@@ -37,7 +37,7 @@ class BannerPreset:
     depth: str  # "truecolor (24-bit RGB)" or "256-color extended ANSI"
     description: str
     resource: str  # filename within the collection's package-data subdirectory
-    # How a main-menu preset is used (issue #929, step 4): "masthead" above
+    # How a main-menu or list preset is used (issue #929): "masthead" above
     # the generated menu, or "slots" -- the art is the menu, with {menu},
     # {user} and other slot tokens (netbbs.rendering.art_slots).
     mode: str = "masthead"
@@ -398,6 +398,16 @@ BOARD_LIST_MASTHEAD_PRESETS: tuple[BannerPreset, ...] = (
         description="An unmistakable Commodore directory screen with numbered message bases and a READY prompt.",
         resource="c64_nostalgia_cyan.ans",
     ),
+    # The list itself with a page drawn into its {list} slot (issue #929):
+    # 16 colours and CP437 glyphs only, so classic terminals show it as drawn.
+    BannerPreset(
+        key="slots_board_ledger", name="Board Ledger (the list itself)", depth="16-color ANSI",
+        description=(
+            "A double-line ledger: the list title and clock on top, a page of boards with what is new"
+            ", and who is signed in and the page at the foot."
+        ),
+        resource="slots_board_ledger.ans", mode="slots",
+    ),
 )
 
 
@@ -425,6 +435,16 @@ FILE_AREA_MASTHEAD_PRESETS: tuple[BannerPreset, ...] = (
         depth="256-color extended ANSI",
         description="A compact LOAD-and-LIST disk directory that turns the file-area picker into a retro drive.",
         resource="c64_nostalgia_cyan.ans",
+    ),
+    # The list itself with a page drawn into its {list} slot (issue #929):
+    # 16 colours and CP437 glyphs only, so classic terminals show it as drawn.
+    BannerPreset(
+        key="slots_filing_cabinet", name="Filing Cabinet (the list itself)", depth="16-color ANSI",
+        description=(
+            "A gold filing-cabinet frame: the list title and clock on top, a page of areas with their"
+            " file counts, and who is signed in and the page at the foot."
+        ),
+        resource="slots_filing_cabinet.ans", mode="slots",
     ),
 )
 
@@ -459,6 +479,16 @@ CHAT_CHANNEL_PICKER_MASTHEAD_PRESETS: tuple[BannerPreset, ...] = (
         depth="truecolor (24-bit RGB)",
         description="A satellite ring, pulsing channel orbits, and a luminous carrier lock across five compact rows.",
         resource="orbital_comms.ans",
+    ),
+    # The list itself with a page drawn into its {list} slot (issue #929):
+    # 16 colours and CP437 glyphs only, so classic terminals show it as drawn.
+    BannerPreset(
+        key="slots_parlour", name="Parlour (the list itself)", depth="16-color ANSI",
+        description=(
+            "A magenta parlour frame: the list title and clock on top, a page of channels with who is"
+            " online, and who is signed in and the page at the foot."
+        ),
+        resource="slots_parlour.ans", mode="slots",
     ),
 )
 

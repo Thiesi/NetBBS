@@ -81,7 +81,8 @@ from netbbs.link.boards import (
 from netbbs.moderation import BoardPermission, has_permission
 from netbbs.mail import MAX_MAIL_SUBJECT_BYTES
 from netbbs.file_refs import FileRef, body_with_link_text, open_ref, refs_some_readers_cannot_open
-from netbbs.net.board_list_banner import load_board_list_banner
+from netbbs.net.board_list_banner import load_board_list_banner, load_board_list_slot_art
+from netbbs.net.list_art import list_slot_fields
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import NAME_GATE_NOTE
 from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
@@ -294,6 +295,9 @@ async def _browse_boards_in_category(
     # first unfiltered screen, matching this feature's own scoping
     # decision.
     board_masthead = load_board_list_banner(db)
+    # The SysOp's art as the list itself (issue #929), or None.
+    board_slot_art = load_board_list_slot_art(db)
+    board_slot_fields = list_slot_fields(session, db, user) if board_slot_art is not None else None
 
     def _load(order_by: str) -> tuple[list[Board], list[Category]]:
         all_boards = [
@@ -389,6 +393,16 @@ async def _browse_boards_in_category(
     def _columns_of(item: Category | Board) -> list[str | tuple[str, int]]:
         return [_activity(item), _about(item)]
 
+    def _slot_column_of(item: Category | Board) -> str:
+        # The one value a row in the SysOp's art has room for: the gate
+        # note when the caller can't post yet (design doc §3.6), else
+        # what is new.
+        if isinstance(item, Board) and not meets_name_requirement(
+            db, user, get_effective_name_requirement(db, item)
+        ):
+            return NAME_GATE_NOTE
+        return _activity(item)[0]
+
     def _prose_of(item: Category | Board) -> str | None:
         """The same facts as one line, for a terminal too narrow for the
         table -- activity first, since that is what a caller scans for."""
@@ -431,6 +445,9 @@ async def _browse_boards_in_category(
                 header_color=header_color,
                 masthead=board_masthead,
                 start_stable_id=reopen_at,
+                slot_art=board_slot_art,
+                slot_column_of=_slot_column_of,
+                slot_fields=board_slot_fields,
             )
             if board is None:
                 return
@@ -478,6 +495,9 @@ async def _browse_boards_in_category(
             header_color=header_color,
             masthead=board_masthead,
             start_stable_id=reopen_at,
+            slot_art=board_slot_art,
+            slot_column_of=_slot_column_of,
+            slot_fields=board_slot_fields,
         )
         if selected is None:
             return

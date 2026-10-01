@@ -1343,6 +1343,36 @@ the menu as you see it, then as a level-0 caller sees it. The gallery's
 colours with characters classic terminals have; applying one switches the mode
 for you.
 
+#### The board, file-area and channel lists as your own art
+
+The three list mastheads (message boards, file areas, chat channels) work the
+same way. **Mode** on each one's screen makes the art the list itself, and a
+page of the list is drawn into a region you mark:
+
+| Token | What goes there |
+| --- | --- |
+| `{list 74x12}` | One page of the list, one entry per row, in a region 74 columns wide and 12 rows tall. Required. |
+| `{title 40}` | The list's title, such as `Available message boards` |
+| `{page 6}` | The page, such as `2/5` |
+| `{count 14}` | How many entries, such as `14 total` |
+
+`{prompt}`, `{user}`, `{node}`, `{level}`, `{time}` and `{date}` work as on the
+main menu. Each row shows the number to press, the name, and one value: what is
+new on a board, how many files an area holds, or who is in a channel. A board,
+area or channel the caller can't use yet because it asks for a verified name
+says `needs verification` there instead. Descriptions stay on the normal list.
+A page holds as many entries as the region has rows, and the keys work as on
+the normal list: type the number, move with the arrow keys, page with **N** and
+**P**, and search with **S**.
+
+A caller gets the normal list when the art has a problem, when they read plain
+ASCII, when their terminal is too small, and when the region is under 3 rows or
+leaves names fewer than 12 columns. **Check** says whether a list fits,
+including one with a `needs verification` entry, whose value is the widest.
+**Preview** draws the first page of your own list into the art. Each gallery
+has a sample drawn this way: **Board Ledger**, **Filing Cabinet** and
+**Parlour**; applying one switches the mode for you.
+
 The welcome and log-off banners take the field tokens too, but not `{menu}`
 or `{prompt}`. The welcome banner is shown before anyone signs in, so it fills
 only `{node}`, `{time}`, `{date}` and `{online}`. The log-off banner adds

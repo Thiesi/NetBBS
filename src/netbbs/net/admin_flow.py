@@ -201,6 +201,7 @@ from netbbs.communities import (
     get_effective_min_write_level,
     get_effective_name_requirement,
     list_communities,
+    meets_read_gate,
     update_community,
 )
 from netbbs.config import (
@@ -562,7 +563,10 @@ from netbbs.net.resource_editor import (
     edit_resource_draft as _edit_resource_draft,
     text_field,
 )
-from netbbs.net.session import Session, post_body_width, write_preformatted_line, write_prompt
+from netbbs.net.session import (
+    Session, physical_terminal_width, post_body_width, write_preformatted_line, write_prompt,
+)
+from netbbs.rendering.charset import ellipsis_for
 from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import (
@@ -678,7 +682,15 @@ from netbbs.net.main_menu_banner import (
     set_main_menu_art_mode,
     set_main_menu_banner_enabled,
 )
-from netbbs.rendering.art_slots import SlotArt, describe_slots, parse_slot_art
+from netbbs.rendering.art_slots import (
+    ListSlotRow,
+    SlotArt,
+    describe_slots,
+    list_name_width,
+    list_slot_fits,
+    parse_slot_art,
+    render_list_slot_art,
+)
 from netbbs.rendering.ansi import move_cursor
 from netbbs.net.logoff_banner import (
     MAX_LOGOFF_BANNER_SIZE_BYTES,
@@ -701,8 +713,20 @@ from netbbs.net.new_account_banner_after import (
     new_account_banner_after_status,
     set_new_account_banner_after_enabled,
 )
+from netbbs.net.list_art import (
+    BOARD_LIST,
+    CHAT_CHANNEL_PICKER,
+    FILE_AREA,
+    list_art_mode,
+    list_slot_fields,
+    read_list_art,
+    set_list_art_mode,
+)
+from netbbs.net.list_art import MASTHEAD_MODE as LIST_MASTHEAD_MODE
+from netbbs.net.list_art import SLOTS_MODE as LIST_SLOTS_MODE
 from netbbs.net.board_list_banner import (
     MAX_BOARD_LIST_BANNER_SIZE_BYTES,
+    is_board_list_banner_enabled,
     board_list_banner_path,
     board_list_banner_status,
     load_board_list_banner,
@@ -710,6 +734,7 @@ from netbbs.net.board_list_banner import (
 )
 from netbbs.net.file_area_banner import (
     MAX_FILE_AREA_BANNER_SIZE_BYTES,
+    is_file_area_banner_enabled,
     file_area_banner_path,
     file_area_banner_status,
     load_file_area_banner,
@@ -717,6 +742,7 @@ from netbbs.net.file_area_banner import (
 )
 from netbbs.net.chat_channel_picker_banner import (
     MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES,
+    is_chat_channel_picker_banner_enabled,
     chat_channel_picker_banner_path,
     chat_channel_picker_banner_status,
     load_chat_channel_picker_banner,
@@ -14909,6 +14935,175 @@ async def _draw_mastheads_menu(
     await _choice_prompt(session)
 
 
+# -- list screens as art (issue #929) --------------------------------------
+#
+# The Boards, file areas and Chat channels lists can use their masthead art
+# as the list itself, with a page drawn into its {list WxH} region
+# (`netbbs.net.list_art`, `pick_item`'s `slot_art`). These are the three
+# masthead screens' [M]ode, [C]heck and slots-mode [P]review.
+
+_LIST_ART_SCREENS = {
+    BOARD_LIST: ("board list", board_list_banner_path, is_board_list_banner_enabled, MAX_BOARD_LIST_BANNER_SIZE_BYTES),
+    FILE_AREA: ("file-area list", file_area_banner_path, is_file_area_banner_enabled, MAX_FILE_AREA_BANNER_SIZE_BYTES),
+    CHAT_CHANNEL_PICKER: (
+        "channel list", chat_channel_picker_banner_path, is_chat_channel_picker_banner_enabled,
+        MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES,
+    ),
+}
+
+
+def _list_art_mode_line(mode: str) -> str:
+    if mode == LIST_MASTHEAD_MODE:
+        return "Mode: above the list. The art is shown above the list, which stays live underneath it."
+    return (
+        "Mode: the list itself. A page of entries is drawn into the art's {list} slot, "
+        "and its {title}, {page} and {count} slots are filled in."
+    )
+
+
+async def _toggle_list_art_mode(session: Session, lane: DatabaseLane, actor: User, kind: str) -> None:
+    what = _LIST_ART_SCREENS[kind][0]
+
+    def _apply(db: Database) -> str:
+        mode = LIST_SLOTS_MODE if list_art_mode(db, kind) == LIST_MASTHEAD_MODE else LIST_MASTHEAD_MODE
+        set_list_art_mode(db, kind, mode)
+        record_action(db, actor=actor, action=f"set_{kind}_art_mode", detail=mode)
+        return mode
+
+    mode = await lane.run(_apply)
+    if mode == LIST_SLOTS_MODE:
+        _announce_line(session, f"The art is now the {what} itself. Use [C]heck to see whether the list fits it.")
+    else:
+        _announce_line(session, f"The art is now shown above the {what}.")
+
+
+def _list_art_sample_rows(db: Database, actor: User, kind: str) -> list[tuple[str, str]]:
+    """The top level of the list as `actor` sees it, name and compact
+    value, for the preview. People online are only known on a running
+    node, so channels show none."""
+    if kind == BOARD_LIST:
+        from netbbs.activity import unread_post_count
+
+        rows = [(f"[{c.name}]", "") for c in list_top_level_board_categories(db)]
+        for board in list_boards(db):
+            if board.category_id is None and meets_read_gate(db, actor, board):
+                count = unread_post_count(db, actor, board)
+                value = "not visited yet" if count is None else ("caught up" if count == 0 else f"{count} new")
+                rows.append((board.name, value))
+        return rows
+    if kind == FILE_AREA:
+        rows = [(f"[{c.name}]", "") for c in list_top_level_file_categories(db)]
+        for area in list_file_areas(db):
+            if area.category_id is None and meets_read_gate(db, actor, area):
+                count, _ = count_listed_files(db, area)
+                rows.append((area.name, f"{count} file{'' if count == 1 else 's'}"))
+        return rows
+    return [(channel.name, "") for channel in list_channels(db) if channel.category_id is None]
+
+
+def _list_art_fits(session: Session, art: SlotArt, column_width: int) -> str | None:
+    """Why a caller with a terminal like yours gets the generated list
+    instead, or `None` when the art is used."""
+    physical = physical_terminal_width(session)
+    if art.width > physical:
+        return f"the art is {art.width} columns, your terminal {physical}"
+    if not list_slot_fits(art.list, column_width):
+        if art.list.height < 3:
+            return f"the {{list}} slot is {art.list.height} rows; it needs at least 3"
+        return f"the {{list}} slot leaves names {list_name_width(art.list, column_width)} columns; they need 12"
+    # The art, a nav row, a trailer row and the prompt, above the last row.
+    if art.height + 3 >= session.terminal_height:
+        return f"the art needs {art.height + 4} rows, your terminal has {session.terminal_height}"
+    return None
+
+
+async def _check_list_slot_art_screen(session: Session, lane: DatabaseLane, actor: User, kind: str) -> None:
+    """[C]heck for a list screen's art: its slots, what makes it unusable,
+    and whether a list fits its `{list}` slot on a terminal the size of
+    yours -- with the widest value a row can show, the gate note."""
+    from netbbs.net.chat_flow import NAME_GATE_NOTE
+
+    what, path_of, enabled_of, max_bytes = _LIST_ART_SCREENS[kind]
+    art, enabled, mode, rows = await lane.run(lambda db: (
+        read_list_art(path_of(db), max_bytes), enabled_of(db), list_art_mode(db, kind),
+        _list_art_sample_rows(db, actor, kind),
+    ))
+    await session.write_line(colored(f"\r\nChecking the {what} art for slots:", fg_color=MUTED_COLOR))
+    if not enabled:
+        await session.write_line(colored(
+            "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+        ))
+    if mode != LIST_SLOTS_MODE:
+        await session.write_line(colored(
+            "Callers see this above the list, not as it: [M]ode changes that.", fg_color=WARNING_COLOR
+        ))
+    if art is None:
+        await session.write_line("No usable art file. Apply a gallery sample, upload one, or draw one first.")
+    else:
+        await session.write_line(f"Art: {art.width} columns, {art.height} rows.")
+        for line in describe_slots(art) or ["No slots found."]:
+            await session.write_line(f"  {line}")
+        if art.problems:
+            for problem in art.problems:
+                await session.write_line(colored(f"  Problem: {problem}", fg_color=ERROR_COLOR))
+        else:
+            widest = max((display_width(value) for _, value in rows), default=0)
+            for label, column_width in (
+                ("Your list", widest),
+                ("A list with an entry that needs verification", max(widest, display_width(NAME_GATE_NOTE))),
+            ):
+                reason = _list_art_fits(session, art, column_width)
+                if reason is None:
+                    await session.write_line(colored(
+                        f"  {label}: fits, {art.list.height} entries a page, names up to "
+                        f"{list_name_width(art.list, column_width)} columns.", fg_color=SUCCESS_COLOR,
+                    ))
+                else:
+                    await session.write_line(
+                        colored(f"  {label}: generated list instead -- {reason}.", fg_color=WARNING_COLOR)
+                    )
+    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.read_any_key()
+
+
+async def _preview_list_slot_art(session: Session, lane: DatabaseLane, actor: User, kind: str) -> None:
+    """[P]review in slots mode: the first page of the list's top level as
+    you see it, drawn into the art."""
+    what, path_of, _enabled_of, max_bytes = _LIST_ART_SCREENS[kind]
+    art, rows, fields = await lane.run(lambda db: (
+        read_list_art(path_of(db), max_bytes), _list_art_sample_rows(db, actor, kind),
+        list_slot_fields(session, db, actor),
+    ))
+    if art is None or art.problems or art.list is None:
+        await session.write_line(colored(
+            f"\r\nThe {what} art can't be used as the list; [C]heck says why. Callers get the generated list.",
+            fg_color=WARNING_COLOR,
+        ))
+    else:
+        column_width = max((display_width(value) for _, value in rows), default=0)
+        reason = _list_art_fits(session, art, column_width)
+        page = rows[:art.list.height]
+        pages = max(1, -(-len(rows) // art.list.height))
+        fields.update(title=what.capitalize(), page=f"1/{pages}", count=f"{len(rows)} total")
+        drawn = None if reason is not None else render_list_slot_art(
+            art, fields=fields,
+            rows=[ListSlotRow(f"{number:02d}.", name, value) for number, (name, value) in enumerate(page, start=1)],
+            column_width=column_width, ellipsis=ellipsis_for(session),
+        )
+        if drawn is None:
+            await session.write_line(colored(
+                f"\r\nCallers like you get the generated list instead: {reason or 'the list does not fit'}.",
+                fg_color=WARNING_COLOR,
+            ))
+        else:
+            await session.write(drawn)
+            await session.write(move_cursor(art.height + 1, 1))
+            if kind == CHAT_CHANNEL_PICKER:
+                await session.write_line(colored("(people online are filled in on a running node)", fg_color=MUTED_COLOR))
+    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.read_any_key()
+
+
 # -- board list masthead --------------------------------------------------
 
 
@@ -14927,7 +15122,10 @@ async def _board_list_masthead_menu(session: Session, lane: DatabaseLane, actor:
             return
         elif choice == "p":
             await session.write_line("")
-            await _preview_board_list_masthead_screen(session, lane)
+            if await lane.run(list_art_mode, BOARD_LIST) == LIST_SLOTS_MODE:
+                await _preview_list_slot_art(session, lane, actor, BOARD_LIST)
+            else:
+                await _preview_board_list_masthead_screen(session, lane)
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "e":
             await session.write_line("")
@@ -14953,6 +15151,14 @@ async def _board_list_masthead_menu(session: Session, lane: DatabaseLane, actor:
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=board_list_banner_path, label="the message-board masthead", audit_action="upload_board_list_banner")
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "m":
+            await session.write_line("")
+            await _toggle_list_art_mode(session, lane, actor, BOARD_LIST)
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "c":
+            await session.write_line("")
+            await _check_list_slot_art_screen(session, lane, actor, BOARD_LIST)
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -14969,6 +15175,7 @@ async def _draw_board_list_masthead_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(board_list_banner_status)
+    mode = await lane.run(list_art_mode, BOARD_LIST)
     await session.write_line("\r\n" + screen_title("Board list masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
@@ -14979,10 +15186,17 @@ async def _draw_board_list_masthead_menu(
         "Community.",
     )
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    await session.write_line("")
+    await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
     await session.write_line(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(
+                    label=menu_key("M", "ode"),
+                    brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
+                ),
+                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
@@ -15101,6 +15315,8 @@ async def _board_list_masthead_gallery_screen(
             path = board_list_banner_path(db)
             path.write_bytes(data)
             set_board_list_banner_enabled(db, True)
+            # A list sample is the list itself; any other sample goes above it.
+            set_list_art_mode(db, BOARD_LIST, LIST_SLOTS_MODE if preset.mode == "slots" else LIST_MASTHEAD_MODE)
             record_action(db, actor=actor, action="apply_board_list_banner_preset", detail=f"{preset.key} -> {path}")
             return path
 
@@ -15200,7 +15416,10 @@ async def _file_area_masthead_menu(session: Session, lane: DatabaseLane, actor: 
             return
         elif choice == "p":
             await session.write_line("")
-            await _preview_file_area_masthead_screen(session, lane)
+            if await lane.run(list_art_mode, FILE_AREA) == LIST_SLOTS_MODE:
+                await _preview_list_slot_art(session, lane, actor, FILE_AREA)
+            else:
+                await _preview_file_area_masthead_screen(session, lane)
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "e":
             await session.write_line("")
@@ -15226,6 +15445,14 @@ async def _file_area_masthead_menu(session: Session, lane: DatabaseLane, actor: 
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=file_area_banner_path, label="the file-area masthead", audit_action="upload_file_area_banner")
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "m":
+            await session.write_line("")
+            await _toggle_list_art_mode(session, lane, actor, FILE_AREA)
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "c":
+            await session.write_line("")
+            await _check_list_slot_art_screen(session, lane, actor, FILE_AREA)
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -15242,6 +15469,7 @@ async def _draw_file_area_masthead_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(file_area_banner_status)
+    mode = await lane.run(list_art_mode, FILE_AREA)
     await session.write_line("\r\n" + screen_title("File area masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
@@ -15252,10 +15480,17 @@ async def _draw_file_area_masthead_menu(
         "Community.",
     )
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    await session.write_line("")
+    await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
     await session.write_line(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(
+                    label=menu_key("M", "ode"),
+                    brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
+                ),
+                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
@@ -15374,6 +15609,8 @@ async def _file_area_masthead_gallery_screen(
             path = file_area_banner_path(db)
             path.write_bytes(data)
             set_file_area_banner_enabled(db, True)
+            # A list sample is the list itself; any other sample goes above it.
+            set_list_art_mode(db, FILE_AREA, LIST_SLOTS_MODE if preset.mode == "slots" else LIST_MASTHEAD_MODE)
             record_action(db, actor=actor, action="apply_file_area_banner_preset", detail=f"{preset.key} -> {path}")
             return path
 
@@ -15471,7 +15708,10 @@ async def _chat_channel_picker_masthead_menu(session: Session, lane: DatabaseLan
             return
         elif choice == "p":
             await session.write_line("")
-            await _preview_chat_channel_picker_masthead_screen(session, lane)
+            if await lane.run(list_art_mode, CHAT_CHANNEL_PICKER) == LIST_SLOTS_MODE:
+                await _preview_list_slot_art(session, lane, actor, CHAT_CHANNEL_PICKER)
+            else:
+                await _preview_chat_channel_picker_masthead_screen(session, lane)
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "e":
             await session.write_line("")
@@ -15497,6 +15737,14 @@ async def _chat_channel_picker_masthead_menu(session: Session, lane: DatabaseLan
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=chat_channel_picker_banner_path, label="the chat-channel masthead", audit_action="upload_chat_channel_picker_banner")
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "m":
+            await session.write_line("")
+            await _toggle_list_art_mode(session, lane, actor, CHAT_CHANNEL_PICKER)
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "c":
+            await session.write_line("")
+            await _check_list_slot_art_screen(session, lane, actor, CHAT_CHANNEL_PICKER)
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -15513,6 +15761,7 @@ async def _draw_chat_channel_picker_masthead_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     status = await lane.run(chat_channel_picker_banner_status)
+    mode = await lane.run(list_art_mode, CHAT_CHANNEL_PICKER)
     await session.write_line("\r\n" + screen_title("Chat channel picker masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
@@ -15523,10 +15772,17 @@ async def _draw_chat_channel_picker_masthead_menu(
         "Community. Never inside a live channel.",
     )
     await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    await session.write_line("")
+    await _write_wrapped_subtitle(session, _list_art_mode_line(mode))
     await session.write_line(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(
+                    label=menu_key("M", "ode"),
+                    brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
+                ),
+                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
@@ -15649,6 +15905,10 @@ async def _chat_channel_picker_masthead_gallery_screen(
             path = chat_channel_picker_banner_path(db)
             path.write_bytes(data)
             set_chat_channel_picker_banner_enabled(db, True)
+            # A list sample is the list itself; any other sample goes above it.
+            set_list_art_mode(
+                db, CHAT_CHANNEL_PICKER, LIST_SLOTS_MODE if preset.mode == "slots" else LIST_MASTHEAD_MODE,
+            )
             record_action(
                 db, actor=actor, action="apply_chat_channel_picker_banner_preset", detail=f"{preset.key} -> {path}"
             )
