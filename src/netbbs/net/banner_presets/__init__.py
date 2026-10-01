@@ -37,6 +37,10 @@ class BannerPreset:
     depth: str  # "truecolor (24-bit RGB)" or "256-color extended ANSI"
     description: str
     resource: str  # filename within the collection's package-data subdirectory
+    # How a main-menu preset is used (issue #929, step 4): "masthead" above
+    # the generated menu, or "slots" -- the art is the menu, with {menu},
+    # {user} and other slot tokens (netbbs.rendering.art_slots).
+    mode: str = "masthead"
 
 
 WELCOME_BANNER_PRESETS: tuple[BannerPreset, ...] = (
@@ -346,6 +350,25 @@ MAIN_MENU_BANNER_PRESETS: tuple[BannerPreset, ...] = (
             "service glyphs, and an asymmetric six-line silhouette."
         ),
         resource="quantum_prism.ans",
+    ),
+    # Slot art (issue #929, step 4): the art is the main menu itself, each
+    # caller's items drawn into its {menu} slot. 16 colours and CP437 glyphs
+    # only, so classic terminals show them as drawn.
+    BannerPreset(
+        key="slots_quill_ledger", name="Quill Ledger (the menu itself)", depth="16-color ANSI",
+        description=(
+            "A double-line ledger frame: the node name and clock on top, the caller's menu in "
+            "the middle, and who is signed in, their mail and callers online at the foot."
+        ),
+        resource="slots_quill_ledger.ans", mode="slots",
+    ),
+    BannerPreset(
+        key="slots_inkwell_blocks", name="Inkwell Blocks (the menu itself)", depth="16-color ANSI",
+        description=(
+            "Blue block-shaded header with the node name and date, the caller's menu below, "
+            "and a status line with name, mail, callers online and the time."
+        ),
+        resource="slots_inkwell_blocks.ans", mode="slots",
     ),
 )
 

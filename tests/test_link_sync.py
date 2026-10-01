@@ -43,7 +43,13 @@ from netbbs.link.remote_attestation import (
 )
 from netbbs.link.sync import run_link_sync
 from netbbs.link.trust import (
+    EvidenceClass,
+    TrustDimension,
+    TrustState,
     TrustSubject,
+    clear_local_observation,
+    get_effective_trust_state,
+    record_local_observation,
     configure_trust_domain,
     configure_trusted_reporter,
     register_subject,
@@ -1713,6 +1719,46 @@ def test_events_a_peer_refused_one_by_one_are_set_aside_then_offered_again(tmp_p
             # Once the peer, asked about it, no longer wants it, it is forgotten.
             push([])
             assert exchange.set_aside == {}
+    finally:
+        node_db.close()
+
+
+def test_a_sync_pass_releases_an_elapsed_recovery_hold(tmp_path, caplog):
+    """Issue #802: a recovery hold's release has no event of its own, so a
+    quiet subject stayed quarantined until the node restarted. A sync pass
+    now re-evaluates trust against the current time."""
+    from datetime import datetime, timedelta, timezone
+
+    def stamp(value):
+        return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    node = LinkNode(identity=bootstrap_node_identity("holding"))
+    node_db = _NodeDb(tmp_path, "holding")
+    now = datetime.now(timezone.utc)
+    subject = TrustSubject.node("held-subject")
+    register_subject(node_db.db, subject, first_accepted_at=stamp(now - timedelta(days=60)),
+                     now_iso=stamp(now - timedelta(days=60)))
+    record_local_observation(
+        node_db.db, observation_id="proof", subject=subject,
+        dimension=TrustDimension.IDENTITY_INTEGRITY, category="signed_equivocation",
+        evidence_class=EvidenceClass.SELF_VERIFYING,
+        observed_at=stamp(now - timedelta(hours=26)), now_iso=stamp(now - timedelta(hours=26)),
+    )
+    # Cleared 25 hours ago, so the 24-hour hold ran out an hour ago.
+    clear_local_observation(node_db.db, "proof", now_iso=stamp(now - timedelta(hours=25)))
+    held = get_effective_trust_state(node_db.db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert (held.state, held.reason_code) == (TrustState.QUARANTINED, "recovery_hold")
+
+    try:
+        with caplog.at_level(logging.INFO, logger="netbbs.link.sync"):
+            _run_passes(node, node_db, [], passes=1)
+        released = get_effective_trust_state(node_db.db, subject, TrustDimension.IDENTITY_INTEGRITY)
+        assert (released.state, released.reason_code) == (TrustState.PROBATIONARY, "automatic_recovery")
+        assert any(
+            "identity_integrity went from quarantined to probationary (automatic_recovery)"
+            in record.getMessage()
+            for record in caplog.records
+        )
     finally:
         node_db.close()
 

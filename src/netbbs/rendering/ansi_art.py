@@ -24,6 +24,7 @@ from netbbs.rendering.ansi import bg as ansi_bg
 from netbbs.rendering.ansi import bg_rgb as ansi_bg_rgb
 from netbbs.rendering.ansi import fg as ansi_fg
 from netbbs.rendering.ansi import fg_rgb as ansi_fg_rgb
+from netbbs.rendering.charset import art_glyphs_to_cp437_controls, art_pictographs_to_glyphs
 from netbbs.rendering.screen_buffer import ScreenBuffer
 from netbbs.rendering.sauce import Sauce, split_sauce
 
@@ -55,14 +56,25 @@ def decode_art_bytes(data: bytes) -> tuple[str, Sauce | None]:
     first (`netbbs.rendering.sauce.split_sauce`), so scene art no longer
     shows its title, author and group as junk under the picture. A file
     with a SAUCE record is classic ANSI art and is read as CP437 without
-    the UTF-8 attempt; one without keeps the UTF-8-then-CP437 guess."""
+    the UTF-8 attempt; one without keeps the UTF-8-then-CP437 guess.
+
+    The pictographs of CP437's control range (☺ ♥ ♫ ► and the rest,
+    `netbbs.rendering.charset.ART_PICTOGRAPHS`) become the glyphs they draw,
+    not control characters that would reach a UTF-8 terminal as raw control
+    bytes. That holds for UTF-8 art too: in art those bytes have no other
+    use, and a file of plain ASCII plus pictograph bytes is valid UTF-8."""
     body, sauce = split_sauce(data)
     if sauce is not None:
-        return body.decode("cp437"), sauce
+        return decode_cp437_art(body), sauce
     try:
-        return body.decode("utf-8"), None
+        return art_pictographs_to_glyphs(body.decode("utf-8")), None
     except UnicodeDecodeError:
-        return body.decode("cp437"), None
+        return decode_cp437_art(body), None
+
+
+def decode_cp437_art(data: bytes) -> str:
+    """CP437 art bytes as text, control-range pictographs included."""
+    return art_pictographs_to_glyphs(data.decode("cp437"))
 
 
 _CSI = re.compile(r"\x1b\[([0-9;?]*)([@-~])")
@@ -178,6 +190,82 @@ def decode_banner_bytes(data: bytes) -> str:
     return trim_trailing_blank_rows(trim_row_ends(decode_ansi_bytes(data)))
 
 
+def decode_banner_bytes_fitting(data: bytes, max_width: int | None) -> str | None:
+    """`decode_banner_bytes`, or `None` when the art's SAUCE record says it
+    was drawn wider than `max_width` columns (issue #929): a screen shows
+    what it shows without art rather than wrap every row of the drawing.
+    `max_width` None means no limit is known (an SSH auth banner)."""
+    text, sauce = decode_art_bytes(data)
+    if max_width is not None and sauce is not None and sauce.width is not None and sauce.width > max_width:
+        return None
+    return trim_trailing_blank_rows(trim_row_ends(text))
+
+
+_BASIC_BACKGROUNDS = range(40, 48)
+_BRIGHT_BACKGROUND_OFFSET = 60  # 40-47 -> 100-107
+
+
+def ice_to_bright_background(text: str) -> str:
+    """Art with iCE colours made explicit (issue #929): blink set together
+    with one of the eight basic background colours becomes that colour's
+    bright variant (40-47 -> 100-107) and no blink. Classic art used the
+    blink attribute that way (iCE colours), and every terminal that does
+    not would make the art blink instead. Blink without a background
+    colour is left alone, and so is everything else in the art."""
+    blink = False
+    background: int | None = None  # a basic background (40-47), if set
+    blink_shown = False  # whether the terminal currently has blink on
+
+    def rewrite(match: re.Match[str]) -> str:
+        nonlocal blink, background, blink_shown
+        if match.group(2) != "m":
+            return match.group(0)
+        raw = match.group(1)
+        if "?" in raw:
+            return match.group(0)
+        params = [p for p in raw.split(";")] if raw else ["0"]
+        out: list[str] = []
+        touched = False
+        i = 0
+        while i < len(params):
+            value = int(params[i]) if is_ascii_number(params[i]) else 0
+            if value == 0:
+                blink, background, blink_shown = False, None, False
+                out.append(params[i] or "0")
+            elif value in (5, 6):
+                blink, touched = True, True
+            elif value == 25:
+                blink, touched = False, True
+            elif value in _BASIC_BACKGROUNDS:
+                background, touched = value, True
+            elif value in (38, 48) and i + 1 < len(params):
+                extra = 2 if params[i + 1] == "5" else 4 if params[i + 1] == "2" else 0
+                if value == 48:
+                    background, touched = None, True
+                out.extend(params[i : i + 1 + extra])
+                i += extra
+            else:
+                if value == 49 or 100 <= value <= 107:
+                    background, touched = None, True
+                out.append(params[i])
+            i += 1
+        if touched:
+            ice = blink and background is not None
+            if background is not None:
+                out.append(str(background + (_BRIGHT_BACKGROUND_OFFSET if ice else 0)))
+            want_blink = blink and not ice
+            if want_blink and not blink_shown:
+                out.append("5")
+            elif not want_blink and blink_shown:
+                out.append("25")
+            blink_shown = want_blink
+        if not out:
+            return ""
+        return f"\x1b[{';'.join(out)}m"
+
+    return _CSI.sub(rewrite, text)
+
+
 def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:
     """
     The save-side counterpart to `decode_ansi_bytes` (design doc --
@@ -210,4 +298,10 @@ def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:
         parts.append("\r\n")
         current_style = None  # each row starts fresh so a mid-row style isn't assumed carried over
     parts.append(RESET)
-    return "".join(parts).encode("cp437", errors="replace")
+    return encode_cp437_art("".join(parts))
+
+
+def encode_cp437_art(text: str) -> bytes:
+    """Art text as CP437 bytes, its control-range pictographs as the bytes
+    that draw them. Never raises: what CP437 lacks becomes "?"."""
+    return art_glyphs_to_cp437_controls(text).encode("cp437", errors="replace")

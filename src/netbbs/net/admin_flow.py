@@ -562,7 +562,7 @@ from netbbs.net.resource_editor import (
     edit_resource_draft as _edit_resource_draft,
     text_field,
 )
-from netbbs.net.session import Session, post_body_width, write_preformatted_line, write_prompt
+from netbbs.net.session import Session, post_body_width, write_art_text, write_preformatted_line, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import (
@@ -643,8 +643,10 @@ from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
+    is_welcome_banner_credit_enabled,
     load_welcome_banner,
     pre_login_unicode_style,
+    set_welcome_banner_credit_enabled,
     set_welcome_banner_enabled,
     welcome_banner_status,
 )
@@ -667,14 +669,19 @@ from netbbs.net.banner_presets import (
     load_welcome_banner_preset,
 )
 from netbbs.net.main_menu_banner import (
+    MASTHEAD_MODE,
     MAX_MASTHEAD_SIZE_BYTES,
     SLOTS_MODE,
+    is_main_menu_banner_enabled,
     load_main_menu_banner,
     main_menu_art_mode,
     main_menu_banner_path,
     main_menu_banner_status,
+    set_main_menu_art_mode,
     set_main_menu_banner_enabled,
 )
+from netbbs.rendering.art_slots import SlotArt, describe_slots, parse_slot_art
+from netbbs.rendering.ansi import move_cursor
 from netbbs.net.logoff_banner import (
     MAX_LOGOFF_BANNER_SIZE_BYTES,
     load_logoff_banner,
@@ -767,6 +774,7 @@ from netbbs.file_refs import open_ref, post_refs
 from netbbs.net.file_ref_view import ref_rows
 from netbbs.rendering.post_body import post_body_mode, post_body_rows
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.sauce import Sauce, split_sauce
 from netbbs.net import notices as _notices
 from netbbs.guest import (
     guest_user,
@@ -1393,13 +1401,27 @@ def _audit_details_text(details: dict) -> str:
     return "; ".join(_pairs(details or {}, ""))
 
 
-def _banner_status_section(status, *, unicode_style: bool) -> Section:
+def _banner_status_section(
+    status,
+    *,
+    unicode_style: bool,
+    sauce: Sauce | None = None,
+    credit_line: bool | None = None,
+    too_wide: str = "no art",
+) -> Section:
     """Whether a banner or masthead is switched on, and the state of the file
     behind it -- the two facts every one of these seven menus leads with. They
     were one run-on line (`disabled -- file: x.ans (missing)`); a missing file
     behind an enabled banner is the case worth seeing, and now reads in red
-    on a row of its own."""
-    return Section("Status", [
+    on a row of its own.
+
+    A file with a SAUCE record (issue #929) also shows its credit, the width
+    it was drawn for, and a warning when it was made for a font other than
+    CP437's; the caller reads the record off the event loop
+    (`_banner_sauce`). `too_wide` is what a caller whose terminal is
+    narrower than the art sees instead. `credit_line` is the welcome
+    banner's caller-facing credit setting, shown when given."""
+    fields = [
         Field(
             "Shown to callers",
             status_badge("ENABLED", tone="success", unicode_style=unicode_style) if status.enabled
@@ -1409,7 +1431,38 @@ def _banner_status_section(status, *, unicode_style: bool) -> Section:
         Field("File", status.path.name, color=METADATA_COLOR),
         Field("On disk", _format_bytes(status.size_bytes), color=VALUE_COLOR) if status.exists
         else Field("On disk", "missing", color=ERROR_COLOR if status.enabled else MUTED_COLOR),
-    ])
+    ]
+    if sauce is not None:
+        credit = "".join(ch for ch in sauce.credit if ch.isprintable())
+        fields.append(Field("Art", credit or "(no credit in its SAUCE record)", color=VALUE_COLOR if credit else MUTED_COLOR))
+        if sauce.width is not None:
+            fields.append(Field("Drawn for", f"{sauce.width} columns; narrower terminals get {too_wide}", color=VALUE_COLOR))
+        if not sauce.font_is_cp437:
+            font = "".join(ch for ch in sauce.font if ch.isprintable())
+            fields.append(Field("Font", f"made for {font}; shown with CP437's characters", color=WARNING_COLOR))
+    if credit_line is not None:
+        fields.append(Field("Credit line", "shown under the banner" if credit_line else "off", color=VALUE_COLOR if credit_line else MUTED_COLOR))
+    return Section("Status", fields)
+
+
+def _toggle_welcome_banner_credit(db: Database, actor: User) -> bool:
+    """Flip whether callers see the art's credit under the welcome banner,
+    audited; returns the new setting."""
+    shown = not is_welcome_banner_credit_enabled(db)
+    set_welcome_banner_credit_enabled(db, shown)
+    record_action(db, actor=actor, action="set_welcome_banner_credit", detail="on" if shown else "off")
+    return shown
+
+
+def _banner_sauce(status) -> Sauce | None:
+    """The SAUCE record of the file behind `status`, or `None` when there is
+    no file, it is over the size limit, or it has no record."""
+    if not status.exists or (status.size_bytes or 0) > _SAVED_BANNER_READ_LIMIT:
+        return None
+    try:
+        return split_sauce(status.path.read_bytes())[1]
+    except OSError:
+        return None
 
 
 def _yes_no(value: bool) -> str:
@@ -12871,6 +12924,12 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=banner_path, label="the welcome banner", audit_action="upload_welcome_banner")
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "c":
+            await session.write_line("")
+            shown = await lane.run(_toggle_welcome_banner_credit, actor)
+            _announce(session, "Callers now see the art's credit under your banner." if shown
+                      else "The art's credit is no longer shown under your banner.")
+            await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == HELP_KEY:
             await session.write_line("")
             header_color = await lane.run(effective_header_color_256)
@@ -12892,7 +12951,15 @@ async def _draw_welcome_banner_menu(
     await session.write_line("\r\n" + screen_title("Welcome banner",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    credit_line = await lane.run(is_welcome_banner_credit_enabled)
+    await _write_sections(
+        session,
+        [_banner_status_section(
+            status, unicode_style=unicode_style, sauce=await asyncio.to_thread(_banner_sauce, status),
+            credit_line=credit_line, too_wide="the default banner",
+        )],
+        unicode_style=unicode_style,
+    )
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -12900,6 +12967,7 @@ async def _draw_welcome_banner_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+                MenuEntry(label=menu_key("C", "redit line"), brief="Credit the art under the banner"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
@@ -13522,6 +13590,14 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=main_menu_banner_path, label="the main-menu masthead", audit_action="upload_main_menu_banner")
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "m":
+            await session.write_line("")
+            await _toggle_main_menu_art_mode(session, lane, actor)
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "c":
+            await session.write_line("")
+            await _check_main_menu_slot_art_screen(session, lane, actor)
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == HELP_KEY:
             await session.write_line("")
             header_color = await lane.run(effective_header_color_256)
@@ -13540,20 +13616,29 @@ async def _draw_main_menu_banner_menu(
     collapsed: bool,
 ) -> None:
     status = await lane.run(main_menu_banner_status)
+    mode = await lane.run(main_menu_art_mode)
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(
         session,
-        "Shown above the main menu, which stays fully live/dynamic underneath "
-        "it -- disabled by default, no effect on any existing node.",
+        "Mode: above the menu. The art is shown above the main menu, which stays live underneath it."
+        if mode == MASTHEAD_MODE else
+        "Mode: the menu itself. The art is the main menu, with each caller's items and live values "
+        "drawn into its {menu}, {user} and other slots.",
     )
     await session.write_line(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(
+                    label=menu_key("M", "ode"),
+                    brief="Make the art the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
+                ),
+                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and menu fit"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
@@ -13583,19 +13668,14 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     the same "trusted, already-composed art" tier as the welcome
     banner's own custom-file path)."""
 
-    def _load(db: Database) -> tuple:
-        return main_menu_banner_status(db), load_main_menu_banner(db), main_menu_art_mode(db)
-
-    status, masthead, mode = await lane.run(_load)
-    if mode == SLOTS_MODE:
-        # Issue #929: in slots mode the art is the menu itself and is never
-        # shown above it, so "callers see no masthead" would be misleading.
-        await session.write_line(colored(
-            "\r\nThis art is set to be the main menu itself, not a masthead above it.", fg_color=MUTED_COLOR
-        ))
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_any_key()
+    if await lane.run(main_menu_art_mode) == SLOTS_MODE:
+        await _preview_main_menu_slot_art(session, lane, actor)
         return
+
+    def _load(db: Database) -> tuple:
+        return main_menu_banner_status(db), load_main_menu_banner(db)
+
+    status, masthead = await lane.run(_load)
     await session.write_line(colored("\r\nPreviewing the masthead as shown above the main menu:", fg_color=MUTED_COLOR))
     if not masthead:
         await _write_banner_not_live(session, status, callers_see="no masthead")
@@ -13609,6 +13689,115 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     # before it can actually be read.
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
+
+
+async def _toggle_main_menu_art_mode(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """[M]ode (issue #929, step 4): the art above the main menu, or the
+    art as the menu itself with live slots."""
+
+    def _apply(db: Database) -> str:
+        mode = SLOTS_MODE if main_menu_art_mode(db) == MASTHEAD_MODE else MASTHEAD_MODE
+        set_main_menu_art_mode(db, mode)
+        record_action(db, actor=actor, action="set_main_menu_art_mode", detail=mode)
+        return mode
+
+    mode = await lane.run(_apply)
+    if mode == SLOTS_MODE:
+        _announce_line(session, "The art is now the main menu itself. Use [C]heck to see whether the menu fits it.")
+    else:
+        _announce_line(session, "The art is now shown above the main menu.")
+
+
+def _read_slot_art(db: Database) -> SlotArt | None:
+    path = main_menu_banner_path(db)
+    try:
+        if not path.exists() or path.stat().st_size > MAX_MASTHEAD_SIZE_BYTES:
+            return None
+        return parse_slot_art(decode_banner_bytes(path.read_bytes()))
+    except OSError:
+        return None
+
+
+async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """[C]heck (issue #929, step 4): the slots found in the art, what makes
+    it unusable, and whether your own menu and a level-0 caller's fit its
+    `{menu}` slot on a terminal the size of yours. A menu that doesn't fit
+    isn't cut: those callers get the generated menu instead."""
+    # Imported here: netbbs.net.main_menu imports this module.
+    from netbbs.net.main_menu import slot_menu_preview
+
+    art = await lane.run(_read_slot_art)
+    enabled, mode = await lane.run(lambda db: (is_main_menu_banner_enabled(db), main_menu_art_mode(db)))
+    await session.write_line(colored("\r\nChecking the main-menu art for slots:", fg_color=MUTED_COLOR))
+    # Enabled and mode are separate switches: [D]isable leaves the mode
+    # alone, so say plainly when callers won't see this art at all.
+    if not enabled:
+        await session.write_line(colored(
+            "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+        ))
+    if mode != SLOTS_MODE:
+        await session.write_line(colored(
+            "Callers see this above the menu, not as it: [M]ode changes that.",
+            fg_color=WARNING_COLOR,
+        ))
+    if art is None:
+        await session.write_line("No usable art file. Apply a gallery sample, upload one, or draw one first.")
+    else:
+        await session.write_line(f"Art: {art.width} columns, {art.height} rows.")
+        for line in describe_slots(art) or ["No slots found."]:
+            await session.write_line(f"  {line}")
+        if art.problems:
+            for problem in art.problems:
+                await session.write_line(colored(f"  Problem: {problem}", fg_color=ERROR_COLOR))
+        else:
+            for label, level in (("Your menu", None), ("A level-0 caller's menu", 0)):
+                plan = await lane.run(lambda db, level=level: slot_menu_preview(session, db, actor, art, level=level))
+                if plan.text is not None:
+                    await session.write_line(colored(f"  {label}: fits.", fg_color=SUCCESS_COLOR))
+                else:
+                    await session.write_line(
+                        colored(f"  {label}: generated menu instead -- {plan.reason}.", fg_color=WARNING_COLOR)
+                    )
+    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.read_any_key()
+
+
+async def _write_slot_art_preview(
+    session: Session, lane: DatabaseLane, actor: User, art: SlotArt, *, level: int | None
+) -> None:
+    from netbbs.net.main_menu import slot_menu_preview
+
+    plan = await lane.run(lambda db: slot_menu_preview(session, db, actor, art, level=level))
+    if plan.text is None:
+        await session.write_line(
+            colored(f"Callers like this get the generated menu instead: {plan.reason}.", fg_color=WARNING_COLOR)
+        )
+        return
+    await write_art_text(session, plan.text)
+    await session.write(move_cursor(art.height + 1, 1))
+
+
+async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """[P]review in slots mode: the main menu as you see it, then as a
+    level-0 caller sees it."""
+    art = await lane.run(_read_slot_art)
+    if art is None:
+        await session.write_line(colored("\r\nNo usable art file to preview.", fg_color=MUTED_COLOR))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_any_key()
+        return
+    # [D]isable leaves the mode alone, so a switched-off banner still lands
+    # here: say under each draw that callers get the plain menu meanwhile.
+    enabled = await lane.run(is_main_menu_banner_enabled)
+    for intro, level in (("as you see it", None), ("as a level-0 caller sees it", 0)):
+        # The art clears the screen, so what is being shown is said below it.
+        await _write_slot_art_preview(session, lane, actor, art, level=level)
+        if not enabled:
+            await session.write_line(colored(
+                "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+            ))
+        await session.write_line(colored(f"(the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_any_key()
 
 
 async def _enable_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -13700,15 +13889,21 @@ async def _main_menu_banner_gallery_screen(
         preset = selection[1]
         data = load_main_menu_banner_preset(preset)
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
-        await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
+        if preset.mode == SLOTS_MODE:
+            art = parse_slot_art(decode_banner_bytes(data))
+            await _write_slot_art_preview(session, lane, actor, art, level=None)
+        else:
+            await write_preformatted_line(session, decode_banner_bytes(data) + RESET)
 
-        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the masthead"):
+        what = "as the main menu" if preset.mode == SLOTS_MODE else "as the masthead"
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} {what}"):
             continue
 
         def _apply(db: Database) -> Path:
             path = main_menu_banner_path(db)
             path.write_bytes(data)
             set_main_menu_banner_enabled(db, True)
+            set_main_menu_art_mode(db, preset.mode)
             record_action(db, actor=actor, action="apply_main_menu_banner_preset", detail=f"{preset.key} -> {path}")
             return path
 
@@ -13941,7 +14136,8 @@ async def _draw_logoff_banner_menu(
         "Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
         "timeout, kick, or account revocation.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14212,7 +14408,8 @@ async def _draw_new_account_banner_before_menu(
         "Shown once, right when a caller starts self-service signup -- before the Create "
         "account prompts, never repeated on a fixable retry.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14491,7 +14688,8 @@ async def _draw_new_account_banner_after_menu(
         "Shown once self-service signup succeeds -- covers both an immediate login and a "
         "pending-approval account, alongside the existing message either way.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14847,7 +15045,8 @@ async def _draw_board_list_masthead_menu(
         "Shown above every board-browsing view -- the top level, a category, or a "
         "Community.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -15120,7 +15319,8 @@ async def _draw_file_area_masthead_menu(
         "Shown above every file-area-browsing view -- the top level, a category, or a "
         "Community.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -15391,7 +15591,8 @@ async def _draw_chat_channel_picker_masthead_menu(
         "Shown above every channel-picker view -- the top level, a category, or a "
         "Community. Never inside a live channel.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [

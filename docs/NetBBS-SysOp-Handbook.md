@@ -1306,6 +1306,70 @@ saves, and **Ctrl+X** quits.
 The welcome gallery ends with three quiet designs for clubs that don't want
 neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
 
+Art from scene tools such as PabloDraw or Moebius works as it is:
+
+- **SAUCE records** (the title, author and group a scene tool saves at the end
+  of the file) are not shown to callers. Each piece's status shows the credit,
+  the width the art was drawn for, and a warning if it was made for a font
+  other than the IBM PC one; such art is still shown with CP437's characters.
+  The editor writes a SAUCE record when it saves, keeping any credit the file
+  had.
+- **Art wider than a caller's screen** is not drawn for them when its SAUCE
+  record says how wide it is: the welcome banner falls back to the default,
+  the other pieces to no art. Without a record, NetBBS can't tell.
+- **Smileys, suits, notes and arrows** drawn with CP437's low characters (☺ ♥
+  ♫ ► ▲) reach every caller: as the original bytes on a classic terminal, as
+  the same symbols on a modern one, and as plain stand-ins in ASCII.
+- **iCE colours** (blink used as a bright background) show as bright
+  backgrounds everywhere, not as blinking text.
+- **Credit line:** on the welcome banner's screen, **Credit line** switches on
+  a line under your banner crediting the art from its SAUCE record, for
+  example `art: Nib Logo by InkWell/Quill`. It is off by default.
+
+#### The main menu as your own art
+
+The main-menu masthead can also be the menu itself. On its screen, **Mode**
+switches between *above the menu* (the default) and *the menu itself*. In the
+second mode your art is the whole main menu, and NetBBS draws each caller's own
+items and a few live values into places you mark in it. You mark a place by
+drawing a token in plain text, in the colour its content should take:
+
+| Token | What goes there |
+| --- | --- |
+| `{menu 74x7}` | The caller's menu items, in a region 74 columns wide and 7 rows tall, starting at the `{`. Required. |
+| `{prompt}` | The prompt. Without one, it goes below the art. |
+| `{user 16}` | The caller's name, cut to 16 columns |
+| `{node 30}` | Your node's name |
+| `{level 9}` | `level 20` |
+| `{mail 18}` | `3 unread` or `mail caught up` |
+| `{time 5}`, `{date 10}` | The node's time and date, in its timezone |
+| `{online 12}` | `4 online` |
+
+Without a number, a field is as wide as its token. Brace text that is not one
+of these stays part of the art.
+
+The art only decorates. Each caller sees exactly the items the normal menu
+would show them, with the same keys; the art can't add or hide any. A caller
+gets the normal menu instead whenever the art can't be used as drawn:
+- **their items don't fit** the `{menu}` region (a SysOp's menu is the longest);
+- **the art has a problem**, such as no `{menu}` or two slots overlapping;
+- **their terminal is too small**, narrower than the art or too short for it;
+- **they read plain ASCII.**
+
+**Check** lists the tokens it found and any problems, and says whether your menu
+and a level-0 caller's fit, on a terminal the size of yours. **Preview** shows
+the menu as you see it, then as a level-0 caller sees it. The gallery's
+**Quill Ledger** and **Inkwell Blocks** samples are drawn this way, in 16
+colours with characters classic terminals have; applying one switches the mode
+for you.
+
+The welcome and log-off banners take the field tokens too, but not `{menu}`
+or `{prompt}`. The welcome banner is shown before anyone signs in, so it fills
+only `{node}`, `{time}`, `{date}` and `{online}`. The log-off banner adds
+`{user}` and `{level}`. Any other field is left blank, and SSH's sign-in banner
+fills `{node}`, `{time}` and `{date}`. A banner without tokens is sent exactly
+as before.
+
 Every caller gets text in the character set their terminal reads:
 
 - **Detection when they connect:**
@@ -1327,6 +1391,9 @@ Every caller gets text in the character set their terminal reads:
     bottom row is written. Your banners keep their full width. Plain spaces at
     the end of each banner row are dropped when it's shown, so draw background
     colours out to the edge if a row should reach it.
+  - SyncTERM also gets full colour (truecolor), so doors and colourful
+    presets look the way they do in a modern terminal. Other classic terminals
+    get 256 colours. A caller can still pick a colour depth in their Profile.
 - **After sign-in:**
   - Each caller's own **Profile → Unicode or CP437** choice applies.
   - A caller whose terminal wasn't recognised is asked once which of two sample
@@ -1555,6 +1622,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | You think `signing.identity` or `transport.identity` leaked | Replace that key as **Compromised** under **Link status → Keys**, or with `python -m netbbs.admin rotate-key signing --compromised` while the node is stopped. The address and reputation stay; see [Node keys](#node-keys). If `root.identity` leaked too, as it does with a whole copied identity directory or backup, rotation is no remedy: the holder can authorize keys of their own, and only a new node identity ends that. |
 | SSH import fails on NetBSD | Check pkgsrc libraries and `LD_LIBRARY_PATH`; see installation above. |
 | An SSH client cannot connect, e.g. SyncTERM says "Error -20 activating session" or "Error -30 activating session" | "Error -30" with "an excessive number of consecutive no-op packets" means the node is older than the fix for issue #964; upgrade it. For "Error -20": the node offers an Ed25519 host key and, for clients without Ed25519 such as older SyncTERM builds, an RSA one (`netbbs_ssh_host_key_rsa`, created at the first start that lacks it). Make sure the node was restarted after upgrading so the RSA key exists. A caller who connected before sees a new fingerprint only if their client picks the RSA key. |
+| The log says an SSH host key "was readable by other accounts" | The key file was created before NetBBS restricted it, or restored from a backup taken then. NetBBS has already made it owner-only (0600). If other people have accounts on the host, assume they could have copied it: stop the node, delete `netbbs_ssh_host_key` and `netbbs_ssh_host_key_rsa`, and start it again to get new keys. Callers' SSH clients will then warn that the host key changed, so tell them first. On a host only you can log in to, no action is needed. |
 | Caller cannot log in | Check maintenance mode, pending approval, disabled account, and login throttling before resetting credentials. |
 | Caller can read but cannot contribute | Check write/join gates, age/name attestations, moderator grants, and inherited Community settings. |
 | Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |

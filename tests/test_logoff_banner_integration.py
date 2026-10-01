@@ -120,6 +120,29 @@ def test_logoff_banner_shown_on_an_intentional_log_off(db):
     assert len(set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", session.output))) >= 10
 
 
+def test_logoff_and_welcome_banners_fill_their_field_slots(db):
+    """Issue #929: `{user}`, `{node}` and `{level}` in a log-off banner, and
+    `{node}` in the welcome banner, are filled in rather than shown raw."""
+    from netbbs.config import set_node_display_name
+    from netbbs.net.welcome_banner import banner_path as welcome_banner_path, set_welcome_banner_enabled
+
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    set_unicode_style_enabled(db, alice, True)
+    set_node_display_name(db, "Nib Quill")
+    welcome_banner_path(db).write_bytes(b"WELCOME TO {node 12}   |")
+    set_welcome_banner_enabled(db, True)
+    logoff_banner_path(db).write_bytes(b"BYE {user 8}FROM {node 12}   AT {level 9}|")
+    set_logoff_banner_enabled(db, True)
+    session = FakeSession(["alice", "hunter2pw", "y"], keys=["l"])
+
+    asyncio.run(_run_login(session, db))
+
+    visible = _visible(session.output)
+    assert "WELCOME TO Nib Quill   |" in visible
+    assert "BYE alice   FROM Nib Quill   AT level 10 |" in visible
+    assert "{node" not in visible and "{user" not in visible
+
+
 def test_logoff_summary_formats_duration_and_fits_256_color_terminal(db):
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     set_unicode_style_enabled(db, alice, False)
