@@ -33,6 +33,7 @@ from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures and helpers
     sysop,
 )
 from tests.test_chat_flow_mrc_open_rooms import _bridge_on, _browse, _visible_text
+from tests.eventually import eventually
 
 
 class _PickerQueueSession(_QueueSession):
@@ -227,8 +228,7 @@ def test_mrc_stats_shows_the_reply_and_the_section_carries_the_size(db, lane, hu
             await rig.fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
             await asyncio.sleep(0.2)
             session, _ = await _run(lane, hub, presence, channel, alice, ["/mrc stats", "/quit"], mrc_bridge=rig.bridge)
-            await asyncio.sleep(0.2)
-            assert rig.bridge.status().network_summary is not None
+            assert await eventually(lambda: rig.bridge.status().network_summary is not None)
             from netbbs.net.chat_flow import _mrc_section_description
             assert rig.bridge.status().network_summary in _mrc_section_description(rig.bridge.status())
         finally:
