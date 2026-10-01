@@ -541,7 +541,7 @@ def materialize_carried_post(
         # Design doc §9.5, issue #1021: a closed board takes no new post,
         # from anywhere -- not only from this node's own callers.
         or board_row["link_closed_at"] is not None
-        or not _posting_allows(db, board_row, payload)
+        or not _posting_allows(db, board_row, payload, is_reply=parent_post_id is not None)
     ):
         # The signed event is kept, only its projection is refused -- which is
         # what makes the rebuild path below a real recovery rather than a
@@ -1034,17 +1034,20 @@ def materialize_carried_board_closure(db: Database, closure: BoardClosure, *, co
         db.connection.commit()
 
 
-def _posting_allows(db: Database, board_row, payload: dict) -> bool:
+def _posting_allows(db: Database, board_row, payload: dict, *, is_reply: bool) -> bool:
     """Whether the board's posting setting (design doc §9.3, issue #993)
     lets this carried `board_post` in: under `origin_only` only an author
     whose home is the board's current origin, and under `origin_threads`
-    anyone's reply but only such an author's new thread. The reply test
-    reads the signed `parent_post_id`, not whether the parent is here."""
+    anyone's reply but only such an author's new thread. `is_reply` is
+    whether its parent is here: a post naming a parent this board does not
+    have would be shown as a new thread, so it is not let in as a reply
+    (review of PR #1024). Such a reply waits as a kept event, and a rebuild
+    takes it in once its parent has arrived."""
     # Absent only while an upgrade test runs this on an older schema.
     mode = board_row["link_posting"] if "link_posting" in board_row.keys() else None
     if mode is None or mode == "anyone":
         return True
-    if mode == "origin_threads" and payload.get("parent_post_id") is not None:
+    if mode == "origin_threads" and is_reply:
         return True
     origin = board_row["link_origin_fingerprint"] or BoardGenesis.from_dict(
         json.loads(board_row["link_genesis_json"])
@@ -1066,6 +1069,13 @@ def posting_here(db: Database, board: Board, *, own_fingerprint: str | None) -> 
     mode = board_posting_mode(db, board)
     if mode == "anyone" or not is_board_linked(db, board):
         return "all"
+    if own_fingerprint is None:
+        # Link is off here, which does not un-Link a board: the fingerprint
+        # cached at every startup still tells whether this node is the
+        # origin, whose callers always post (review of PR #1024).
+        from netbbs.managed_dns.state import get_node_fingerprint
+
+        own_fingerprint = get_node_fingerprint(db)
     if own_fingerprint is not None and board_origin_fingerprint(db, board) == own_fingerprint:
         return "all"
     return "replies" if mode == "origin_threads" else "none"
@@ -1368,6 +1378,16 @@ def record_board_origin_change(
     db.connection.execute(
         "UPDATE boards SET link_origin_fingerprint = ? WHERE board_id = ?",
         (new_origin_fingerprint, board_id),
+    )
+    # Issue #993: a former origin stops pushing and serving its own posting
+    # setting -- signed by a node that is no longer the origin, it is
+    # nothing a peer can apply. The setting stays in force here until the
+    # new origin sets one (design doc §9.3).
+    db.connection.execute(
+        """UPDATE boards SET link_posting_json = NULL
+            WHERE board_id = ? AND link_posting_json IS NOT NULL
+              AND json_extract(link_posting_json, '$.envelope.payload.origin_fingerprint') != ?""",
+        (board_id, new_origin_fingerprint),
     )
     if commit:
         db.connection.commit()
@@ -1935,15 +1955,20 @@ def load_own_board_events(db: Database, own_fingerprint: str) -> list[_OwnBoardE
     """
     events: list[_OwnBoardEvent] = []
     for row in db.connection.execute(
-        "SELECT link_genesis_json, link_lifecycle_json, link_posting_json FROM boards "
+        "SELECT link_genesis_json, link_lifecycle_json, link_posting_json, link_origin_fingerprint FROM boards "
         "WHERE link_genesis_json IS NOT NULL AND link_hidden_at IS NULL"
     ):
         genesis = BoardGenesis.from_dict(json.loads(row["link_genesis_json"]))
         if genesis.payload["origin_fingerprint"] == own_fingerprint:
             events.append(genesis)
         if row["link_posting_json"] is not None:
-            # Issue #993: only ever this node's own, set as origin.
-            events.append(BoardPosting.from_dict(json.loads(row["link_posting_json"])))
+            # Issue #993: only ever this node's own, set as origin, and only
+            # pushed while it still is: `record_board_origin_change` drops it
+            # when the origin moves, this is the belt to that.
+            own_posting = BoardPosting.from_dict(json.loads(row["link_posting_json"]))
+            current_origin = row["link_origin_fingerprint"] or genesis.payload["origin_fingerprint"]
+            if own_posting.payload["origin_fingerprint"] == current_origin:
+                events.append(own_posting)
         if row["link_lifecycle_json"] is not None:
             raw = json.loads(row["link_lifecycle_json"])
             lifecycle_object_type = raw["envelope"]["object_type"]

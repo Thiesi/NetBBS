@@ -4165,10 +4165,12 @@ class LinkNode:
                     )
                 current_origin = self.current_board_origin(board_id)
                 if posting.payload.get("origin_fingerprint") != current_origin:
-                    raise LinkProtocolError(
-                        f"board_posting for board_id {board_id!r} is not from its current origin "
-                        f"({current_origin!r})"
-                    )
+                    # A setting the board's origin before a transfer signed,
+                    # still relayed by a peer that has it on file: nothing to
+                    # apply, and no reason to refuse the batch it came in
+                    # (review of PR #1024). Skipped, not stored -- it cannot be
+                    # verified against the current origin's keys.
+                    continue
                 origin_peer = self.known_identity(current_origin)
                 if origin_peer is None:
                     raise MissingDependency(

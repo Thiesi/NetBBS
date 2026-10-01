@@ -247,12 +247,15 @@ def test_handle_events_accepts_the_origins_setting_and_refuses_anyone_elses(tmp_
     )
     assert bob_node.handle_events(alice.fingerprint, [good.to_dict()]) == [good.content_id]
 
+    # Signed by a node that is not the origin (a former origin's, relayed
+    # after a transfer): skipped, never applied, and not an error that would
+    # refuse the batch it came in.
     as_herself = build_board_posting(
         signing_identity=mallory.identity.signing_key, origin_fingerprint=mallory.fingerprint,
         board_id="existing-local-board-id", posting="anyone", created_at=clock.now_iso(),
     )
-    with pytest.raises(LinkProtocolError, match="not from its current origin"):
-        bob_node.handle_events(mallory.fingerprint, [as_herself.to_dict()])
+    assert bob_node.handle_events(mallory.fingerprint, [as_herself.to_dict()]) == []
+    assert as_herself.content_id not in bob_node.known_event_ids
 
     forged = build_board_posting(
         signing_identity=mallory.identity.signing_key, origin_fingerprint=alice.fingerprint,
@@ -289,3 +292,43 @@ def test_the_board_screen_offers_no_post_key_and_says_why(db, origin):
     screen = session.screens()[0]
     assert "Only the board's origin node posts on this board." in " ".join(screen.split())
     assert "[P]ost" not in screen
+
+
+# -- review of PR #1024
+
+
+def test_a_reply_to_a_parent_this_board_lacks_is_not_let_in_as_a_reply(db, origin, third):
+    """It would be shown as a new thread, which origin_threads keeps to the
+    origin: a made-up parent must not open that door."""
+    _carried(db, origin)
+    materialize_carried_board_posting(db, _setting(origin, "origin_threads", "2026-01-01T12:00:00Z"))
+    sneaky = _post(third, subject="new thread in disguise", parent_post_id="0" * 64)
+
+    assert materialize_carried_post(db, sneaky, sender_fingerprint=third.fingerprint) is None
+    assert not _shown(db, sneaky)
+
+
+def test_a_former_origin_stops_pushing_its_setting(db, alice, here, origin):
+    board = create_board(db, "news", creator=alice)
+    link_board(db, board, node_identity=here)
+    set_board_posting(db, board, "origin_only", node_identity=here)
+
+    record_board_origin_change(db, board.board_id, origin.fingerprint)
+
+    assert not [e for e in load_own_board_events(db, here.fingerprint) if isinstance(e, BoardPosting)]
+    assert db.connection.execute(
+        "SELECT link_posting_json FROM boards WHERE id = ?", (board.id,)
+    ).fetchone()[0] is None
+    # Still in force here until the new origin sets one.
+    assert board_posting_mode(db, board) == "origin_only"
+
+
+def test_the_origin_keeps_posting_on_its_board_with_link_off(db, alice, here):
+    from netbbs.managed_dns.state import set_node_fingerprint
+
+    board = create_board(db, "news", creator=alice)
+    link_board(db, board, node_identity=here)
+    set_board_posting(db, board, "origin_only", node_identity=here)
+    set_node_fingerprint(db, here.fingerprint)  # cached at every startup
+
+    assert posting_here(db, board, own_fingerprint=None) == "all"

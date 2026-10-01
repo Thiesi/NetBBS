@@ -1246,7 +1246,8 @@ def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
         raw = json.loads(board_row["link_lifecycle_json"])
         events[event_content_id(raw["envelope"])] = raw
     if board_row["link_posting_json"] is not None:
-        # Issue #993: the origin's own latest posting setting.
+        # Issue #993: the origin's own latest posting setting
+        # (`record_board_origin_change` drops it once the origin moves).
         raw = json.loads(board_row["link_posting_json"])
         events[event_content_id(raw["envelope"])] = raw
 
