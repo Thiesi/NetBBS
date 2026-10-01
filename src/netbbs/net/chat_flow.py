@@ -2556,7 +2556,12 @@ async def _show_help_pages(
         return True
 
     write_page = page_writer or write_direct
-    remaining = [_HelpEntryState(syntax, description) for syntax, description in entries]
+    # Issue #1044: one command column for the whole help. Sized from what
+    # was left to show, each page lined its descriptions up at a different
+    # column once the widest command had scrolled past. Still sized per
+    # page for the terminal's current width, so a resize reflows.
+    all_entries = list(entries)
+    remaining = [_HelpEntryState(syntax, description) for syntax, description in all_entries]
     page_number = 1
     while remaining or message is not None:
         width = max(1, getattr(session, "terminal_width", 80))
@@ -2568,8 +2573,7 @@ async def _show_help_pages(
                 return
             continue
 
-        current_entries = [(state.syntax, state.description) for state in remaining]
-        syntax_width = _help_column_width(current_entries, width)
+        syntax_width = _help_column_width(all_entries, width)
         # Three heading rows and an optional continuation prompt are written
         # into the scroll region. Keep one further row unused because the
         # final write_line CRLF advances the cursor and can scroll the title.

@@ -55,7 +55,6 @@ ALLOWED: dict[str, str] = {
     # Its only caller, the digest path, was deleted with #1036; #589's
     # automatic issuance records observed equivocation with it.
     "record_local_observation": "#589",
-    "record_activity": "#589",
     "clear_local_observation": "#589",
 }
 

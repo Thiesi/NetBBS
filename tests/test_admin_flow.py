@@ -8307,6 +8307,50 @@ def test_link_status_screen_prioritizes_a_cryptographic_identity_warning(
     assert "could indicate impersonation" in text
 
 
+def test_link_status_identity_changes_say_when_each_was_seen(db, lane, sysop):
+    """Issue #1043: without a time a SysOp could not tell a change seen this
+    morning from one weeks old. Each change shows when it was observed, in
+    the node's display format, newest first."""
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.timeutil import format_for_display, resolve_display_preferences
+
+    link_context = _link_context()
+    node = LinkNode(identity=bootstrap_node_identity("renamed-node"))
+    for minute, name in ((0, "Old Name"), (1, "Middle Name"), (2, "New Name")):
+        record = node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at=f"2026-09-03T13:{minute:02d}:00+00:00", friendly_name=name,
+        ))
+        save_peer(db, record)
+    link_context.link_node.peers[record.fingerprint] = record
+    rows = db.connection.execute(
+        "SELECT id FROM link_node_identity_observations WHERE kind <> 'first_seen' ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 2
+    stamps = ["2026-08-01T09:15:00.000000Z", "2026-09-30T21:40:00.000000Z"]
+    for row, stamp in zip(rows, stamps):
+        db.connection.execute(
+            "UPDATE link_node_identity_observations SET observed_at = ? WHERE id = ?", (stamp, row["id"])
+        )
+    db.connection.commit()
+    display_format, display_timezone = resolve_display_preferences(db)
+    older, newer = (
+        format_for_display(stamp, override_format=display_format, override_timezone=display_timezone)
+        for stamp in stamps
+    )
+
+    session = FakeSession(["s", "l", "PAGE_DOWN", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _normalized_visible(_written_text(session))
+    section = text[text.index("IDENTITY CHANGES"):]
+    assert "When" in section and "Change" in section
+    assert newer in section and older in section
+    assert section.index(newer) < section.index(older), "newest first"
+
+
 def test_repair_carried_posts_screen_reports_nothing_to_do_when_caught_up(db, lane, sysop):
     link_context = _link_context()
 

@@ -607,9 +607,19 @@ def _ordinary_state(
         (subject.subject_id,),
     ).fetchone()
     activity_condition = "direct = 1" if subject.kind == "node" else "1 = 1"
-    activity_days = db.connection.execute(
-        f"SELECT COUNT(*) FROM link_trust_activity_days WHERE subject_id = ? AND {activity_condition}",
+    # Recovery returns to probation (§12.9), so only days after the subject's
+    # most recent restriction count (issue #1035): the dates are kept, and the
+    # count restarts the day after the subject was last quarantined or blocked.
+    last_restricted = db.connection.execute(
+        """SELECT MAX(created_at) FROM link_trust_decision_audit
+           WHERE subject_id = ? AND new_state IN ('quarantined', 'blocked')""",
         (subject.subject_id,),
+    ).fetchone()[0]
+    since = last_restricted[:10] if last_restricted else ""
+    activity_days = db.connection.execute(
+        f"""SELECT COUNT(*) FROM link_trust_activity_days
+            WHERE subject_id = ? AND {activity_condition} AND activity_date > ?""",
+        (subject.subject_id, since),
     ).fetchone()[0]
     first_value = (
         subject_row["first_verified_hello_at"]
