@@ -1041,7 +1041,15 @@ def test_the_migration_redacts_what_was_already_revoked(tmp_path, monkeypatch):
     path = tmp_path / "pre-596.db"
     old = Database(path)
     subject = TrustSubject.user(HOME, "alice")
-    register_subject(old, subject, first_accepted_at=stamp(NOW), now_iso=stamp(NOW))
+    # Inserted directly: `register_subject` recomputes trust with today's code,
+    # which reads columns a schema this old does not have yet.
+    old.connection.execute(
+        """INSERT INTO link_trust_subjects
+           (subject_id, subject_kind, node_fingerprint, opaque_user_id,
+            first_accepted_at, first_verified_hello_at)
+           VALUES (?, ?, ?, ?, ?, NULL)""",
+        (subject.subject_id, subject.kind, subject.node_fingerprint, subject.opaque_user_id, stamp(NOW)),
+    )
     envelope = json.dumps({"payload": {"attested_value": "1990-04-01"}})
     for content_id, revoked_at in (("a" * 64, stamp(NOW)), ("b" * 64, None)):
         old.connection.execute(

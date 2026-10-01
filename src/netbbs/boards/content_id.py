@@ -48,8 +48,14 @@ _MAX_SAFE_INTEGER = 2**53 - 1
 _MIN_SAFE_INTEGER = -_MAX_SAFE_INTEGER
 
 
-class ContentIdError(Exception):
-    """Raised when `fields` passed to `compute_content_id`/
+class ContentIdError(ValueError):
+    """A `ValueError`, so that every guard written for malformed input
+    catches it: canonicalization is where untrusted peer input first meets
+    these rules, and as a bare `Exception` it slipped past `except
+    ValueError` guards four times (#998, #1027, #1040, #1042), each time
+    turning one malformed object into a failed request or a dead loop.
+
+    Raised when `fields` passed to `compute_content_id`/
     `canonical_json_bytes` violates the canonical-format rule (design
     doc §7.2, issue #11): a `float` anywhere, an `int` outside the
     cross-language-safe integer range, or two distinct object member

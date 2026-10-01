@@ -518,11 +518,14 @@ def _active_evidence(
             "issuer_fingerprint": row["issuer_fingerprint"],
             "domain_id": row["domain_id"],
             "domain_weight": row["weight"],
+            # Issue #1036: whether this node reproduced the evidence itself.
+            # Only a verified self-verifying signal counts (see `remote_auto`).
+            "evidence_verified": row["evidence_verified_at"] is not None,
         }
         for row in db.connection.execute(
             """
             SELECT s.content_id, s.category, s.evidence_class, s.issuer_fingerprint,
-                   r.domain_id, d.weight
+                   r.domain_id, d.weight, s.evidence_verified_at
             FROM link_trust_signals AS s
             JOIN link_trust_reporters AS r ON r.fingerprint = s.issuer_fingerprint
             JOIN link_trust_reporter_scopes AS rs
@@ -604,9 +607,19 @@ def _ordinary_state(
         (subject.subject_id,),
     ).fetchone()
     activity_condition = "direct = 1" if subject.kind == "node" else "1 = 1"
-    activity_days = db.connection.execute(
-        f"SELECT COUNT(*) FROM link_trust_activity_days WHERE subject_id = ? AND {activity_condition}",
+    # Recovery returns to probation (§12.9), so only days after the subject's
+    # most recent restriction count (issue #1035): the dates are kept, and the
+    # count restarts the day after the subject was last quarantined or blocked.
+    last_restricted = db.connection.execute(
+        """SELECT MAX(created_at) FROM link_trust_decision_audit
+           WHERE subject_id = ? AND new_state IN ('quarantined', 'blocked')""",
         (subject.subject_id,),
+    ).fetchone()[0]
+    since = last_restricted[:10] if last_restricted else ""
+    activity_days = db.connection.execute(
+        f"""SELECT COUNT(*) FROM link_trust_activity_days
+            WHERE subject_id = ? AND {activity_condition} AND activity_date > ?""",
+        (subject.subject_id, since),
     ).fetchone()[0]
     first_value = (
         subject_row["first_verified_hello_at"]
@@ -701,10 +714,14 @@ def _recompute_dimension(
         if item["evidence_class"] == EvidenceClass.SELF_VERIFYING.value
         and item["category"] in IDENTITY_CATEGORIES
     ]
+    # A remote signal is self-verifying only if this node verified it (issue
+    # #1036): the label alone is the issuer's say-so, which §12.6 does not
+    # accept as proof.
     remote_auto = [
         item for item in remote
         if item["evidence_class"] == EvidenceClass.SELF_VERIFYING.value
         and item["category"] in IDENTITY_CATEGORIES
+        and item["evidence_verified"]
     ]
     remote_domains: dict[str, float] = {}
     for item in remote_auto:
@@ -755,6 +772,16 @@ def _recompute_dimension(
                 }
                 for item in sole_authority_matches
             ],
+        }
+    elif awaiting_review := _equivocation_awaiting_review(db, subject.subject_id, dimension, now_value):
+        # §12.9: equivocation this node proved itself does not recover by
+        # waiting. Its observation expiring is not a SysOp having looked; the
+        # quarantine stays until one clears it (issue #589).
+        state = TrustState.QUARANTINED
+        reason_code = "equivocation_review_required"
+        explanation = {
+            "expired_uncleared_evidence": awaiting_review,
+            "release": "a SysOp clears the evidence on the subject's screen",
         }
     elif previous is not None and previous["state"] == TrustState.QUARANTINED.value:
         started_value = previous["recovery_started_at"] or now_value
@@ -833,8 +860,12 @@ def record_trust_signal(
     evidence: dict[str, object] | None = None,
     explanation: str | None = None,
     now_iso: str | None = None,
+    evidence_verified_at: str | None = None,
 ) -> bool:
-    """Persist one already-signature-verified signal; return False on replay."""
+    """Persist one already-signature-verified signal; return False on replay.
+
+    `evidence_verified_at` is when this node reproduced the signal's evidence
+    itself (issue #1036); a self-verifying signal counts only with it."""
     normalized_dimension = _dimension(dimension)
     normalized_evidence = _evidence_class(evidence_class)
     validate_category_evidence(normalized_dimension, category, normalized_evidence)
@@ -856,20 +887,102 @@ def record_trust_signal(
             INSERT OR IGNORE INTO link_trust_signals (
                 content_id, issuer_fingerprint, subject_id, dimension, category,
                 evidence_class, observed_at, issued_at, declared_expires_at,
-                effective_expires_at, received_at, evidence_json, explanation
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                effective_expires_at, received_at, evidence_json, explanation,
+                evidence_verified_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 content_id, issuer_fingerprint, subject.subject_id,
                 normalized_dimension.value, category, normalized_evidence.value,
                 observed_at, issued_at, expires_at, _iso(effective_expiry), now_value,
                 json.dumps(evidence, sort_keys=True, separators=(",", ":")) if evidence else None,
-                explanation,
+                explanation, evidence_verified_at,
             ),
         )
         if cursor.rowcount:
             _recompute_subject(db, subject, now_value, now, actor_user_id=None)
         return bool(cursor.rowcount)
+
+
+#: Unverified signals re-checked per sync pass (issue #1036): bounded, since
+#: they come from reporters and a node may hold many.
+MAX_SIGNALS_REVERIFIED_PER_PASS = 50
+
+
+def unverified_equivocation_signals(
+    db: Database, *, now_iso: str | None = None, limit: int = MAX_SIGNALS_REVERIFIED_PER_PASS,
+) -> list[tuple[str, str, dict]]:
+    """Active `signed_equivocation` signals about a node whose embedded
+    evidence this node has not reproduced yet: (content_id, node fingerprint,
+    evidence data). Re-checked when this node may have learned the subject's
+    keys since (issue #1036). Never tried first, then least recently tried
+    (`mark_signal_reverify_attempted`), so signals that never reproduce cannot
+    keep the rest from their turn. At most `limit`."""
+    now_value, _ = _now(now_iso)
+    rows = db.connection.execute(
+        """
+        SELECT s.content_id, subj.node_fingerprint, s.evidence_json
+        FROM link_trust_signals AS s
+        JOIN link_trust_subjects AS subj ON subj.subject_id = s.subject_id
+        WHERE s.evidence_verified_at IS NULL AND s.revoked_at IS NULL
+          AND s.effective_expires_at > ? AND s.evidence_class = 'self_verifying'
+          AND s.category = 'signed_equivocation' AND subj.subject_kind = 'node'
+          AND s.evidence_json IS NOT NULL
+        ORDER BY s.reverify_attempted_at IS NOT NULL, s.reverify_attempted_at,
+                 s.received_at, s.content_id
+        LIMIT ?
+        """,
+        (now_value, limit),
+    ).fetchall()
+    result = []
+    for row in rows:
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(evidence, dict) and evidence.get("mode") == "embedded":
+            result.append((row["content_id"], row["node_fingerprint"], evidence.get("data")))
+    return result
+
+
+def mark_signal_reverify_attempted(
+    db: Database, content_ids: list[str], *, now_iso: str | None = None
+) -> None:
+    """Record that the per-pass re-check tried these signals and could not
+    reproduce them (issue #1036), sending them to the back of the queue."""
+    if not content_ids:
+        return
+    now_value, _ = _now(now_iso)
+    with db.connection:
+        db.connection.executemany(
+            "UPDATE link_trust_signals SET reverify_attempted_at = ? WHERE content_id = ?",
+            [(now_value, content_id) for content_id in content_ids],
+        )
+
+
+def mark_signal_evidence_verified(
+    db: Database, content_id: str, *, now_iso: str | None = None
+) -> bool:
+    """Record that this node reproduced a signal's evidence (issue #1036), so
+    it counts toward the two-domain threshold from now on. Like evidence
+    verified on arrival, it does not become this node's own observation:
+    independent domains still have to agree before a remote report quarantines
+    (design doc §12.6). Returns False if it was already verified or is
+    unknown."""
+    now_value, now = _now(now_iso)
+    with db.connection:
+        row = db.connection.execute(
+            "SELECT subject_id FROM link_trust_signals WHERE content_id = ? AND evidence_verified_at IS NULL",
+            (content_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        db.connection.execute(
+            "UPDATE link_trust_signals SET evidence_verified_at = ? WHERE content_id = ?",
+            (now_value, content_id),
+        )
+        _recompute_subject(db, _subject_from_id(db, row["subject_id"]), now_value, now, actor_user_id=None)
+    return True
 
 
 def revoke_trust_signal(
@@ -895,47 +1008,6 @@ def revoke_trust_signal(
         _recompute_subject(
             db, _subject_from_id(db, row["subject_id"]), now_value, now, actor_user_id=None
         )
-
-
-def record_reproduced_signal_observation(
-    db: Database,
-    signal_content_id: str,
-    *,
-    observation_id: str,
-    now_iso: str | None = None,
-) -> bool:
-    """Promote caller-reproduced self-verifying evidence to local fact.
-
-    The caller owns bounded fetch/hash/parse/reproduction; this local-domain
-    function records that successful result. The new observation intentionally
-    has its own lifetime and survives later expiry or revocation of the remote
-    reporter's signal.
-    """
-    row = db.connection.execute(
-        """
-        SELECT subject_id, dimension, category, evidence_class, evidence_json
-        FROM link_trust_signals WHERE content_id = ?
-        """,
-        (signal_content_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError(f"unknown trust signal: {signal_content_id!r}")
-    if row["evidence_class"] != EvidenceClass.SELF_VERIFYING.value:
-        raise ValueError("only self-verifying signal evidence can be reproduced locally")
-    subject = _subject_from_id(db, row["subject_id"])
-    now_value, _ = _now(now_iso)
-    return record_local_observation(
-        db,
-        observation_id=observation_id,
-        subject=subject,
-        dimension=row["dimension"],
-        category=row["category"],
-        evidence_class=EvidenceClass.SELF_VERIFYING,
-        observed_at=now_value,
-        evidence=json.loads(row["evidence_json"]) if row["evidence_json"] else None,
-        explanation=f"reproduced from trust signal {signal_content_id}",
-        now_iso=now_value,
-    )
 
 
 def record_vouch(
@@ -1433,6 +1505,77 @@ def record_local_observation(
         if cursor.rowcount:
             _recompute_subject(db, subject, now_value, now, actor_user_id=None)
         return bool(cursor.rowcount)
+
+
+def _equivocation_awaiting_review(
+    db: Database, subject_id: str, dimension: TrustDimension, now_value: str
+) -> list[str]:
+    """Equivocation this node observed about `subject_id` whose observation
+    expired without a SysOp clearing it (issue #589, design doc §12.9)."""
+    if dimension != TrustDimension.IDENTITY_INTEGRITY:
+        return []
+    return [
+        row["observation_id"]
+        for row in db.connection.execute(
+            """SELECT observation_id FROM link_trust_local_observations
+               WHERE subject_id = ? AND dimension = ? AND category = 'signed_equivocation'
+                 AND evidence_class = 'self_verifying' AND cleared_at IS NULL AND expires_at <= ?
+               ORDER BY observation_id""",
+            (subject_id, dimension.value, now_value),
+        ).fetchall()
+    ]
+
+
+@dataclass(frozen=True)
+class LocalObservation:
+    """Evidence this node observed itself about one subject."""
+
+    observation_id: str
+    dimension: str
+    category: str
+    evidence_class: str
+    observed_at: str
+    expires_at: str
+    cleared_at: str | None
+    publication_withdrawn_at: str | None
+    explanation: str | None
+
+
+def list_local_observations(
+    db: Database, subject: TrustSubject, *, include_cleared: bool = False
+) -> list[LocalObservation]:
+    """What this node observed itself about `subject`, newest first: active
+    observations, and expired ones that still hold a quarantine because nobody
+    cleared them (§12.9). `include_cleared` adds the cleared history."""
+    rows = db.connection.execute(
+        f"""SELECT observation_id, dimension, category, evidence_class, observed_at, expires_at,
+                   cleared_at, publication_withdrawn_at, explanation
+            FROM link_trust_local_observations
+            WHERE subject_id = ? {"" if include_cleared else "AND cleared_at IS NULL"}
+            ORDER BY observed_at DESC, observation_id""",
+        (subject.subject_id,),
+    ).fetchall()
+    return [LocalObservation(*row) for row in rows]
+
+
+def withdraw_observation_publication(
+    db: Database, observation_id: str, *, now_iso: str | None = None
+) -> bool:
+    """Stop publishing the automatic signal about one observation, keeping the
+    observation (issue #589). The next issuance pass revokes the signal and
+    never re-issues it. Returns False if already withdrawn."""
+    now_value, _ = _now(now_iso)
+    with db.connection:
+        if db.connection.execute(
+            "SELECT 1 FROM link_trust_local_observations WHERE observation_id = ?", (observation_id,)
+        ).fetchone() is None:
+            raise ValueError(f"unknown local trust observation: {observation_id!r}")
+        cursor = db.connection.execute(
+            """UPDATE link_trust_local_observations SET publication_withdrawn_at = ?
+               WHERE observation_id = ? AND publication_withdrawn_at IS NULL""",
+            (now_value, observation_id),
+        )
+    return bool(cursor.rowcount)
 
 
 def clear_local_observation(
