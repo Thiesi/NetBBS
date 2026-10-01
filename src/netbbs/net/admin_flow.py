@@ -12967,7 +12967,7 @@ async def _draw_welcome_banner_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
-                MenuEntry(label=menu_key("C", "redit line"), brief="Show the art's SAUCE credit under it"),
+                MenuEntry(label=menu_key("C", "redit line"), brief="Credit the art under the banner"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
                 MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
