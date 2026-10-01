@@ -2746,7 +2746,7 @@ class LinkServer:
             issuer_hello = HelloMessage.from_dict(body["issuer_hello"])
         except MalformedBundle as exc:
             return web.json_response({"error": f"malformed attestation bundle: {exc}"}, status=400)
-        except (KeyError, ValueError, TypeError) as exc:
+        except (KeyError, ValueError, TypeError, ContentIdError) as exc:
             return web.json_response({"error": f"malformed issuer identity bundle: {exc}"}, status=400)
         if bundle.recipient_fingerprint != recipient_fingerprint:
             return web.json_response({"error": "bundle is addressed to a different recipient"}, status=400)
@@ -2759,7 +2759,7 @@ class LinkServer:
             return self._policy_rejection(recipient_decision)
         try:
             issuer_key = self._node.authenticated_signing_key(issuer_hello, bundle.issuer_fingerprint)
-        except (LinkProtocolError, NodeIdentityError, ValueError) as exc:
+        except (LinkProtocolError, NodeIdentityError, ValueError, ContentIdError) as exc:
             return web.json_response({"error": f"issuer could not be authenticated: {exc}"}, status=403)
         if not bundle.verifies([issuer_key]):
             return web.json_response(

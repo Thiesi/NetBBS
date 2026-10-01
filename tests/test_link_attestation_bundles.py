@@ -101,6 +101,10 @@ def test_a_snapshot_over_the_limit_is_refused_before_anything_is_sent(cast):
     lambda d: d["envelope"].update(object_type="link_message"),
     lambda d: d.update(signature="not base64!"),
     lambda d: d["envelope"]["payload"].update(recipient_fingerprint=""),
+    # Past canonical JSON's safe-integer range (review of #1040): refused as
+    # malformed, never a ContentIdError escaping as a 500.
+    lambda d: d["envelope"]["payload"].update(sequence=2**53),
+    lambda d: d["envelope"]["payload"].update(sequence=10**30),
 ])
 def test_a_malformed_bundle_is_refused_by_shape(cast, mutate):
     data = _bundle(cast["issuer"], cast["recipient"]).to_dict()
@@ -304,3 +308,44 @@ def test_a_stale_identity_bundle_cannot_revive_a_compromised_key(tmp_path, cast)
         assert _held_sequences(relay.db) == []
     finally:
         relay.close()
+
+
+def test_an_out_of_range_sequence_is_a_400_and_the_relay_keeps_working(tmp_path, cast):
+    """Review of #1040: a sequence past 2**53 - 1 used to make canonical JSON
+    raise on the open deposit route. Now it is a plain 400, and the next,
+    genuine deposit still works."""
+    issuer, recipient = cast["issuer"], cast["recipient"]
+    relay_node = LinkNode(identity=cast["relay"])
+    relay_node.relaying_for[recipient.fingerprint] = "2026-01-01T00:00:00+00:00"
+    relay = _NodeDb(tmp_path, "relay")
+    hello = _hello_for(LinkNode(identity=issuer))
+    huge = _bundle(issuer, recipient).to_dict()
+    huge["envelope"]["payload"]["sequence"] = 2**60
+
+    async def scenario():
+        server = await _run_server(relay_node, lambda: _hello_for(relay_node), relay.lane)
+        base = f"http://127.0.0.1:{server.port}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{base}/link/v1/relay-mailbox/{recipient.fingerprint}/deposit"
+                async with session.post(
+                    url, json={"attestation_bundle": huge, "issuer_hello": hello.to_dict()}
+                ) as response:
+                    assert response.status == 400
+                    assert "sequence" in await response.text()
+                await deposit_attestation_bundle(
+                    session, base, recipient.fingerprint, _bundle(issuer, recipient, sequence=4), hello,
+                )
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert _held_sequences(relay.db) == [4]
+    finally:
+        relay.close()
+
+
+def test_building_a_bundle_refuses_an_out_of_range_sequence(cast):
+    with pytest.raises(ValueError):
+        _bundle(cast["issuer"], cast["recipient"], sequence=2**53)
