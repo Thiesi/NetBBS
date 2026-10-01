@@ -2587,6 +2587,14 @@ CPU/memory/process rlimits, bounds the read and the wall clock, and kills and
 reaps on every exit path. No archive, no DIZ, no unpacker, or a corrupt member
 are all "no description", never a failed upload.
 
+Every description, whether extracted, typed, or carried in a peer's
+`file_descriptor`, is stored as plain text. Whole ANSI escape sequences are
+removed, not only their ESC byte, which would leave `[0m`-style remains from a
+colour DIZ (issue #1000). Control and bidi-override characters are stripped
+after that. A DIZ's SAUCE record, and anything after its DOS end-of-file byte,
+is dropped before decoding. Colour in a DIZ is not kept: descriptions have no
+colour markup.
+
 A description may also be written by hand, from the file listing, by the
 uploader themselves or by anyone holding `EDIT` on the area. Hand-written
 edits are local-only: a `file_descriptor` (§11.2) is immutable and single-shot,
