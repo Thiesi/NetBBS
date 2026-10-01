@@ -93,6 +93,8 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_enabled,
 )
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
+from netbbs.net.animation_preference import animations_enabled
+from netbbs.net.art_pacing import WELCOME_ART, art_speed, write_paced_art
 from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
 from netbbs.permissions import meets_level
 from netbbs.net.banner_fields import banner_fields, count_callers_online
@@ -396,7 +398,7 @@ async def _run_authenticated_session(
         return
 
     try:
-        await write_preformatted_line(
+        await write_paced_art(
             session,
             # Field slots (issue #929): before sign-in, only what is true
             # for every caller -- the node, the time, callers online.
@@ -413,6 +415,9 @@ async def _run_authenticated_session(
                 ellipsis=ellipsis_for(session),
                 width=getattr(session, "physical_width", session.terminal_width),
             ),
+            # Paced art (issue #929): the welcome art plays once per
+            # connection, at the speed the SysOp set for it.
+            speed=art_speed(db, WELCOME_ART), once=WELCOME_ART,
         )
         # Design doc -- node management, Thiesi's own request: shown to
         # *every* connecting client, SysOp-to-be or not -- account level
@@ -733,6 +738,8 @@ async def run_authenticated_session(
     # The caller's character set preference replaces what was detected at
     # connect time, from the first screen after login on (issue #929).
     apply_charset_preference(session, charset_preference(db, user))
+    # Paced art plays only for a caller who keeps animations on (issue #929).
+    session.animations_enabled = animations_enabled(db, user)
     # Issue #611: the self-service password change re-verifies the
     # current password from inside this session, and that check charges
     # the node's login throttle rather than opening a second, unbounded

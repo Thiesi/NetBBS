@@ -81,6 +81,7 @@ from netbbs.net.node_theme import (
 from netbbs.net.mail_flow import blocked_senders_screen
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import EditorHeader, edit_prose
+from netbbs.net.animation_preference import animations_enabled, set_animations_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
 from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, live_choice_field
 from netbbs.net.session import Session, write_prompt
@@ -1021,6 +1022,11 @@ def _charset_label(preference: str, session: Session) -> str:
     return {"unicode": "Unicode", "cp437": "CP437", "ascii": "ASCII"}[preference]
 
 
+async def _persist_animations(session: Session, lane: DatabaseLane, user: User, enabled: bool) -> None:
+    await lane.run(set_animations_enabled, user, enabled)
+    session.animations_enabled = enabled
+
+
 async def _persist_charset(session: Session, lane: DatabaseLane, user: User, preference: str) -> None:
     await lane.run(set_charset_preference, user, preference)
     apply_charset_preference(session, preference)
@@ -1068,6 +1074,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "color_depth": await lane.run(color_depth_override, user) or "auto",
         "description_level": description_level,
         "redraw_in_place": redraw_in_place,
+        "animations": await lane.run(animations_enabled, user),
         "unicode_style": unicode_style,
         "charset": await lane.run(charset_preference, user),
         "mrc_colors": await lane.run(mrc_colors_enabled, user),
@@ -1427,6 +1434,22 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "what's already there -- less scrolling, but anything above the clear (like a "
                 "save confirmation) disappears immediately. Off is the safer default -- it "
                 "preserves scrollback."
+            ),
+            section="Display",
+        ),
+        FieldSpec(
+            key="animations", hotkey="q", menu_text=menu_key("Q", "uick or animated banners"),
+            label="Banner animations",
+            render=lambda d: "animated" if d["animations"] else "quick",
+            prompt=live_choice_field(
+                "animations", [True, False],
+                persist=lambda lane, v: _persist_animations(session, lane, user, v),
+            ),
+            brief="Play banners at their modem speed, or draw them at once",
+            help=(
+                "Animated: a banner the SysOp gave a speed draws at that speed, as a modem of "
+                "the day would have, and any key draws the rest at once. Quick: every banner "
+                "is drawn at once."
             ),
             section="Display",
         ),

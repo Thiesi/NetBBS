@@ -56,6 +56,7 @@ from netbbs.managed_dns.state import get_admin_token, get_local_listeners, get_s
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_telnet import skip_initial_negotiation
+from tests.eventually import eventually
 
 
 def _config(tmp_path, *, seed_sysop: bool = True, **overrides) -> NodeConfig:
@@ -1004,9 +1005,10 @@ def test_run_writes_and_removes_its_own_pid_file(tmp_path):
         config = _config(tmp_path, db_path=captured_db_path)
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
-        await asyncio.sleep(0.1)
-
-        assert pid_path.exists()
+        # Waited for, not slept for (issue #999): startup can take longer
+        # than 0.1 s on a loaded machine.
+        assert await eventually(lambda: pid_path.exists() or task.done())
+        assert not task.done(), "the node stopped before writing its pid file"
         assert int(pid_path.read_text().strip()) == os.getpid()  # this test process is what's actually running
 
         shutdown_event.set()

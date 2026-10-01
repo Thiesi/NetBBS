@@ -430,6 +430,11 @@ class SSHSession(Session):
     async def discard_buffered_input(self) -> None:
         await char_input.discard_buffered_input(self)
 
+    paces_art = True
+
+    async def take_waiting_key(self, timeout: float) -> bool:
+        return await char_input.take_waiting_key(self, timeout)
+
     def arm_word_guard(self) -> None:
         char_input.arm_word_guard(self)
 
