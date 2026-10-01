@@ -126,8 +126,9 @@ from netbbs.link.enforcement import (
     LinkPolicyDecision,
     decide_event_authorship,
     decide_node_action,
-    ensure_event_author_subject,
     ensure_node_subject,
+    record_author_activity,
+    record_direct_activity,
     node_transport_state,
 )
 from netbbs.link.trust import TrustState
@@ -517,7 +518,9 @@ async def persist_accepted_events(
                 await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
             continue
         if enforce_trust_policy:
-            await lane.run(ensure_event_author_subject, envelope)
+            # Registers the author, and counts the day for a remote user
+            # (design doc §12.4, issue #1035).
+            await lane.run(record_author_activity, envelope)
         # Design doc §9.3/issue #73: board_post/board_post_edit skip
         # the generic save_event dispatch below entirely --
         # materialize_carried_post/_edit each persist the underlying
@@ -2088,7 +2091,8 @@ class LinkServer:
             self._node.peers.pop(peer.fingerprint, None)
             return self._policy_rejection(decision)
         if self._enforce_trust_policy:
-            await self._lane.run(ensure_node_subject, peer.fingerprint)
+            # Issue #1035: a completed hello is a day of direct interaction.
+            await self._lane.run(record_direct_activity, peer.fingerprint)
         await self._refresh_own_claims_before_peer_persistence()
         await self._lane.run(save_peer, peer)
         return web.json_response(self._own_hello_provider().to_dict())
@@ -2162,6 +2166,9 @@ class LinkServer:
             # sender.transitions grew -- one updated write, not one per
             # accepted event.
             await self._lane.run(save_peer, self._node.peers[fingerprint])
+            if self._enforce_trust_policy:
+                # Issue #1035: an accepted push is direct interaction too.
+                await self._lane.run(record_direct_activity, fingerprint)
 
         if refused:
             return web.json_response({"accepted": accepted, "refused": refused})
