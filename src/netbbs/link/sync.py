@@ -204,8 +204,8 @@ from netbbs.link.mail import (
     record_link_message_refused,
 )
 from netbbs.link.protocol import (
-    DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, HelloMessage, LinkNode, LinkProtocolError,
-    PeerExchange,
+    DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, MAX_SET_ASIDE_PER_PEER, HelloMessage, LinkNode,
+    LinkProtocolError, PeerExchange,
 )
 from netbbs.link.relay_mailbox import (
     RELAY_MAILBOX_RETENTION_DAYS,
@@ -253,7 +253,9 @@ from netbbs.link.transport import (
     dial_hello,
     persist_accepted_events,
     pickup_from_relay_mailbox,
+    RefusedEvent,
     push_events,
+    push_events_partial,
     request_inventory,
     request_peer_list,
     request_relay_consent,
@@ -682,6 +684,8 @@ async def _push_own_events(
         # Design doc §11, issue #89.
         + await lane.run(load_own_file_area_events, node.identity.fingerprint)
     )
+    exchange = node.peer_exchange.setdefault(peer_fingerprint, PeerExchange())
+    now = time.time()
     start = 0
     if wanted is None:
         start = fallback_offsets.get(peer_fingerprint, 0)
@@ -689,8 +693,18 @@ async def _push_own_events(
             start = 0
         selected = resource_events[start:]
     else:
+        # What the peer no longer asks for, it took or no longer carries.
+        wanted_ids = set(wanted)
+        for content_id in [cid for cid in exchange.set_aside if cid not in wanted_ids]:
+            del exchange.set_aside[content_id]
         by_content_id = {event.content_id: event for event in resource_events}
         selected = [by_content_id[cid] for cid in wanted if cid in by_content_id]
+    # Issue #897: events this peer refused one by one wait out their retry
+    # time, so they cannot fill the request ahead of everything else.
+    selected = [
+        event for event in selected
+        if exchange.set_aside.get(event.content_id, ("", 0.0))[1] <= now
+    ]
 
     # The cap belongs *here*, after the filter, not on the `wanted` list
     # the peer sent (Codex review of issue #478). Truncating what the
@@ -713,8 +727,7 @@ async def _push_own_events(
     # boards, channels and file areas. A genesis this exchange declared and
     # the peer did not ask for is one it holds.
     own_genesis = {event.content_id for event in resource_events if isinstance(event, _GENESIS_TYPES)}
-    exchange = node.peer_exchange.setdefault(peer_fingerprint, PeerExchange())
-    exchange.at = time.time()
+    exchange.at = now
     exchange.holds &= own_genesis
     if wanted is not None:
         exchange.holds |= (own_genesis & declared) - set(wanted)
@@ -724,10 +737,19 @@ async def _push_own_events(
         exchange.refused_reason = None
     if not to_push:
         return
+    refused_now: list[RefusedEvent] = []
+    sent_ids = {event.content_id for event in to_push}
     for index in range(0, len(to_push), MAX_EVENTS_PER_REQUEST):
+        chunk = to_push[index:index + MAX_EVENTS_PER_REQUEST]
         try:
-            await push_events(node, session, seed_url, to_push[index:index + MAX_EVENTS_PER_REQUEST])
+            _, refused = await push_events_partial(node, session, seed_url, chunk)
+            refused_now += refused
         except LinkPolicyRefused as exc:
+            if exc.refused:
+                # Every event in this request was refused on its own
+                # account, not this node's: set them aside like any other.
+                refused_now += exc.refused
+                continue
             # The peer's own text, kept for the SysOp's screens: bounded.
             exchange.refused_reason = exc.reason_code[:80]
             if exc.reason_code == REASON_NODE_PROBATIONARY:
@@ -741,21 +763,60 @@ async def _push_own_events(
                 )
             else:
                 _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+            _set_aside_refused(exchange, peer_fingerprint, refused_now, sent_ids, now)
             return
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+            _set_aside_refused(exchange, peer_fingerprint, refused_now, sent_ids, now)
             # Deliberately without advancing the offset: the seed
             # received nothing, so the next pass owes it this same
             # stretch, not the one after it.
             return
+    refused_ids = _set_aside_refused(exchange, peer_fingerprint, refused_now, sent_ids, now)
     # Only content answers whether the peer takes this node's content: key
     # transitions pass even a peer's probation, so a push of those alone
-    # leaves the last answer standing.
+    # leaves the last answer standing. A refusal of single events is about
+    # their authors, not this node.
     if sending:
         exchange.refused_reason = None
-        exchange.holds |= own_genesis & {event.content_id for event in sending}
+        exchange.holds |= own_genesis & ({event.content_id for event in sending} - refused_ids)
     if wanted is None and resource_events:
         fallback_offsets[peer_fingerprint] = (start + len(sending)) % len(resource_events)
+
+
+def _set_aside_refused(
+    exchange: PeerExchange,
+    peer_fingerprint: str,
+    refused: list[RefusedEvent],
+    sent_ids: set[str],
+    now: float,
+) -> set[str]:
+    """Remember the events a peer refused one by one (issue #897), to offer
+    them again after `DEFERRED_EVENT_RETRY_SECONDS`, and say so the first
+    time. A WARNING, so it reaches the SysOp's diagnostic log: an author held
+    on probation there is the usual reason, and what they wrote waits until
+    that node lets them post. Returns the IDs set aside."""
+    newly: dict[str, int] = {}
+    result: set[str] = set()
+    for item in refused:
+        if item.content_id not in sent_ids:
+            continue  # The peer can only refuse what it was sent.
+        reason = item.reason_code[:80]
+        if item.content_id not in exchange.set_aside:
+            newly[reason] = newly.get(reason, 0) + 1
+        exchange.set_aside[item.content_id] = (reason, now + DEFERRED_EVENT_RETRY_SECONDS)
+        result.add(item.content_id)
+    while len(exchange.set_aside) > MAX_SET_ASIDE_PER_PEER:
+        del exchange.set_aside[min(exchange.set_aside, key=lambda cid: exchange.set_aside[cid][1])]
+    if newly:
+        _logger.warning(
+            "Link sync: node %s refused %d event(s) from this node one by one (%s) and took the "
+            "rest. They are offered again every %d minutes while that node still asks for them.",
+            peer_fingerprint, sum(newly.values()),
+            ", ".join(f"{reason}: {count}" for reason, count in sorted(newly.items())),
+            DEFERRED_EVENT_RETRY_SECONDS // 60,
+        )
+    return result
 
 
 async def _sync_one_seed(

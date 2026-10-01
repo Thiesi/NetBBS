@@ -1579,11 +1579,23 @@ class PeerExchange:
     them from a push, or an inventory exchange that declared them did not
     ask for them. `refused_reason` is the peer's trust-policy reason code
     when it refused the last push (`link_policy_node_probationary_read_only`
-    for a peer that has this node on probation), else None."""
+    for a peer that has this node on probation), else None.
+
+    `set_aside` is the own events the peer refused one by one (issue #897),
+    by content ID: the reason code and when to offer the event again. A
+    refused event stays in the peer's `wanted` list, so without this it was
+    sent every pass, and refused events could fill a whole request.
+    Bounded by `MAX_SET_ASIDE_PER_PEER`."""
 
     at: float = 0.0
     holds: set[str] = field(default_factory=set)
     refused_reason: str | None = None
+    set_aside: dict[str, tuple[str, float]] = field(default_factory=dict)
+
+
+#: The most refused events one `PeerExchange` remembers (issue #897). Past it
+#: the soonest-due are forgotten, which only means offering them again early.
+MAX_SET_ASIDE_PER_PEER = 1024
 
 
 _GENESIS_OBJECT_TYPES = frozenset({"board_genesis", "channel_genesis", "file_area_genesis"})
