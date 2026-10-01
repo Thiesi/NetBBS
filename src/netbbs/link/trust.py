@@ -578,8 +578,25 @@ def _vouch_domains(
     return {row["domain_id"]: row["weight"] for row in rows}
 
 
+def _threshold_progress(remote_domains: dict[str, float], remote_weight: float) -> dict[str, object]:
+    """The explanation's counted/required fields for the two-domain
+    quarantine threshold (issue #752), or nothing when no report counts
+    toward it. Only self-verifying identity reports count, so a resource or
+    content dimension -- which quarantines by local evidence or a sole
+    authority, never by this threshold -- gets no "0 of 2 domains" claim."""
+    if not remote_domains:
+        return {}
+    return {
+        "counted_domains": remote_domains,
+        "counted_weight": remote_weight,
+        "required_domains": 2,
+        "required_weight": 2.0,
+    }
+
+
 def _ordinary_state(
-    db: Database, subject: TrustSubject, now_value: str, now: datetime
+    db: Database, subject: TrustSubject, now_value: str, now: datetime,
+    dimension: TrustDimension,
 ) -> tuple[TrustState, str, dict[str, object]]:
     subject_row = db.connection.execute(
         """SELECT first_accepted_at, first_verified_hello_at
@@ -641,12 +658,17 @@ def _ordinary_state(
         if subject.kind == "user"
         else {TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR}
     )
-    active_trigger_count = sum(
-        1
+    triggers = [
+        TrustDimension(row["dimension"])
         for row in [*local_rows, *remote_rows]
         if TrustDimension(row["dimension"]) in applicable_dimensions
         and row["category"] in _CATEGORIES_BY_DIMENSION[TrustDimension(row["dimension"])]
-    )
+    ]
+    # Across every applicable dimension, because any active trigger keeps the
+    # subject from graduating in all of them. Issue #752: on its own that read
+    # as closer to a restriction than it is in a dimension the trigger does
+    # not name, so the explanation also says how many are in this dimension.
+    active_trigger_count = len(triggers)
     vouch_domains = _vouch_domains(db, subject, now_value)
     required_vouch_domains = 2 if subject.kind == "node" else 1
     explanation = {
@@ -654,6 +676,7 @@ def _ordinary_state(
         "activity_days": activity_days,
         "required_activity_days": 3,
         "active_trigger_count": active_trigger_count,
+        "dimension_trigger_count": sum(1 for found in triggers if found == dimension),
         "vouch_domains": sorted(vouch_domains),
         "required_vouch_domains": required_vouch_domains,
     }
@@ -735,10 +758,6 @@ def _recompute_dimension(
         explanation = {
             "active_local_evidence": local,
             "active_remote_evidence": remote,
-            "counted_domains": remote_domains,
-            "counted_weight": remote_weight,
-            "required_domains": 2,
-            "required_weight": 2.0,
             "sole_authority": [
                 {
                     "reporter_fingerprint": item["issuer_fingerprint"],
@@ -765,7 +784,14 @@ def _recompute_dimension(
             reason_code = "automatic_recovery"
             explanation = {"recovered_at": now_value, "returns_to": "probationary"}
     else:
-        state, reason_code, explanation = _ordinary_state(db, subject, now_value, now)
+        state, reason_code, explanation = _ordinary_state(db, subject, now_value, now, dimension)
+
+    # Issue #752: how far the remote reports have got toward quarantine,
+    # whatever decided the state -- every branch, one rule. Before, only the
+    # quarantine branch said so, and a SysOp looking at one report against a
+    # caller could not tell whether one more domain would restrict them.
+    if "recovered_at" not in explanation:
+        explanation.update(_threshold_progress(remote_domains, remote_weight))
 
     explanation_json = json.dumps(explanation, sort_keys=True, separators=(",", ":"))
     db.connection.execute(

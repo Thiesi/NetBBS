@@ -559,10 +559,18 @@ def test_war_dialer_timeout_does_not_leave_bracketed_paste_enabled(db, lane, pla
         db, "War Dialer timeout", sys.executable,
         args=(str(_BUNDLED_DOORS_DIR / "war_dialer.py"),), creator=player,
     )
-    session = FakeSession()
-    result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=3))
-    assert result.reason == "timed_out"
-    assert b"W A R" in session.written
+    # The door has to have drawn its title -- and so have had the chance to
+    # turn bracketed paste on -- before the limit, or the check below proves
+    # nothing. A busy CPU can spend the whole limit starting Python, so the
+    # limit doubles until the title appears (issue #896).
+    for limit in (3, 6, 12):
+        session = FakeSession()
+        result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=limit))
+        assert result.reason == "timed_out"
+        if b"W A R" in session.written:
+            break
+    else:
+        pytest.fail(f"War Dialer never drew its title within {limit} s: {bytes(session.written)!r}")
     assert b"\x1b[?2004h" not in session.written
 
 
