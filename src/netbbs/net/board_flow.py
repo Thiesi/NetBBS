@@ -393,15 +393,22 @@ async def _browse_boards_in_category(
     def _columns_of(item: Category | Board) -> list[str | tuple[str, int]]:
         return [_activity(item), _about(item)]
 
+    # The one value a row in the SysOp's art has room for: the gate note
+    # when the caller can't post yet (design doc §3.6), else what is new.
+    # Read once per list below, since the picker asks for every row's
+    # value to size the column.
+    board_slot_values: dict[int, str] = {}
+
+    def _read_slot_values(boards: list[Board]) -> None:
+        board_slot_values.clear()
+        for board in boards:
+            if not meets_name_requirement(db, user, get_effective_name_requirement(db, board)):
+                board_slot_values[board.id] = NAME_GATE_NOTE
+            else:
+                board_slot_values[board.id] = _activity(board)[0]
+
     def _slot_column_of(item: Category | Board) -> str:
-        # The one value a row in the SysOp's art has room for: the gate
-        # note when the caller can't post yet (design doc §3.6), else
-        # what is new.
-        if isinstance(item, Board) and not meets_name_requirement(
-            db, user, get_effective_name_requirement(db, item)
-        ):
-            return NAME_GATE_NOTE
-        return _activity(item)[0]
+        return board_slot_values.get(item.id, "") if isinstance(item, Board) else ""
 
     def _prose_of(item: Category | Board) -> str | None:
         """The same facts as one line, for a terminal too narrow for the
@@ -415,6 +422,8 @@ async def _browse_boards_in_category(
     reopen_at: int | None = None
     while True:
         boards_here, categories_here = _load(mode_box["mode"])
+        if board_slot_art is not None:
+            _read_slot_values(boards_here)
         if not categories_here:
             async def on_sort_flat() -> list[Board] | None:
                 new_mode = await _run_sort_prompt()

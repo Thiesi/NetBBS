@@ -586,7 +586,7 @@ from netbbs.net.resource_editor import (
 from netbbs.net.session import (
     Session, physical_terminal_width, post_body_width, write_art_text, write_preformatted_line, write_prompt,
 )
-from netbbs.rendering.charset import ellipsis_for
+from netbbs.rendering.charset import ASCII, ellipsis_for
 from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import (
@@ -15490,12 +15490,20 @@ def _list_art_sample_rows(db: Database, actor: User, kind: str) -> list[tuple[st
                 count, _ = count_listed_files(db, area)
                 rows.append((area.name, f"{count} file{'' if count == 1 else 's'}"))
         return rows
-    return [(channel.name, "") for channel in list_channels(db) if channel.category_id is None]
+    # The channel list's own filter: hidden channels, level and age gates.
+    from netbbs.net.chat_flow import _visible_channels_for
+
+    rows = [(f"[{c.name}]", "") for c in list_top_level_channel_categories(db)]
+    rows += [(channel.name, "") for channel in _visible_channels_for(db, actor) if channel.category_id is None]
+    return rows
 
 
 def _list_art_fits(session: Session, art: SlotArt, column_width: int) -> str | None:
     """Why a caller with a terminal like yours gets the generated list
-    instead, or `None` when the art is used."""
+    instead, or `None` when the art is used -- the same tests the list
+    itself makes (`pick_item`'s slot art)."""
+    if getattr(session, "output_charset", None) == ASCII:
+        return "your terminal reads plain ASCII"
     physical = physical_terminal_width(session)
     if art.width > physical:
         return f"the art is {art.width} columns, your terminal {physical}"
@@ -15588,7 +15596,7 @@ async def _preview_list_slot_art(session: Session, lane: DatabaseLane, actor: Us
                 fg_color=WARNING_COLOR,
             ))
         else:
-            await session.write(drawn)
+            await write_art_text(session, drawn)
             await session.write(move_cursor(art.height + 1, 1))
             if kind == CHAT_CHANNEL_PICKER:
                 await session.write_line(colored("(people online are filled in on a running node)", fg_color=MUTED_COLOR))

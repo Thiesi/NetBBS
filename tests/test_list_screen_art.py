@@ -261,3 +261,48 @@ def test_each_list_has_a_slot_sample_that_can_be_used():
         assert art.problems == () and art.list.height >= 10
         # Fits a 24-row terminal with the nav, the trailer and the prompt.
         assert art.height + 3 < 24
+
+
+def test_preview_shows_channels_as_your_list_does(db, lane, sysop, alice):
+    create_channel(db, "lobby", creator=sysop)
+    create_channel(db, "back-room", creator=sysop, hidden=True)
+    chat_channel_picker_banner_path(db).write_bytes(ART)
+    session = ConsoleSession()
+    asyncio.run(admin_flow._preview_list_slot_art(session, lane, alice, CHAT_CHANNEL_PICKER))
+    text = _art_screen(session)
+    assert "01. lobby" in text and "back-room" not in text
+
+
+def test_check_says_an_ascii_reader_gets_the_generated_list(db, lane, sysop):
+    create_board(db, "General", creator=sysop)
+    board_list_banner_path(db).write_bytes(ART)
+    session = ConsoleSession()
+    session.output_charset = "ascii"
+    asyncio.run(admin_flow._check_list_slot_art_screen(session, lane, sysop, BOARD_LIST))
+    assert "Your list: generated list instead -- your terminal reads plain ASCII" in _text(session)
+
+
+def test_preview_sends_the_art_as_art(db, lane, sysop):
+    create_board(db, "General", creator=sysop)
+    board_list_banner_path(db).write_bytes(ART.replace(b"+---", "+\u2665--".encode("utf-8"), 1))
+    session = ConsoleSession()
+    session.output_charset = "cp437"
+    asyncio.run(admin_flow._preview_list_slot_art(session, lane, sysop, BOARD_LIST))
+    assert "\x03" in "".join(session.written)
+
+
+def test_board_values_are_read_once_per_list_not_per_row(db, alice, monkeypatch):
+    for name in ("General", "Inks", "Nibs"):
+        create_board(db, name, creator=alice)
+    board_list_banner_path(db).write_bytes(ART)
+    set_board_list_banner_enabled(db, True)
+    set_list_art_mode(db, BOARD_LIST, SLOTS_MODE)
+    calls = []
+    real = board_flow.unread_post_count
+    monkeypatch.setattr(board_flow, "unread_post_count", lambda *a, **k: calls.append(1) or real(*a, **k))
+    session = BoardSession(["b"])
+    asyncio.run(board_flow._browse_boards(session, db, alice))
+    # Once per board for the art's value; the generated table's own column
+    # isn't drawn. The picker asks for every row's value several times per
+    # render, so a per-call read would be a multiple of three.
+    assert len(calls) == 3
