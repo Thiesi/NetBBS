@@ -773,6 +773,16 @@ def _recompute_dimension(
                 for item in sole_authority_matches
             ],
         }
+    elif awaiting_review := _equivocation_awaiting_review(db, subject.subject_id, dimension, now_value):
+        # §12.9: equivocation this node proved itself does not recover by
+        # waiting. Its observation expiring is not a SysOp having looked; the
+        # quarantine stays until one clears it (issue #589).
+        state = TrustState.QUARANTINED
+        reason_code = "equivocation_review_required"
+        explanation = {
+            "expired_uncleared_evidence": awaiting_review,
+            "release": "a SysOp clears the evidence on the subject's screen",
+        }
     elif previous is not None and previous["state"] == TrustState.QUARANTINED.value:
         started_value = previous["recovery_started_at"] or now_value
         started = _parse_timestamp(started_value, field_name="recovery_started_at")
@@ -1495,6 +1505,77 @@ def record_local_observation(
         if cursor.rowcount:
             _recompute_subject(db, subject, now_value, now, actor_user_id=None)
         return bool(cursor.rowcount)
+
+
+def _equivocation_awaiting_review(
+    db: Database, subject_id: str, dimension: TrustDimension, now_value: str
+) -> list[str]:
+    """Equivocation this node observed about `subject_id` whose observation
+    expired without a SysOp clearing it (issue #589, design doc §12.9)."""
+    if dimension != TrustDimension.IDENTITY_INTEGRITY:
+        return []
+    return [
+        row["observation_id"]
+        for row in db.connection.execute(
+            """SELECT observation_id FROM link_trust_local_observations
+               WHERE subject_id = ? AND dimension = ? AND category = 'signed_equivocation'
+                 AND evidence_class = 'self_verifying' AND cleared_at IS NULL AND expires_at <= ?
+               ORDER BY observation_id""",
+            (subject_id, dimension.value, now_value),
+        ).fetchall()
+    ]
+
+
+@dataclass(frozen=True)
+class LocalObservation:
+    """Evidence this node observed itself about one subject."""
+
+    observation_id: str
+    dimension: str
+    category: str
+    evidence_class: str
+    observed_at: str
+    expires_at: str
+    cleared_at: str | None
+    publication_withdrawn_at: str | None
+    explanation: str | None
+
+
+def list_local_observations(
+    db: Database, subject: TrustSubject, *, include_cleared: bool = False
+) -> list[LocalObservation]:
+    """What this node observed itself about `subject`, newest first: active
+    observations, and expired ones that still hold a quarantine because nobody
+    cleared them (§12.9). `include_cleared` adds the cleared history."""
+    rows = db.connection.execute(
+        f"""SELECT observation_id, dimension, category, evidence_class, observed_at, expires_at,
+                   cleared_at, publication_withdrawn_at, explanation
+            FROM link_trust_local_observations
+            WHERE subject_id = ? {"" if include_cleared else "AND cleared_at IS NULL"}
+            ORDER BY observed_at DESC, observation_id""",
+        (subject.subject_id,),
+    ).fetchall()
+    return [LocalObservation(*row) for row in rows]
+
+
+def withdraw_observation_publication(
+    db: Database, observation_id: str, *, now_iso: str | None = None
+) -> bool:
+    """Stop publishing the automatic signal about one observation, keeping the
+    observation (issue #589). The next issuance pass revokes the signal and
+    never re-issues it. Returns False if already withdrawn."""
+    now_value, _ = _now(now_iso)
+    with db.connection:
+        if db.connection.execute(
+            "SELECT 1 FROM link_trust_local_observations WHERE observation_id = ?", (observation_id,)
+        ).fetchone() is None:
+            raise ValueError(f"unknown local trust observation: {observation_id!r}")
+        cursor = db.connection.execute(
+            """UPDATE link_trust_local_observations SET publication_withdrawn_at = ?
+               WHERE observation_id = ? AND publication_withdrawn_at IS NULL""",
+            (now_value, observation_id),
+        )
+    return bool(cursor.rowcount)
 
 
 def clear_local_observation(

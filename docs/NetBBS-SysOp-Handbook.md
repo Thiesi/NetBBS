@@ -1193,6 +1193,28 @@ Vouches renew themselves. If you quarantine or block an identity, your node
 stops vouching for it on its own and resumes if you lift the restriction. Your
 node cannot vouch for itself or for its own callers.
 
+**Equivocation.** When your node sees another node sign two different objects
+into the same place in one chain -- two edits of the same version of a post,
+two successors of one key change, two closures of one board -- it keeps both,
+quarantines that node's identity integrity on yours, and logs it. Unless you
+turn it off, it also signs a short signal saying so, with both objects
+attached, for the nodes that name yours a trusted reporter. They check the
+proof themselves, and it counts there only together with a report from a
+second, independent trust domain. **Policy trust → Signals** lists what your
+node published, turns automatic signals off (which also withdraws the
+published ones) or back on, and revokes one signal while keeping the evidence.
+At most five are signed a day, and never about your own node.
+
+The quarantine does not lift on its own when the evidence expires: open the
+node under **Subjects**, look at **Observed here**, and choose **Clear
+evidence**. That also revokes your node's signal about it.
+
+Honest nodes fork too. A node restored from an older backup, or a copied VM
+running with the same identity, will sign things its earlier self already
+signed. If another node quarantines yours for equivocation, that is usually
+what happened: make sure only one copy of your node runs, then ask that node's
+SysOp to clear the evidence.
+
 Verified ages and names cross the Link only when three people agree. The
 caller switches sharing on in their Profile. You name the receiving node under
 **Settings → Policy trust → Published identity → Recipients**; the list starts

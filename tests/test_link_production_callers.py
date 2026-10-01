@@ -44,18 +44,8 @@ LINK = SRC / "netbbs" / "link"
 # subsystem shipped with no production caller, which is the thing the check
 # exists to stop.
 ALLOWED: dict[str, str] = {
-    # Issue #589 -- a node can issue a vouch (slice 1, `trust_issuance`), which
-    # took `build_trust_vouch` and `build_trust_revocation` off this list.  It
-    # still cannot issue a trust *signal*: when a node accuses another node is
-    # the open design question, and everything below waits on it.
-    "build_trust_signal": "#589",
-    # Issue #1036 built how equivocation evidence is reproduced; #589's
-    # automatic issuance is what builds it.
-    "build_equivocation_evidence": "#589",
-    # Its only caller, the digest path, was deleted with #1036; #589's
-    # automatic issuance records observed equivocation with it.
-    "record_local_observation": "#589",
-    "clear_local_observation": "#589",
+    # Empty since issues #589 (automatic equivocation signals, digest evidence
+    # deleted) and #1035 (activity days) wired the last names.
 }
 
 

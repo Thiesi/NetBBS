@@ -11179,3 +11179,46 @@ def test_a_trust_decision_about_a_node_starts_a_pass_at_once(db, lane, sysop):
     ])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     assert link_context.link_node.sync_wake.is_set()
+
+
+# -- automatic equivocation signals (issue #589) -------------------------------
+
+
+def test_the_signals_screen_turns_automatic_signals_off(db, lane, sysop):
+    from netbbs.link.trust_issuance import automatic_signals_enabled
+
+    assert automatic_signals_enabled(db)
+    session = FakeSession(["s", "p", "g", "t", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    assert not automatic_signals_enabled(db)
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Automatic signals" in text
+    assert "Automatic signals are off. Published ones are revoked on the next Link sync pass." in text
+
+
+def test_a_sysop_clears_observed_equivocation_from_the_subject_screen(db, lane, sysop):
+    """§12.9: equivocation recovers only once a SysOp has looked, and this is
+    where they clear it."""
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.trust import list_local_observations
+    from netbbs.link.trust_issuance import record_observed_equivocation
+    from tests.test_link_equivocation_signals import forked_edits
+
+    author = LinkNode(identity=bootstrap_node_identity("forker"))
+    observer = LinkNode(identity=bootstrap_node_identity("observer"))
+    forked_edits(author, observer)
+    [(subject_fingerprint, evidence)] = observer.observed_equivocations
+    record_observed_equivocation(db, subject_fingerprint, evidence)
+    subject = TrustSubject.node(subject_fingerprint)
+    assert len(list_local_observations(db, subject)) == 1
+
+    # [N]ext page: the subject screen pages, and what was observed is on page 2.
+    session = FakeSession(["s", "p", "s", "0", "1", "n", "l", "y", "b", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    assert list_local_observations(db, subject) == []
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "OBSERVED HERE" in text.upper()
+    assert "Evidence cleared." in text

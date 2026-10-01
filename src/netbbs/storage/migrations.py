@@ -3993,4 +3993,15 @@ MIGRATIONS = [
         ALTER TABLE link_trust_signals ADD COLUMN reverify_attempted_at TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #589: `link_trust_local_observations.publication_withdrawn_at` -- when the "
+            "SysOp withdrew the automatic trust signal this node published about an observed "
+            "equivocation, while keeping the observation itself. NULL for every existing row: "
+            "no node published signals before this."
+        ),
+        sql="""
+        ALTER TABLE link_trust_local_observations ADD COLUMN publication_withdrawn_at TEXT;
+        """,
+    ),
 ]
