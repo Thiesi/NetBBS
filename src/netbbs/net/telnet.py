@@ -59,6 +59,7 @@ from netbbs.net.terminal_detect import (
     classify_terminal_types,
     clean_terminal_type,
     describe_detection,
+    terminal_supports_truecolor,
     terminal_wraps_immediately,
 )
 from netbbs.rendering.charset import ASCII, CP437
@@ -159,6 +160,9 @@ class TelnetSession(Session):
         self.truecolor_diagnostic = (
             "Telnet NEW-ENVIRON/COLORTERM negotiation pending; initial banner uses 256-color"
         )
+        # The COLORTERM value NEW-ENVIRON reported, once it has; an explicit
+        # value beats the terminal type (issue #986).
+        self._colorterm: str | None = None
         self.peer_address = peer_address
 
     async def negotiate_initial_options(self) -> None:
@@ -274,11 +278,25 @@ class TelnetSession(Session):
         self.output_charset = self.detected_charset = charset if charset is not None else ASCII
         self.charset_certain = certain
         self.terminal_wraps_immediately = terminal_wraps_immediately(self.terminal_types)
+        self._apply_terminal_truecolor()
         outcome = self._ttype_outcome or ("answered" if self.terminal_types else "no answer")
         _logger.info(describe_detection(
             "telnet", self.peer_address, names=self.terminal_types, outcome=outcome,
             charset=self.output_charset, certain=certain,
         ))
+
+    def _apply_terminal_truecolor(self) -> None:
+        """Give truecolor to a terminal whose type says it shows it but
+        that sent no COLORTERM, such as SyncTERM (issue #986). Runs when
+        detection finishes and again after NEW-ENVIRON, whichever comes
+        last, so a reply without COLORTERM doesn't take it away again."""
+        if self._colorterm or not terminal_supports_truecolor(self.terminal_types):
+            return
+        self.supports_truecolor = True
+        self.truecolor_diagnostic = (
+            f"Telnet terminal type {', '.join(map(repr, self.terminal_types))} shows truecolor "
+            "(no COLORTERM sent); truecolor available"
+        )
 
     async def _send_terminal_type_request(self) -> None:
         try:
@@ -596,12 +614,16 @@ class TelnetSession(Session):
             # trusted (see SSHSession's identical reasoning).
             variables = _parse_new_environ_is(body[1:])
             colorterm = variables.get("COLORTERM")
+            self._colorterm = colorterm
             if colorterm in ("truecolor", "24bit"):
                 self.supports_truecolor = True
                 self.truecolor_diagnostic = (
                     f"Telnet NEW-ENVIRON reported COLORTERM={colorterm}; truecolor available"
                 )
             elif colorterm:
+                # An explicit value decides, even over a terminal type
+                # that would have given truecolor (issue #986).
+                self.supports_truecolor = False
                 self.truecolor_diagnostic = (
                     f"Telnet NEW-ENVIRON reported COLORTERM={colorterm}; using 256-color"
                 )
@@ -609,6 +631,7 @@ class TelnetSession(Session):
                 self.truecolor_diagnostic = (
                     "Telnet NEW-ENVIRON did not report COLORTERM; using 256-color"
                 )
+                self._apply_terminal_truecolor()
 
     async def _read_subnegotiation(self) -> tuple[int, bytes]:
         option = (await self._reader.readexactly(1))[0]

@@ -70,6 +70,7 @@ from netbbs.net.terminal_detect import (
     classify_terminal_types,
     clean_terminal_type,
     describe_detection,
+    terminal_supports_truecolor,
     terminal_wraps_immediately,
 )
 from netbbs.rendering import strip_ansi
@@ -276,6 +277,13 @@ class SSHSession(Session):
         charset, self.charset_certain = classify_terminal_types(self.terminal_types)
         self.output_charset = self.detected_charset = charset if charset is not None else UTF8
         self.terminal_wraps_immediately = terminal_wraps_immediately(self.terminal_types)
+        # A terminal that shows truecolor but forwards no COLORTERM, such as
+        # SyncTERM (issue #986). An explicit COLORTERM above still decides.
+        if not colorterm and terminal_supports_truecolor(self.terminal_types):
+            self.supports_truecolor = True
+            self.truecolor_diagnostic = (
+                f"SSH terminal type {terminal_type!r} shows truecolor (no COLORTERM sent); truecolor available"
+            )
         _logger.info(describe_detection(
             "SSH", self.peer_address, names=self.terminal_types,
             outcome="PTY request" if terminal_type else "no PTY terminal type",

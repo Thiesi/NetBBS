@@ -391,6 +391,21 @@ any screen knowing about it:
   columns wide; its status line on the bottom row is cut to `terminal_width`,
   so it never writes the last cell.
 
+**Colour depth from the terminal type (issue #986).** A session is truecolor
+when the client says so through `COLORTERM` (`truecolor` or `24bit`, over
+Telnet NEW-ENVIRON or the SSH environment) and 256-colour otherwise. Classic
+terminals send no `COLORTERM`, so the terminal type also counts: a client
+whose first recognised name is `syncterm` gets truecolor
+(`terminal_detect.terminal_supports_truecolor`). CTerm, SyncTERM's emulator,
+handles SGR `38;2;R;G;B` and `48;2;R;G;B` -- the semicolon form NetBBS sends --
+through an internal palette large enough for every cell of a 132x60 screen
+(CTerm manual, `src/conio/cterm.adoc` at tag `syncterm-1.9`). An explicit
+`COLORTERM` still decides when a client sends one, and `ansi-bbs` and `ansi`
+stay at 256 colours because those names also cover clients with less. Doors,
+banners, presets and gradients all read the session's depth through
+`effective_truecolor`, so nothing per screen changes, and a caller's own
+**Profile** colour-depth choice still overrides it after sign-in.
+
 **SysOp art: storage and SAUCE (issue #929).** A banner or masthead is the
 `.ans` file on disk, exactly as uploaded or saved; there is no second copy in
 the database, so a SysOp editing the file over SFTP changes what callers see.
