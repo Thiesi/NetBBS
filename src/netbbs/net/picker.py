@@ -41,11 +41,14 @@ from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 from netbbs.digits import is_ascii_number
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
-from netbbs.rendering.ansi import strip_ansi
-from netbbs.rendering.charset import ellipsis_for
+from netbbs.rendering.ansi import move_cursor, strip_ansi
+from netbbs.rendering.art_slots import ListSlotRow, SlotArt, list_slot_fits, render_list_slot_art
+from netbbs.rendering.charset import ASCII, ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.notices import announce, take_notices
-from netbbs.net.session import Session, physical_terminal_width, write_preformatted_line, write_prompt
+from netbbs.net.session import (
+    Session, physical_terminal_width, write_art_text, write_preformatted_line, write_prompt,
+)
 from netbbs.rendering import (
     ACCENT_COLOR,
     ERROR_COLOR,
@@ -292,6 +295,9 @@ async def pick_item(
     start_stable_id: int | None = None,
     masthead: str | Callable[[], Awaitable[str]] = "",
     selectable_of: Callable[[T], bool] | None = None,
+    slot_art: SlotArt | None = None,
+    slot_column_of: Callable[[T], str] | None = None,
+    slot_fields: Mapping[str, str] | None = None,
 ) -> T | None:
     """
     Let the user browse/search/jump through `items` and pick one, or
@@ -519,6 +525,19 @@ async def pick_item(
     01, 02, ... down the page. The highlight steps over it, a number never
     reaches it, and a search whose one match it is shows it rather than
     returning it. `None` (every other caller) makes every row pickable.
+
+    `slot_art` (issue #929) is the SysOp's art for this list with a
+    `{list WxH}` region, drawn instead of the generated list when this
+    caller can have it: not plain ASCII, a terminal wide and tall enough
+    for the art and the lines below it, and a region of at least three
+    rows that leaves the name twelve columns. Each row of the region is
+    one entry: its number, its name, and `slot_column_of`'s one compact
+    value. A page holds as many entries as the region has rows; the keys,
+    numbers, search and paging are the same as on the generated list, and
+    the navigation and prompt go below the art (or at its `{prompt}`).
+    The art's `{title}`, `{page}` and `{count}` fields are filled here,
+    and any other field from `slot_fields`. `None` (every caller that has
+    no art) draws the generated list, byte for byte as before.
     """
     if (columns is None) != (column_values_of is None):
         raise ValueError("pick_item: columns and column_values_of must be given together")
@@ -634,6 +653,8 @@ async def pick_item(
         return label_cache[1]
 
     def _sized_page_size() -> int:
+        if _slot_active():
+            return slot_art.list.height
         width, height = _dimensions()
 
         def measure(shapes: Sequence[tuple[bool, bool]]) -> int:
@@ -716,6 +737,77 @@ async def pick_item(
     async def _write_notices() -> None:
         for line in notice_lines:
             await session.write_line(line)
+
+    def _slot_column_width() -> int:
+        # Over the whole working set, not one page, so the value column
+        # and the name beside it stay put from page to page.
+        if slot_column_of is None:
+            return 0
+        return max((display_width(sanitize_text(slot_column_of(item))) for item in working_set), default=0)
+
+    def _trailer_line() -> str:
+        # The standing state and the instructions after the nav row; see
+        # where the generated list draws it for what goes in it and why.
+        line = ""
+        if sort_label is not None:
+            line = f"Sort: {_sort_label_text()}"
+        if live_label is not None:
+            standing = sanitize_text(live_label())
+            if standing:
+                line = f"{line}, {standing}" if line else standing
+        boilerplate = "or type a number to select; Ctrl-L: redraw"
+        if refresh is not None:
+            boilerplate += ", Ctrl-R: refresh"
+        boilerplate += ", Ctrl-H: help"
+        return f"{line}; {boilerplate}" if line else boilerplate
+
+    def _slot_nav_lines(
+        *, include_next: bool = True, include_prev: bool = True,
+        shapes: Sequence[tuple[bool, bool]] = _SHAPES_MANY_PAGES,
+    ) -> list[str]:
+        # The compact nav bar under slot art, whatever the caller's
+        # description level: the art already took the screen, and the
+        # descriptive form would cost it several rows.
+        width, height = _dimensions()
+        nav = _render_nav(
+            session, on_sort, "off", include_next=include_next, include_prev=include_prev,
+            shapes=shapes, live_nav=live_nav, width=width, height=height, on_create=on_create,
+            trailer=_trailer_text(_sort_label_text(), refresh is not None), unicode_style=unicode_style,
+        )
+        lines = nav.split("\r\n")
+        trailer = _trailer_line()
+        separator = " — " if unicode_style else " - "
+        if visible_width(lines[-1]) + visible_width(separator) + visible_width(trailer) <= width:
+            lines[-1] = f"{lines[-1]}{separator}{trailer}"
+        else:
+            lines.extend(wrap_to_width(trailer, width))
+        return lines
+
+    def _slot_prompt_at_art() -> bool:
+        art = slot_art
+        return art is not None and art.prompt is not None and (
+            art.prompt.col + display_width("Choice: ") + 2 <= physical_terminal_width(session)
+        )
+
+    def _slot_active() -> bool:
+        """Whether this render draws the list into the SysOp's art; see
+        `slot_art` above for when it does not."""
+        art = slot_art
+        if art is None or art.list is None or art.problems or not working_set:
+            return False
+        if getattr(session, "output_charset", None) == ASCII:
+            return False
+        if art.width > physical_terminal_width(session):
+            return False
+        if not list_slot_fits(art.list, _slot_column_width()):
+            return False
+        width, height = _dimensions()
+        below = len(_slot_nav_lines()) + (0 if _slot_prompt_at_art() else 1)
+        below += sum(wrap_terminal_text(line, max(1, width)).count("\r\n") + 1 for line in notice_lines)
+        # Nothing is drawn on the last row, so a terminal that wraps the
+        # moment it writes the bottom-right cell never scrolls the art
+        # (issue #964).
+        return art.height + below < height
 
     def _masthead_prefix() -> str:
         # Same clear_screen()-ordering hazard `_draw_main_menu`'s own
@@ -963,6 +1055,46 @@ async def pick_item(
         if highlighted is not None and not _pickable(page_items[highlighted]):
             highlighted = None
 
+        if _slot_active():
+            slot_rows = []
+            slot_number = 0
+            for item in page_items:
+                if _pickable(item):
+                    slot_number += 1
+                slot_rows.append(ListSlotRow(
+                    f"{slot_number:02d}." if _pickable(item) else None,
+                    name_of(item),
+                    slot_column_of(item) if slot_column_of is not None else "",
+                ))
+            fields = dict(slot_fields or {})
+            fields.update(
+                title=title, page=f"{page_index + 1}/{total_pages}", count=f"{len(working_set)} total",
+            )
+            drawn = render_list_slot_art(
+                slot_art, fields=fields, rows=slot_rows, highlighted=highlighted,
+                column_width=_slot_column_width(), ellipsis=cell_ellipsis,
+            )
+            if drawn is not None:
+                # As the main menu draws its slot art: iCE colours, CTerm's
+                # bright backgrounds and the pictographs for a CP437 terminal.
+                await write_art_text(session, drawn)
+                await session.write(move_cursor(slot_art.height + 1, 1))
+                for line in _slot_nav_lines(
+                    include_next=page_start + len(page_items) < len(working_set),
+                    include_prev=page_start > 0,
+                    shapes=(
+                        _SHAPES_ONE_PAGE if total_pages <= 1
+                        else _SHAPES_TWO_PAGES if total_pages == 2
+                        else _SHAPES_MANY_PAGES
+                    ),
+                ):
+                    await session.write_line(line)
+                await _write_notices()
+                if _slot_prompt_at_art():
+                    await session.write(move_cursor(slot_art.prompt.row + 1, slot_art.prompt.col + 1))
+                await session.write("Choice: ")
+                return page_items
+
         if masthead_text:
             await write_preformatted_line(session, _masthead_prefix())
         await session.write_line(
@@ -1150,30 +1282,15 @@ async def pick_item(
         # active sort mode being a mystery), not a one-time hint the
         # way the rest of this trailer is -- it must survive truncation
         # ahead of the boilerplate instructions below it.
-        trailer = ""
-        if sort_label is not None:
-            # `_sort_label_text`, not `sort_label()` directly: the page
-            # budget has already read it this render, and the contract
-            # is one read per render. Calling it again here consumed a
-            # second value from a label that changes between reads, so
-            # the trailer showed the mode *after* the one the page was
-            # sized for -- which the integration of #538 and #537 caught
-            # and neither branch could.
-            trailer = f"Sort: {_sort_label_text()}"
-        if live_label is not None:
-            # Beside the sort label and ahead of the boilerplate, for the
-            # same reason: it is standing state, not a hint. A list whose
-            # rows are filtered without saying so is a list with rows
-            # missing for no visible reason -- precisely what the SysOp
-            # who asked for the account filter did not want.
-            standing = sanitize_text(live_label())
-            if standing:
-                trailer = f"{trailer}, {standing}" if trailer else standing
-        boilerplate = "or type a number to select; Ctrl-L: redraw"
-        if refresh is not None:
-            boilerplate += ", Ctrl-R: refresh"
-        boilerplate += ", Ctrl-H: help"
-        trailer = f"{trailer}; {boilerplate}" if trailer else boilerplate
+        # `_sort_label_text`, not `sort_label()` directly: the page budget
+        # has already read it this render, and the contract is one read
+        # per render -- calling it again consumed a second value from a
+        # label that changes between reads (#538 and #537). The live label
+        # sits beside it and ahead of the boilerplate for the same reason:
+        # it is standing state, not a hint, and a list whose rows are
+        # filtered without saying so has rows missing for no visible
+        # reason.
+        trailer = _trailer_line()
         # Dogfood-reported regression, and a real dogfood-reported
         # *re*-regression on top of the original fix: with sort mode
         # (and/or refresh) active, nav + separator + trailer could run
