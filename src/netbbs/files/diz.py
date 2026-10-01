@@ -62,6 +62,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import sys
@@ -69,6 +70,8 @@ import time
 import unicodedata
 import zipfile
 from pathlib import Path
+
+from netbbs.rendering.sauce import split_sauce
 
 _logger = logging.getLogger(__name__)
 
@@ -171,6 +174,17 @@ sanitize` strips -- real visual-reordering potential, and a description
 is displayed next to a filename people judge before downloading."""
 
 
+_ESCAPE_SEQUENCE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"            # CSI: colour, cursor moves, erase
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: a window title, ended by BEL or ST
+    r"|\x1b[()*+][0-~]"                  # charset designation, ESC ( 0
+)
+"""The escape sequences a DIZ actually carries (issue #1000), removed whole.
+Narrower than `netbbs.rendering.ansi.ANSI_ESCAPE_RE` on purpose: that one
+also takes ESC with any following printable character as a sequence, which
+here would eat a typed character after a stray ESC rather than just the ESC."""
+
+
 def normalize_description(raw: str) -> str | None:
     """
     Clean one description into the only shape the rest of the system
@@ -195,7 +209,13 @@ def normalize_description(raw: str) -> str | None:
     version that holds everywhere. Rendering still sanitizes -- that
     boundary doesn't get to trust its input either.
     """
-    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    # Issue #1000: a colour DIZ is common in art packs. Removing only the
+    # control bytes below left each escape sequence's printable remains in
+    # the text -- `ESC [ 0 m` became a description line reading `[0m`.
+    # Whole sequences go first; a lone or broken ESC still falls to the
+    # control-character filter after.
+    text = _ESCAPE_SEQUENCE.sub("", raw)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     # Unicode's own line/paragraph separators become ordinary newlines
     # rather than surviving as content (Codex review): `str.splitlines`
     # -- which `netbbs.files.entries.validate_description` counts lines
@@ -247,7 +267,13 @@ def decode_diz(raw: bytes) -> str | None:
     actually grew up in -- and the reason `╔══╗`-style art survives the
     trip instead of arriving as mojibake). CP437 cannot fail, so there
     is no third fallback and no `errors="replace"` damage.
+
+    A SAUCE record, and anything after the DOS end-of-file byte, is not
+    part of the description (issue #1000): art tools append one to a
+    DIZ like to any other text file, and only its control bytes would
+    otherwise be stripped, leaving `SAUCE00` and its fields as text.
     """
+    raw, _sauce = split_sauce(raw)
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
