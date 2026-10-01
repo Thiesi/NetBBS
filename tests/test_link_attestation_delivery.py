@@ -656,3 +656,32 @@ def test_a_recipient_that_only_pulls_is_not_a_failure_and_its_pulls_count(issuer
     record_attestation_pull(issuer_db, "recipient-a", snapshot_objects(issuer_db, now=NOW), now=NOW)
     [status] = list_attestation_delivery_status(issuer_db, now=NOW)
     assert status.route == "pull" and status.current
+
+
+
+def test_a_pushed_snapshot_is_not_current_once_an_object_drops_out(issuer_db):
+    """Review of #1042: a recipient sent a snapshot holds exactly what it
+    held. When an object leaves the live set -- here it expires -- the
+    recipient still holds it until the resend withdraws it, so it is not
+    current, although everything live is a subset of what it holds. A
+    pull-route recipient keeps the superset rule."""
+    from netbbs.link.attestation_delivery import list_attestation_delivery_status, record_attestation_pull
+
+    [plan] = plan_attestation_deliveries(issuer_db, now=NOW)
+    record_attestation_delivery(
+        issuer_db, "recipient-a", digest=plan.digest, route="relay", final=False,
+        content_ids=plan.content_ids, now=NOW,
+    )
+    [status] = list_attestation_delivery_status(issuer_db, now=NOW)
+    assert status.current
+    after_expiry = NOW + timedelta(days=400)
+    assert snapshot_objects(issuer_db, now=after_expiry) == []
+    [status] = list_attestation_delivery_status(issuer_db, now=after_expiry)
+    assert not status.current
+
+    # The same recipient on the pull route: holding more than is live is fine.
+    issuer_db.connection.execute("UPDATE link_attestation_bundle_ledger SET route = 'pull'")
+    issuer_db.connection.commit()
+    record_attestation_pull(issuer_db, "recipient-a", snapshot_objects(issuer_db, now=NOW), now=NOW)
+    [status] = list_attestation_delivery_status(issuer_db, now=after_expiry)
+    assert status.current
