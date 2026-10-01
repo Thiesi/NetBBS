@@ -49,7 +49,6 @@ import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Sequence
-from urllib.parse import urljoin, urlparse
 
 import nacl.bindings
 import nacl.exceptions
@@ -220,12 +219,10 @@ from netbbs.link.trust_carriage import (
     store_deposited_trust_objects,
 )
 from netbbs.link.trust_wire import (
-    MAX_EMBEDDED_EVIDENCE_BYTES,
     UNKNOWN_PULL_CURSOR_REASON_CODE,
     TrustPullRequest,
     TrustWireError,
     UnknownTrustPullCursor,
-    verify_evidence_bytes,
 )
 from netbbs.net.throttle import LinkRequestThrottle
 from netbbs.storage.execution import DatabaseLane
@@ -3205,47 +3202,6 @@ async def request_remote_attestations(
             f"{MAX_ATTESTATION_OBJECTS_PER_RESPONSE} objects"
         )
     return objects, more_available
-
-
-async def fetch_trust_evidence(
-    session: ClientSession,
-    reporter_base_url: str,
-    evidence: dict,
-    *,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[bytes, object]:
-    """Fetch one signed digest locator without granting it arbitrary network access."""
-    locator = evidence.get("locator")
-    if not isinstance(locator, str):
-        raise LinkTransportError("trust evidence locator is missing")
-    base = urlparse(reporter_base_url)
-    url = urljoin(reporter_base_url.rstrip("/") + "/", locator)
-    target = urlparse(url)
-    if (
-        base.scheme not in {"http", "https"}
-        or (target.scheme, target.hostname, target.port) != (base.scheme, base.hostname, base.port)
-        or target.username is not None
-        or target.password is not None
-        or target.fragment
-    ):
-        raise LinkTransportError("trust evidence locator must stay on the reporter origin")
-    try:
-        async with session.get(url, timeout=ClientTimeout(total=timeout)) as response:
-            if response.status != 200:
-                raise LinkTransportError(
-                    f"trust evidence fetch from {url} failed: HTTP {response.status}"
-                )
-            if response.content_length is not None and response.content_length > MAX_EMBEDDED_EVIDENCE_BYTES:
-                raise LinkTransportError("trust evidence body exceeds the 256 KiB limit")
-            content = await response.content.read(MAX_EMBEDDED_EVIDENCE_BYTES + 1)
-    except (ClientError, TimeoutError) as exc:
-        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
-    if len(content) > MAX_EMBEDDED_EVIDENCE_BYTES:
-        raise LinkTransportError("trust evidence body exceeds the 256 KiB limit")
-    try:
-        return content, verify_evidence_bytes(evidence, content)
-    except TrustWireError as exc:
-        raise LinkTransportError(f"invalid trust evidence from {url}: {exc}") from exc
 
 
 def _parse_withdrawal_body(text: str, url: str) -> FileWithdrawal:

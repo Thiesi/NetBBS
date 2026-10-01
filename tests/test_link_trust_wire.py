@@ -20,7 +20,6 @@ from netbbs.link.trust import (
 from netbbs.link.trust_wire import (
     SignedTrustObject,
     TrustWireError,
-    activate_reproduced_digest_signal,
     build_trust_revocation,
     build_trust_signal,
     build_trust_vouch,
@@ -28,7 +27,6 @@ from netbbs.link.trust_wire import (
     load_trust_object_page,
     load_trust_pull_cursor,
     save_trust_pull_cursor,
-    verify_evidence_bytes,
 )
 from netbbs.storage.database import Database
 
@@ -187,59 +185,21 @@ def test_per_subject_category_quota_is_visible_and_atomic(db, reporter):
     assert db.connection.execute("SELECT COUNT(*) FROM link_trust_signals").fetchone()[0] == 10
 
 
-def test_digest_evidence_stays_inactive_until_verified_and_reproduced(db, reporter):
-    configure_reporter(db, reporter.fingerprint)
-    body = json.dumps({"proof": "reproducible"}).encode()
-    evidence = {
-        "mode": "digest",
-        "sha256": hashlib.sha256(body).hexdigest(),
-        "size": len(body),
-        "locator": "https://reporter.invalid/evidence/1",
-    }
-    digest_signal = signal(reporter, evidence=evidence)
-    ingest_trust_objects(db, [digest_signal], now_iso=stamp(NOW))
-    assert db.connection.execute(
-        "SELECT COUNT(*) FROM link_trust_signals WHERE content_id = ?", (digest_signal.content_id,)
-    ).fetchone()[0] == 0
-    assert verify_evidence_bytes(evidence, body) == {"proof": "reproducible"}
-    with pytest.raises(TrustWireError, match="hash"):
-        verify_evidence_bytes(evidence, body[:-1] + b"x")
-    with pytest.raises(TrustWireError, match="could not be independently reproduced"):
-        activate_reproduced_digest_signal(
-            db, digest_signal.content_id, body, observation_id="failed-proof",
-            reproduce=lambda parsed: False, now_iso=stamp(NOW),
-        )
-    assert activate_reproduced_digest_signal(
-        db, digest_signal.content_id, body, observation_id="local-proof",
-        reproduce=lambda parsed: parsed == {"proof": "reproducible"}, now_iso=stamp(NOW),
-    )
-    assert db.connection.execute(
-        "SELECT COUNT(*) FROM link_trust_signals WHERE content_id = ?", (digest_signal.content_id,)
-    ).fetchone()[0] == 1
-    assert db.connection.execute(
-        "SELECT COUNT(*) FROM link_trust_local_observations WHERE observation_id = 'local-proof'"
-    ).fetchone()[0] == 1
-
-
-def test_revocation_can_cancel_a_digest_signal_before_activation(db, reporter):
+def test_digest_evidence_is_carried_but_never_counts(db, reporter):
+    """Issue #589: a signal whose evidence is only a digest and a locator is
+    stored and served like any object, and never becomes policy evidence --
+    there is no fetch, so nothing could reproduce it."""
     configure_reporter(db, reporter.fingerprint)
     body = b'{"proof":true}'
     pending = signal(reporter, evidence={
         "mode": "digest", "sha256": hashlib.sha256(body).hexdigest(),
         "size": len(body), "locator": "/evidence/pending",
     })
-    ingest_trust_objects(db, [pending], now_iso=stamp(NOW))
-    revocation = build_trust_revocation(
-        signing_identity=reporter, issuer_fingerprint=reporter.fingerprint,
-        revocation_id="revoke-pending", revoked_content_id=pending.content_id,
-        issued_at=stamp(NOW),
-    )
-    ingest_trust_objects(db, [revocation], now_iso=stamp(NOW))
-    with pytest.raises(TrustWireError, match="revoked"):
-        activate_reproduced_digest_signal(
-            db, pending.content_id, body, observation_id="too-late",
-            reproduce=lambda parsed: True, now_iso=stamp(NOW),
-        )
+    accepted, _replayed = ingest_trust_objects(db, [pending], now_iso=stamp(NOW))
+    assert accepted == [pending.content_id]
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_trust_signals WHERE content_id = ?", (pending.content_id,)
+    ).fetchone()[0] == 0
 
 
 def test_pull_pagination_uses_a_stable_content_cursor(db, reporter):

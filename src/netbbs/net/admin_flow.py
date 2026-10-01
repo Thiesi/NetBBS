@@ -433,9 +433,14 @@ from netbbs.net.node_map_flow import row_labels as node_map_row_labels
 from netbbs.net.node_map_flow import search_text as node_map_search_text
 from netbbs.net.node_map_flow import stable_id as node_map_stable_id
 from netbbs.link.trust_issuance import (
+    MAX_AUTOMATIC_SIGNALS_PER_DAY,
     MAX_VOUCH_EXPLANATION_CHARS,
     VouchIntentError,
+    automatic_signals_enabled,
     get_vouch_intent,
+    list_issued_signals,
+    reconcile_issued_signals,
+    set_automatic_signals_enabled,
     list_vouch_intent_history,
     list_vouch_intents,
     reconcile_issued_vouches,
@@ -443,6 +448,9 @@ from netbbs.link.trust_issuance import (
     withdraw_vouch_intent,
 )
 from netbbs.link.trust import (
+    clear_local_observation,
+    list_local_observations,
+    withdraw_observation_publication,
     trust_policy_generation,
     NodeProbation,
     TrustDimension,
@@ -4115,6 +4123,7 @@ async def _trust_menu(
             MenuEntry(label=menu_key("I", "dentity authorities"), brief="Attestation authority list"),
             MenuEntry(label=menu_key("P", "ublished identity"), brief="What it asserts about its users"),
             MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for"),
+            MenuEntry(label=menu_key("g", "nals", prefix="Si"), brief="Equivocation it reported"),
             MenuEntry(label=menu_key("E", "xceptions"), brief="Sole-authority deviations"),
             MenuEntry(label=menu_key("H", "istory"), brief="Trust config change log"),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
@@ -4158,6 +4167,8 @@ async def _trust_menu(
             await _trust_subjects_screen(session, lane, actor, link_context=link_context)
         elif choice == "v":
             await _published_vouches_screen(session, lane, actor, link_context=link_context)
+        elif choice == "g":
+            await _issued_signals_screen(session, lane, actor, link_context=link_context)
         elif choice == "i":
             await _attestation_authorities_screen(session, lane, actor)
         elif choice == "p":
@@ -4593,6 +4604,17 @@ async def _trust_subject_screen(
             for state in states
         ]))
 
+        observations = await lane.run(list_local_observations, selected)
+        if observations:
+            sections.append(Section("Observed here", [
+                Field(
+                    f"{observation.category} ({observation.dimension})",
+                    _observation_status(observation),
+                    note=(sanitize_text(observation.explanation) if observation.explanation else None),
+                )
+                for observation in observations
+            ]))
+
         own_fingerprint = await lane.run(_own_fingerprint, link_context)
         vouch_intent = await lane.run(get_vouch_intent, selected, home_node_fingerprint=own_fingerprint)
         if vouch_intent is not None:
@@ -4627,6 +4649,8 @@ async def _trust_subject_screen(
         ]
         if selected.kind == "user":
             actions.append(("i", menu_key("I", "dentity attestation override")))
+        if observations:
+            actions.append(("l", menu_key("l", "ear evidence", prefix="C")))
         actions.extend([("v", menu_key("V", "ouch")), ("h", menu_key("H", "istory")), _BACK_ACTION])
         choice, listing.page = await show_detail(
             session,
@@ -4654,6 +4678,178 @@ async def _trust_subject_screen(
             await _vouch_screen(session, lane, actor, selected, subject_name, link_context=link_context)
         elif choice == "i":
             await _remote_attestation_override_screen(session, lane, actor, selected, listing)
+        elif choice == "l" and observations:
+            await _clear_observation(session, lane, actor, selected, observations, listing, link_context)
+
+
+def _observation_status(observation) -> str:
+    """One observation's state in words, for the subject screen."""
+    expires = observation.expires_at[:10]
+    if observation.expires_at <= utc_now_iso():
+        return f"observed {observation.observed_at[:10]}; expired {expires}, awaiting a SysOp to clear it"
+    published = "" if observation.category != "signed_equivocation" else (
+        "; not published (withdrawn)" if observation.publication_withdrawn_at else ""
+    )
+    return f"observed {observation.observed_at[:10]}, until {expires}{published}"
+
+
+async def _clear_observation(
+    session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject,
+    observations: list, listing: "_Listing", link_context: LinkContext | None,
+) -> None:
+    """Clear evidence this node observed itself (issue #589).
+
+    The SysOp's review §12.9 requires before equivocation recovers. Clearing
+    also revokes any signal this node published about it, which is the
+    network-touching part the yes/no is for."""
+    chrome = await _load_chrome(lane, actor)
+    selected = observations[0] if len(observations) == 1 else await pick_item(
+        session, observations,
+        name_of=lambda observation: f"{observation.category} ({observation.dimension})",
+        stable_id_of=lambda observation: _stable_id_for(observation.observation_id),
+        description_of=_observation_status,
+        title="Clear which evidence?",
+        empty_message="Nothing observed here to clear.",
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        collapsed=chrome.collapsed,
+    )
+    if selected is None:
+        return
+    if not await prompt_yes_no(
+        session,
+        "Clear this evidence? The subject starts its recovery, and any signal this node "
+        "published about it is revoked.",
+        default=False,
+    ):
+        listing.say("No change made.")
+        return
+
+    def _apply(db: Database) -> None:
+        clear_local_observation(db, selected.observation_id)
+        record_action(
+            db, actor=actor, action="clear_trust_observation",
+            detail=f"{subject.subject_id} {selected.observation_id}",
+        )
+
+    await lane.run(_apply)
+    if link_context is not None:
+        link_context.link_node.wake_sync()
+    listing.say("Evidence cleared. A signal about it is revoked on the next Link sync pass.", color=SUCCESS_COLOR)
+
+
+async def _issued_signals_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
+    """Equivocation signals this node published, and the switch that lets it
+    (issue #589).
+
+    Signals are signed automatically from equivocation this node saw itself;
+    nothing here issues one. `[T]urn` the switch off and every live signal is
+    revoked on the next pass; `[R]evoke` withdraws one, keeping the evidence
+    it was about."""
+    chrome = await _load_chrome(lane, actor)
+    listing = _Listing()
+    while True:
+        own = await lane.run(_own_fingerprint, link_context)
+        enabled = await lane.run(automatic_signals_enabled)
+        signals = await lane.run(list_issued_signals, home_node_fingerprint=own) if own else []
+        live = [signal for signal in signals if signal.revoked_at is None and signal.expires_at > utc_now_iso()]
+        labels = {
+            signal.subject_fingerprint: (await lane.run(identity_for_fingerprint, signal.subject_fingerprint)).label
+            for signal in signals
+        }
+        rows: list[Field | Note | Table] = [
+            Field(
+                "Automatic signals",
+                status_badge("on" if enabled else "off", tone="success" if enabled else "warning",
+                             unicode_style=chrome.unicode_style),
+                styled=True,
+                note=(
+                    "When this node sees another node sign two different objects into the same slot "
+                    "of one chain, it signs a signal saying so, with both attached, for the nodes "
+                    "that name it a reporter. They check the proof themselves. At most "
+                    f"{MAX_AUTOMATIC_SIGNALS_PER_DAY} a day; never about this node."
+                ),
+            ),
+        ]
+        if signals:
+            rows.append(Table(
+                ("Node", "Status", "Issued", "Until"),
+                [
+                    [
+                        (labels.get(signal.subject_fingerprint, signal.subject_fingerprint), ACCENT_COLOR),
+                        ("revoked" if signal.revoked_at else "published", METADATA_COLOR),
+                        (signal.issued_at[:10], METADATA_COLOR),
+                        (signal.expires_at[:10], METADATA_COLOR),
+                    ]
+                    for signal in signals
+                ],
+            ))
+        else:
+            rows.append(Note("This node has published no signals."))
+        if link_context is None:
+            rows.append(Note("Link is not running here, so a change is signed when it next is."))
+        extra = [("t", menu_key("T", "urn " + ("off" if enabled else "on")))]
+        if live:
+            extra.append(("r", menu_key("R", "evoke")))
+        choice = await _trust_list_choice(
+            session, lane, actor, listing, title="Signals",
+            subtitle="Equivocation this node reported to the nodes that subscribe to it.",
+            rows=rows, options=[], extra_actions=extra,
+        )
+        if choice == "b":
+            return
+        if choice == "t":
+            def _toggle(db: Database) -> None:
+                set_automatic_signals_enabled(db, not enabled)
+                record_action(
+                    db, actor=actor, action="set_automatic_trust_signals",
+                    detail="off" if enabled else "on",
+                )
+
+            await lane.run(_toggle)
+            if link_context is not None:
+                link_context.link_node.wake_sync()
+            listing.say(
+                "Automatic signals are off. Published ones are revoked on the next Link sync pass."
+                if enabled else "Automatic signals are on.",
+                color=SUCCESS_COLOR,
+            )
+        elif choice == "r" and live:
+            selected = await pick_item(
+                session, live,
+                name_of=lambda signal: labels.get(signal.subject_fingerprint, signal.subject_fingerprint),
+                stable_id_of=lambda signal: _stable_id_for(signal.content_id),
+                description_of=lambda signal: f"published {signal.issued_at[:10]}",
+                title="Revoke which signal?",
+                empty_message="No published signal.",
+                redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+                collapsed=chrome.collapsed,
+            )
+            if selected is None:
+                continue
+            if not await prompt_yes_no(
+                session, "Revoke this signal? This publishes a signed withdrawal; the evidence stays here.",
+                default=False,
+            ):
+                listing.say("No change made.")
+                continue
+
+            def _withdraw(db: Database) -> None:
+                withdraw_observation_publication(db, selected.observation_id)
+                record_action(db, actor=actor, action="withdraw_trust_signal", detail=selected.content_id)
+                if link_context is not None:
+                    reconcile_issued_signals(
+                        db, link_context.node_identity.signing_key,
+                        home_node_fingerprint=link_context.node_identity.fingerprint,
+                    )
+
+            await lane.run(_withdraw)
+            listing.say(
+                "Signal revoked." if link_context is not None
+                else "Signal withdrawn. Link is not running here, so the revocation is signed when it next is.",
+                color=SUCCESS_COLOR,
+            )
 
 
 # The override editor's "every dimension" choice (issue #820): what

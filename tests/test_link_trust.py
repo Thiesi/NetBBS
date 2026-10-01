@@ -27,7 +27,6 @@ from netbbs.link.trust import (
     maintain_trust_state,
     record_activity,
     record_local_observation,
-    record_reproduced_signal_observation,
     record_trust_signal,
     record_vouch,
     recompute_all_trust_states,
@@ -695,24 +694,6 @@ def test_revocation_removes_remote_support_without_deleting_history(db):
         "SELECT revoked_by_content_id FROM link_trust_signals WHERE content_id = 'signal-2'"
     ).fetchone()
     assert row[0] == "revoke-2"
-
-
-def test_reproduced_signal_becomes_local_evidence_independent_of_revocation(db):
-    subject = register_old_node(db)
-    configure_reporter(db, "reporter", "domain")
-    add_signal(db, subject, "reporter", 1)
-    assert record_reproduced_signal_observation(
-        db, "signal-1", observation_id="reproduced-1", now_iso=stamp(NOW)
-    )
-    revoke_trust_signal(
-        db, "signal-1", revocation_content_id="revoke-1",
-        now_iso=stamp(NOW + timedelta(minutes=1)),
-    )
-
-    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
-    assert state.state == TrustState.QUARANTINED
-    assert state.reason_code == "local_self_verifying_evidence"
-    assert state.explanation["active_local_evidence"][0]["observation_id"] == "reproduced-1"
 
 
 def test_startup_recompute_reconstructs_projection_from_persisted_inputs(db):
