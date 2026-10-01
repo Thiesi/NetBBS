@@ -1178,7 +1178,10 @@ def _parse_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address 
     return getattr(address, "ipv4_mapped", None) or address
 
 
-def _is_trusted(address, trusted_proxies) -> bool:
+def _is_trusted(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    trusted_proxies: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> bool:
     return any(address in network for network in trusted_proxies)
 
 
