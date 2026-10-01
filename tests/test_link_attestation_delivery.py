@@ -617,3 +617,42 @@ def test_an_object_signed_by_a_rotated_out_key_is_not_ingested(net):
     asyncio.run(scenario())
     assert not remote_meets_age(net.r_db.db, net.subject, 18, now_iso=_now())
     assert has_attestation_snapshot_from(net.r_db.db, net.i.identity.fingerprint)  # the bundle itself applied
+
+
+
+# -- review of #1045: what each recipient holds, by snapshot or by pull ------
+
+
+def test_a_snapshot_records_exactly_what_it_held(issuer_db):
+    from netbbs.link.attestation_delivery import list_attestation_delivery_status
+
+    [plan] = plan_attestation_deliveries(issuer_db, now=NOW)
+    record_attestation_delivery(
+        issuer_db, "recipient-a", digest=plan.digest, route="relay", final=False,
+        content_ids=plan.content_ids, now=NOW,
+    )
+    [status] = list_attestation_delivery_status(issuer_db, now=NOW)
+    assert status.current and status.delivered_ids == frozenset(plan.content_ids)
+
+
+def test_a_recipient_that_only_pulls_is_not_a_failure_and_its_pulls_count(issuer_db):
+    """A recipient whose NetBBS does not take snapshots yet still gets the
+    value by pull this release. Its route reads "pull", with no error, and
+    what it fetched is what it is recorded as holding."""
+    from netbbs.link.attestation_delivery import (
+        list_attestation_delivery_status,
+        record_attestation_pull,
+        record_legacy_attestation_recipient,
+    )
+
+    plan_attestation_deliveries(issuer_db, now=NOW)
+    record_legacy_attestation_recipient(issuer_db, "recipient-a", now=NOW)
+    [status] = list_attestation_delivery_status(issuer_db, now=NOW)
+    assert (status.route, status.last_error, status.current) == ("pull", None, False)
+    # Rechecked hourly, in case it upgraded, not every pass.
+    assert plan_attestation_deliveries(issuer_db, now=NOW + timedelta(minutes=5)) == []
+    assert plan_attestation_deliveries(issuer_db, now=NOW + FAILED_DELIVERY_BACKOFF + timedelta(minutes=1))
+
+    record_attestation_pull(issuer_db, "recipient-a", snapshot_objects(issuer_db, now=NOW), now=NOW)
+    [status] = list_attestation_delivery_status(issuer_db, now=NOW)
+    assert status.route == "pull" and status.current

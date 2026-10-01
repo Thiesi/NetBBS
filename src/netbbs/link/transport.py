@@ -183,7 +183,7 @@ from netbbs.link.protocol import (
 from netbbs.link.carry import KIND_LABELS, accept_genesis, genesis_kind
 from netbbs.link.store import event_is_stored, forget_opaque_event, opaque_events_to_rejudge, store_opaque_event
 from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
-from netbbs.link.attestation_delivery import receive_attestation_bundle_safely
+from netbbs.link.attestation_delivery import record_attestation_pull, receive_attestation_bundle_safely
 from netbbs.link.attestation_bundles import (
     SEALED_ATTESTATION_BUNDLE_OBJECT_TYPE,
     MalformedBundle,
@@ -2483,6 +2483,9 @@ class LinkServer:
             return web.json_response({"error": f"malformed attestation pull: {exc}"}, status=400)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=403)
+        # Issue #632: the legacy path, recorded per recipient so the issuer's
+        # screens can say what it holds (review of #1045).
+        await self._lane.run(record_attestation_pull, fingerprint, objects)
         return web.json_response({"objects": objects, "more_available": more})
 
     async def _handle_file_chunk_request(self, request: web.Request) -> web.Response:

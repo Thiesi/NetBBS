@@ -192,6 +192,7 @@ from netbbs.link.attestation_delivery import (
     receive_attestation_bundle_safely,
     record_attestation_delivery,
     record_attestation_delivery_failure,
+    record_legacy_attestation_recipient,
     retry_pending_attestations,
 )
 from netbbs.link.enforcement import (
@@ -1852,10 +1853,8 @@ async def _deliver_attestation_bundles(
             )
             continue
         if not descriptor_has_capability(descriptor, SEALED_ATTESTATIONS_CAPABILITY):
-            await lane.run(
-                record_attestation_delivery_failure, recipient,
-                "the recipient's NetBBS does not take sealed snapshots yet; it can still pull",
-            )
+            # It still pulls this release; not a failure (review of #1045).
+            await lane.run(record_legacy_attestation_recipient, recipient)
             continue
         try:
             recipient_key = node.resolve_known_signing_key(recipient, "attestation recipient")
@@ -1899,6 +1898,7 @@ async def _deliver_attestation_bundles(
             continue
         await lane.run(
             record_attestation_delivery, recipient, digest=plan.digest, route=route, final=plan.final,
+            content_ids=plan.content_ids,
         )
         _logger.info(
             "Link attestations: sent %s snapshot %d to %s via %s",
