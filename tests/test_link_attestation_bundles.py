@@ -30,8 +30,10 @@ from netbbs.link.relay_mailbox import (
     pickup_relay_attestation_bundles,
     prune_expired_relay_attestation_bundles,
 )
+from netbbs.link.node_identity import rotate_operational_key
 from netbbs.link.transport import (
     LinkTransportError,
+    deposit_attestation_bundle,
     deposit_into_relay_mailbox,
     pickup_from_relay_mailbox_all,
 )
@@ -153,9 +155,9 @@ def test_an_abandoned_bundle_is_pruned_after_ninety_days(db, cast):
 
 
 def test_a_bundle_deposited_at_a_relay_is_picked_up_with_the_mail(tmp_path, cast):
-    """Over real HTTP: the issuer deposits at the recipient's relay, a
-    third party's forged replacement is refused (the relay knows the issuer),
-    and the recipient picks the genuine bundle up beside its mail."""
+    """Over real HTTP: the issuer deposits at the recipient's relay with its
+    own identity bundle, a third party's forged replacement is refused, and
+    the recipient picks the genuine bundle up beside its mail."""
     issuer, recipient = cast["issuer"], cast["recipient"]
     relay_node = LinkNode(identity=cast["relay"])
     relay_node.relaying_for[recipient.fingerprint] = "2026-01-01T00:00:00+00:00"
@@ -174,12 +176,10 @@ def test_a_bundle_deposited_at_a_relay_is_picked_up_with_the_mail(tmp_path, cast
         base = f"http://127.0.0.1:{server.port}"
         try:
             async with aiohttp.ClientSession() as session:
-                # The relay has met the issuer, so it can check the signature.
-                issuer_node = LinkNode(identity=issuer)
-                relay_node.handle_hello(_hello_for(issuer_node))
-                await deposit_into_relay_mailbox(session, base, recipient.fingerprint, genuine)
+                issuer_hello = _hello_for(LinkNode(identity=issuer))
+                await deposit_attestation_bundle(session, base, recipient.fingerprint, genuine, issuer_hello)
                 with pytest.raises(LinkTransportError, match="does not verify"):
-                    await deposit_into_relay_mailbox(session, base, recipient.fingerprint, forged)
+                    await deposit_attestation_bundle(session, base, recipient.fingerprint, forged, issuer_hello)
                 await deposit_into_relay_mailbox(session, base, recipient.fingerprint, mail)
                 # The mail-only call still works for an older caller's shape.
                 return await pickup_from_relay_mailbox_all(
@@ -206,9 +206,9 @@ def test_a_relay_refuses_a_bundle_for_a_node_it_does_not_relay_for(tmp_path, cas
         try:
             async with aiohttp.ClientSession() as session:
                 with pytest.raises(LinkTransportError, match="not currently relaying"):
-                    await deposit_into_relay_mailbox(
+                    await deposit_attestation_bundle(
                         session, f"http://127.0.0.1:{server.port}", cast["recipient"].fingerprint,
-                        _bundle(cast["issuer"], cast["recipient"]),
+                        _bundle(cast["issuer"], cast["recipient"]), _hello_for(LinkNode(identity=cast["issuer"])),
                     )
                 # And the mail-only pickup keeps its old shape.
                 assert (await pickup_from_relay_mailbox_all(
@@ -219,5 +219,87 @@ def test_a_relay_refuses_a_bundle_for_a_node_it_does_not_relay_for(tmp_path, cas
 
     try:
         asyncio.run(scenario())
+    finally:
+        relay.close()
+
+
+def _held_sequences(relay_db) -> list[int]:
+    return [row[0] for row in relay_db.connection.execute(
+        "SELECT sequence FROM link_relay_attestation_bundles ORDER BY sequence"
+    )]
+
+
+def test_only_the_issuer_can_fill_or_replace_its_slot_at_a_relay_that_never_met_it(tmp_path, cast):
+    """Review of #1040: a relay that has never met the issuer used to take a
+    bundle unverified, so a third node could push the genuine snapshot out of
+    its slot with a higher-numbered forgery. Now every deposit carries the
+    issuer's identity bundle and must be signed by its current key; a third
+    node -- with its own identity bundle, with the issuer's, or with none --
+    is refused, and the genuine slot survives."""
+    issuer, recipient, attacker = cast["issuer"], cast["recipient"], cast["other"]
+    relay_node = LinkNode(identity=cast["relay"])
+    relay_node.relaying_for[recipient.fingerprint] = "2026-01-01T00:00:00+00:00"
+    relay = _NodeDb(tmp_path, "relay")
+    genuine = _bundle(issuer, recipient, sequence=3)
+    # Claims the issuer, signed by the attacker, with a far higher sequence.
+    forged = build_sealed_attestation_bundle(
+        signing_key=attacker.signing_key.signing_key, issuer_fingerprint=issuer.fingerprint,
+        recipient_fingerprint=recipient.fingerprint, recipient_verify_key=recipient.signing_key.verify_key,
+        objects=[], sequence=10**12, created_at="2026-10-01T00:00:00.000000Z",
+    )
+
+    async def scenario():
+        server = await _run_server(relay_node, lambda: _hello_for(relay_node), relay.lane)
+        base = f"http://127.0.0.1:{server.port}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                assert issuer.fingerprint not in relay_node.peers  # never met
+                await deposit_attestation_bundle(
+                    session, base, recipient.fingerprint, genuine, _hello_for(LinkNode(identity=issuer)),
+                )
+                for hello in (_hello_for(LinkNode(identity=issuer)), _hello_for(LinkNode(identity=attacker))):
+                    with pytest.raises(LinkTransportError, match="HTTP 403"):
+                        await deposit_attestation_bundle(session, base, recipient.fingerprint, forged, hello)
+                # The bare bundle, the shape part 1 first accepted, is refused too.
+                with pytest.raises(LinkTransportError, match="identity bundle"):
+                    await deposit_into_relay_mailbox(session, base, recipient.fingerprint, forged)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert _held_sequences(relay.db) == [3]
+        assert relay_node.peers.get(issuer.fingerprint) is None  # authenticating admits nothing
+    finally:
+        relay.close()
+
+
+def test_a_stale_identity_bundle_cannot_revive_a_compromised_key(tmp_path, cast):
+    """Someone holding the issuer's stolen, since-compromised key presents
+    the issuer's identity bundle from before the compromise. A relay that
+    already holds the newer chain refuses the deposit."""
+    issuer, recipient = cast["issuer"], cast["recipient"]
+    stale_hello = _hello_for(LinkNode(identity=issuer))
+    rotated = rotate_operational_key(issuer, purpose="signing", compromised=True)
+    relay_node = LinkNode(identity=cast["relay"])
+    relay_node.relaying_for[recipient.fingerprint] = "2026-01-01T00:00:00+00:00"
+    relay_node.handle_introduction(_hello_for(LinkNode(identity=rotated), created_at="2026-02-01T00:00:00+00:00"))
+    relay = _NodeDb(tmp_path, "relay")
+    stolen = _bundle(issuer, recipient, sequence=99)  # signed with the old, compromised key
+
+    async def scenario():
+        server = await _run_server(relay_node, lambda: _hello_for(relay_node), relay.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(LinkTransportError, match="HTTP 403"):
+                    await deposit_attestation_bundle(
+                        session, f"http://127.0.0.1:{server.port}", recipient.fingerprint, stolen, stale_hello,
+                    )
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert _held_sequences(relay.db) == []
     finally:
         relay.close()
