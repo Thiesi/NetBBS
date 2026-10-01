@@ -7024,6 +7024,20 @@ transfer, relay store, and bandwidth consumer needs:
 
 Security state and unread user data must not be silently discarded.
 
+A caller's address is the key for per-source limits such as the login
+throttle, so it must be one the caller cannot choose. For Telnet and SSH it is
+the TCP peer. The web transport normally sits behind a reverse proxy, where the
+TCP peer is the proxy for every browser caller. `[web] trusted_proxies` (issue
+#980; empty by default) names the proxies, as IP addresses or networks, never
+hostnames. Only for a connection from one of them does NetBBS read
+`X-Forwarded-For`, and then it takes the rightmost entry that is not itself a
+trusted proxy: each proxy appends the address it received the request from, so
+everything left of that entry was written by the caller. A missing or malformed
+entry falls back to the proxy's address. The address is decided once, when the
+web session is built, so the throttle, the logs and the SysOp's screens agree.
+The `Forwarded` header (RFC 7239) is not read: the proxies the Handbook
+documents all write `X-Forwarded-For`.
+
 ### 13.6 Operational control surface
 
 Issue #60 remains the authority for the incomplete production operating model,
