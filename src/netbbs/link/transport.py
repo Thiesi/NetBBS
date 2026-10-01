@@ -2679,9 +2679,14 @@ class LinkServer:
         recipient_fingerprint = request.match_info["fingerprint"]
         try:
             body = await request.json(loads=strict_json_loads)
+            if isinstance(body, dict) and "attestation_bundle" in body:
+                return await self._deposit_attestation_bundle(recipient_fingerprint, body)
             object_type = body["envelope"]["object_type"]
             if object_type == SEALED_ATTESTATION_BUNDLE_OBJECT_TYPE:
-                return await self._deposit_attestation_bundle(recipient_fingerprint, body)
+                return web.json_response(
+                    {"error": "an attestation bundle must be deposited with its issuer's identity bundle"},
+                    status=400,
+                )
             envelope_cls = {
                 LINK_MESSAGE_OBJECT_TYPE: LinkMessage,
                 LINK_MESSAGE_ACCEPTED_OBJECT_TYPE: LinkMessageAccepted,
@@ -2720,16 +2725,29 @@ class LinkServer:
 
     async def _deposit_attestation_bundle(self, recipient_fingerprint: str, body: object) -> web.Response:
         """Issue #632: hold a sealed attestation bundle in its (issuer,
-        recipient) slot. The same open-to-a-stranger deposit as mail, with one
-        check mail cannot have: when this relay knows the issuer's keys it
-        verifies the outer signature, so a third party cannot push a genuine
-        issuer's snapshot out of its slot with a forged, higher-numbered one.
-        An issuer this relay has never met is taken unverified, as mail is;
-        the recipient verifies everything itself on pickup."""
+        recipient) slot.
+
+        Unlike a letter, a bundle can displace another one -- the slot keeps
+        only the newest -- so it is never taken on an unverifiable claim. The
+        deposit carries the issuer's own hello bundle, which authenticates
+        itself (`LinkNode.authenticated_signing_key`): its root key hashes to
+        the issuer's fingerprint, and its chain names the issuer's current
+        signing key, merged with any chain this relay already holds so a stale
+        bundle cannot revive a compromised key. The snapshot's outer signature
+        must verify under that key. Only the issuer can produce such a
+        signature, so only the issuer can fill or replace its slot; a third
+        node depositing a bundle in another issuer's name -- whatever sequence
+        it claims -- is refused. The recipient still verifies everything
+        itself on pickup."""
+        if not isinstance(body, dict) or set(body) != {"attestation_bundle", "issuer_hello"}:
+            return web.json_response({"error": "malformed attestation bundle deposit"}, status=400)
         try:
-            bundle = SealedAttestationBundle.from_dict(body)
+            bundle = SealedAttestationBundle.from_dict(body["attestation_bundle"])
+            issuer_hello = HelloMessage.from_dict(body["issuer_hello"])
         except MalformedBundle as exc:
             return web.json_response({"error": f"malformed attestation bundle: {exc}"}, status=400)
+        except (KeyError, ValueError, TypeError) as exc:
+            return web.json_response({"error": f"malformed issuer identity bundle: {exc}"}, status=400)
         if bundle.recipient_fingerprint != recipient_fingerprint:
             return web.json_response({"error": "bundle is addressed to a different recipient"}, status=400)
         if recipient_fingerprint not in self._node.relaying_for:
@@ -2740,14 +2758,14 @@ class LinkServer:
         if recipient_decision is not None and not recipient_decision.allowed:
             return self._policy_rejection(recipient_decision)
         try:
-            keys = [
-                self._node.resolve_known_signing_key(bundle.issuer_fingerprint, "attestation bundle"),
-                *self._node.resolve_known_superseded_signing_keys(bundle.issuer_fingerprint),
-            ]
-        except (LinkProtocolError, NodeIdentityError, ValueError):
-            keys = []
-        if keys and not bundle.verifies(keys):
-            return web.json_response({"error": "attestation bundle signature does not verify"}, status=400)
+            issuer_key = self._node.authenticated_signing_key(issuer_hello, bundle.issuer_fingerprint)
+        except (LinkProtocolError, NodeIdentityError, ValueError) as exc:
+            return web.json_response({"error": f"issuer could not be authenticated: {exc}"}, status=403)
+        if not bundle.verifies([issuer_key]):
+            return web.json_response(
+                {"error": "attestation bundle signature does not verify under its issuer's current key"},
+                status=403,
+            )
         try:
             stored = await self._lane.run(deposit_relay_attestation_bundle, recipient_fingerprint, bundle)
         except RelayMailboxFullError as exc:
@@ -3822,11 +3840,35 @@ async def request_relay_consent(
     return consent_response
 
 
+async def deposit_attestation_bundle(
+    session: ClientSession,
+    relay_base_url: str,
+    recipient_fingerprint: str,
+    bundle: SealedAttestationBundle,
+    issuer_hello: HelloMessage,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> None:
+    """Leave `bundle` at the relay for `recipient_fingerprint` (issue #632),
+    with the issuer's own hello bundle, which the relay authenticates the
+    deposit by (see `LinkServer._deposit_attestation_bundle`). Raises
+    `LinkTransportError` unless the relay answered 200."""
+    url = f"{relay_base_url}{LINK_PATH_PREFIX}/relay-mailbox/{recipient_fingerprint}/deposit"
+    payload = {"attestation_bundle": bundle.to_dict(), "issuer_hello": issuer_hello.to_dict()}
+    try:
+        async with session.post(url, json=payload, timeout=ClientTimeout(total=timeout)) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(f"attestation bundle deposit to {url} failed: HTTP {response.status}: {text}")
+    except (ClientError, TimeoutError) as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+
+
 async def deposit_into_relay_mailbox(
     session: ClientSession,
     relay_base_url: str,
     recipient_fingerprint: str,
-    message: RelayableEnvelope | SealedAttestationBundle,
+    message: RelayableEnvelope,
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> None:
