@@ -27,7 +27,7 @@ from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.boards.moderation_notices import record_moderation_outcome
-from netbbs.communities import get_effective_min_age, get_effective_min_read_level, require_level_gate
+from netbbs.communities import get_effective_min_age, require_read_gate, require_write_gate
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.file_refs import (
     MAX_FILE_REFS,
@@ -160,7 +160,7 @@ def create_post(
     `board_closure`) -- a closed board accepts no further posts of any
     kind, replies included.
     """
-    require_level_gate(db, author, board.min_write_level, board, BoardPermission.WRITE)
+    require_write_gate(db, author, board)
     _check_content_length(subject, body)
     closed_row = db.connection.execute(
         "SELECT * FROM boards WHERE id = ?", (board.id,)
@@ -727,7 +727,7 @@ def _require_board_readable(db: Database, board: Board, user: User) -> None:
     -- and its effective minimum age, the two gates on reading a board.
     (The name requirement gates posting, not reading.) Checked by every
     listing of a board's posts, not only by the screens that lead to one."""
-    require_level_gate(db, user, get_effective_min_read_level(db, board), board, BoardPermission.READ)
+    require_read_gate(db, user, board)
     if not meets_age(db, user, get_effective_min_age(db, board)):
         raise PostError("this message board has an age requirement you do not meet")
 

@@ -433,6 +433,7 @@ async def _start_servers(
                 WebServer(
                     host=config.web.host, port=config.web.port,
                     session_handler=session_handler, transfers=transfers,
+                    trusted_proxies=config.web.trusted_proxies,
                 ),
             )
             any_interactive_started = True
