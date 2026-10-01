@@ -185,6 +185,23 @@ def test_art_without_a_menu_slot_that_misses_an_item_falls_back(tmp_path):
     db.close()
 
 
+def test_the_fallback_is_logged_once_however_the_unread_count_changes(tmp_path, caplog):
+    import logging
+
+    from netbbs.mail import send_mail
+    from netbbs.net import main_menu
+
+    main_menu._overflow_logged.clear()
+    db, user = _setup(tmp_path, b"  [M]essage boards  [L]ogoff\r\n{prompt}")
+    other = create_user(db, "harold", password="parker51", user_level=10)
+    with caplog.at_level(logging.INFO, logger=main_menu._logger.name):
+        for n in range(3):
+            send_mail(db, sender=other, recipient=user, subject=f"hi {n}", body="hello")
+            assert "Main menu" in _draw(db, user)
+    assert sum("drawing the generated menu" in r.getMessage() for r in caplog.records) == 1
+    db.close()
+
+
 def test_a_drawn_key_that_is_no_menu_key_stays_as_drawn(tmp_path):
     art = ALL_DRAWN.replace(b"[S]ysOp console", b"[x] marks the spot")
     db, user = _setup(tmp_path, art)

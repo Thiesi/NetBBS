@@ -603,7 +603,7 @@ async def _draw_slot_main_menu(
     plan = plan_slot_main_menu(session, art, labels, fields, rows_below=below, prompt=prompt)
     if plan.text is None:
         if plan.overflow:
-            _log_slot_overflow(plan.reason)
+            _log_slot_overflow(plan, art)
         return False
     await session.write(plan.text)
     await session.write(move_cursor(art.height + 1, 1))
@@ -616,14 +616,18 @@ async def _draw_slot_main_menu(
     return True
 
 
-_overflow_logged: set[str] = set()
+_overflow_logged: set[tuple] = set()
 
 
-def _log_slot_overflow(reason: str) -> None:
-    # Once per distinct reason: a busy node draws the menu constantly.
-    if reason not in _overflow_logged:
-        _overflow_logged.add(reason)
-        _logger.info("main menu art: %s -- drawing the generated menu", reason)
+def _log_slot_overflow(plan: SlotMenuPlan, art: SlotArt) -> None:
+    # Once per art layout and set of missing items, keyed on their keys:
+    # the reason's text carries live counts (unread mail, held posts) that
+    # change all the time, and a busy node draws the menu constantly.
+    region = (art.menu.width, art.menu.height) if art.menu is not None else None
+    key = (region, tuple(sorted(menu_label_key(label) or "" for label in plan.overflow)))
+    if key not in _overflow_logged:
+        _overflow_logged.add(key)
+        _logger.info("main menu art: %s -- drawing the generated menu", plan.reason)
 
 
 def _main_menu_prompt(db: Database, user: User, node_controls: NodeControls | None) -> str:
