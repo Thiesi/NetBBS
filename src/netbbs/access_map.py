@@ -18,7 +18,7 @@ pretending the level is the whole answer.
 from __future__ import annotations
 
 from bisect import bisect_left
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from netbbs.auth.users import SYSOP_LEVEL, User
@@ -385,6 +385,7 @@ class LevelContext:
     levels: tuple[int, ...]
     communities: dict[int, Community]
     inheriting: dict[tuple[int, str], dict[str, int]]
+    names: dict[int, str] = field(default_factory=dict)
 
     def users_at_or_above(self, level: int) -> int:
         """Enabled, approved accounts at `level` or higher."""
@@ -404,7 +405,9 @@ def level_context(db: Database) -> LevelContext:
                 if stored is None:
                     counts = inheriting.setdefault((resource.community_id, direction), {})
                     counts[what] = counts.get(what, 0) + 1
-    return LevelContext(levels, {c.id: c for c in list_communities(db)}, inheriting)
+    from netbbs.level_names import get_level_names
+
+    return LevelContext(levels, {c.id: c for c in list_communities(db)}, inheriting, get_level_names(db))
 
 
 @dataclass(frozen=True)
@@ -430,6 +433,55 @@ def level_ladder(db: Database) -> list[LadderStep]:
         LadderStep(level, held.get(level, 0), tuple(g for g in gates if g.off is None and g.opens_at == level))
         for level in levels_in_use(db, gates)
     ]
+
+
+# `(access, what)` per gate kind, in the words the SysOp's screens and the
+# CLI use: "post" a "board", "play" a "door".
+GATE_WORDS: dict[GateKind, tuple[str, str]] = {
+    GateKind.BOARD_READ: ("read", "board"),
+    GateKind.BOARD_WRITE: ("post", "board"),
+    GateKind.AREA_READ: ("download", "file area"),
+    GateKind.AREA_WRITE: ("upload", "file area"),
+    GateKind.CHANNEL: ("join", "channel"),
+    GateKind.DOOR: ("play", "door"),
+    GateKind.NODE_MAP: ("open", "node-wide"),
+    GateKind.MAIL: ("use", "node-wide"),
+    GateKind.MRC_OPEN_ROOM: ("open", "node-wide"),
+    GateKind.SYSOP: ("use", "node-wide"),
+}
+
+
+SOURCE_WORDS = {
+    LevelSource.RESOURCE: "set here",
+    LevelSource.DEFAULT: "default",
+    LevelSource.SETTING: "Settings",
+    LevelSource.FIXED: "fixed",
+}
+
+
+def gate_source(gate: Gate) -> str:
+    """Where a gate's level comes from, in a few words."""
+    if gate.source is LevelSource.COMMUNITY:
+        return f"Community {gate.community_name}"
+    return SOURCE_WORDS[gate.source]
+
+
+def ladder_summary(step: LadderStep) -> str:
+    """What a level first opens, counted by kind: `2 read · 1 post · Mail`."""
+    counts: dict[str, int] = {}
+    named: list[str] = []
+    for gate in step.opens:
+        action, what = GATE_WORDS[gate.kind]
+        if what == "node-wide":
+            named.append(gate.name)
+        else:
+            label = {"channel": "channel", "door": "door"}.get(what, action)
+            counts[label] = counts.get(label, 0) + 1
+    order = ("read", "post", "download", "upload", "channel", "door")
+    parts = [f"{counts[label]} {label}" for label in order if label in counts]
+    if step.level >= SYSOP_LEVEL:
+        return "everything"
+    return " · ".join(parts + named) or "nothing new"
 
 
 def levels_in_use(db: Database, gates: list[Gate]) -> list[int]:

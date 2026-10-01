@@ -469,6 +469,25 @@ verified-name requirement, a members-only channel) still applies. Picking a
 board, file area, channel or door there opens its own screen, where you can
 change its levels. `G` on the level list shows any level, in use or not.
 
+You can name a level, for example "Member" for 10: on the Levels screen,
+press `M` (Na[m]e) on its row and type the name, or a blank line to clear
+it. 255 is always "SysOp". From then on the console shows that level as
+`10 (Member)`, and the level prompt on a user's screen and `G` on the Levels
+screen take `member` as well as `10`. A name is only a label: renaming or
+clearing it changes nobody's access. It can be up to 12 characters, needs at
+least one letter, and no two levels can share one.
+
+The same overview is available from the shell, without opening the console:
+
+```sh
+python -m netbbs.admin levels                          # every level in use
+python -m netbbs.admin levels member                   # what one level opens
+python -m netbbs.admin levels --user alice --to 50     # one account's change, previewed
+```
+
+Add `--json` to any of them for scripts. The command only reads; it changes
+nothing.
+
 Every level field in an editor also says what its value means. Next to the
 level it shows how many enabled accounts that level lets in, for example
 `10 · 41 users`, and the count follows what you type before you save. A

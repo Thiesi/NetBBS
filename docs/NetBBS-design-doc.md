@@ -2101,6 +2101,22 @@ that level or above, recounted from the draft as the SysOp types:
 The count is by level only; age and verified-name gates depend on each
 account and are not counted in.
 
+**Level names** (issue #1009). A SysOp can name any level from 0 to 254, such
+as "Member" for 10, from the Levels screen; 255 is always "SysOp". A name is a
+label: gates and accounts keep their numbers, and naming, renaming or clearing
+a level changes nobody's access. The console shows a named level as
+`10 (Member)` wherever it shows a level: the Levels screens, the change
+preview, the user screen and the editors' level fields. The user screen's
+level prompt and `[G]o to level` take a level's name as well as its number.
+A name is at most 12 characters, needs a letter (so it cannot read as a
+number), and is unique regardless of case. Names are node configuration and
+travel in backups. Naming is recorded in the moderation log.
+
+**From the shell.** `python -m netbbs.admin levels` prints the ladder;
+`levels <level>` (a number or a name) prints what a level opens and what stays
+closed; `levels --user <name> --to <level>` prints the change preview for one
+account. Each takes `--json`. The command only reads.
+
 **A level change is previewed for the account** (issue #1006). Changing an
 account's level from its detail screen shows what the change gains, loses and
 leaves blocked for that account before anything is written. Unlike the map
@@ -14242,6 +14258,18 @@ a preview for a change that would then be refused.
 **Decision 5 — levels run from 0 to 255.** Nothing enforced the range before:
 an account could be created at, or changed to, a negative level or one above
 255. Both are refused now.
+
+**Decision 6 — level names are labels in node configuration** (#1009).
+Rejected: named levels as the stored value, with gates and accounts
+referring to a name, which would make renaming a level a migration of every
+gate and leave Link genesis events, which carry numbers, needing a mapping.
+A JSON object in the config table, rather than a table of its own, because
+it is a handful of short strings read together.
+
+**Decision 7 — a name is typed where a level is asked for on the user
+screen and the Levels screen, not in the resource editors.** Those are where
+a SysOp thinks in names (promote alice to Member). A resource editor's level
+fields keep taking numbers, and show the name beside the value.
 
 ### SFTP over the SSH transport — declined
 

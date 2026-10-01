@@ -162,7 +162,7 @@ def test_the_ladder_is_counted_again_after_go_to_level(db, lane, sysop, node):
         asyncio.run(admin_menu(session, lane, sysop))
     text = "\n".join(" ".join(row.split()) for row in session.on_terminal())
 
-    assert "Level 60" in text and "Level 100" not in text
+    assert ". 60 " in text and ". 100 " not in text
 
 
 def test_a_resource_opened_from_levels_gets_the_content_menus_services(db, lane, sysop, node, monkeypatch):
