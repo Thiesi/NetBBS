@@ -15491,10 +15491,10 @@ def _list_art_sample_rows(db: Database, actor: User, kind: str) -> list[tuple[st
                 rows.append((area.name, f"{count} file{'' if count == 1 else 's'}"))
         return rows
     # The channel list's own filter: hidden channels, level and age gates.
-    from netbbs.net.chat_flow import _visible_channels_for
+    from netbbs.net.chat_flow import list_visible_channels_for
 
     rows = [(f"[{c.name}]", "") for c in list_top_level_channel_categories(db)]
-    rows += [(channel.name, "") for channel in _visible_channels_for(db, actor) if channel.category_id is None]
+    rows += [(channel.name, "") for channel in list_visible_channels_for(db, actor) if channel.category_id is None]
     return rows
 
 
