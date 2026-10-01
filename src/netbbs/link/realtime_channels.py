@@ -48,7 +48,6 @@ from netbbs.link.enforcement import (
     node_transport_state,
 )
 from netbbs.link.events import ChannelMessage as LinkChannelMessage
-from netbbs.link.events import event_content_id
 from netbbs.link.node_identity import NodeIdentity
 from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
 from netbbs.link.protocol import (
@@ -208,22 +207,27 @@ def _accept_scrollback_snapshot(
     return channel, messages
 
 
-#: How many content IDs of channel lines already shown live a bridge
-#: remembers (issue #860), so the signed event arriving later is not shown a
-#: second time. Live delivery and its async catch-up are minutes apart at
-#: most, so this only needs to outlast one sync interval of chat.
+#: How many channel lines already shown live a bridge remembers (issue
+#: #860), so the signed event arriving later is not shown a second time.
+#: Live delivery and its async catch-up are minutes apart at most, so this
+#: only needs to outlast one sync interval of chat.
 _MAX_SHOWN_LIVE = 1024
 
+ShownKey = tuple[str, str, str, str]
 
-def _queued_content_id(db: Database, message_id: int) -> str | None:
-    """The content ID of the `channel_message` event queued for a local
-    line, if one was (`queue_channel_message_if_linked`)."""
-    row = db.connection.execute(
-        "SELECT link_event_json FROM channel_messages WHERE id = ?", (message_id,)
-    ).fetchone()
-    if row is None or row["link_event_json"] is None:
-        return None
-    return event_content_id(json.loads(row["link_event_json"])["envelope"])
+
+def shown_key(author_node: str, user_id: str, created_at: str, body: str) -> ShownKey:
+    """What a channel line *is*, for showing it once (issue #860): its
+    author's home node, the author's local user id, when it was written and
+    what it says. Derived here from what was received -- never a key the
+    sender names -- the same way for a live frame and for the signed event:
+    the sending node builds both from one `channel_messages` row
+    (`queue_channel_message_if_linked`: `local_user_id` and the frame's
+    `user_id` are its `author_label`, `created_at` and `body` the row's).
+    A live line is attributed to its session peer, or to the node the
+    channel's origin names, so a peer can only ever mark its own callers'
+    lines as shown, and an origin only lines it would show anyway."""
+    return (author_node, user_id, created_at, body)
 
 
 def _live_author_allowed(db: Database, node_fingerprint: str, user_id: str, *, relayed: bool) -> bool:
@@ -233,11 +237,16 @@ def _live_author_allowed(db: Database, node_fingerprint: str, user_id: str, *, r
     allowed -- and their node may publish here. For the session's own peer
     that is the real-time check already passed; for a node the origin relays
     for, which this node may never have met, it is the `EVENTS` rule the
-    async copy of the same line meets, so the two never disagree."""
+    async copy of the same line meets, so the two never disagree.
+
+    Decided before anything is written: a fingerprint the origin names is
+    remote input, and an unregistered subject is probationary, which `EVENTS`
+    refuses -- so a refused name leaves no trust-subject row behind (review
+    of #1028). Registered only once allowed, like any node first seen."""
     if relayed:
-        ensure_node_subject(db, node_fingerprint)
         if not decide_node_action(db, node_fingerprint, LinkPolicyAction.EVENTS).allowed:
             return False
+        ensure_node_subject(db, node_fingerprint)
     return decide_user_authorship(db, node_fingerprint, user_id).allowed
 
 
@@ -286,7 +295,7 @@ class LiveChannelBridge:
         self._peer_capable = peer_capable or (lambda fingerprint: False)
         # Content IDs of channel lines already shown live here, oldest first,
         # so the signed event that follows is not shown again.
-        self._shown_live: OrderedDict[str, None] = OrderedDict()
+        self._shown_live: OrderedDict[ShownKey, None] = OrderedDict()
         # channel_id -> {peer_fingerprint: session}
         self._subscribers: dict[str, dict[str, LinkRealtimeSession]] = {}
         self._watchers: set[asyncio.Task] = set()
@@ -582,11 +591,11 @@ class LiveChannelBridge:
         if not subscribers:
             del self._subscribers[channel_id]
 
-    def _remember_shown(self, content_id: str) -> bool:
+    def _remember_shown(self, key: ShownKey) -> bool:
         """Record a line as shown here; False if it already was."""
-        if content_id in self._shown_live:
+        if key in self._shown_live:
             return False
-        self._shown_live[content_id] = None
+        self._shown_live[key] = None
         while len(self._shown_live) > _MAX_SHOWN_LIVE:
             self._shown_live.popitem(last=False)
         return True
@@ -616,8 +625,11 @@ class LiveChannelBridge:
             relayed=author_node != session.remote_fingerprint,
         ):
             return  # Refused by this node's policy: not shown, and not passed on.
-        content_id = payload.get("content_id")
-        if content_id is not None and not self._remember_shown(content_id):
+        # A `content_id` an older sender of this capability adds is accepted
+        # and ignored: it is unverified, so nothing is keyed on it.
+        if not self._remember_shown(
+            shown_key(author_node, payload["user_id"], payload["created_at"], payload["body"])
+        ):
             return
         node_label = (await self._lane.run(identity_for_fingerprint, author_node)).label
         message = LocalChannelMessage(
@@ -629,7 +641,6 @@ class LiveChannelBridge:
             # render the friendly label by default.
             author_fingerprint=author_node,
             body=payload["body"], created_at=payload["created_at"],
-            link_content_id=content_id,
         )
         await self._hub.broadcast(channel.name, message)
         if origin == own:
@@ -647,8 +658,7 @@ class LiveChannelBridge:
         payload = frame.payload
         relayed = build_channel_message_frame(
             payload["channel_id"], payload["user_id"], payload["display_label"],
-            payload["body"], payload["created_at"],
-            content_id=payload.get("content_id"), author_node_fingerprint=author_node,
+            payload["body"], payload["created_at"], author_node_fingerprint=author_node,
         )
         for session in await self._live_subscribers(channel):
             if session.remote_fingerprint == author_node or not self._peer_capable(session.remote_fingerprint):
@@ -659,16 +669,20 @@ class LiveChannelBridge:
                 pass
 
     async def on_carried_message_materialized(
-        self, channel_id: str, content_id: str, message: LocalChannelMessage
+        self, content_id: str, payload: dict, message: LocalChannelMessage
     ) -> None:
         """Show a `channel_message` that arrived by async sync to the
         callers already in its channel (issue #860), unless it was shown
-        live already. `LinkNode.on_channel_message_materialized` points here.
-        Hidden content (a quarantined or blocked author) is not shown, the
-        same as in scrollback."""
-        if not self._remember_shown(content_id):
+        live already. `payload` is the verified signed event's payload.
+        `LinkNode.on_channel_message_materialized` points here. Hidden
+        content (a quarantined or blocked author) is not shown, the same as
+        in scrollback."""
+        author = payload["author"]
+        if not self._remember_shown(shown_key(
+            author["home_node_fingerprint"], author["local_user_id"], payload["created_at"], payload["body"],
+        )):
             return
-        channel = await self._lane.run(get_channel_by_channel_id, channel_id)
+        channel = await self._lane.run(get_channel_by_channel_id, payload["channel_id"])
         if channel is None or not await self._lane.run(link_content_visible, content_id):
             return
         await self._hub.broadcast(channel.name, message)
@@ -828,16 +842,15 @@ class LiveChannelBridge:
                 sessions.append(upstream)
         if not sessions:
             return
-        content_id = await self._lane.run(_queued_content_id, message.id) if message.id > 0 else None
-        if content_id is not None:
-            self._remember_shown(content_id)
+        # This node's own line, should its signed event ever come back by sync.
+        self._remember_shown(shown_key(
+            self._registry.own_fingerprint, message.author_label, message.created_at, message.body or "",
+        ))
+        frame = build_channel_message_frame(
+            channel.channel_id, message.author_label, message.author_label,
+            message.body or "", message.created_at,
+        )
         for session in sessions:
-            capable = content_id is not None and self._peer_capable(session.remote_fingerprint)
-            frame = build_channel_message_frame(
-                channel.channel_id, message.author_label, message.author_label,
-                message.body or "", message.created_at,
-                content_id=content_id if capable else None,
-            )
             try:
                 await session.send(frame)
             except LinkTransportError:

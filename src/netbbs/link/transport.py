@@ -598,7 +598,7 @@ async def persist_accepted_events(
                 # Issue #860: callers in the channel see it now, not on rejoin.
                 try:
                     await node.on_channel_message_materialized(
-                        envelope["envelope"]["payload"]["channel_id"], content_id, projected,
+                        content_id, envelope["envelope"]["payload"], projected,
                     )
                 except Exception:  # Live display must never cost the persist.
                     _logger.exception("could not show a carried channel message live")

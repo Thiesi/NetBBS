@@ -396,11 +396,11 @@ would refuse a request that carries it."""
 
 CHANNEL_RELAY_CAPABILITY = "channel_relay"
 """Issue #860: this node understands a live `channel_message` frame's
-optional `author_node_fingerprint` and `content_id`. A channel's origin
-relays a subscriber's live line to its other subscribers with the first, and
-any sender adds the second so a receiver shows a line once even when its
-signed event arrives later. A node without it would refuse those fields as a
-malformed frame, so they are only ever sent to a peer that advertises this."""
+optional `author_node_fingerprint`, with which a channel's origin relays a
+subscriber's live line to its other subscribers. A node without it would
+refuse the field as a malformed frame, so it is only ever sent to a peer that
+advertises this. The frame may also carry a `content_id`; it is accepted for
+compatibility and ignored, since nothing keys on an unverified id."""
 
 LINK_CAPABILITIES: tuple[str, ...] = (
     INVENTORY_NOT_CARRIED_CAPABILITY, INVENTORY_PAGES_CAPABILITY, CHANNEL_RELAY_CAPABILITY,

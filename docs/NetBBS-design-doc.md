@@ -5016,22 +5016,27 @@ Live lines flow both ways over the one session a subscriber holds to the
 channel's origin (issue #860). A subscriber sends its callers' lines up that
 session, and the origin shows them to its own callers and relays them to its
 other live subscribers, so a Linked channel is one room live. The relayed frame
-names the author's node in an optional `author_node_fingerprint`, and any
-sender may add the line's signed-event `content_id`. A receiver accepts
+names the author's node in an optional `author_node_fingerprint`. A receiver accepts
 `author_node_fingerprint` only from the channel's origin; anyone else naming
 another node is a protocol strike. A relayed line meets the same policy as its
 signed event: the author's node must be one allowed to publish here (`EVENTS`),
 and the caller must not be quarantined or blocked. A node that has not
 established the author's node sees the line neither live nor by sync. Older
-nodes refuse unknown frame keys, so the optional keys go only to peers
-advertising the `channel_relay` capability. An older subscriber gets relayed
+nodes refuse unknown frame keys, so that key goes only to peers advertising the
+`channel_relay` capability. A frame's optional `content_id` is accepted and
+ignored: it is the sender's unverified claim. An older subscriber gets relayed
 lines through async catch-up instead; an older origin still shows a
 subscriber's plain frame to its own callers.
 
 A line that arrives by async sync is shown at once to callers already in its
-channel, not only on their next join. The bridge remembers the content IDs it
-has shown live (bounded), so the signed event that follows a live line is not
-shown twice.
+channel, not only on their next join. The bridge remembers the lines it has
+shown (bounded), so the signed event that follows a live line is not shown
+twice. A line is keyed on what it is -- author's home node, author's local user
+id, `created_at` and body -- derived locally the same way from the live frame
+(author node: the session peer, or the node the origin names) and from the
+signed event's verified payload; the sender builds both from one stored row. A
+peer therefore can only mark its own callers' lines as shown, never suppress
+another node's line by claiming its id.
 
 Presence is leased, scoped to subscribed linked channels, and advisory. A
 snapshot establishes current state after subscription; deltas update it.

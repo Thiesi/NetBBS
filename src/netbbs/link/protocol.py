@@ -2116,8 +2116,8 @@ class LinkNode:
     # peer taking this node's own content. Memory only; see `PeerExchange`.
     peer_exchange: dict[str, PeerExchange] = field(default_factory=dict)
     # Issue #860: told about each carried `channel_message` once it is
-    # materialized, so callers already in the channel see it without
-    # rejoining. Set by `netbbs.__main__` to the live-channel bridge; None in
+    # materialized -- (content_id, verified payload, stored line) -- so
+    # callers already in the channel see it without rejoining. Set by `netbbs.__main__` to the live-channel bridge; None in
     # a node without one.
     on_channel_message_materialized: (
         Callable[[str, str, Any], Awaitable[None]] | None
