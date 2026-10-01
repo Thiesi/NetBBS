@@ -5306,8 +5306,9 @@ them, per object.
 signer has since marked compromised, is not re-checked by being kept; it was
 accepted when that key was current. When the node learns the compromise --
 from the signer's own revoke or hello, or from a carried chain -- it looks
-through what it stores of the inventory-carried kinds for copies that verify
-under that key and under none the signer still stands behind, once per newly
+through what it stores of the inventory-carried kinds, among the copies that
+name that signer as author or origin, for those that verify under that key and
+under none the signer still stands behind, once per newly
 compromised key, and marks them stale (`link_events.stale_signer`). A stale
 copy is neither declared in inventory nor served, so the next exchange asks
 for it again. The signer re-signed its content in its compromise response
@@ -14703,10 +14704,23 @@ signer whose content the requester only declares, when that signer has marked a
 key compromised, since a requester holding a stale copy is served nothing of
 that signer's (§8.11).
 
-**Decision 3 — bounded.** Each newly compromised key costs one look through the
-stored events of the kinds inventory carries, once per process; a stale mark is
-stored, so a restart does not forget it. Mail, its acknowledgements and key
-transitions travel outside inventory and are left as they are.
+**Decision 3 — bounded.** An identity's chain is looked at again only when it
+has changed since the sweep last saw it, and a hello or introduction looks only
+at the identity it changed, so an ordinary hello verifies nothing. Each newly
+compromised key costs one look through the stored events of the kinds inventory
+carries, once per process; a stale mark is stored, so a restart does not forget
+it. Mail, its acknowledgements and key transitions travel outside inventory and
+are left as they are.
+
+**Decision 4 — only an event's own signer speaks for it.** A chain is any
+root's to write, and nothing stops a node from authorizing another node's
+public key as its own and then declaring it compromised. A copy is therefore
+tested only against the compromised keys of the identity it names as its
+signer (author, origin), never against another identity's; such a claim
+affects nothing but the claiming node's own content. Rejecting a chain that
+claims a key another identity already holds was considered and not done: the
+receiver cannot know every identity's keys, so the rule could not be enforced
+consistently, and attributing by signer already makes the claim harmless.
 
 ### SFTP over the SSH transport — declined
 

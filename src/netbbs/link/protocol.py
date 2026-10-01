@@ -2247,6 +2247,9 @@ class LinkNode:
     # (signer, key) pairs `sweep_compromised_copies` has already looked for:
     # each newly compromised key costs one pass over the stored events, once.
     compromise_swept: set[tuple[str, str]] = field(default_factory=set)
+    # Per identity, (chain length, last transition's content ID) as last
+    # looked at by the sweep, so an unchanged chain is never verified again.
+    _chain_seen: dict[str, tuple[int, str | None]] = field(default_factory=dict, repr=False)
     # Changes the store has yet to record, drained by
     # `netbbs.link.transport.persist_stale_copy_changes`: copies newly found
     # stale, and fresh copies that replaced stale ones.
@@ -2441,7 +2444,7 @@ class LinkNode:
         self.peer_directory.admit(record)
         # Issue #672: a hello carries the whole chain, so it is often how a
         # compromise arrives, ahead of the revoke the same peer then pushes.
-        self.sweep_compromised_copies()
+        self.sweep_compromised_copies(only=claimed_fingerprint)
         return record
 
     def _merge_known_chain(self, existing: "PeerRecord", record: "PeerRecord") -> "PeerRecord":
@@ -2548,7 +2551,7 @@ class LinkNode:
             return None
         if not self.peer_directory.introduce(record, max_introduced=_MAX_INTRODUCED_IDENTITIES):
             return None
-        self.sweep_compromised_copies()  # issue #672, as in handle_hello
+        self.sweep_compromised_copies(only=record.fingerprint)  # issue #672, as in handle_hello
         return record
 
     def handle_events_tolerantly(
@@ -2821,7 +2824,7 @@ class LinkNode:
             self.sweep_compromised_copies()
         return changed
 
-    def sweep_compromised_copies(self) -> int:
+    def sweep_compromised_copies(self, only: str | None = None) -> int:
         """Mark stale every stored copy that verifies only under a key its
         signer has marked compromised (issue #672). Returns how many.
 
@@ -2834,24 +2837,39 @@ class LinkNode:
         chain a carrier attaches (issue #914) -- so the fresh copies travel
         through any chain of carriers with no change on the wire.
 
-        Bounded: each newly compromised key is looked for once, over the
-        stored events inventory carries. The materialized posts, lines and
+        Bounded: an identity's chain is looked at again only when it has
+        changed since last time (`only` narrows the look to the one identity
+        a hello or introduction just changed), and each newly compromised key
+        is looked for once, over the stored events inventory carries, and only
+        in events that name that identity as their signer. The materialized posts, lines and
         files stay as they are; only the signed copy is in question. This
         node's own content is never in `events` and so never swept.
         """
         own = self.identity.fingerprint
         identities = {**self.introduced, **self.peers}
-        found = 0
-        for fingerprint, record in identities.items():
+        names = identities if only is None else {only: identities[only]} if only in identities else {}
+        newly: dict[str, list[nacl.signing.VerifyKey]] = {}
+        acceptable: dict[str, list[nacl.signing.VerifyKey]] = {}
+        for fingerprint, record in names.items():
             if fingerprint == own:
+                continue
+            # Review of #1034: what was seen last time is checked before any
+            # signature is, so a hello that changes nothing costs nothing for
+            # this or any other identity.
+            transitions = record.transitions
+            seen = (len(transitions), transitions[-1].content_id if transitions else None)
+            if self._chain_seen.get(fingerprint) == seen:
+                continue
+            self._chain_seen[fingerprint] = seen
+            if not any(t.payload.get("compromised") is True for t in transitions):
                 continue
             try:
                 history = operational_key_history(
-                    record.transitions, root_verify_key=record.root_verify_key,
+                    transitions, root_verify_key=record.root_verify_key,
                     subject_fingerprint=fingerprint, purpose="signing",
                 )
                 acceptable_b64 = verifying_operational_keys(
-                    record.transitions, root_verify_key=record.root_verify_key,
+                    transitions, root_verify_key=record.root_verify_key,
                     subject_fingerprint=fingerprint, purpose="signing",
                 )
             except Exception:  # noqa: BLE001 -- a chain that does not resolve has nothing to sweep
@@ -2860,27 +2878,41 @@ class LinkNode:
                         if r.status == "compromised" and (fingerprint, r.key_b64) not in self.compromise_swept]
             if not new_keys:
                 continue
-            compromised = _verify_keys(new_keys)
-            acceptable = _verify_keys(acceptable_b64)
-            for content_id, raw in list(self.events.items()):
-                if content_id in self.stale_copies:
+            self.compromise_swept.update((fingerprint, key) for key in new_keys)
+            newly[fingerprint] = _verify_keys(new_keys)
+            acceptable[fingerprint] = _verify_keys(acceptable_b64)
+        if not newly:
+            return 0
+        found = 0
+        for content_id, raw in list(self.events.items()):
+            if content_id in self.stale_copies:
+                continue
+            try:
+                if raw["envelope"]["object_type"] not in REFETCHABLE_OBJECT_TYPES:
                     continue
-                try:
-                    if raw["envelope"]["object_type"] not in REFETCHABLE_OBJECT_TYPES:
-                        continue
-                    message = canonical_bytes(raw["envelope"])
-                    signature = base64.b64decode(raw["signature"])
-                except Exception:  # noqa: BLE001 -- unvalidated input already on file
+                # Review of #1034: only the event's own signer's keys are
+                # tried. A chain is any root's to write, and nothing stops one
+                # node authorizing another's public key and then calling it
+                # compromised; tested against every identity, that would have
+                # marked the other node's content stale. Its own signer's chain
+                # is the only one that can speak for it.
+                signers = [fp for fp in self._signers_of(raw) if fp in newly]
+                if not signers:
                     continue
-                if not any(verify_signature(key, message, signature) for key in compromised):
+                message = canonical_bytes(raw["envelope"])
+                signature = base64.b64decode(raw["signature"])
+            except Exception:  # noqa: BLE001 -- unvalidated input already on file
+                continue
+            for fingerprint in signers:
+                if not any(verify_signature(key, message, signature) for key in newly[fingerprint]):
                     continue
-                if any(verify_signature(key, message, signature) for key in acceptable):
+                if any(verify_signature(key, message, signature) for key in acceptable[fingerprint]):
                     continue
                 self.known_event_ids.discard(content_id)
                 self.stale_copies[content_id] = fingerprint
                 self.stale_marks_pending[content_id] = fingerprint
                 found += 1
-            self.compromise_swept.update((fingerprint, key) for key in new_keys)
+                break
         return found
 
     def _take_fresh_copy(self, raw: dict) -> bool:
@@ -3902,7 +3934,7 @@ class LinkNode:
                 if transition.payload.get("compromised") is True:
                     # Issue #672: before the next event in this push, which
                     # may be a re-signed copy of something now stale.
-                    self.sweep_compromised_copies()
+                    self.sweep_compromised_copies(only=sender_fingerprint)
 
             elif object_type == BOARD_GENESIS_OBJECT_TYPE:
                 genesis = BoardGenesis.from_dict(raw)
