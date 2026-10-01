@@ -78,6 +78,7 @@ def test_naming_renaming_and_clearing_a_level(db, sysop):
         (300, "Ghost", "0 to 255"),
         (10, "x" * 13, "at most 12"),
         (10, "42", "needs a letter"),
+        (10, "#1", "needs a letter"),
         (20, "member", "Level 10 is already called Member"),
         (20, "sysop", "Level 255 is already called SysOp"),
     ],

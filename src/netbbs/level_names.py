@@ -61,7 +61,7 @@ def set_level_name(db: Database, level: int, name: str | None, *, changed_by: Us
     if cleaned:
         if len(cleaned) > MAX_LEVEL_NAME_LENGTH:
             raise LevelNameError(f"A level name is at most {MAX_LEVEL_NAME_LENGTH} characters.")
-        if is_ascii_number(cleaned):
+        if not any(char.isalpha() for char in cleaned):
             raise LevelNameError("A level name needs a letter, so it can't be mistaken for a level.")
         taken = next((other for other, other_name in names.items()
                       if other != level and other_name.casefold() == cleaned.casefold()), None)
