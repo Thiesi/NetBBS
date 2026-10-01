@@ -388,7 +388,9 @@ async def rejudge_opaque_events(
     peer that sent it, and is persisted like any accepted event. One that
     fails its checks is dropped; one that waits for something this node does
     not have yet (its signer, what it builds on) stays kept for the next
-    start, or until it expires. Returns how many were accepted."""
+    start, or until it expires. One the checks pass over without an error
+    (a setting from a board's former origin) is dropped too. Returns how
+    many were accepted."""
     taken = 0
     for content_id, sender, raw in await lane.run(opaque_events_to_rejudge, KNOWN_EVENT_OBJECT_TYPES):
         try:
@@ -410,8 +412,10 @@ async def rejudge_opaque_events(
                 max_remote_files_per_area=max_remote_files_per_area, enforce_trust_policy=enforce_trust_policy,
             )
             taken += len(accepted)
-        if content_id in node.known_event_ids:
-            await lane.run(forget_opaque_event, content_id)
+        # Taken now, or passed over without an error (a setting signed by a
+        # board's former origin, say): either way there is nothing left to
+        # wait for.
+        await lane.run(forget_opaque_event, content_id)
     if taken:
         _logger.info("Link: %d kept event(s) of a type this node now understands were taken in", taken)
     return taken

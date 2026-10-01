@@ -979,7 +979,9 @@ def store_opaque_event(
             (content_id, sender_fingerprint, object_type, board_id, envelope_json, received_at)
             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(content_id) DO NOTHING""",
         (content_id, sender_fingerprint, object_type, board_id if isinstance(board_id, str) else None,
-         json.dumps(envelope), now),
+         # Compact, as measured on receipt: what is written stays within the
+         # bound `OPAQUE_EVENT_MAX_BYTES` checked there.
+         json.dumps(envelope, separators=(",", ":")), now),
     )
     db.connection.execute(
         """DELETE FROM opaque_events WHERE sender_fingerprint = ? AND content_id NOT IN (

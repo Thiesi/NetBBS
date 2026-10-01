@@ -4267,9 +4267,10 @@ has verified (`opaque_events`).
   what it could not verify.
 - **After an update.** At startup, each kept event whose type the node now
   understands goes through the normal checks as if just received from the
-  peer that sent it: valid ones are accepted and projected, invalid ones
-  dropped, and ones waiting for something the node lacks (their signer, what
-  they build on) kept for the next start.
+  peer that sent it: valid ones are accepted and projected, invalid ones and
+  ones the checks pass over (a setting from a board's former origin) dropped,
+  and ones waiting for something the node lacks (their signer, what they
+  build on) kept for the next start.
 
 A new event type therefore travels through nodes that do not understand it
 yet, and takes effect on each of them once it updates.

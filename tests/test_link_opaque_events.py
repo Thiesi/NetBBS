@@ -229,3 +229,38 @@ def test_known_types_are_exactly_the_types_handle_events_handles():
     import netbbs.link.protocol as protocol
 
     assert {getattr(protocol, name) for name in handled} == set(KNOWN_EVENT_OBJECT_TYPES)
+
+
+def test_at_startup_a_kept_event_the_checks_pass_over_is_dropped(tmp_path, db, clock):  # noqa: F811
+    """A setting signed by a node that is not the board's origin is skipped
+    without an error on receipt; kept from an older build, it must not stay
+    to be re-judged at every start (review of PR #1026)."""
+    alice, bob, genesis = _setup(tmp_path, clock)
+    mallory = spawn_node(tmp_path, "mallory")
+    bob.handle_hello(_hello_bytes(LinkNode(identity=mallory.identity), clock=clock))
+    materialize_carried_board(db, genesis)
+    stale = build_board_posting(
+        signing_identity=mallory.identity.signing_key, origin_fingerprint=mallory.fingerprint,
+        board_id=BOARD, posting="origin_only", created_at=clock.now_iso(),
+    )
+    store_opaque_event(db, sender_fingerprint=mallory.fingerprint, content_id=stale.content_id,
+                       object_type="board_posting", envelope=stale.to_dict())
+
+    lane = DatabaseLane(db.path)
+    try:
+        assert asyncio.run(rejudge_opaque_events(lane, bob, max_carried_boards=None)) == 0
+    finally:
+        lane.close()
+
+    assert db.connection.execute("SELECT COUNT(*) FROM opaque_events").fetchone()[0] == 0
+    alice.close()
+    mallory.close()
+
+
+def test_what_is_written_stays_within_the_size_checked_on_receipt(db):
+    raw = {"envelope": {"object_type": "x", "payload": {"a": [1, 2, 3], "b": "c"}}, "signature": "s"}
+    store_opaque_event(db, sender_fingerprint="p", content_id="c", object_type="x", envelope=raw)
+    import json
+
+    written = db.connection.execute("SELECT envelope_json FROM opaque_events").fetchone()[0]
+    assert written == json.dumps(raw, separators=(",", ":"))
