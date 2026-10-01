@@ -97,6 +97,8 @@ from netbbs.link.trust import (
     configure_trusted_reporter, get_effective_trust_state, list_trust_decision_audit,
     register_subject, set_trust_override,
 )
+from netbbs.link.events import build_board_post_edit
+from netbbs.link.equivocation import build_equivocation_evidence, subject_keys_from_record
 from netbbs.link.trust_wire import (
     SignedTrustObject,
     build_trust_pull_request,
@@ -1548,7 +1550,28 @@ def test_sybil_reporters_share_one_domain_vote_over_real_transport_and_restart(t
         (identity, LinkNode(identity=identity), _NodeDb(tmp_path, f"sybil-reporter-{number}"))
         for number, (identity, _domain) in enumerate(reporters, start=1)
     ]
-    subject = TrustSubject.node("reported-subject")
+    # A real node, and real proof that it equivocated (issue #1036: a
+    # self-verifying signal counts only when its evidence reproduces).
+    subject_identity = bootstrap_node_identity("reported-subject")
+    subject_node = LinkNode(identity=subject_identity)
+    subject = TrustSubject.node(subject_identity.fingerprint)
+    edits = [
+        build_board_post_edit(
+            signing_identity=subject_identity.signing_key,
+            author={"kind": "node_vouched_user", "home_node_fingerprint": subject_identity.fingerprint,
+                    "local_user_id": "nib"},
+            board_id="b" * 64, root_post_id="r" * 64, previous_event_id="h" * 64,
+            subject="Re", body=body, created_at="2026-08-14T10:00:00+00:00",
+        ).to_dict()
+        for body in ("one", "two")
+    ]
+    proof = build_equivocation_evidence(*edits)
+    subscriber_node.handle_hello(subject_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00",
+    ))
+    subject_keys = {subject_identity.fingerprint: subject_keys_from_record(
+        subscriber_node.known_identity(subject_identity.fingerprint)
+    )}
     now = "2026-08-14T12:00:00+00:00"
 
     for domain in ("domain-a", "domain-b"):
@@ -1582,7 +1605,7 @@ def test_sybil_reporters_share_one_domain_vote_over_real_transport_and_restart(t
             dimension=TrustDimension.IDENTITY_INTEGRITY,
             category="signed_equivocation",
             evidence_class="self_verifying",
-            evidence={"mode": "embedded", "data": {"proof": number}},
+            evidence=proof,
             observed_at="2026-08-14T10:00:00+00:00",
             issued_at="2026-08-14T11:00:00+00:00",
             expires_at="2026-08-15T11:00:00+00:00",
@@ -1615,7 +1638,9 @@ def test_sybil_reporters_share_one_domain_vote_over_real_transport_and_restart(t
                     SignedTrustObject.from_dict(item, issuer_verify_key=verify_key)
                     for item in raw
                 ]
-                await subscriber.lane.run(ingest_trust_objects, parsed, now_iso=now)
+                await subscriber.lane.run(
+                    ingest_trust_objects, parsed, now_iso=now, subject_keys=subject_keys,
+                )
         finally:
             await server.stop()
 

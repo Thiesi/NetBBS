@@ -518,11 +518,14 @@ def _active_evidence(
             "issuer_fingerprint": row["issuer_fingerprint"],
             "domain_id": row["domain_id"],
             "domain_weight": row["weight"],
+            # Issue #1036: whether this node reproduced the evidence itself.
+            # Only a verified self-verifying signal counts (see `remote_auto`).
+            "evidence_verified": row["evidence_verified_at"] is not None,
         }
         for row in db.connection.execute(
             """
             SELECT s.content_id, s.category, s.evidence_class, s.issuer_fingerprint,
-                   r.domain_id, d.weight
+                   r.domain_id, d.weight, s.evidence_verified_at
             FROM link_trust_signals AS s
             JOIN link_trust_reporters AS r ON r.fingerprint = s.issuer_fingerprint
             JOIN link_trust_reporter_scopes AS rs
@@ -678,10 +681,14 @@ def _recompute_dimension(
         if item["evidence_class"] == EvidenceClass.SELF_VERIFYING.value
         and item["category"] in IDENTITY_CATEGORIES
     ]
+    # A remote signal is self-verifying only if this node verified it (issue
+    # #1036): the label alone is the issuer's say-so, which §12.6 does not
+    # accept as proof.
     remote_auto = [
         item for item in remote
         if item["evidence_class"] == EvidenceClass.SELF_VERIFYING.value
         and item["category"] in IDENTITY_CATEGORIES
+        and item["evidence_verified"]
     ]
     remote_domains: dict[str, float] = {}
     for item in remote_auto:
@@ -807,8 +814,12 @@ def record_trust_signal(
     evidence: dict[str, object] | None = None,
     explanation: str | None = None,
     now_iso: str | None = None,
+    evidence_verified_at: str | None = None,
 ) -> bool:
-    """Persist one already-signature-verified signal; return False on replay."""
+    """Persist one already-signature-verified signal; return False on replay.
+
+    `evidence_verified_at` is when this node reproduced the signal's evidence
+    itself (issue #1036); a self-verifying signal counts only with it."""
     normalized_dimension = _dimension(dimension)
     normalized_evidence = _evidence_class(evidence_class)
     validate_category_evidence(normalized_dimension, category, normalized_evidence)
@@ -830,20 +841,84 @@ def record_trust_signal(
             INSERT OR IGNORE INTO link_trust_signals (
                 content_id, issuer_fingerprint, subject_id, dimension, category,
                 evidence_class, observed_at, issued_at, declared_expires_at,
-                effective_expires_at, received_at, evidence_json, explanation
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                effective_expires_at, received_at, evidence_json, explanation,
+                evidence_verified_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 content_id, issuer_fingerprint, subject.subject_id,
                 normalized_dimension.value, category, normalized_evidence.value,
                 observed_at, issued_at, expires_at, _iso(effective_expiry), now_value,
                 json.dumps(evidence, sort_keys=True, separators=(",", ":")) if evidence else None,
-                explanation,
+                explanation, evidence_verified_at,
             ),
         )
         if cursor.rowcount:
             _recompute_subject(db, subject, now_value, now, actor_user_id=None)
         return bool(cursor.rowcount)
+
+
+#: Unverified signals re-checked per sync pass (issue #1036): bounded, since
+#: they come from reporters and a node may hold many.
+MAX_SIGNALS_REVERIFIED_PER_PASS = 50
+
+
+def unverified_equivocation_signals(
+    db: Database, *, now_iso: str | None = None, limit: int = MAX_SIGNALS_REVERIFIED_PER_PASS,
+) -> list[tuple[str, str, dict]]:
+    """Active `signed_equivocation` signals about a node whose embedded
+    evidence this node has not reproduced yet: (content_id, node fingerprint,
+    evidence data). Re-checked when this node may have learned the subject's
+    keys since (issue #1036). Oldest first, at most `limit`."""
+    now_value, _ = _now(now_iso)
+    rows = db.connection.execute(
+        """
+        SELECT s.content_id, subj.node_fingerprint, s.evidence_json
+        FROM link_trust_signals AS s
+        JOIN link_trust_subjects AS subj ON subj.subject_id = s.subject_id
+        WHERE s.evidence_verified_at IS NULL AND s.revoked_at IS NULL
+          AND s.effective_expires_at > ? AND s.evidence_class = 'self_verifying'
+          AND s.category = 'signed_equivocation' AND subj.subject_kind = 'node'
+          AND s.evidence_json IS NOT NULL
+        ORDER BY s.received_at, s.content_id
+        LIMIT ?
+        """,
+        (now_value, limit),
+    ).fetchall()
+    result = []
+    for row in rows:
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(evidence, dict) and evidence.get("mode") == "embedded":
+            result.append((row["content_id"], row["node_fingerprint"], evidence.get("data")))
+    return result
+
+
+def mark_signal_evidence_verified(
+    db: Database, content_id: str, *, now_iso: str | None = None
+) -> bool:
+    """Record that this node reproduced a signal's evidence (issue #1036), so
+    it counts toward the two-domain threshold from now on. Like evidence
+    verified on arrival, it does not become this node's own observation:
+    independent domains still have to agree before a remote report quarantines
+    (design doc §12.6). Returns False if it was already verified or is
+    unknown."""
+    now_value, now = _now(now_iso)
+    with db.connection:
+        row = db.connection.execute(
+            "SELECT subject_id FROM link_trust_signals WHERE content_id = ? AND evidence_verified_at IS NULL",
+            (content_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        db.connection.execute(
+            "UPDATE link_trust_signals SET evidence_verified_at = ? WHERE content_id = ?",
+            (now_value, content_id),
+        )
+        _recompute_subject(db, _subject_from_id(db, row["subject_id"]), now_value, now, actor_user_id=None)
+    return True
 
 
 def revoke_trust_signal(

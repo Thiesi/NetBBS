@@ -3963,4 +3963,17 @@ MIGRATIONS = [
         CREATE INDEX idx_opaque_events_board ON opaque_events(board_id);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1036: `link_trust_signals.evidence_verified_at` -- when this node itself "
+            "reproduced a self-verifying signal's embedded evidence (design doc §12.6). Only a "
+            "verified self-verifying signal counts toward automatic policy; one this node could "
+            "not reproduce is kept for diagnostics and shown as unverified. NULL for every existing "
+            "row: nothing before this checked the evidence, so a signal that counted only on its "
+            "label stops counting until its evidence reproduces here."
+        ),
+        sql="""
+        ALTER TABLE link_trust_signals ADD COLUMN evidence_verified_at TEXT;
+        """,
+    ),
 ]

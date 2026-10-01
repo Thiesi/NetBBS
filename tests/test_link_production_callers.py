@@ -49,6 +49,9 @@ ALLOWED: dict[str, str] = {
     # still cannot issue a trust *signal*: when a node accuses another node is
     # the open design question, and everything below waits on it.
     "build_trust_signal": "#589",
+    # Issue #1036 built how equivocation evidence is reproduced; #589's
+    # automatic issuance is what builds it.
+    "build_equivocation_evidence": "#589",
     "activate_reproduced_digest_signal": "#589",
     "fetch_trust_evidence": "#589",
     "record_activity": "#589",

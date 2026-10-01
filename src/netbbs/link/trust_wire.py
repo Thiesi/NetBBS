@@ -14,11 +14,12 @@ import json
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 import nacl.signing
 
 from netbbs.identity.keys import Identity, verify_signature
+from netbbs.link.equivocation import SIGNED_EQUIVOCATION, SubjectKeys, reproduce_equivocation
 from netbbs.link.events import (
     NETBBS_PROTOCOL_VERSION,
     build_envelope,
@@ -517,8 +518,37 @@ def store_issued_trust_object(db: Database, obj: SignedTrustObject, *, issued_at
     _store_wire_object(db, obj, issued_at)
 
 
+def evidence_reproduces(
+    payload: dict[str, Any], subject: TrustSubject, subject_keys: Mapping[str, SubjectKeys] | None,
+) -> bool:
+    """Whether this node itself reproduces a signal's embedded evidence (issue
+    #1036, design doc §12.6).
+
+    Only `signed_equivocation` about a node can carry proof a receiver checks
+    on its own: two conflicting objects, both signed under keys this node
+    attributes to the subject. The other integrity categories assert something
+    a third party cannot reconstruct -- a revoked key's signature proves
+    nothing about who made it, nor does an invalid signature, and authority
+    depends on the observer's view of the chain -- so from a remote issuer
+    they never verify. Neither does a subject whose keys this node does not
+    know yet; such a signal is re-checked once it does.
+    """
+    if payload["evidence_class"] != EvidenceClass.SELF_VERIFYING.value:
+        return False
+    if payload["category"] != SIGNED_EQUIVOCATION or subject.kind != "node":
+        return False
+    evidence = payload["evidence"]
+    if evidence.get("mode") != "embedded":
+        return False
+    keys = (subject_keys or {}).get(subject.node_fingerprint)
+    if keys is None:
+        return False
+    return reproduce_equivocation(evidence.get("data"), subject_fingerprint=subject.node_fingerprint, keys=keys)
+
+
 def ingest_trust_objects(
-    db: Database, objects: Iterable[SignedTrustObject], *, now_iso: str | None = None
+    db: Database, objects: Iterable[SignedTrustObject], *, now_iso: str | None = None,
+    subject_keys: Mapping[str, SubjectKeys] | None = None,
 ) -> TrustIngestResult:
     """Admit verified objects from configured issuers; return accepted/replayed IDs.
 
@@ -527,6 +557,11 @@ def ingest_trust_objects(
     `TrustObjectOutOfScope`. A skipped object is not stored, so widening the
     reporter's grant later has to be able to reach it again, which is why
     `configure_trusted_reporter` resets that issuer's pull cursor.
+
+    `subject_keys` is what this node knows of the keys of the nodes the batch's
+    signals are about, by fingerprint. A self-verifying signal counts only if
+    its evidence reproduces against them (issue #1036); otherwise it is kept,
+    shown as unverified, and does not count.
     """
     now = now_iso or utc_now_iso()
     accepted: list[str] = []
@@ -587,12 +622,14 @@ def ingest_trust_objects(
                     evidence = payload["evidence"]
                     if evidence["mode"] == "embedded":
                         register_subject(db, subject, first_accepted_at=now, now_iso=now)
+                        verified = evidence_reproduces(payload, subject, subject_keys)
                         record_trust_signal(
                             db, content_id=obj.content_id, issuer_fingerprint=issuer, subject=subject,
                             dimension=payload["dimension"], category=payload["category"],
                             evidence_class=payload["evidence_class"], observed_at=payload["observed_at"],
                             issued_at=payload["issued_at"], expires_at=payload["expires_at"],
                             evidence=evidence, explanation=payload["explanation"], now_iso=now,
+                            evidence_verified_at=now if verified else None,
                         )
                 elif obj.object_type == TRUST_VOUCH_OBJECT_TYPE:
                     subject = _subject_from_dict(payload["subject"])

@@ -6679,10 +6679,33 @@ but remain under bounded audit retention. Digest-only evidence is not
 self-verifying until fetched, size-checked, hashed, parsed, and reproduced;
 failure to fetch is not evidence against the subject.
 
-Successfully reproduced self-verifying evidence becomes this receiver's own
-local observation. The remote signal's later expiry or revocation removes that
-issuer's support but does not un-verify the local observation; its recovery
-rule applies independently. Inactive signals and evidence are retained for 365
+A self-verifying signal counts only when this receiver reproduces its
+evidence itself (issue #1036). On Link v1 the one integrity violation a
+receiver can prove to itself is `signed_equivocation`: embedded evidence
+`{"kind": "signed_equivocation", "objects": [a, b]}` holding two different
+signed Link objects in the same slot of one append-only chain -- the same
+`previous_transition_id` of one subject's key-transition chain (signed by its
+root key), the same `(root_post_id, previous_event_id)` of a post's content
+chain (edit, moderator edit, tombstone), or the same `(board_id,
+previous_event_id)` of a board's lifecycle chain (origin transfer, closure) --
+both verifying under keys this receiver itself attributes to the subject node:
+its root key, or an operational signing key its chain has not called
+compromised. A compromised key's signature proves nothing about who made it.
+The other integrity categories (`revoked_key_use`, `invalid_authority`,
+`invalid_signature_delivery`) assert what a third party cannot reconstruct, so
+from a remote issuer they never verify. A signal that does not reproduce is
+kept, listed as unverified, and counts toward no quarantine threshold; like
+any claim, it still holds back graduation. One about a node this receiver does
+not know yet is re-checked, a bounded number per sync pass, once it does.
+
+Verified evidence counts toward the two-domain threshold; it does not become
+the receiver's own local observation by itself. A proof is a proof whoever
+delivers it, but independent domains still have to report it before a remote
+report quarantines, so one reporter -- and, since #589, one node's automatic
+issuance -- cannot quarantine a subject at every subscriber on its own. An
+honestly forked node (restored from an old backup, a cloned VM) is still
+quarantined once two domains have seen it, and its SysOp's remedy is the
+recovery rule of §12.9. Inactive signals and evidence are retained for 365
 days by default, unless an active decision or explicit legal/diagnostic hold
 still references them. Later pruning preserves the content digest and decision
 audit so historical enforcement remains explainable without unbounded blobs.
@@ -14624,6 +14647,30 @@ earlier transfer out of reach of a peer that missed it.
 **Decision 4 — no capability gating.** Every node is updated before origins
 set this (the maintainer's call); an older node would refuse the unknown
 event type (#1022).
+
+### Issue #1036 — self-verifying evidence is verified — decided
+
+`ingest_trust_objects` stored an embedded `self_verifying` signal and counted
+it on its label: a configured reporter in scope could quarantine a node,
+together with a second domain, with "evidence" that proved nothing.
+Normative description: §12.6.
+
+**Decision 1 — only signed equivocation reproduces.** It is the one violation
+whose evidence a receiver checks against its own record of the subject's keys,
+trusting nothing about the issuer. Revoked-key use, invalid authority and an
+invalid signature delivery stay observer claims when they come from elsewhere.
+
+**Decision 2 — unverified is kept, not refused.** The signal is stored and
+shown as unverified, so a SysOp sees what was claimed, and re-checked once the
+subject's keys are known. It counts toward no quarantine.
+
+**Decision 3 — verified evidence counts toward the threshold, and is not
+promoted to a local observation.** This supersedes the earlier §12.6 sentence
+that made reproduced evidence the receiver's own observation, written for the
+digest path. With automatic issuance (#589), promotion would let one issuing
+node quarantine its subject everywhere; the two-domain rule keeps the
+independence §12.7 is built on. Existing signals stop counting until their
+evidence reproduces here (migration 111; release note).
 
 ### Issue #914 — a compromise reaching a node that knows the signer only by introduction — decided
 
