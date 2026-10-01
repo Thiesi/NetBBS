@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config
-from netbbs.rendering import RESET, decode_banner_bytes
+from netbbs.rendering import RESET, decode_banner_bytes_fitting
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ def new_account_banner_after_status(db: Database) -> NewAccountBannerAfterStatus
     )
 
 
-def load_new_account_banner_after(db: Database) -> str:
+def load_new_account_banner_after(db: Database, *, max_width: int | None = None) -> str:
     """Resolves the banner to show once self-service registration
     completes successfully (either outcome -- see module docstring): the
     SysOp's custom file if enabled and usable, or `""` (no banner --
@@ -124,4 +124,10 @@ def load_new_account_banner_after(db: Database) -> str:
     # the end matters here specifically, unlike a truly final screen --
     # the real success/pending-approval message follows immediately and
     # must never inherit color state left open by the banner's own art.
-    return decode_banner_bytes(data) + RESET
+    text = decode_banner_bytes_fitting(data, max_width)
+    if text is None:
+        # Its SAUCE record says it was drawn wider than this caller's
+        # terminal (issue #929): wrapping every row would turn it to noise.
+        _logger.info("new account banner after at %s is wider than %d columns -- showing nothing", path, max_width)
+        return ""
+    return text + RESET

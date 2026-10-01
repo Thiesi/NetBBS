@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -29,6 +30,7 @@ from netbbs.rendering.charset import (
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.reflow import fills_last_column, wrap_terminal_text
 from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.ansi_art import ice_to_bright_background
 from netbbs.rendering.terminal_emulator import TerminalEmulator
 from netbbs.rendering.width import display_width
 
@@ -905,17 +907,39 @@ async def write_preformatted_line(session: Session, text: str) -> None:
     Art keeps the pictographs of CP437's control range (☺ ♥ ♫ ►, issue #929):
     a CP437 terminal gets the byte that draws each one, where ordinary text
     would get a printable substitute.
+
+    iCE colours (blink meaning a bright background) are made explicit
+    (`ice_to_bright_background`). CTerm, SyncTERM's terminal, ignores the
+    bright backgrounds 100-107 unless its DECSET mode 33 is on, so a CP437
+    terminal gets the art between ``CSI ? 33 h`` and ``CSI ? 33 l``; other
+    terminals ignore the private mode.
     """
-    rows = preformatted_rows(session, text)
+    await write_art_text(session, preformatted_rows(session, text))
+
+
+async def write_art_text(session: Session, text: str) -> None:
+    """Send SysOp art that is already laid out for the screen (rows, or
+    cursor-positioned cells such as slot art, issue #929): iCE colours made
+    explicit, CTerm's bright backgrounds switched on around them for a CP437
+    terminal, and pictographs as the bytes that draw them there
+    (`Session.write_art`)."""
+    text = ice_to_bright_background(text)
+    if getattr(session, "output_charset", UTF8) == CP437 and _BRIGHT_BACKGROUND.search(text):
+        text = f"{_CTERM_BRIGHT_BACKGROUNDS_ON}{text}{_CTERM_BRIGHT_BACKGROUNDS_OFF}"
     write_art = getattr(session, "write_art", None)
     if write_art is None:
         # A stand-in session that is not a `Session` (tests): it gets what
         # the terminal would, as `write_art` gives a double of `write`.
         if getattr(session, "output_charset", UTF8) == CP437:
-            rows = art_glyphs_to_cp437_controls(rows)
-        await session.write(rows)
+            text = art_glyphs_to_cp437_controls(text)
+        await session.write(text)
         return
-    await write_art(rows)
+    await write_art(text)
+
+
+_BRIGHT_BACKGROUND = re.compile(r"\x1b\[(?:[0-9;]*;)?10[0-7](?:;[0-9;]*)?m")
+_CTERM_BRIGHT_BACKGROUNDS_ON = "\x1b[?33h"
+_CTERM_BRIGHT_BACKGROUNDS_OFF = "\x1b[?33l"
 
 
 async def write_laid_out_row(session: Session, row: str) -> None:

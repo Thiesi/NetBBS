@@ -1384,7 +1384,9 @@ def test_forward_does_not_send_upstream_after_its_reservation_expired():
         a = _RecordingSession("a")
         registry._sessions["a"] = a
         task = asyncio.create_task(relay._handle_request(a, "b", via="r2", request_id="req-9"))
-        await asyncio.sleep(0.25)  # the reservation times out while the dial is still in flight
+        # The reservation times out while the dial is still in flight:
+        # waited for, not slept for (issue #999).
+        assert await _wait_until(lambda: bool(a.sent) and a.sent[-1].type == "relay_reject", timeout=30.0)
         assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "timeout"
         gate.set()
         await task

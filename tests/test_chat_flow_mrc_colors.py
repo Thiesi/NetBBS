@@ -18,6 +18,7 @@ from netbbs.net.char_input import InputHistory
 from netbbs.net.mrc_color_preference import set_mrc_colors_enabled
 from netbbs.rendering.ansi import fg
 from netbbs.rendering.pipe_codes import cga_to_xterm
+from tests.eventually import eventually
 from tests.test_chat_flow_mrc import (  # noqa: F401 -- fixtures
     _QueueSession,
     _rig,
@@ -111,8 +112,9 @@ def test_mrc_subcommands_ask_the_hub_and_show_the_reply_to_the_asker_only(db, la
             # Three asks spent the caller's own burst (the same allowance a
             # chat line uses); the fourth waits for it to refill.
             session.inputs.put_nowait("/mrc send TOPICS")
-            await asyncio.sleep(0.2)
-            assert "(not sent to MRC: you're sending faster than MRC allows)" in _text(session)
+            assert await eventually(
+                lambda: "(not sent to MRC: you're sending faster than MRC allows)" in _text(session)
+            )
             await asyncio.sleep(1.1)
             session.inputs.put_nowait("/mrc send TOPICS")
             await rig.fake.wait_for(lambda p: p.body == "TOPICS")
