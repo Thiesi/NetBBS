@@ -248,3 +248,15 @@ def test_resuming_a_draft_keeps_the_files_credit(tmp_path):
     assert saved is not None
     _, sauce = split_sauce(saved)
     assert sauce is not None and sauce.credit == "Nib Logo by InkWell/Quill"
+
+
+def test_slot_art_gets_the_art_path_too():
+    # Step 4's slot art is drawn cell by cell; it needs iCE colours and the
+    # CP437 pictograph bytes just as banners do.
+    from netbbs.net.session import write_art_text
+
+    session = _Session(CP437)
+    asyncio.run(write_art_text(session, f"{ESC}[1;1H{ESC}[0;5;44m♥{ESC}[0m"))
+    sent = "".join(session.sent)
+    assert "\x03" in sent and "*" not in sent
+    assert f"{ESC}[0;104m" in sent and sent.startswith(f"{ESC}[?33h")

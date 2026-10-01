@@ -69,7 +69,13 @@ from netbbs.net.profile_flow import (
 )
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
-from netbbs.net.session import Session, physical_terminal_width, write_preformatted_line, write_prompt
+from netbbs.net.session import (
+    Session,
+    physical_terminal_width,
+    write_art_text,
+    write_preformatted_line,
+    write_prompt,
+)
 from netbbs.net.session_activity import activity, set_root_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
@@ -561,7 +567,7 @@ async def _draw_slot_main_menu(
         if "don't fit" in plan.reason:
             _log_slot_overflow(len(labels), art)
         return False
-    await session.write(plan.text)
+    await write_art_text(session, plan.text)
     await session.write(move_cursor(art.height + 1, 1))
     for line in extra_lines:
         await session.write_line(line)

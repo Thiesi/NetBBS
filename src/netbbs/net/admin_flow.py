@@ -562,7 +562,7 @@ from netbbs.net.resource_editor import (
     edit_resource_draft as _edit_resource_draft,
     text_field,
 )
-from netbbs.net.session import Session, post_body_width, write_preformatted_line, write_prompt
+from netbbs.net.session import Session, post_body_width, write_art_text, write_preformatted_line, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import (
@@ -13773,7 +13773,7 @@ async def _write_slot_art_preview(
             colored(f"Callers like this get the generated menu instead: {plan.reason}.", fg_color=WARNING_COLOR)
         )
         return
-    await session.write(plan.text)
+    await write_art_text(session, plan.text)
     await session.write(move_cursor(art.height + 1, 1))
 
 
