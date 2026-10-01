@@ -1306,6 +1306,26 @@ saves, and **Ctrl+X** quits.
 The welcome gallery ends with three quiet designs for clubs that don't want
 neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
 
+Art from scene tools such as PabloDraw or Moebius works as it is:
+
+- **SAUCE records** (the title, author and group a scene tool saves at the end
+  of the file) are not shown to callers. Each piece's status shows the credit,
+  the width the art was drawn for, and a warning if it was made for a font
+  other than the IBM PC one; such art is still shown with CP437's characters.
+  The editor writes a SAUCE record when it saves, keeping any credit the file
+  had.
+- **Art wider than a caller's screen** is not drawn for them when its SAUCE
+  record says how wide it is: the welcome banner falls back to the default,
+  the other pieces to no art. Without a record, NetBBS can't tell.
+- **Smileys, suits, notes and arrows** drawn with CP437's low characters (☺ ♥
+  ♫ ► ▲) reach every caller: as the original bytes on a classic terminal, as
+  the same symbols on a modern one, and as plain stand-ins in ASCII.
+- **iCE colours** (blink used as a bright background) show as bright
+  backgrounds everywhere, not as blinking text.
+- **Credit line:** on the welcome banner's screen, **Credit line** switches on
+  a line under your banner crediting the art from its SAUCE record, for
+  example `art: Nib Logo by InkWell/Quill`. It is off by default.
+
 Every caller gets text in the character set their terminal reads:
 
 - **Detection when they connect:**

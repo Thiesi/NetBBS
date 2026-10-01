@@ -173,3 +173,52 @@ def test_the_editor_saves_a_sauce_record_keeping_the_loaded_credits():
     assert sauce.file_size == len(body)
     _, fresh = split_sauce(_saved_bytes(buffer, None))
     assert fresh is not None and fresh.credit == ""
+
+
+# -- credits and the font warning in the console --------------------------
+
+
+def _section_text(section) -> str:
+    from netbbs.rendering.ansi import strip_ansi
+    from netbbs.rendering.detail import render_sections
+
+    blocks = render_sections([section], width=120)
+    return strip_ansi("\n".join("\n".join(block) if isinstance(block, list) else str(block) for block in blocks))
+
+
+def test_the_console_status_shows_credit_width_and_a_font_warning(db):
+    from netbbs.net.admin_flow import _banner_status_section
+    from netbbs.net.welcome_banner import welcome_banner_status
+
+    _enable(db, "welcome", ART + build_sauce(width=80, lines=1, title="Nib Logo", author="InkWell", font="IBM VGA 850"))
+    text = _section_text(_banner_status_section(welcome_banner_status(db), unicode_style=False, credit_line=False))
+    assert "Nib Logo by InkWell" in text
+    assert "80 columns" in text
+    assert "made for IBM VGA 850" in text
+    assert "Credit line" in text and "off" in text
+
+
+def test_art_without_sauce_shows_no_sauce_rows(db):
+    from netbbs.net.admin_flow import _banner_status_section
+    from netbbs.net.welcome_banner import welcome_banner_status
+
+    _enable(db, "welcome", ART)
+    text = _section_text(_banner_status_section(welcome_banner_status(db), unicode_style=False))
+    assert "Drawn for" not in text and "Art" not in text.split("File")[0]
+
+
+def test_the_optional_credit_line_under_the_welcome_banner(db):
+    from netbbs.net.welcome_banner import set_welcome_banner_credit_enabled
+
+    _enable(db, "welcome", ART + build_sauce(width=80, lines=1, title="Nib Logo", author="InkWell", group="Quill"))
+    assert "art: Nib Logo" not in load_welcome_banner(db, max_width=80)
+    set_welcome_banner_credit_enabled(db, True)
+    assert "art: Nib Logo by InkWell/Quill" in load_welcome_banner(db, max_width=80)
+
+
+def test_no_credit_line_without_a_credit(db):
+    from netbbs.net.welcome_banner import set_welcome_banner_credit_enabled
+
+    _enable(db, "welcome", ART + build_sauce(width=80, lines=1))
+    set_welcome_banner_credit_enabled(db, True)
+    assert "art:" not in load_welcome_banner(db, max_width=80)
