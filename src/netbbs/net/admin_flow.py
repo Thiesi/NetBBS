@@ -2496,6 +2496,13 @@ def _gate_columns(gate: Gate) -> list[str]:
     return [action, str(gate.opens_at), _gate_source(gate), ", ".join(also)]
 
 
+def _gate_description(gate: Gate) -> str:
+    """The table's columns as one line, for a terminal too narrow for the
+    table: `post at 10, from Community Market; age 18+`."""
+    action, level, source, also = _gate_columns(gate)
+    return f"{action} at {level}, {source}" + (f"; {also}" if also else "")
+
+
 def _gates_in_view(gates: list[Gate], level: int, view: str) -> list[Gate]:
     if view == "new":
         return [g for g in gates if g.off is None and g.opens_at == level]
@@ -2511,7 +2518,10 @@ async def _open_gate_resource(
     node_controls: NodeControls | None, link_context: LinkContext | None,
 ) -> None:
     """The board's, file area's, channel's or door's own detail screen, the
-    one the Content menu opens, so its levels can be changed from here."""
+    one the Content menu opens, so its levels can be changed from here. It
+    gets the same live services the Content menu hands it: the chat hub
+    that refuses renaming an occupied channel and moves callers out of a
+    deleted one, the door supervisor, the transfer grants."""
     from netbbs.doors.registry import list_doors
 
     what = _GATE_WORDS[gate.kind][1]
@@ -2520,15 +2530,26 @@ async def _open_gate_resource(
     if resource is None:
         _announce_line(session, colored("That no longer exists.", fg_color=MUTED_COLOR))
         return
+    controls = node_controls
     if what == "board":
         await _board_detail_screen(session, lane, actor, resource, link_context=link_context)
     elif what == "file area":
-        await _area_detail_screen(session, lane, actor, resource, link_context=link_context)
+        await _area_detail_screen(
+            session, lane, actor, resource, link_context=link_context,
+            transfers=controls.transfers if controls is not None else None,
+        )
     elif what == "channel":
-        mrc_bridge = node_controls.mrc_bridge if node_controls is not None else None
-        await _channel_detail_screen(session, lane, actor, resource, link_context=link_context, mrc_bridge=mrc_bridge)
+        await _channel_detail_screen(
+            session, lane, actor, resource, link_context=link_context,
+            mrc_bridge=controls.mrc_bridge if controls is not None else None,
+            chat_hub=controls.chat_hub if controls is not None else None,
+        )
     else:
-        await _door_detail_screen(session, lane, actor, resource)
+        await _door_detail_screen(
+            session, lane, actor, resource,
+            door_services=controls.door_services if controls is not None else None,
+            backup_identity_dir=controls.backup_identity_dir if controls is not None else None,
+        )
 
 
 async def _level_detail_screen(
@@ -2565,6 +2586,7 @@ async def _level_detail_screen(
             stable_id_of=_gate_stable_id,
             columns=_GATE_COLUMNS,
             column_values_of=_gate_columns,
+            description_of=_gate_description,
             title=f"Level {level}",
             empty_message=f"Nothing in this view of level {level}.",
             refresh=_load,
@@ -2601,7 +2623,7 @@ async def _levels_screen(
     async def _load() -> list[LadderStep]:
         return await lane.run(level_ladder)
 
-    async def _other_level() -> None:
+    async def _other_level() -> list[LadderStep] | None:
         await write_field_prompt(
             session, colored(f"Which level? (0-{SYSOP_LEVEL})", fg_color=MUTED_COLOR), hint=_EDIT_HINT
         )
@@ -2615,7 +2637,8 @@ async def _levels_screen(
         await _level_detail_screen(
             session, lane, actor, int(raw), node_controls=node_controls, link_context=link_context
         )
-        return None
+        # A level may have been changed on the way: count again.
+        return await _load()
 
     chrome = await _load_chrome(lane, actor)
     while True:
@@ -2625,6 +2648,9 @@ async def _levels_screen(
             stable_id_of=lambda step: step.level,
             columns=_LADDER_COLUMNS,
             column_values_of=lambda step: [str(step.users), _ladder_summary(step)],
+            description_of=lambda step: (
+                f"{step.users} user{'s' if step.users != 1 else ''}; opens {_ladder_summary(step)}"
+            ),
             title="Levels",
             empty_message="No levels in use.",
             refresh=_load,
