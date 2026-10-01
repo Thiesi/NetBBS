@@ -887,7 +887,13 @@ async def edit_resource_draft(
             try:
                 return await save(draft)
             except error_type as exc:
-                await session.write_line(colored(f"Could not save: {exc}", fg_color=MUTED_COLOR))
+                refusal = colored(f"Could not save: {exc}", fg_color=MUTED_COLOR)
+                if redraw_in_place:
+                    # Carried into the redraw, which clears the screen: written
+                    # here, the reason was wiped before it could be read.
+                    field_message = refusal
+                else:
+                    await session.write_line(refusal)
                 continue
 
         field_index = next((i for i, f in enumerate(fields) if f.hotkey.lower() == choice), None)
