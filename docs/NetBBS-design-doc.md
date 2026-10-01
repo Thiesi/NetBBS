@@ -1567,7 +1567,10 @@ states in the revoke it signs:
   objects again under the new key. A key retired routinely can be declared
   compromised later by a second revoke that says so. A node that knows the
   rotating node only by introduction learns the revoke from whoever carries
-  that node's content, beside the content (§8.11, issue #914).
+  that node's content, beside the content (§8.11, issue #914). A copy a node
+  already held when it learned the revoke, signed only by the compromised key,
+  is held as stale from then on: not declared, not served, and replaced in
+  place by the re-signed copy when a peer offers it (§8.11, issue #672).
 
 What counts as signed "while current" is decided per object family. A
 long-lived event is checked against the current key and then every key retired
@@ -5279,7 +5282,10 @@ as part of a chain, though. A carrier's inventory response names, under
 `key_chains`, the signing-key history of each node whose content it serves in
 that response, when that history holds more than the first authorization and
 is no longer than 64 transitions; at most 32 chains per response, never the
-carrier's own or the requester's (issue #914). The requester merges each into
+carrier's own or the requester's (issue #914). It also names the chain of
+whoever signed what the requester declares it holds, when that signer has
+marked a key compromised: a requester holding a stale copy is served nothing of
+that signer's, and would otherwise never hear (issue #672). The requester merges each into
 an identity it knows **by introduction only**, checked against the root key
 already on file. A direct peer's chain comes only from that peer; an identity
 the requester has not been introduced to is learned whole, by introduction.
@@ -5287,6 +5293,25 @@ Without this, a compromise never reached an introduced-only node: its bundle
 still held the compromised key as current, old-key copies verified and were
 accepted, and nothing failed to prompt a refresh. With it the same pull skips
 them, per object.
+
+**Stale copies.** A copy a node already holds, signed only by a key its
+signer has since marked compromised, is not re-checked by being kept; it was
+accepted when that key was current. When the node learns the compromise --
+from the signer's own revoke or hello, or from a carried chain -- it looks
+through what it stores of the inventory-carried kinds for copies that verify
+under that key and under none the signer still stands behind, once per newly
+compromised key, and marks them stale (`link_events.stale_signer`). A stale
+copy is neither declared in inventory nor served, so the next exchange asks
+for it again. The signer re-signed its content in its compromise response
+(§4.5); a content id covers the envelope and not the signature, so the
+re-signed copy has the same id and the same envelope. It replaces the stale
+copy in place -- the stored envelope, and a carried genesis on its board,
+channel or file area row -- and the projection built from that envelope is
+left as it is: the post, line or file stays visible throughout and is never
+doubled. Each hop learns the compromise in turn, so re-signed copies travel
+through any chain of carriers without a change on the wire (issue #672). A
+second stale copy offered meanwhile, by a carrier that has not heard yet, is
+dropped.
 
 A bundle on file can still be stale another way: after a rotation it no
 longer verifies what the new key signs. The requester knows which identity the
@@ -13678,9 +13703,9 @@ finishes a response that a stop interrupted.
 A copy that another node already holds is not reached. It stays accepted
 there, and a node that later pulls it from that carrier skips it *per
 object*, as it does a trust object signed by a superseded key: a stale copy
-must never end the response it arrives in. That node gets the object from its
-origin instead. Carrying re-signed copies onward to carriers is a propagation
-mechanism of its own, not built (issue #672).
+must never end the response it arrives in. A carrier that has learned the compromise holds such a copy as
+stale and asks for it again, so the re-signed copy reaches it and then the
+nodes behind it (§8.11 "Stale copies", issue #672).
 
 **Decision 4 — a rotation is saved before anything live changes.** It is also
 journaled, because the node is running. The new key is staged beside its
@@ -14646,6 +14671,34 @@ of at most 64 transitions; a chain holding only the first authorization is not
 sent. An ordinary response is unchanged, an older requester ignores the field,
 and an older carrier simply sends none. Longer chains fall back to the
 stale-bundle refresh.
+
+### Issue #672 — carriers holding copies signed by a compromised key — decided
+
+After a compromise rotation the origin re-signs its own content, but a re-signed
+object keeps its content id, and inventory diffs by content id: carriers kept
+serving the old-signed copies, and the re-signed ones never spread past the
+origin's own peers. Normative description: §8.11, "Stale copies".
+
+**Decision 1 — a node that learns a compromise treats what that key alone
+signed as missing** (the maintainer's choice). It stops declaring and serving
+those copies, keeps their projections, and takes the re-signed copy in place
+when the ordinary inventory exchange offers it. No change on the wire. Rejected:
+the origin pushing its re-signed events once to each peer, which reaches only
+its own peers and leaves every carrier further out, which already holds the old
+copy, as stale as before; and naming the signer in every inventory entry, which
+spreads through every hop but changes the inventory format of every event for a
+rare case.
+
+**Decision 2 — learned from any source.** A direct peer's revoke or hello, an
+introduction, or a chain a carrier sends. A carrier also sends the chain of a
+signer whose content the requester only declares, when that signer has marked a
+key compromised, since a requester holding a stale copy is served nothing of
+that signer's (§8.11).
+
+**Decision 3 — bounded.** Each newly compromised key costs one look through the
+stored events of the kinds inventory carries, once per process; a stale mark is
+stored, so a restart does not forget it. Mail, its acknowledgements and key
+transitions travel outside inventory and are left as they are.
 
 ### SFTP over the SSH transport — declined
 
