@@ -145,15 +145,15 @@
   function keyAt(text, col) {
     var row = /^(?:> |  )?\s*(\d{2})\.\s/.exec(text);
     if (row) return row[1];
+    // A numbered row drawn inside SysOp art (issue #929) starts after the
+    // art's own frame -- box-drawing or punctuation, no letters or digits --
+    // and the whole row picks it, its value column included.
+    var drawn = /^[^A-Za-z0-9\[]*?\s(\d{2})\.\s/.exec(text);
+    if (drawn) return drawn[1];
     var start = col, end = col;
     while (start > 0 && !(text[start - 1] === " " && text[start - 2] === " ")) start--;
     while (end < text.length && !(text[end] === " " && text[end + 1] === " ")) end++;
-    var run = text.slice(start, end);
-    // A numbered row drawn inside SysOp art starts after the art's own
-    // frame, not at the start of the line (issue #929).
-    var drawn = /(?:^|\s)(\d{2})\.\s/.exec(run);
-    if (drawn) return drawn[1];
-    var entry = /\[([^\]\s])\]/.exec(run);
+    var entry = /\[([^\]\s])\]/.exec(text.slice(start, end));
     return entry ? entry[1].toLowerCase() : null;
   }
 
