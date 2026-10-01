@@ -4253,6 +4253,31 @@ Unknown event types or unsupported versions may be stored and relayed opaquely,
 but must not be projected, displayed, or treated as authority by a node which
 cannot interpret them.
 
+**How a node keeps an unknown event type** (issue #1022). An event of a type
+the node does not understand is taken with the rest of the batch it came in,
+never refused for its type alone, and kept apart from the events the node
+has verified (`opaque_events`).
+
+- **What is checked.** Only its shape (a well-formed type name, a payload
+  object, a signature string) and its size, at most 64 KiB. Its signature
+  cannot be checked, because who must sign depends on the type.
+- **Bounds.** At most 500 per sending peer, that peer's oldest going first,
+  and none kept past 90 days. An event dropped by the bound is forgotten, so
+  it can be taken again later.
+- **Relay.** When its payload names a `board_id` this node carries, it is
+  declared and served in that board's inventory like any board event, so
+  peers pull it. Otherwise it is kept but not passed on. A node never pushes
+  what it could not verify.
+- **After an update.** At startup, each kept event whose type the node now
+  understands goes through the normal checks as if just received from the
+  peer that sent it: valid ones are accepted and projected, invalid ones and
+  ones the checks pass over (a setting from a board's former origin) dropped,
+  and ones waiting for something the node lacks (their signer, what they
+  build on) kept for the next start.
+
+A new event type therefore travels through nodes that do not understand it
+yet, and takes effect on each of them once it updates.
+
 Unknown fields within a known signed event must be preserved in the original
 signed representation. A node must not strip and reserialize them in a way
 which changes the signed bytes.

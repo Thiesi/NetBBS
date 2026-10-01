@@ -1608,21 +1608,23 @@ def test_handle_events_board_post_edit_is_idempotent_for_already_seen(tmp_path, 
     alice.close()
 
 
-def test_handle_events_rejects_an_unrecognized_object_type(tmp_path, clock):
+def test_handle_events_keeps_an_unrecognized_object_type_opaquely(tmp_path, clock):
+    """Issue #1022 (design doc §7.5): an unknown type used to refuse the whole
+    batch. It is now accepted as opaque -- kept and relayed, never projected
+    (tests/test_link_opaque_events.py covers the rest)."""
     alice = spawn_node(tmp_path, "alice")
     bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
 
     alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
     bob_node.handle_hello(alice_hello)
 
-    # board_post is a recognized type (design doc §9.1/9.2) --
-    # use a genuinely bogus one instead.
     fake_event = {
         "envelope": {"netbbs_protocol": 1, "object_type": "not_a_real_object_type", "payload": {}},
         "signature": "",
     }
-    with pytest.raises(LinkProtocolError):
-        bob_node.handle_events(alice.fingerprint, [fake_event])
+    accepted = bob_node.handle_events(alice.fingerprint, [fake_event])
+
+    assert len(accepted) == 1 and accepted[0] in bob_node.known_event_ids
 
     alice.close()
 

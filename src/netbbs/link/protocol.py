@@ -60,6 +60,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import secrets
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -1616,6 +1617,35 @@ def _event_resource(raw: dict) -> tuple[str, str] | None:
         if isinstance(value, str) and value:
             return kind, value
     return None
+
+
+# Issue #1022 (design doc §7.5): every event type `LinkNode.handle_events`
+# understands. Anything else is accepted *opaquely*: kept and relayed, never
+# projected, and judged properly once this node understands it
+# (`netbbs.link.transport.rejudge_opaque_events`). Kept in step with
+# `handle_events`' own branches by `tests/test_link_opaque_events.py`.
+KNOWN_EVENT_OBJECT_TYPES = frozenset({
+    KEY_TRANSITION_OBJECT_TYPE,
+    BOARD_GENESIS_OBJECT_TYPE,
+    BOARD_POST_OBJECT_TYPE,
+    BOARD_POST_EDIT_OBJECT_TYPE,
+    BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
+    BOARD_POST_TOMBSTONE_OBJECT_TYPE,
+    BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
+    BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
+    BOARD_CLOSURE_OBJECT_TYPE,
+    BOARD_POSTING_OBJECT_TYPE,
+    CHANNEL_GENESIS_OBJECT_TYPE,
+    CHANNEL_MESSAGE_OBJECT_TYPE,
+    FILE_AREA_GENESIS_OBJECT_TYPE,
+    FILE_DESCRIPTOR_OBJECT_TYPE,
+    LINK_MESSAGE_OBJECT_TYPE,
+    LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
+    LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
+})
+# The largest opaque event kept, as canonical-ish JSON.
+OPAQUE_EVENT_MAX_BYTES = 64 * 1024
+_OPAQUE_TYPE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 class MissingDependency(LinkProtocolError):
@@ -4301,6 +4331,36 @@ class LinkNode:
                 accepted.append(bounced.content_id)
 
             else:
-                raise LinkProtocolError(f"unrecognized event object_type: {object_type!r}")
+                # Issue #1022 (design doc §7.5): a type this node does not
+                # understand is kept and relayed, never projected, and is no
+                # reason to refuse the rest of what came with it.
+                opaque_id = self._accept_opaque(raw, object_type)
+                if opaque_id is not None:
+                    accepted.append(opaque_id)
 
         return accepted
+
+    def _accept_opaque(self, raw: dict, object_type: object) -> str | None:
+        """Take an event of a type this node does not understand (issue
+        #1022): only its shape and size are checked, since who must sign it
+        depends on the type. Returns its content id, or `None` if it is
+        already known. Persisting it, within the per-peer bounds, is
+        `netbbs.link.transport.persist_accepted_events`' job."""
+        if not isinstance(object_type, str) or not _OPAQUE_TYPE_RE.fullmatch(object_type):
+            raise LinkProtocolError(f"malformed event object_type: {object_type!r}")
+        if not isinstance(raw.get("signature"), str) or not isinstance(raw["envelope"].get("payload"), dict):
+            raise LinkProtocolError(f"malformed {object_type} event")
+        if len(json.dumps(raw, separators=(",", ":"))) > OPAQUE_EVENT_MAX_BYTES:
+            raise LinkProtocolError(
+                f"{object_type} event is larger than the {OPAQUE_EVENT_MAX_BYTES} bytes this node keeps "
+                "of an event type it does not understand"
+            )
+        try:
+            content_id = event_content_id(raw["envelope"])
+        except Exception as exc:  # noqa: BLE001 -- unvalidated input
+            raise LinkProtocolError(f"malformed {object_type} event: {exc}") from exc
+        if content_id in self.known_event_ids:
+            return None
+        self.known_event_ids.add(content_id)
+        self.events[content_id] = raw
+        return content_id

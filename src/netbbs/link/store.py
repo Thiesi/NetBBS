@@ -68,7 +68,7 @@ from netbbs.link.protocol import (
     MAX_INTRODUCED_IDENTITIES, MAX_INVENTORY_PAGES, InventoryRequest, LinkNode, PeerRecord, inventory_page,
 )
 from netbbs.storage.database import Database
-from netbbs.timeutil import utc_now_iso
+from netbbs.timeutil import parse_utc_iso, utc_iso, utc_now_iso
 
 
 def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
@@ -195,6 +195,16 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             board_id = own_accepted.payload["board_id"]
             node.board_origin[board_id] = own_accepted.payload["new_origin_fingerprint"]
             node.board_lifecycle_head[board_id] = own_accepted.content_id
+
+    # Issue #1022: kept opaque events are known, so a resend is not taken
+    # again -- except those of a type this build understands, which
+    # `rejudge_opaque_events` puts through the real checks at startup.
+    from netbbs.link.protocol import KNOWN_EVENT_OBJECT_TYPES
+
+    for row in db.connection.execute("SELECT content_id, object_type, envelope_json FROM opaque_events"):
+        if row["object_type"] not in KNOWN_EVENT_OBJECT_TYPES:
+            node.known_event_ids.add(row["content_id"])
+            node.events[row["content_id"]] = json.loads(row["envelope_json"])
 
     for row in db.connection.execute(
         "SELECT content_id, object_type, envelope_json FROM link_events ORDER BY received_at ASC"
@@ -946,6 +956,74 @@ def clear_deletion_record(db: Database, table: str, resource_id: str) -> None:
     db.connection.commit()
 
 
+# Issue #1022 (design doc §7.5): bounds on what this node keeps of event
+# types it does not understand, which it cannot verify.
+MAX_OPAQUE_EVENTS_PER_PEER = 500
+OPAQUE_EVENT_RETENTION_DAYS = 90
+
+
+def store_opaque_event(
+    db: Database, *, sender_fingerprint: str, content_id: str, object_type: str, envelope: dict,
+) -> bool:
+    """Keep one event of a type this node does not understand (issue #1022):
+    never projected, served in a carried board's inventory when its payload
+    names one, and re-judged at startup once the type is understood. Each
+    sending peer keeps at most `MAX_OPAQUE_EVENTS_PER_PEER`, its oldest going
+    first, and nothing is kept past `OPAQUE_EVENT_RETENTION_DAYS`. Returns
+    whether the event is kept."""
+    payload = envelope["envelope"].get("payload")
+    board_id = payload.get("board_id") if isinstance(payload, dict) else None
+    now = utc_now_iso()
+    db.connection.execute(
+        """INSERT INTO opaque_events
+            (content_id, sender_fingerprint, object_type, board_id, envelope_json, received_at)
+            VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(content_id) DO NOTHING""",
+        (content_id, sender_fingerprint, object_type, board_id if isinstance(board_id, str) else None,
+         # Compact, as measured on receipt: what is written stays within the
+         # bound `OPAQUE_EVENT_MAX_BYTES` checked there.
+         json.dumps(envelope, separators=(",", ":")), now),
+    )
+    db.connection.execute(
+        """DELETE FROM opaque_events WHERE sender_fingerprint = ? AND content_id NOT IN (
+            SELECT content_id FROM opaque_events WHERE sender_fingerprint = ?
+            ORDER BY received_at DESC, content_id DESC LIMIT ?)""",
+        (sender_fingerprint, sender_fingerprint, MAX_OPAQUE_EVENTS_PER_PEER),
+    )
+    purge_expired_opaque_events(db, now_iso=now, commit=False)
+    db.connection.commit()
+    return db.connection.execute(
+        "SELECT 1 FROM opaque_events WHERE content_id = ?", (content_id,)
+    ).fetchone() is not None
+
+
+def purge_expired_opaque_events(db: Database, *, now_iso: str | None = None, commit: bool = True) -> int:
+    """Drop opaque events kept longer than `OPAQUE_EVENT_RETENTION_DAYS`."""
+    now = parse_utc_iso(now_iso) if now_iso is not None else parse_utc_iso(utc_now_iso())
+    cutoff = utc_iso(now - timedelta(days=OPAQUE_EVENT_RETENTION_DAYS))
+    removed = db.connection.execute("DELETE FROM opaque_events WHERE received_at < ?", (cutoff,)).rowcount
+    if commit:
+        db.connection.commit()
+    return removed
+
+
+def opaque_events_to_rejudge(db: Database, known_types: frozenset[str]) -> list[tuple[str, str, dict]]:
+    """`(content_id, sender_fingerprint, raw)` of every kept opaque event
+    whose type this node now understands, oldest first."""
+    rows = db.connection.execute(
+        "SELECT content_id, sender_fingerprint, object_type, envelope_json FROM opaque_events "
+        "ORDER BY received_at ASC, content_id ASC"
+    ).fetchall()
+    return [
+        (row["content_id"], row["sender_fingerprint"], json.loads(row["envelope_json"]))
+        for row in rows if row["object_type"] in known_types
+    ]
+
+
+def forget_opaque_event(db: Database, content_id: str) -> None:
+    db.connection.execute("DELETE FROM opaque_events WHERE content_id = ?", (content_id,))
+    db.connection.commit()
+
+
 def event_is_stored(db: Database, content_id: str) -> bool:
     """Whether `link_events` holds `content_id` -- what "known" has to mean for
     an event this node could not project (issue #683)."""
@@ -1262,6 +1340,13 @@ def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
 
     for row in db.connection.execute(
         "SELECT content_id, envelope_json FROM link_events WHERE board_id = ? ORDER BY received_at ASC", (board_id,)
+    ):
+        events.setdefault(row["content_id"], json.loads(row["envelope_json"]))
+    # Issue #1022: what this node keeps of event types it does not understand
+    # travels on with the board it names -- declared as known, so it is not
+    # pulled again, and served to peers that ask.
+    for row in db.connection.execute(
+        "SELECT content_id, envelope_json FROM opaque_events WHERE board_id = ? ORDER BY received_at ASC", (board_id,)
     ):
         events.setdefault(row["content_id"], json.loads(row["envelope_json"]))
 
