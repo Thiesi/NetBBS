@@ -351,13 +351,30 @@ def test_remote_sharing_reports_an_attestation_removed_since_the_draw(db, lane, 
     assert get_attestation(db, alice, "name") is None
 
 
+def _publish(db):
+    """Sign what consent allows, as the sync pass does."""
+    import nacl.signing
+
+    from netbbs.identity.keys import Identity, IdentityKind
+    from netbbs.link.remote_attestation import reconcile_issued_attestations
+
+    identity = Identity(
+        kind=IdentityKind.NODE, label="node", signing_key=nacl.signing.SigningKey(b"\x22" * 32),
+        created_at="2026-10-01T00:00:00.000000Z",
+    )
+    reconcile_issued_attestations(db, identity, home_node_fingerprint="home-node")
+
+
 def _deliver_to(db, fingerprint):
     """Record that `fingerprint` was sent the current snapshot (issue #632)."""
     from netbbs.link.attestation_delivery import plan_attestation_deliveries, record_attestation_delivery
 
+    _publish(db)
     for plan in plan_attestation_deliveries(db):
         if plan.recipient_fingerprint == fingerprint:
-            record_attestation_delivery(db, fingerprint, digest=plan.digest, route="relay", final=False)
+            record_attestation_delivery(
+                db, fingerprint, digest=plan.digest, route="relay", final=False, content_ids=plan.content_ids,
+            )
 
 
 def test_remote_sharing_shows_how_many_nodes_it_reaches(db, lane, alice):
@@ -367,10 +384,12 @@ def test_remote_sharing_shows_how_many_nodes_it_reaches(db, lane, alice):
 
     verifier = create_user(db, "sysop", password="hunter2", user_level=255)
     attest_name(db, alice, "Alice Wonderland", verifier=verifier)
+    from netbbs.attestation import set_attestation_link_visible as _share
+    _share(db, alice, "name", True)
     configure_attestation_recipient(db, "a" * 32, reason="first")
     _deliver_to(db, "a" * 32)
 
-    session = FakeSession(["h", "b"])
+    session = FakeSession(["b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = squeezed(_visible(session))
     assert "Share verified name over Link: on (sent to 1 node)" in text
@@ -384,6 +403,51 @@ def test_remote_sharing_shows_how_many_nodes_it_reaches(db, lane, alice):
     session = FakeSession(["b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert "Share verified name over Link: on (sent to 2 nodes)" in squeezed(_visible(session))
+
+
+def test_another_callers_change_does_not_undeliver_this_callers_value(db, lane, alice):
+    """Review of #1045: counts are per caller. Bob switching sharing on makes
+    every recipient's snapshot out of date, but they still hold Alice's
+    value, and her toggle must keep saying so."""
+    from netbbs.attestation import set_attestation_link_visible
+    from netbbs.link.remote_attestation import configure_attestation_recipient
+
+    verifier = create_user(db, "sysop", password="hunter2", user_level=255)
+    attest_name(db, alice, "Alice Wonderland", verifier=verifier)
+    from netbbs.attestation import set_attestation_link_visible as _share
+    _share(db, alice, "name", True)
+    configure_attestation_recipient(db, "a" * 32, reason="first")
+    _deliver_to(db, "a" * 32)
+    bob = create_user(db, "bob", password="hunter2")
+    attest_name(db, bob, "Bob Builder", verifier=verifier)
+    set_attestation_link_visible(db, bob, "name", True)
+    _publish(db)  # a new object for Bob, not yet sent anywhere
+
+    session = FakeSession(["b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    assert "Share verified name over Link: on (sent to 1 node)" in squeezed(_visible(session))
+
+
+def test_a_recipient_that_pulled_the_value_counts(db, lane, alice):
+    """Review of #1045: a recipient running an older NetBBS fetches by pull
+    this release; once it has, the value counts as sent to it."""
+    from netbbs.link.attestation_delivery import record_attestation_pull, snapshot_objects
+    from netbbs.link.remote_attestation import configure_attestation_recipient
+
+    verifier = create_user(db, "sysop", password="hunter2", user_level=255)
+    attest_name(db, alice, "Alice Wonderland", verifier=verifier)
+    from netbbs.attestation import set_attestation_link_visible as _share
+    _share(db, alice, "name", True)
+    configure_attestation_recipient(db, "a" * 32, reason="older node")
+    _publish(db)
+    session = FakeSession(["b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    assert "on (not delivered yet)" in squeezed(_visible(session))
+
+    record_attestation_pull(db, "a" * 32, snapshot_objects(db))
+    session = FakeSession(["b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    assert "Share verified name over Link: on (sent to 1 node)" in squeezed(_visible(session))
 
 
 def test_remote_sharing_says_not_delivered_until_a_snapshot_is_sent(db, lane, alice):

@@ -330,12 +330,32 @@ def list_attestation_delivery_status(db: Database, *, now: datetime | None = Non
     return result
 
 
-def attestation_delivery_counts(db: Database, *, now: datetime | None = None) -> tuple[int, int]:
-    """(delivered, named): how many of the currently named recipients hold the
-    current snapshot, and how many are named. What the Profile toggle shows a
-    caller -- counts only, never which nodes (#596 Decision 4)."""
+def attestation_delivery_counts(
+    db: Database, user_id: int, attribute: str, *, now: datetime | None = None,
+) -> tuple[int, int]:
+    """(delivered, named) for one caller's value: how many of the currently
+    named recipients hold this caller's current signed object for
+    `attribute`, by snapshot or by pull, and how many are named. What the
+    Profile toggle shows the caller -- counts only, never which nodes (#596
+    Decision 4).
+
+    Per caller, not per snapshot (review of #1045): another caller's change
+    makes every recipient's snapshot out of date without touching what it
+    holds of this one. A caller with no live object yet -- sharing switched on
+    since the last sync pass -- has been sent nothing."""
+    now_value, _ = _now(now)
+    ids = {
+        row[0] for row in db.connection.execute(
+            """SELECT content_id FROM link_issued_remote_attestations
+               WHERE object_type = ? AND user_id = ? AND attribute = ?
+                 AND revoked_at IS NULL AND redacted_at IS NULL AND expires_at > ?""",
+            (REMOTE_ATTESTATION_OBJECT_TYPE, user_id, attribute, now_value),
+        )
+    }
     statuses = [s for s in list_attestation_delivery_status(db, now=now) if not s.removed]
-    return sum(1 for s in statuses if s.current), len(statuses)
+    if not ids:
+        return 0, len(statuses)
+    return sum(1 for s in statuses if ids <= s.delivered_ids), len(statuses)
 
 
 # -- recipient ------------------------------------------------------------

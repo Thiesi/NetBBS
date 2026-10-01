@@ -2048,7 +2048,8 @@ the recipient list and says so plainly when that list is empty, since
 published objects beside no recipients publish nothing, and it lists each
 recipient with how it was last reached, when, and whether that delivered the
 current snapshot, or why the last attempt failed (issue #632). A caller sees
-how many recipients were sent their value beside their own sharing toggle --
+how many recipients hold their own value, by snapshot or by pull, beside their
+own sharing toggle --
 "sent to 2 nodes", "sent to 1 of 2 nodes", "not delivered yet" -- never which. The listing
 names the subject, the attribute, and the expiry, but never the attested
 value: it is a screen about what leaves the node, not a place a verified real

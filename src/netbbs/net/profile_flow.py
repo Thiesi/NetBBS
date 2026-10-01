@@ -1771,7 +1771,8 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         # The caller is told how many; which ones is the SysOp's screen.
         "recipient_count": await lane.run(count_attestation_recipients),
         # Issue #632: how many of them hold what this node last sent.
-        "delivered_count": (await lane.run(attestation_delivery_counts))[0],
+        "delivered_age": (await lane.run(attestation_delivery_counts, user.id, "age"))[0],
+        "delivered_name": (await lane.run(attestation_delivery_counts, user.id, "name"))[0],
     }
 
     async def _display_name_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
@@ -1861,7 +1862,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             # Re-read with the toggle, so the number beside "on" is the one
             # that was true when the caller switched it on.
             draft["recipient_count"] = await lane.run(count_attestation_recipients)
-            draft["delivered_count"] = (await lane.run(attestation_delivery_counts))[0]
+            draft[f"delivered_{attribute}"] = (await lane.run(attestation_delivery_counts, user.id, attribute))[0]
             if toggled:
                 return
             if attestation is None:
@@ -1902,7 +1903,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             # Issue #632: what was actually sent, not who could ask. A change
             # the caller just made reads as not delivered until the next sync
             # pass sends it, which is the truth.
-            delivered = d.get("delivered_count", 0)
+            delivered = d.get(f"delivered_{attribute}", 0)
             plural = "s" if count != 1 else ""
             if delivered == 0:
                 return "on (not delivered yet)"

@@ -5920,9 +5920,13 @@ def _delivery_state(status) -> tuple[str, str]:
     if status.removed:
         return "retracting: sends it an empty snapshot", WARNING_COLOR
     if status.current:
-        return "has the current snapshot", SUCCESS_COLOR
+        return "holds everything published", SUCCESS_COLOR
     if status.last_error:
         return sanitize_text(status.last_error), WARNING_COLOR
+    if status.route == "pull":
+        # Issue #632, review of #1045: an older NetBBS still fetches by pull
+        # this release, when it next asks; not a failure.
+        return "older NetBBS: fetches the rest when it next asks", VALUE_COLOR
     return "update goes out on the next Link sync pass", VALUE_COLOR
 
 

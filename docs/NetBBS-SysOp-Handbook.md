@@ -1206,9 +1206,10 @@ when. A changed snapshot goes out on the next Link sync pass, and an unchanged
 one again every week. **Published identity** lists each recipient with how it
 was last reached, when, and whether that was the current snapshot, or why the
 last attempt failed (for example, a recipient nobody can dial that names no
-relay your node has met). Callers see only how many nodes were sent their
-value, never which. A recipient running a NetBBS from before sealed snapshots
-still fetches from you, which works only if your node can be dialed.
+relay your node has met). A recipient running a NetBBS from before sealed
+snapshots still fetches from you, which works only if your node can be
+dialed; its route reads **pull**, and what it fetched counts as delivered.
+Each caller sees how many nodes hold their own value, never which.
 
 If you have named an authority and nothing arrives, look in **Diagnostics**: a
 refusal there means its SysOp has not added your node as a recipient yet.

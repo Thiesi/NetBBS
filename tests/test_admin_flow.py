@@ -10668,13 +10668,27 @@ def test_published_identity_says_per_recipient_what_was_delivered(db, lane, syso
     assert "Nobody can dial this node" not in text
 
     plans = {plan.recipient_fingerprint: plan for plan in plan_attestation_deliveries(db)}
-    record_attestation_delivery(db, "a" * 32, digest=plans["a" * 32].digest, route="relay", final=False)
+    record_attestation_delivery(
+        db, "a" * 32, digest=plans["a" * 32].digest, route="relay", final=False,
+        content_ids=plans["a" * 32].content_ids,
+    )
     record_attestation_delivery_failure(db, "b" * 32, "the recipient cannot be dialed and names no relay")
     remove_attestation_recipient(db, "c" * 32)
+    # Review of #1045: a recipient on an older NetBBS is reached by pull, not a failure.
+    from netbbs.link.attestation_delivery import record_legacy_attestation_recipient
+    configure_attestation_recipient(db, "d" * 32, reason="older node")
+    plan_attestation_deliveries(db)
+    record_legacy_attestation_recipient(db, "d" * 32)
     text = screen()
-    assert "has the current snapshot" in text and "relay" in text
+    assert "holds everything published" in text and "relay" in text
     assert "the recipient cannot be dialed and names no relay" in text
     assert "retracting" in text  # the row may wrap onto the next page
+    # The fourth row is on the next page; its state, as the table shows it.
+    from netbbs.link.attestation_delivery import list_attestation_delivery_status
+    from netbbs.net.admin_flow import _delivery_state
+    [older] = [s for s in list_attestation_delivery_status(db) if s.recipient_fingerprint == "d" * 32]
+    assert older.route == "pull" and older.last_error is None
+    assert _delivery_state(older)[0] == "older NetBBS: fetches the rest when it next asks"
 
 
 def test_the_vouch_screen_says_when_a_relay_did_not_take_this_nodes_vouches(db, lane, sysop):
