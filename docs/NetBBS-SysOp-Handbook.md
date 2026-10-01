@@ -487,6 +487,19 @@ can post on a board through a grant does not "lose" it in a demotion. Press
 opens and closes nothing is applied straight away, and the line under the
 screen says so.
 
+To see what every level opens in one place, open **Users ▸ Le[v]els**. Each
+row is a level that matters on your node: one some board, file area,
+channel, door or setting is gated at, or one an account holds. The row shows
+how many enabled accounts hold exactly that level and what it adds to the
+levels below it, for example `2 read · 1 post · 1 door · Mail`. Pick a level
+to see its gates one by one, each with where its level comes from: set on the
+resource itself, inherited from a Community, the default of 0, or a setting.
+`V` steps the list through what is new at this level, everything it opens,
+what stays closed to it, and what it opens while another gate (an age or
+verified-name requirement, a members-only channel) still applies. Picking a
+board, file area, channel or door there opens its own screen, where you can
+change its levels. `G` on the level list shows any level, in use or not.
+
 A small club rarely needs more than this:
 
 | Level | Who | Example use |
