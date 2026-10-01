@@ -2271,9 +2271,15 @@ class LinkServer:
             requested_channels=inventory_request.channels,
             requested_file_areas=inventory_request.file_areas,
         )
-        return web.json_response(
-            {"events": events, "more_available": more_available, "wanted": wanted}
-        )
+        body = {"events": events, "more_available": more_available, "wanted": wanted}
+        # Issue #914: the key histories of whoever signed these events, so a
+        # requester that knows a signer only by introduction learns of a
+        # compromise on this pull. Left out when there is no news, so an
+        # ordinary response is unchanged; an older requester ignores it.
+        key_chains = self._node.build_carried_key_chains(events, requester_fingerprint=fingerprint)
+        if key_chains:
+            body["key_chains"] = key_chains
+        return web.json_response(body)
 
     async def _handle_trust_pull(self, request: web.Request) -> web.Response:
         """Serve one authenticated, issuer-filtered trust subscription page."""
@@ -2870,7 +2876,7 @@ async def request_inventory(
     inventory_request: InventoryRequest,
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[list[dict], bool, list[str]]:
+) -> tuple[list[dict], bool, list[str], list]:
     """
     Design doc §8.8, issue #85: ask a peer at `base_url` what it has for
     `inventory_request.boards` that this node doesn't already. Returns
@@ -2879,7 +2885,10 @@ async def request_inventory(
     exactly as it would a push response, with no translation),
     whether more remain beyond the peer's own response cap, and (issue
     #478) which of the `content_id`s this request declared the peer is
-    itself missing -- the list the caller's own push then sends.
+    itself missing -- the list the caller's own push then sends, and
+    (issue #914) the key chains it served beside them, unverified: the
+    caller hands them to `LinkNode.apply_carried_key_chains`. An older
+    responder sends none, which reads as an empty list.
 
     `wanted` is **required**. A response without it is malformed and
     refused like any other: every node on this mesh runs the same
@@ -2924,7 +2933,10 @@ async def request_inventory(
                 f"inventory response from {url} claims to want {len(wanted)} content ids, more "
                 f"than the {_MAX_WANTED_CONTENT_IDS} any request this node sends could declare"
             )
-        return body["events"], bool(body["more_available"]), wanted
+        key_chains = body.get("key_chains", [])
+        if not isinstance(key_chains, list):
+            raise LinkTransportError(f"malformed inventory response from {url}: bad key_chains")
+        return body["events"], bool(body["more_available"]), wanted, key_chains
     except (KeyError, TypeError, AttributeError) as exc:
         raise LinkTransportError(f"malformed inventory response from {url}: {exc}") from exc
 

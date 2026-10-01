@@ -968,9 +968,20 @@ async def _sync_one_seed(
             for content_ids in resources.values()
             for content_id in content_ids
         )
-        events, _more_available, wanted = await request_inventory(
+        events, _more_available, wanted, key_chains = await request_inventory(
             node, session, seed_url, inventory_request
         )
+        # Issue #914: before anything in the response is checked, so a
+        # signer's compromise reaches this node on the pull that carries its
+        # old-key content, which is then skipped rather than accepted.
+        updated = node.apply_carried_key_chains(key_chains)
+        for record in updated:
+            await lane.run(save_introduced_identity, record, introduced_by=seed_peer.fingerprint)
+        if updated:
+            _logger.info(
+                "Link sync: seed %s carried newer key history for %s",
+                seed_url, ", ".join(record.fingerprint for record in updated),
+            )
         if events:
             # Issue #630. Before policy is asked anything: a node this one has
             # never met is not a trust subject here, reads as probationary, and
