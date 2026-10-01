@@ -878,24 +878,52 @@ _FRAGMENT_ATTEMPTS = 5
 
 def _send_fragmented_x10_report(send) -> bool:
     """Send an X10 mouse report in four writes. False when the attempt is
-    void: a gap between two writes reached the door's lookahead, so the door
-    rightly ended the visit on an incomplete report (issue #896), or the door
-    had already closed its input. Neither says anything about fragments that
-    arrive in time; under a saturated CPU the scheduler, not the door,
-    decides the gaps."""
-    try:
-        send(b"\x1b[M")
-        last = time.monotonic()
-        for byte in (b" ", b"C", b"C"):
-            time.sleep(_FRAGMENT_GAP_SECONDS)
+    void: a gap between two writes reached the limit, so the door may rightly
+    have ended the visit on an incomplete report (issue #896). That says
+    nothing about fragments that arrive in time; under a saturated CPU the
+    scheduler, not the door, decides the gaps.
+
+    A write that fails while every gap so far stayed under the limit is not
+    void: the door ended the visit although the report arrived in time, which
+    is the bug this test exists for, so the error is raised (review of #1033).
+    """
+    send(b"\x1b[M")  # The door is waiting for input: a failure here is real.
+    last = time.monotonic()
+    for byte in (b" ", b"C", b"C"):
+        time.sleep(_FRAGMENT_GAP_SECONDS)
+        try:
             send(byte)
-            now = time.monotonic()
-            if now - last >= _FRAGMENT_GAP_LIMIT_SECONDS:
+        except OSError:  # EINVAL on Windows, EPIPE elsewhere: the door ended it
+            if time.monotonic() - last >= _FRAGMENT_GAP_LIMIT_SECONDS:
                 return False
-            last = now
-    except OSError:  # EINVAL on Windows, EPIPE elsewhere: the door ended it
-        return False
+            raise
+        now = time.monotonic()
+        if now - last >= _FRAGMENT_GAP_LIMIT_SECONDS:
+            return False
+        last = now
     return True
+
+
+def test_a_door_that_ends_the_visit_on_a_timely_report_fails_the_attempt(monkeypatch):
+    """The void rule must not hide the regression it guards against: a door
+    that stops reading although every fragment arrived in time makes the
+    helper raise, while one that stops after a gap past the limit voids it."""
+    clock = {"now": 100.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    writes = []
+
+    def closed_after_first(data):
+        if writes:
+            raise OSError(22, "Invalid argument")
+        writes.append(data)
+
+    with pytest.raises(OSError):
+        _send_fragmented_x10_report(closed_after_first)
+
+    writes.clear()
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + 0.2))
+    assert _send_fragmented_x10_report(closed_after_first) is False
 
 
 @pytest.mark.timing_sensitive  # fragment gaps against a 100ms escape lookahead
