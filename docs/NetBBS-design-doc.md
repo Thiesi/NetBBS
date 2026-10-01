@@ -462,19 +462,19 @@ WxH}` region. The current page fills it, one row per entry: the number to
 press for it, the name, and one compact column the screen chooses (unread
 posts for boards, files for areas, people for channels). A board, area or
 channel whose name requirement the caller does not meet shows "needs
-verification" in that column instead, so the gate note §3.6 requires
-survives in art too.
-Descriptions and full tables appear only on the generated list. A page holds as many entries as the region has
-rows; numbering, one-digit selection, browser clicks, search and the paging
-keys work as on the generated list, and the navigation block and prompt go
-below the art unless `{prompt}` places it. The cursor row is drawn reversed in
-the token's colour. Three
-more fields serve lists: `{title N}`, `{page N}` ("2/5") and `{count N}`. A
-region under 3 rows, or one that leaves the name under 12 columns, falls back
-to the generated list, as does every case that makes the main menu fall back.
+verification" in that column instead, so the gate note §3.6 requires survives
+in art too. Descriptions and full tables appear only on the generated list. A
+page holds as many entries as the region has rows; numbering, one-digit
+selection, browser clicks, search and the paging keys work as on the generated
+list, and the navigation block and prompt go below the art unless `{prompt}`
+places it. The cursor row is drawn reversed in the token's colour. Three more
+fields serve lists: `{title N}`, `{page N}` ("2/5") and `{count N}`. A region
+under 3 rows, or one that leaves the name under 12 columns, falls back to the
+generated list, as does every case that makes the main menu fall back.
 
 *Hand-drawn items.* A SysOp may draw the menu's items into the art instead of
-leaving them to a `{menu}` region. Every bracketed key drawn in the art,
+leaving them to a `{menu WxH}` region (written `{menu}` below; it is the same
+token). Every bracketed key drawn in the art,
 `[K]`, marks one item; the item spans the run of text around it, bounded by
 two or more spaces, which is also how the browser terminal finds what a click
 means. An item the caller cannot use is blanked: its cells are repainted as
