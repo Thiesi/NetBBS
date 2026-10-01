@@ -183,11 +183,28 @@ def trim_row_ends(text: str) -> str:
     return "\n".join(trimmed)
 
 
+#: Cursor movements that go back to a row already drawn: up, to an
+#: absolute position, to a line, or back to a saved position.
+_REVISITING = re.compile(r"\x1b\[[0-9;?]*[AFHfdu]")
+
+
+def revisits_rows(text: str) -> bool:
+    """Whether art goes back to rows it already drew (issue #929): an
+    ANSImation, drawn to be played at an emulated line speed, does, and
+    its spaces at the end of a row may be erasing an earlier frame."""
+    return _REVISITING.search(text) is not None
+
+
 def decode_banner_bytes(data: bytes) -> str:
     """`decode_ansi_bytes` for art shown as a banner or masthead: decoded,
     trimmed of the plain spaces at the end of each row (`trim_row_ends`)
-    and of the empty rows at its end (`trim_trailing_blank_rows`)."""
-    return trim_trailing_blank_rows(trim_row_ends(decode_ansi_bytes(data)))
+    and of the empty rows at its end (`trim_trailing_blank_rows`). Art that
+    goes back to earlier rows (`revisits_rows`, an ANSImation) is left as
+    drawn: a trimmed space there would leave part of an earlier frame."""
+    text = decode_ansi_bytes(data)
+    if revisits_rows(text):
+        return text
+    return trim_trailing_blank_rows(trim_row_ends(text))
 
 
 def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:

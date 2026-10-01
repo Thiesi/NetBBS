@@ -4900,7 +4900,7 @@ def test_main_menu_masthead_subtitle_wraps_on_a_narrow_terminal(db, lane, sysop)
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
-    full_sentence = "Mode: above the menu. The art is shown above the main menu, which stays live underneath it."
+    full_sentence = "Mode: above the menu. The art is shown above the live main menu."
     assert full_sentence not in text
     assert "Mode: above the menu." in text
     for line in text.split("\n"):
@@ -10808,3 +10808,28 @@ def test_a_pending_post_keeps_the_readers_layout_with_colors_off(db, lane, sysop
 
     lines = [line.strip() for line in _visible(_written_text(session)).splitlines()]
     assert "> quoted" in lines and "the reply" in lines
+
+
+# -- paced art speed (issue #929, step 6) ------------------------------------
+
+
+def test_welcome_banner_speed_cycles_through_the_offered_speeds(db, lane, sysop):
+    from netbbs.net.art_pacing import WELCOME_ART, art_speed
+
+    session = FakeSession(["s", "m", "n", "w", "s", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert art_speed(db, WELCOME_ART) == 9600
+    assert "Plays at 9600 bps" in _written_text(session)
+    rows = db.connection.execute(
+        "SELECT detail FROM moderation_log WHERE action = 'set_art_speed' ORDER BY id"
+    ).fetchall()
+    assert [r["detail"] for r in rows] == ["welcome=2400", "welcome=9600"]
+
+
+def test_main_menu_masthead_speed_wraps_back_to_off(db, lane, sysop):
+    from netbbs.net.art_pacing import MAIN_MENU_ART, art_speed
+
+    session = FakeSession(["s", "m", "m", "m", "s", "s", "s", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert art_speed(db, MAIN_MENU_ART) == 0
+    assert "Drawn at once" in _written_text(session)

@@ -458,6 +458,25 @@ token places it. The main menu comes first, then the welcome and logoff
 fields; the Boards, Chat and Files lists need a list region with paging and
 get their own design.
 
+**Paced art (issue #929, step 6).** A SysOp can give a piece of art a speed --
+2400, 9600 or 38400 bps, off by default -- and NetBBS then sends it in small
+chunks at the speed a modem of the day would have drawn it
+(`netbbs.net.art_pacing`). Art that moves the cursor back over rows it drew
+plays as the ANSImation it was made to be, and is exempt from the row-end
+trimming of still art (`revisits_rows`), since its trailing spaces may erase an
+earlier frame; still art and slot art build up top to bottom. The pacing is
+NetBBS's own, so it works in every terminal, and a key ends it: the rest of the
+art is drawn at once, and that key -- with anything typed behind it -- is
+swallowed (`Session.take_waiting_key`), so an Enter pressed to skip the
+welcome art never submits an empty username. One draw takes at most 5 seconds;
+past that the rest goes out at once. Each piece of art plays once per
+connection: the welcome art before sign-in, and the main menu's art on the
+first main menu, never on a redraw, after a notice, or when a break-in hands
+the screen back. Nothing is paced for a session with no live terminal
+(`Session.paces_art`, set only by the Telnet, SSH and web transports), during
+a break-in, for a plain-ASCII caller, or for a caller who chose quick under
+**Profile → [Q]uick or animated banners**, and doors are never paced.
+
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
 titles and frame borders), and clock (the main-menu prompt's time display)
@@ -14121,6 +14140,16 @@ which editors strip and nobody sees.
 **Decision 6 — items that do not fit fall back to the generated menu.**
 Rejected: filling the region and moving the rest behind a "more" entry, which
 silently moves items a caller can use out of sight.
+
+**Decision 7 — art is paced by NetBBS, not by the terminal (step 6).**
+CTerm's `CSI Ps1 ; Ps2 * r` sets SyncTERM's own emulated line speed, but only
+SyncTERM has it, bytes already handed to the terminal can't be skipped, and
+turning it off queues behind the art. NetBBS sends the art in chunks itself and
+checks for a key between them. The skipping key is swallowed, not passed on as
+Voidrunner passes its interrupting key, because a prompt follows the art.
+Speeds are off, 2400, 9600 or 38400 bps per piece of art, off by default, with
+a 5-second cap per draw; a cap that slowed the art instead of ending the
+pacing was rejected, since the speed is part of how the art was meant to look.
 
 ### SFTP over the SSH transport — declined
 
