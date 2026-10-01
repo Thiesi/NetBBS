@@ -614,7 +614,10 @@ class TelnetSession(Session):
             # trusted (see SSHSession's identical reasoning).
             variables = _parse_new_environ_is(body[1:])
             colorterm = variables.get("COLORTERM")
-            self._colorterm = colorterm
+            if colorterm:
+                # Kept once seen: a later reply without COLORTERM must not
+                # forget it and let the terminal type decide instead.
+                self._colorterm = colorterm
             if colorterm in ("truecolor", "24bit"):
                 self.supports_truecolor = True
                 self.truecolor_diagnostic = (
@@ -627,7 +630,7 @@ class TelnetSession(Session):
                 self.truecolor_diagnostic = (
                     f"Telnet NEW-ENVIRON reported COLORTERM={colorterm}; using 256-color"
                 )
-            else:
+            elif self._colorterm is None:
                 self.truecolor_diagnostic = (
                     "Telnet NEW-ENVIRON did not report COLORTERM; using 256-color"
                 )

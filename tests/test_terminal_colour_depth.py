@@ -40,7 +40,7 @@ def test_terminal_supports_truecolor_by_first_recognised_name(names, expected):
     assert terminal_supports_truecolor(names) is expected
 
 
-def _telnet_scenario(terminal_type: str, colorterm: bytes | None):
+def _telnet_scenario(terminal_type: str, *colorterms: bytes | None):
     captured = {}
 
     async def handler(session: Session):
@@ -52,7 +52,9 @@ def _telnet_scenario(terminal_type: str, colorterm: bytes | None):
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer, terminal_type=terminal_type)
-            if colorterm is not None:
+            for colorterm in colorterms:
+                if colorterm is None:
+                    continue
                 body = bytes([NEW_ENVIRON_IS, NEW_ENVIRON_VAR]) + b"COLORTERM"
                 if colorterm:
                     body += bytes([NEW_ENVIRON_VALUE]) + colorterm
@@ -87,6 +89,11 @@ def test_telnet_explicit_colorterm_wins_over_the_terminal_type():
     assert _telnet_scenario("syncterm", b"256color") == (
         False, "Telnet NEW-ENVIRON reported COLORTERM=256color; using 256-color"
     )
+
+
+def test_telnet_a_later_reply_without_colorterm_keeps_the_explicit_value():
+    supported, _diagnostic = _telnet_scenario("syncterm", b"256color", b"")
+    assert supported is False
 
 
 def test_telnet_other_classic_terminals_stay_at_256_colours():
