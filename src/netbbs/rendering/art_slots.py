@@ -15,7 +15,8 @@ filled-in content should take:
   token's own length without `N`), cut to fit.
 
 Plain tokens rather than ENiGMA-style `%VM1` codes plus a theme file
-(issue #929's step-4 decisions): they survive every art
+(design doc §3.2, "Art with live slots", and the #929 decision 5 in
+§16): they survive every art
 editor, CP437 and UTF-8 alike, carry their size with them, and can be
 checked from the art alone. A brace pair that isn't one of these names
 is art, left as drawn.
@@ -34,6 +35,7 @@ from dataclasses import dataclass, replace
 
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
+from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer, full_render_ansi
 from netbbs.rendering.theme import MENU_KEY_COLOR
 from netbbs.rendering.width import char_width, display_width, truncate_to_width
@@ -231,7 +233,10 @@ def render_slot_art(
         for col in range(art.width):
             buffer.put_cell(row, col, art.buffer.get_cell(row, col))
     for slot in art.fields:
-        value = truncate_to_width(fields.get(slot.name, ""), slot.width, ellipsis=ellipsis)
+        # Field values are live text (a name, a node name) -- sanitized
+        # here, the one place they enter the screen, like every other
+        # caller-visible string.
+        value = truncate_to_width(sanitize_text(fields.get(slot.name, "")), slot.width, ellipsis=ellipsis)
         _fill(buffer, slot, [value], highlight_keys=False)
     if art.menu is not None and menu_rows is not None:
         _fill(buffer, art.menu, menu_rows, highlight_keys=True)
