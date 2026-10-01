@@ -994,8 +994,9 @@ def count_listed_posts(db: Database, board: Board) -> tuple[int, str | None]:
     runs wherever a reader or the detail screen opens the board."""
     if board.max_post_age_days is None:
         return count_visible_roots(db, board.id)
-    # The sweep's own rule: a revision expires by its own `created_at`
-    # unless exempt, and a post is listed while any revision is not expired.
+    # The sweep's own rule: a revision expires by its post's original
+    # `created_at` unless exempt, and a post is listed while any revision is
+    # not expired.
     return count_visible_roots(
         db, board.id,
         extra_sql="""
@@ -1003,7 +1004,7 @@ def count_listed_posts(db: Database, board: Board) -> tuple[int, str | None]:
               SELECT 1 FROM posts fresh
               WHERE fresh.root_post_id = root.root_post_id AND fresh.board_id = root.board_id
                 AND fresh.status = 'approved'
-                AND (fresh.exempt_from_expiry = 1 OR fresh.created_at >= ?)
+                AND (fresh.exempt_from_expiry = 1 OR COALESCE((SELECT origin.created_at FROM posts origin WHERE origin.post_id = fresh.root_post_id), fresh.created_at) >= ?)
           )""",
         extra_params=(_cutoff_iso(board.max_post_age_days),),
     )
@@ -1676,6 +1677,13 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
     if board.max_post_age_days is None:
         return
 
+    # Issue #793: every revision of a post ages from the post's original
+    # revision (its root's `created_at`), never from its own. A revision
+    # carried over the Link is stamped by its author's clock, display metadata
+    # that may run far behind (design doc §7.2); aged by that, an edit expired
+    # on arrival and the revision before it came back -- for a withdrawal, the
+    # very text withdrawn. So an edit can never expire before its post, and a
+    # post is gone at its age limit whatever was edited into it since.
     expiry_cutoff = _cutoff_iso(board.max_post_age_days)
     # Collected before either bulk statement runs below (issue #56's
     # search index): both are set-based SQL, not a per-row Python loop,
@@ -1690,7 +1698,7 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
             """
             SELECT DISTINCT root_post_id FROM posts
             WHERE board_id = ? AND status = 'approved' AND exempt_from_expiry = 0
-                  AND created_at < ?
+                  AND COALESCE((SELECT origin.created_at FROM posts origin WHERE origin.post_id = posts.root_post_id), posts.created_at) < ?
             """,
             (board.id, expiry_cutoff),
         ).fetchall()
@@ -1699,7 +1707,7 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
         """
         UPDATE posts SET status = 'expired'
         WHERE board_id = ? AND status = 'approved' AND exempt_from_expiry = 0
-              AND created_at < ?
+              AND COALESCE((SELECT origin.created_at FROM posts origin WHERE origin.post_id = posts.root_post_id), posts.created_at) < ?
         """,
         (board.id, expiry_cutoff),
     )
@@ -1708,7 +1716,7 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
     deletion_cutoff = _cutoff_iso(board.max_post_age_days + grace_days)
     _deletable_where = """
         board_id = ? AND status = 'expired' AND exempt_from_expiry = 0
-              AND created_at < ?
+              AND COALESCE((SELECT origin.created_at FROM posts origin WHERE origin.post_id = posts.root_post_id), posts.created_at) < ?
               AND NOT EXISTS (
                   SELECT 1 FROM posts child
                   WHERE child.post_id != posts.post_id

@@ -1733,6 +1733,25 @@ visible. Local maintenance follows:
 with a grace period between expiration and deletion. Local pruning never
 becomes a network-wide deletion instruction.
 
+A post ages from its original revision (issue #793). Every revision of it
+(edits, withdrawals, moderator edits) is judged by the first revision's
+`created_at`, never by its own:
+- **Why not its own:** a revision carried over the Link is stamped by its
+  author's clock, display metadata that may run far behind (§7.2). Aged by its
+  own stamp, an edit from a node with a badly wrong clock expired on arrival,
+  and the post fell back to the revision before it. For a withdrawal, that
+  re-showed the withdrawn text. Now an edit can never expire before its post.
+- **Editing does not extend a post's life.** A post is gone at its board's
+  limit, counted from when it was first written.
+- **If the first revision was also stamped by the bad clock,** the post and its
+  edits expire together, which is the accepted cost.
+- **Receipt time was rejected:** ageing carried content by when this node
+  received it would keep old history, carried late to a newly subscribing
+  node, alive for a full maximum age.
+- **Where it applies:** the sweep's expire and delete steps, the read-only
+  listed count and the board rankings. A file has no revisions and ages by its
+  own `created_at`.
+
 **Pinning and keeping** (issue #675). A moderator with the board's or area's
 edit permission can pin a post or file, and can keep it from expiring:
 - **Where:** from the post reader (`P[i]n`, `[K]eep`) or the file area screen,
