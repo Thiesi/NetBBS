@@ -204,8 +204,8 @@ from netbbs.link.mail import (
     record_link_message_refused,
 )
 from netbbs.link.protocol import (
-    DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, MAX_SET_ASIDE_PER_PEER, HelloMessage, LinkNode,
-    LinkProtocolError, PeerExchange,
+    DEFERRED_EVENT_RETRY_SECONDS, MAX_EVENTS_PER_REQUEST, MAX_SET_ASIDE_PER_PEER, REPORTER_REFRESH, HelloMessage,
+    LinkNode, LinkProtocolError, PeerExchange,
 )
 from netbbs.link.relay_mailbox import (
     RELAY_MAILBOX_RETENTION_DAYS,
@@ -285,7 +285,7 @@ from netbbs.link.trust_wire import (
     load_trust_pull_cursor,
     save_trust_pull_cursor,
 )
-from netbbs.link.trust import TrustState, recompute_all_trust_states
+from netbbs.link.trust import TrustState, recompute_all_trust_states, trust_policy_generation
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_ACK,
     KIND_LINK_MAIL_DELIVERY,
@@ -430,7 +430,19 @@ async def run_link_sync(
     # Issue #712: relay candidates that declined consent, with when, for the
     # lifetime of this loop. In memory, like `fallback_offsets`.
     relay_declines: dict[str, float] = {}
+    # Issue #700: trust policy as of the last pass. A change made where the
+    # running node could not be told -- `python -m netbbs.admin` -- shows up
+    # here, and releases what was set aside so it is judged afresh.
+    policy_generation = await _read_trust_policy_generation(lane)
     while stop_event is None or not stop_event.is_set():
+        current_generation = await _read_trust_policy_generation(lane)
+        if current_generation != policy_generation and policy_generation is not None:
+            released = node.deferred_events.release_all()
+            if released:
+                _logger.info(
+                    "Link sync: trust policy changed; retrying %d event(s) that were set aside", released
+                )
+        policy_generation = current_generation
         refresh = getattr(own_hello_provider, "refresh", None)
         if refresh is not None:
             # Mutable friendly/DNS claims are read once per pass through the
@@ -523,7 +535,7 @@ async def run_link_sync(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
         await _forget_retired_attestations(lane)
-        await _reevaluate_trust_over_time(lane)
+        await _reevaluate_trust_over_time(node, lane)
         # Issue #891: mail held here as a relay that its recipient never
         # came back for. Every pass, whatever this node's own mode: a node
         # that stopped serving relays still holds what it took before.
@@ -592,17 +604,35 @@ async def run_link_sync(
                     len(pass_seeds),
                     ", ".join(pass_seeds) or "(none configured)",
                 )
-        if stop_event is None:
-            await asyncio.sleep(interval_seconds)
-        else:
-            # Woken early by stop_event (see this function's own
-            # docstring for why an idle sleep, unlike an in-flight
-            # pass, is safe to cut short) -- otherwise identical to the
-            # plain asyncio.sleep(interval_seconds) above.
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
-            except asyncio.TimeoutError:
-                pass
+        # Woken early by stop_event (see this function's own docstring for
+        # why an idle sleep, unlike an in-flight pass, is safe to cut short),
+        # or by `node.wake_sync()` (issue #700: the SysOp asked for a pass
+        # now). A wake set during the pass just run is still set here, so it
+        # is not lost: the sleep returns at once.
+        await _sleep_until_woken(node, stop_event, interval_seconds)
+
+
+async def _sleep_until_woken(
+    node: LinkNode, stop_event: asyncio.Event | None, interval_seconds: float
+) -> None:
+    waiters = [asyncio.create_task(node.sync_wake.wait())]
+    if stop_event is not None:
+        waiters.append(asyncio.create_task(stop_event.wait()))
+    try:
+        await asyncio.wait(waiters, timeout=interval_seconds, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for waiter in waiters:
+            waiter.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+    node.sync_wake.clear()
+
+
+async def _read_trust_policy_generation(lane: DatabaseLane) -> tuple[int, ...] | None:
+    try:
+        return await lane.run(trust_policy_generation)
+    except sqlite3.Error as exc:
+        _logger.warning("Link sync: could not read the trust policy state: %s", exc)
+        return None
 
 
 async def _push_own_events(
@@ -938,9 +968,20 @@ async def _sync_one_seed(
             for content_ids in resources.values()
             for content_id in content_ids
         )
-        events, _more_available, wanted = await request_inventory(
+        events, _more_available, wanted, key_chains = await request_inventory(
             node, session, seed_url, inventory_request
         )
+        # Issue #914: before anything in the response is checked, so a
+        # signer's compromise reaches this node on the pull that carries its
+        # old-key content, which is then skipped rather than accepted.
+        updated = node.apply_carried_key_chains(key_chains)
+        for record in updated:
+            await lane.run(save_introduced_identity, record, introduced_by=seed_peer.fingerprint)
+        if updated:
+            _logger.info(
+                "Link sync: seed %s carried newer key history for %s",
+                seed_url, ", ".join(record.fingerprint for record in updated),
+            )
         if events:
             # Issue #630. Before policy is asked anything: a node this one has
             # never met is not a trust subject here, reads as probationary, and
@@ -1283,7 +1324,7 @@ async def _pull_trust_subscriptions(
 _PULL_COMPLETED, _PULL_STALLED, _PULL_FAILED = "completed", "stalled", "failed"
 
 # In place of a carrier's fingerprint in `LinkNode.unanswered_identities`.
-_REPORTER_REFRESH = "reporter-refresh"
+_REPORTER_REFRESH = REPORTER_REFRESH
 
 # In place of an address, for the pull a relay makes of what it carries itself.
 _OWN_CARRIAGE = "local:carried"
@@ -1758,7 +1799,7 @@ async def _forget_retired_attestations(lane: DatabaseLane) -> None:
         _logger.warning("Link attestations: could not forget retired values: %s", exc)
 
 
-async def _reevaluate_trust_over_time(lane: DatabaseLane) -> None:
+async def _reevaluate_trust_over_time(node: LinkNode, lane: DatabaseLane) -> None:
     """Apply the trust changes that are due to time alone (issue #802).
 
     A recovery hold's release, an override's or a signal's expiry and
@@ -1776,6 +1817,10 @@ async def _reevaluate_trust_over_time(lane: DatabaseLane) -> None:
             change.subject_id, change.dimension, change.previous_state or "(none)",
             change.new_state, change.reason_code,
         )
+        # Issue #700: a node (or a user of it) that graduated or recovered
+        # should not wait out the hour its content was set aside for.
+        if change.node_fingerprint:
+            node.deferred_events.release_identity(change.node_fingerprint)
 
 
 async def _pull_attestation_authorities(

@@ -308,6 +308,37 @@ def trust_deposit_refused_recently(db: Database, relay_fingerprint: str, *, now_
     return 0 <= elapsed < TRUST_DEPOSIT_REFUSAL_BACKOFF_SECONDS
 
 
+def trust_deposits_waiting(db: Database) -> list[tuple[str, str]]:
+    """Relays whose refusal is still holding deposits back (issue #700):
+    `(relay fingerprint, when they are next tried)`, soonest first."""
+    from datetime import datetime, timedelta
+
+    now = datetime.fromisoformat(utc_now_iso().replace("Z", "+00:00"))
+    result = []
+    for relay, updated_at in db.connection.execute(
+        """SELECT relay_fingerprint, updated_at FROM link_trust_deposit_cursors
+           WHERE last_refusal IS NOT NULL ORDER BY updated_at"""
+    ):
+        retry_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00")) + timedelta(
+            seconds=TRUST_DEPOSIT_REFUSAL_BACKOFF_SECONDS
+        )
+        if retry_at > now:
+            result.append((relay, retry_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")))
+    return result
+
+
+def release_trust_deposit_backoffs(db: Database) -> int:
+    """Let every relay that refused a deposit be tried on the next pass
+    (issue #700's `[R]etry now`). The refusal's text stays, for the screen
+    that says where vouches go; only its time moves back past the backoff,
+    and the next exchange replaces or clears it as usual."""
+    with db.connection:
+        return db.connection.execute(
+            """UPDATE link_trust_deposit_cursors SET updated_at = '1970-01-01T00:00:00.000000Z'
+               WHERE last_refusal IS NOT NULL AND updated_at > '1970-01-01T00:00:00.000000Z'"""
+        ).rowcount
+
+
 def clear_trust_deposit_refusal(db: Database, relay_fingerprint: str) -> None:
     """A relay answered, so whatever it refused last time is over."""
     with db.connection:

@@ -11,12 +11,12 @@ import asyncio
 
 def parked_between_passes(task: asyncio.Task) -> bool:
     """Whether `run_link_sync` has finished a pass and is waiting out its
-    interval: its own coroutine is directly awaiting `asyncio.sleep`, or
-    `asyncio.wait_for` on its `stop_event`. Anything else it awaits is
-    part of a pass."""
+    interval: its own coroutine is directly awaiting its idle sleep
+    (`_sleep_until_woken`, which also wakes on `stop_event` and, issue
+    #700, on `node.wake_sync()`). Anything else it awaits is part of a pass."""
     awaited = getattr(task.get_coro(), "cr_await", None)
     code = getattr(awaited, "cr_code", None)
-    return code is not None and code.co_name in ("sleep", "wait_for")
+    return code is not None and code.co_name in ("sleep", "wait_for", "_sleep_until_woken")
 
 
 async def run_sync_briefly(

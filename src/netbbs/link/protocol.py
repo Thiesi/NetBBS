@@ -57,6 +57,7 @@ this same in-memory state.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -1171,6 +1172,50 @@ def _signing_transitions(transitions: tuple[KeyTransition, ...], fingerprint: st
     )
 
 
+def merge_key_chain(
+    existing: "PeerRecord", transitions: tuple[KeyTransition, ...]
+) -> tuple[KeyTransition, ...] | None:
+    """`existing`'s transitions with whichever of `transitions` it lacks
+    appended, or `None` if the result does not verify against its root key
+    (issue #914). Transitions are append-only history: what is on file stays,
+    which is why an older chain can never make a compromised key current
+    again. Only the identity's own signing transitions are taken."""
+    known = {t.content_id for t in existing.transitions}
+    new = tuple(
+        t for t in transitions
+        if t.content_id not in known
+        and t.payload.get("subject_fingerprint") == existing.fingerprint
+        and t.payload.get("purpose") == "signing"
+    )
+    if not new:
+        return existing.transitions
+    merged = existing.transitions + new
+    try:
+        current = resolve_current_operational_key(
+            merged, root_verify_key=existing.root_verify_key,
+            subject_fingerprint=existing.fingerprint, purpose="signing",
+        )
+    except NodeIdentityError:
+        return None
+    return merged if current is not None else None
+
+
+def descriptor_verifies_under_chain(
+    descriptor: EndpointDescriptor, existing: "PeerRecord", transitions: tuple[KeyTransition, ...]
+) -> bool:
+    """Whether `descriptor` is signed by the current signing key of `transitions`."""
+    try:
+        current = resolve_current_operational_key(
+            transitions, root_verify_key=existing.root_verify_key,
+            subject_fingerprint=existing.fingerprint, purpose="signing",
+        )
+    except NodeIdentityError:
+        return False
+    return current is not None and verify_endpoint_descriptor(
+        descriptor, nacl.signing.VerifyKey(base64.b64decode(current))
+    )
+
+
 @dataclass(frozen=True)
 class HelloMessage:
     """
@@ -1484,6 +1529,12 @@ _MAX_DEFERRED_EVENTS = 10_000
 # least recently served goes, and is back the next time its content is served.
 _MAX_SERVED_SIGNERS = 4096
 
+#: Issue #914: the most signers' key chains one inventory response carries,
+#: and the longest chain carried. A chain longer than this is left to the
+#: stale-bundle refresh (design doc §8.11), which asks for it whole.
+MAX_CARRIED_KEY_CHAINS = 32
+MAX_CARRIED_CHAIN_TRANSITIONS = 64
+
 
 @dataclass
 class DeferredEvents:
@@ -1539,6 +1590,33 @@ class DeferredEvents:
             if waiting_for == fingerprint or waiting_for is None or held_from == fingerprint:
                 del self.entries[content_id]
 
+    def release_all(self) -> int:
+        """Retry everything on the next pass (issue #700: the SysOp's
+        `[R]etry now`, or a trust change made where the running node could
+        not be told which node it concerned). Returns how many were waiting."""
+        count = len(self.entries)
+        self.entries.clear()
+        return count
+
+    def waiting(self) -> dict[tuple[str, str | None], tuple[int, float]]:
+        """For Link status (issue #700): how many events are set aside and
+        when the soonest is next tried, keyed by why -- `("held", node)` for
+        content held back by that node's trust state here, `("unknown",
+        node)` for content signed by a node this one has yet to learn of, and
+        `("waiting", None)` for content waiting on something else, usually an
+        earlier event."""
+        result: dict[tuple[str, str | None], tuple[int, float]] = {}
+        for _kind, _resource, waiting_for, retry_at, held_from, _name in self.entries.values():
+            if held_from is not None:
+                key = ("held", held_from)
+            elif waiting_for is not None:
+                key = ("unknown", waiting_for)
+            else:
+                key = ("waiting", None)
+            count, soonest = result.get(key, (0, retry_at))
+            result[key] = (count + 1, min(soonest, retry_at))
+        return result
+
     def expire(self, now: float) -> None:
         for content_id, (_kind, _resource, _waiting, retry_at, _held, _name) in list(self.entries.items()):
             if retry_at <= now:
@@ -1565,6 +1643,21 @@ class DeferredEvents:
             if name is not None and name not in names.setdefault(kind, []):
                 names[kind].append(name)
         return HeldBack(count, {kind: tuple(sorted(found, key=str.casefold)) for kind, found in names.items()})
+
+
+#: In place of a carrier's fingerprint in `LinkNode.unanswered_identities`: the
+#: hourly refresh of a reporter known only by introduction (issue #627; named
+#: here for Link status, issue #700).
+REPORTER_REFRESH = "reporter-refresh"
+
+
+@dataclass(frozen=True)
+class ReleasedWaits:
+    """What `LinkNode.release_waits` let go of, for the SysOp's result line."""
+
+    set_aside: int
+    refused_at_peers: int
+    introductions: int
 
 
 @dataclass(frozen=True)
@@ -1766,9 +1859,19 @@ class PeerDirectory:
             return False
         existing = self.introduced.get(record.fingerprint)
         if existing is not None:
-            older = record.descriptor.payload.get("created_at", "") < existing.descriptor.payload.get("created_at", "")
-            if older or len(record.transitions) < len(existing.transitions):
+            # Issue #914: merged, not replaced. A bundle verifies against
+            # itself alone, so one from before a compromise verifies too; the
+            # key history already on file -- from an earlier bundle or a
+            # carrier's chain -- must survive it, or the compromised key
+            # would be current here again.
+            merged = merge_key_chain(existing, record.transitions)
+            if merged is None:
                 return False
+            older = record.descriptor.payload.get("created_at", "") < existing.descriptor.payload.get("created_at", "")
+            descriptor = existing.descriptor
+            if not older and descriptor_verifies_under_chain(record.descriptor, existing, merged):
+                descriptor = record.descriptor
+            record = replace(record, transitions=merged, descriptor=descriptor)
             # The same bundle again is not news. Reporting it as learned made
             # every refresh write to the database, release everything that
             # waited for the node and download it all once more.
@@ -2122,6 +2225,33 @@ class LinkNode:
     on_channel_message_materialized: (
         Callable[[str, str, Any], Awaitable[None]] | None
     ) = field(default=None, repr=False, compare=False)
+    # Issue #700: set to run a sync pass now rather than at the end of the
+    # interval -- the SysOp's `[R]etry now`, or a trust decision whose effect
+    # they are waiting to see. `run_link_sync` waits on it beside its stop
+    # event and clears it when it wakes. An `asyncio.Event` binds no loop
+    # until it is first awaited, so building one here is safe.
+    sync_wake: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+
+    def wake_sync(self) -> None:
+        """Ask the sync loop for a pass now (issue #700)."""
+        self.sync_wake.set()
+
+    def release_waits(self) -> "ReleasedWaits":
+        """Forget every hour-long Link wait held in memory (issue #700), so the
+        next pass tries again: events set aside, own events a peer refused one
+        by one, and introductions a carrier could not answer (the hourly
+        reporter refresh included). The trust-deposit backoff lives in the
+        database; see `netbbs.link.trust_carriage.release_trust_deposit_backoffs`."""
+        set_aside_at_peers = sum(len(exchange.set_aside) for exchange in self.peer_exchange.values())
+        for exchange in self.peer_exchange.values():
+            exchange.set_aside.clear()
+        introductions = len(self.unanswered_identities)
+        self.unanswered_identities.clear()
+        return ReleasedWaits(
+            set_aside=self.deferred_events.release_all(),
+            refused_at_peers=set_aside_at_peers,
+            introductions=introductions,
+        )
 
     @property
     def peers(self) -> dict[str, "PeerRecord"]:
@@ -2523,19 +2653,111 @@ class LinkNode:
         included.
         """
         for raw in raw_events:
-            signers = referenced_identities(raw)
-            # A closure, a tombstone, a moderator's edit or a file descriptor
-            # is signed by its resource's origin and does not say so in its
-            # payload. A requester that has to refresh that origin's bundle
-            # names it all the same, and must not be told it is unknown.
-            origin = self._resource_origin(_event_resource(raw))
-            if origin is not None and origin not in signers:
-                signers.append(origin)
-            for fingerprint in signers:
+            for fingerprint in self._signers_of(raw):
                 self.served_signers.pop(fingerprint, None)
                 self.served_signers[fingerprint] = None
         while len(self.served_signers) > _MAX_SERVED_SIGNERS:
             self.served_signers.pop(next(iter(self.served_signers)))
+
+    def _signers_of(self, raw: dict) -> list[str]:
+        """Whoever signed `raw`, as far as this node can tell."""
+        signers = referenced_identities(raw)
+        # A closure, a tombstone, a moderator's edit or a file descriptor
+        # is signed by its resource's origin and does not say so in its
+        # payload. A requester that has to refresh that origin's bundle
+        # names it all the same, and must not be told it is unknown.
+        origin = self._resource_origin(_event_resource(raw))
+        if origin is not None and origin not in signers:
+            signers.append(origin)
+        return signers
+
+    def build_carried_key_chains(self, raw_events: list[dict], *, requester_fingerprint: str) -> list[dict]:
+        """The signing-key histories of whoever signed `raw_events` (issue #914).
+
+        Served beside an inventory response so that a requester who knows a
+        signer only by introduction learns of a rotation -- above all a
+        compromise -- on the same pull that brings that signer's content. A
+        stale bundle still treats a compromised key as current, so old-key
+        content verifies there and nothing would otherwise prompt a refresh
+        (design doc §8.11). Each chain verifies against the root key the
+        requester already holds; who carried it adds nothing.
+
+        Only a chain with news in it: a lone authorization is what every
+        bundle of that node already holds. Not this node's own chain, which
+        its peers have from its hello and its gossip, nor the requester's.
+        Bounded by `MAX_CARRIED_KEY_CHAINS` and `MAX_CARRIED_CHAIN_TRANSITIONS`.
+        """
+        chains: list[dict] = []
+        seen: set[str] = {self.identity.fingerprint, requester_fingerprint}
+        for raw in raw_events:
+            for fingerprint in self._signers_of(raw):
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                record = self.known_identity(fingerprint)
+                if record is None:
+                    continue
+                transitions = _signing_transitions(record.transitions, fingerprint)
+                if len(transitions) < 2 or len(transitions) > MAX_CARRIED_CHAIN_TRANSITIONS:
+                    continue
+                chains.append({
+                    "fingerprint": fingerprint,
+                    "root_public_key": base64.b64encode(record.root_public_key).decode("ascii"),
+                    "transitions": [t.to_dict() for t in transitions],
+                })
+                if len(chains) >= MAX_CARRIED_KEY_CHAINS:
+                    return chains
+        return chains
+
+    def apply_carried_key_chains(self, chains: object) -> list["PeerRecord"]:
+        """Merge the key chains a carrier served into identities this node
+        knows only by introduction (issue #914). Returns the records that
+        changed, for the caller to persist.
+
+        Only an introduced identity is updated. A direct peer's chain comes
+        from that peer itself, by hello and gossip, and is never taken from a
+        third node; an identity this node has never been introduced to is
+        learned whole through an introduction, which brings its descriptor
+        too. A chain is checked against the root key already on file, merged
+        as `merge_key_chain` does, and skipped if it does not verify: a carrier
+        that sends a bad one costs only that chain. The descriptor on file is
+        kept even if the merged chain has since replaced the key that signed
+        it -- it says where the node is, not what to believe it signed.
+        """
+        if not isinstance(chains, list):
+            return []
+        changed: list[PeerRecord] = []
+        for item in chains[:MAX_CARRIED_KEY_CHAINS]:
+            try:
+                fingerprint = item["fingerprint"]
+                existing = self.introduced.get(fingerprint) if isinstance(fingerprint, str) else None
+                if existing is None or fingerprint in self.peers:
+                    continue
+                if base64.b64decode(item["root_public_key"]) != existing.root_public_key:
+                    continue
+                raw_transitions = item["transitions"]
+                if not isinstance(raw_transitions, list) or len(raw_transitions) > MAX_CARRIED_CHAIN_TRANSITIONS:
+                    continue
+                transitions = tuple(KeyTransition.from_dict(raw) for raw in raw_transitions)
+                for transition in transitions:
+                    self._check_protocol_version(
+                        transition.envelope, kind="key_transition", sender_fingerprint=fingerprint,
+                    )
+                # Inside the guard: the merge is the first thing to read each
+                # transition's payload, which nothing above has checked exists
+                # (review of #1027). Outside it, one malformed chain ended the
+                # whole sync pass with that seed.
+                merged = merge_key_chain(existing, transitions)
+            except (KeyError, TypeError, ValueError, LinkProtocolError):
+                continue
+            except Exception:  # noqa: BLE001 -- unvalidated input
+                continue
+            if merged is None or merged == existing.transitions:
+                continue
+            record = replace(existing, transitions=merged)
+            self.introduced[fingerprint] = record
+            changed.append(record)
+        return changed
 
     def build_peer_list(self) -> PeerListMessage:
         """This node's own currently-verified peers' endpoint
@@ -2615,14 +2837,26 @@ class LinkNode:
                 if self._refresh_known_peer_descriptor(candidate_fingerprint, descriptor):
                     recorded.append(candidate_fingerprint)
                 continue
+            if candidate_fingerprint in self.introduced:
+                # Issue #700: the same for a node known only by introduction,
+                # whose signing key is on file just as a peer's is. Its record
+                # was otherwise refreshed at most hourly, so a reporter that
+                # had just gained a relay stayed "cannot be dialed" for up to
+                # an hour while the answer sat among the candidates. Recorded
+                # as a candidate as well, below, as before.
+                if self._refresh_known_peer_descriptor(candidate_fingerprint, descriptor, introduced=True):
+                    recorded.append(candidate_fingerprint)
             if self.peer_directory.record_candidate(
                 candidate_fingerprint, descriptor, max_candidates=_MAX_CANDIDATE_DESCRIPTORS
             ):
                 recorded.append(candidate_fingerprint)
         return recorded
 
-    def _refresh_known_peer_descriptor(self, fingerprint: str, descriptor: EndpointDescriptor) -> bool:
-        peer = self.peers[fingerprint]
+    def _refresh_known_peer_descriptor(
+        self, fingerprint: str, descriptor: EndpointDescriptor, *, introduced: bool = False
+    ) -> bool:
+        records = self.introduced if introduced else self.peers
+        peer = records[fingerprint]
         if str(descriptor.payload.get("created_at", "")) <= str(peer.descriptor.payload.get("created_at", "")):
             return False
         try:
@@ -2638,7 +2872,7 @@ class LinkNode:
         from netbbs.link.node_profiles import profile_claims_are_canonical
         if not profile_claims_are_canonical(descriptor.payload):
             return False
-        self.peers[fingerprint] = PeerRecord(
+        records[fingerprint] = PeerRecord(
             fingerprint=peer.fingerprint, root_public_key=peer.root_public_key,
             transitions=peer.transitions, descriptor=descriptor,
         )

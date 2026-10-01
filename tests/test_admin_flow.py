@@ -10967,3 +10967,133 @@ def test_who_posts_steps_through_the_modes_on_an_originated_board(db, lane, syso
     assert "Who posts on 'General': the origin's callers only." in text
     assert len([event for event in link_context.link_node.events.values()
                 if event["envelope"]["object_type"] == "board_posting"]) == 2
+
+
+
+# -- the hour-long Link waits (issue #700) -----------------------------------------------
+
+
+def _waiting_link_context(db):
+    import time
+
+    from netbbs.link.protocol import REPORTER_REFRESH, PeerExchange
+    from netbbs.link.trust_carriage import record_trust_deposit_refusal
+
+    link_context = _link_context()
+    node = link_context.link_node
+    soon = time.time() + 1800
+    node.deferred_events.entries["1" * 64] = ("boards", "b", None, soon, "remote-node", "Pen Talk")
+    node.deferred_events.entries["2" * 64] = ("boards", "b", "stranger-node", soon, None, None)
+    node.peer_exchange["peer-node"] = PeerExchange(
+        set_aside={"3" * 64: ("link_policy_user_probationary_approval_required", soon)}
+    )
+    node.unanswered_identities[("carrier-node", "who-node")] = soon
+    node.unanswered_identities[(REPORTER_REFRESH, "reporter-node")] = soon
+    record_trust_deposit_refusal(db, "relay-node", "HTTP 403: not established")
+    return link_context
+
+
+def _link_status_pages(session) -> str:
+    return " ".join(_visible(_written_text(session)).split())
+
+
+def test_link_status_lists_every_hour_long_wait_with_its_next_try(db, lane, sysop):
+    """Issue #700: an operator who fixed the cause could not tell whether they
+    had, or when the node would next try, and waited the full hour to be safe."""
+    link_context = _waiting_link_context(db)
+    session = FakeSession(["s", "l", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    text = _link_status_pages(session)
+
+    assert "WAITING Wait What Next try" in text
+    # Cell text wraps inside its column, so each is checked up to its first break.
+    for what in (
+        "Set aside 1 event(s) from Unknown node remote, held",
+        "Set aside 1 event(s) signed by Unknown node strang, a",
+        "Refused there 1 of yours at Unknown node peer-n: their",
+        "Introduction Unknown node who-no: no carrier could say who",
+        "Introduction Unknown node report: reporter looked up again",
+        "Trust deposit refused by Unknown node relay-",
+    ):
+        assert what in text, what
+    assert "author is on probation there" in text
+    assert "These are waits, not failures" in text
+    assert "[R]etry now" in text
+
+
+def test_link_status_leaves_the_waiting_section_out_when_nothing_waits(db, lane, sysop):
+    session = FakeSession(["s", "l", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+    assert "WAITING" not in _link_status_pages(session)
+
+
+def test_retry_now_ends_every_wait_and_starts_a_pass(db, lane, sysop):
+    from netbbs.link.trust_carriage import relays_refusing_trust_deposits, trust_deposits_waiting
+
+    link_context = _waiting_link_context(db)
+    node = link_context.link_node
+    session = FakeSession(["s", "l", "r", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    text = _link_status_pages(session)
+
+    assert (
+        "Released 2 set-aside event(s), 1 event(s) refused at peers, 2 introduction wait(s), "
+        "1 trust-deposit wait(s). A sync pass is starting now." in text
+    )
+    assert node.deferred_events.entries == {}
+    assert node.peer_exchange["peer-node"].set_aside == {}
+    assert node.unanswered_identities == {}
+    assert trust_deposits_waiting(db) == []
+    assert relays_refusing_trust_deposits(db, ["relay-node"]) == ["relay-node"], "what it said is kept"
+    assert node.sync_wake.is_set()
+
+
+def test_retry_now_with_nothing_waiting_still_starts_a_pass(db, lane, sysop):
+    link_context = _link_context()
+    session = FakeSession(["s", "l", "r", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    assert "Nothing was waiting. A sync pass is starting now." in _link_status_pages(session)
+    assert link_context.link_node.sync_wake.is_set()
+
+
+def test_naming_a_trusted_reporter_retries_everything_set_aside(db, lane, sysop):
+    """Issue #700: only a Subjects override used to release held-back content.
+    A reporter change can change how any of it is judged."""
+    from netbbs.link.trust import configure_trust_domain
+
+    configure_trust_domain(db, "emergency", display_name="Emergency operator")
+    link_context = _link_context()
+    held = link_context.link_node.deferred_events
+    held.entries["c" * 64] = ("boards", "a" * 64, "some-node", 9e12, None, None)
+    reporter = "abcdefghijklmnopqrstuvwxyz234567"
+    session = FakeSession([
+        "s", "p",
+        "r", "a", "n", "0", "1", reporter, "d", "emergency", "c", "identity_integrity:signed_equivocation", "s", "b",
+        "b", "b", "b",
+    ])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    assert held.entries == {}
+    assert link_context.link_node.sync_wake.is_set()
+
+
+def test_leaving_reporters_unchanged_keeps_what_is_set_aside(db, lane, sysop):
+    link_context = _link_context()
+    held = link_context.link_node.deferred_events
+    held.entries["c" * 64] = ("boards", "a" * 64, "some-node", 9e12, None, None)
+    session = FakeSession(["s", "p", "r", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    assert list(held.entries) == ["c" * 64]
+    assert not link_context.link_node.sync_wake.is_set()
+
+
+def test_a_trust_decision_about_a_node_starts_a_pass_at_once(db, lane, sysop):
+    subject = TrustSubject.node("remote-node")
+    register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
+    link_context = _link_context()
+    session = FakeSession([
+        "s", "p", "s", "0", "1",
+        "o", "d", "r", "t", "e", "r", "known operator", "s", "y",
+        "b", "b", "b", "b",
+    ])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    assert link_context.link_node.sync_wake.is_set()

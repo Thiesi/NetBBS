@@ -2137,8 +2137,11 @@ def test_request_inventory_lets_a_completed_peer_discover_carried_content_from_a
             await bob_server.stop()
 
     try:
-        events, more_available, wanted = asyncio.run(scenario())
+        events, more_available, wanted, key_chains = asyncio.run(scenario())
         assert more_available is False
+        # Issue #914: Bob signed everything he served, and his own chain is
+        # Alice's from his hello, so there is no key history to carry.
+        assert key_chains == []
         # Alice's request declares nothing carried, so there is nothing
         # Bob can ask her for (the `wanted` half, #478/PR #498).
         assert wanted == []

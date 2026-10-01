@@ -41,7 +41,7 @@ Then run the complete suite:
 | SysOp explanation and configuration | A SysOp can inspect domains, reporters, anchors, authorities, subjects, effective decisions, evidence, overrides, recovery requirements, and audit history | implemented; automated UI coverage. Gaps found in the 2026-09 exercise: a `*` scope category was accepted but authorized nothing (#745, fixed: it now expands to every known category of its dimension); below the threshold the explanation shows no counted domains, weight or release condition (#752) |
 | Manual quarantine/block/recovery exercise | Follow “Phase 4 trust and recovery exercise” in `docs/NetBBS-link-dogfood-plan.md`; record the visible reason and effects, restart while restricted, clear the trigger or override, observe the recovery hold, and record release | **done 2026-09-26 to 09-29, with one defect.** Two signals from two domains quarantined `identity_integrity` only, and a new post by the subject was refused. The state survived a restart during a partition. A mandatory-reason override was scoped, audited, restart-safe and cleared. The signal's revocation started the 24 h hold, and the subject returned to probationary with `automatic_recovery`. An ordinary caller sees nothing. **But release happened only at a restart (#802).** Record: issue #131 |
 | Independently administered multi-node exercise | Using that same runbook, at least two administrators configure separate nodes; introduce a trust trigger across a partition; inspect quarantine on the receiving node; heal, revoke/remove the trigger, restart, and verify convergence without deleting accepted objects | **done 2026-09**, on three live nodes on three networks, two of them outgoing-only and one behind a corporate proxy. Two separately run sessions administered them, which the operator counts as independent (the gate is about network and configuration diversity). Every step of the row held, and no accepted object was deleted. Record: issue #131 |
-| Operational-key rotation and compromise response | The rotation rows of that runbook: a routine signing-key rotation leaves the node's earlier content usable by a new subscriber, a transport rotation's sessions reconnect, and an offline compromise response re-signs the node's own content while stale carrier copies are skipped per object (issue #624) | **exercised 2026-09 on v7.13.0; one requirement fails.** Routine signing rotation: content signed before it was accepted on first fetch after it. Transport rotation: the live session reconnected in 17 s (live chat is one-way, #860). Compromise response: 11 objects re-signed, and the new content was accepted. **But a node that knows the rotating node only by introduction accepted a carrier's stale copy signed by the compromised key: #914.** Pending #914's fix |
+| Operational-key rotation and compromise response | The rotation rows of that runbook: a routine signing-key rotation leaves the node's earlier content usable by a new subscriber, a transport rotation's sessions reconnect, and an offline compromise response re-signs the node's own content while stale carrier copies are skipped per object (issue #624) | **exercised 2026-09 on v7.13.0; one requirement fails.** Routine signing rotation: content signed before it was accepted on first fetch after it. Transport rotation: the live session reconnected in 17 s (live chat is one-way, #860). Compromise response: 11 objects re-signed, and the new content was accepted. **But a node that knows the rotating node only by introduction accepted a carrier's stale copy signed by the compromised key: #914.** Fixed (carriers serve the signer's key history); to be re-run on real nodes |
 | Sustained private dogfood | Complete and record issue #83's duration, restart, partition, quota, and operator-observation checklist | pending |
 
 ## Decision
@@ -49,11 +49,13 @@ Then run the complete suite:
 NetBBS remains private/experimental federation. The automated §12.10 gate is
 necessary evidence. The 2026-09 exercise closed the real-node quarantine and
 independently administered rows. Phase 4 and issue #131 are still not complete,
-and no public-network readiness claim is justified, while two things stand:
+and no public-network readiness claim is justified while issue #83's sustained
+run has not been recorded.
 
-- the compromise response does not reach nodes that know the compromised node
-  only by introduction (#914);
-- issue #83's sustained run has not been recorded.
+The compromise response did not reach nodes that knew the compromised node only
+by introduction (#914). A carrier now serves each signer's key history beside
+its content, and the receiver merges it; a later exercise should see row 9's
+stale copy skipped on real nodes.
 
 Automatic recovery waited for a restart (#802). A running node now re-evaluates
 trust on every Link sync pass; a later exercise should see a hold release on a
