@@ -106,6 +106,7 @@ from netbbs.rendering.ansi import move_cursor, strip_ansi
 from netbbs.rendering.art_slots import SlotArt, layout_menu_slot, render_slot_art
 from netbbs.rendering.charset import ASCII, ellipsis_for
 from netbbs.rendering.width import display_width
+from netbbs.rendering.reflow import wrap_terminal_text
 
 #: What the SysOp monitor shows for a caller who took each main-menu branch
 #: (issue #762), named as the menu names it. Every key `_main_menu_loop`
@@ -530,9 +531,12 @@ async def _draw_slot_main_menu(
     """Draw the main menu as the SysOp's slot art, or return `False`
     without writing anything when this caller gets the generated menu
     (see `plan_slot_main_menu`)."""
-    plan = plan_slot_main_menu(
-        session, art, labels, fields, rows_below=len(extra_lines) + pending_notice_rows(session), prompt=prompt
-    )
+    # Rows as written: a carried notice can hold several lines joined by
+    # CR LF (an access change), and long lines wrap.
+    width = max(1, session.terminal_width)
+    below = sum(wrap_terminal_text(line, width).count("\r\n") + 1 for line in extra_lines)
+    below += pending_notice_rows(session)
+    plan = plan_slot_main_menu(session, art, labels, fields, rows_below=below, prompt=prompt)
     if plan.text is None:
         if "don't fit" in plan.reason:
             _log_slot_overflow(len(labels), art)
