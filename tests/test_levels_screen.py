@@ -123,3 +123,81 @@ def test_go_to_level_lists_what_a_level_nobody_holds_opens(lane, sysop, node):
     text = _screen(lane, sysop, ["u", "v", "g", "60", "v"])
 
     assert "Level 60" in text and "Trading Post" in text and "Staff Room" not in text
+
+
+def test_a_narrow_terminal_gets_the_columns_as_text(lane, sysop, node):
+    session = ScriptedSession(["u", "v"], width=50)
+    with pytest.raises(_Exhausted):
+        asyncio.run(admin_menu(session, lane, sysop))
+    ladder = "\n".join(" ".join(row.split()) for row in session.on_terminal())
+
+    assert "2 users; opens 1 read" in ladder
+
+    session = ScriptedSession(["u", "v", "0", "2"], width=50)
+    with pytest.raises(_Exhausted):
+        asyncio.run(admin_menu(session, lane, sysop))
+    detail = "\n".join(" ".join(row.split()) for row in session.on_terminal())
+
+    assert "read at 10, Community Market" in detail
+
+
+class _HookedSession(ScriptedSession):
+    """Runs a callable placed among the inputs when the screen reaches it."""
+
+    def _next(self) -> str:
+        while self._inputs and callable(self._inputs[0]):
+            self._inputs.pop(0)()
+        return super()._next()
+
+
+def test_the_ladder_is_counted_again_after_go_to_level(db, lane, sysop, node):
+    """What happens on a level's own screen -- a gate's level changed on a
+    board's screen -- shows on the ladder it returns to (review of #1018)."""
+    def raise_staff_room():
+        db.connection.execute("UPDATE boards SET min_read_level = 60, min_write_level = 60 WHERE name = 'Staff Room'")
+        db.connection.commit()
+
+    session = _HookedSession(["u", "v", "g", "60", raise_staff_room, "b"])
+    with pytest.raises(_Exhausted):
+        asyncio.run(admin_menu(session, lane, sysop))
+    text = "\n".join(" ".join(row.split()) for row in session.on_terminal())
+
+    assert "Level 60" in text and "Level 100" not in text
+
+
+def test_a_resource_opened_from_levels_gets_the_content_menus_services(db, lane, sysop, node, monkeypatch):
+    """The chat hub guards renaming an occupied channel and moves callers out
+    of a deleted one, the door supervisor follows a door's edits, the
+    transfer grants offer downloads: opened from here, the screens get them
+    as from the Content menu (review of #1018)."""
+    from types import SimpleNamespace
+
+    from netbbs.access_map import GateKind, list_gates
+    from netbbs.files.areas import create_file_area
+    from netbbs.net import admin_flow
+
+    create_file_area(db, "Uploads", creator=sysop)
+    seen = {}
+
+    def recorder(name):
+        async def screen(session, lane, actor, resource, **kwargs):
+            seen[name] = kwargs
+        return screen
+
+    for name in ("_channel_detail_screen", "_door_detail_screen", "_area_detail_screen"):
+        monkeypatch.setattr(admin_flow, name, recorder(name))
+    controls = SimpleNamespace(
+        chat_hub="hub", mrc_bridge="bridge", door_services="doors", transfers="grants", backup_identity_dir="ids",
+    )
+    gates = list_gates(db)
+    for kind in (GateKind.CHANNEL, GateKind.DOOR, GateKind.AREA_READ):
+        gate = next(g for g in gates if g.kind is kind)
+        asyncio.run(admin_flow._open_gate_resource(
+            ScriptedSession([]), lane, sysop, gate, node_controls=controls, link_context=None,
+        ))
+
+    assert seen["_channel_detail_screen"]["chat_hub"] == "hub"
+    assert seen["_channel_detail_screen"]["mrc_bridge"] == "bridge"
+    assert seen["_door_detail_screen"]["door_services"] == "doors"
+    assert seen["_door_detail_screen"]["backup_identity_dir"] == "ids"
+    assert seen["_area_detail_screen"]["transfers"] == "grants"
