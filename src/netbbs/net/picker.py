@@ -46,7 +46,9 @@ from netbbs.rendering.art_slots import ListSlotRow, SlotArt, list_slot_fits, ren
 from netbbs.rendering.charset import ASCII, ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.notices import announce, take_notices
-from netbbs.net.session import Session, physical_terminal_width, write_preformatted_line, write_prompt
+from netbbs.net.session import (
+    Session, physical_terminal_width, write_art_text, write_preformatted_line, write_prompt,
+)
 from netbbs.rendering import (
     ACCENT_COLOR,
     ERROR_COLOR,
@@ -1073,7 +1075,9 @@ async def pick_item(
                 column_width=_slot_column_width(), ellipsis=cell_ellipsis,
             )
             if drawn is not None:
-                await session.write(drawn)
+                # As the main menu draws its slot art: iCE colours, CTerm's
+                # bright backgrounds and the pictographs for a CP437 terminal.
+                await write_art_text(session, drawn)
                 await session.write(move_cursor(slot_art.height + 1, 1))
                 for line in _slot_nav_lines(
                     include_next=page_start + len(page_items) < len(working_set),

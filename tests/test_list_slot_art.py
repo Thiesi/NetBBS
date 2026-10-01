@@ -255,3 +255,11 @@ def test_no_art_draws_the_list_as_before():
         title="Message boards", empty_message="No boards.", slot_art=None,
     ))
     assert plain.written == art_off.written
+
+
+def test_list_art_goes_out_as_art_with_its_pictographs():
+    # A heart drawn in the art (CP437 0x03) reaches a CP437 terminal as the
+    # byte that draws it, as the main menu's art does, not as a substitute.
+    art_text = LIST_ART.replace("+------------------------------------------+", "+-------------------\u2665----------------------+", 1)
+    _, session = _pick(["b"], art_text=art_text)
+    assert "\x03" in "".join(session.written)
