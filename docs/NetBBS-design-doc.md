@@ -477,14 +477,20 @@ leaving them to a `{menu WxH}` region (written `{menu}` below; it is the same
 token). Every bracketed key drawn in the art,
 `[K]`, marks one item; the item spans the run of text around it, bounded by
 two or more spaces, which is also how the browser terminal finds what a click
-means. An item the caller cannot use is blanked: its cells are repainted as
-spaces in their own background colour, so frames and fills stay whole and the
-caller sees only what the generated menu would show. Items the caller can use
-that the art does not draw go into the art's `{menu}` region; art with no
-`{menu}` region and an undrawn item falls back to the generated menu, so
-nothing is ever hidden. A drawn `[X]` that matches no item is left as drawn,
-and the console's check lists it. Buttons drawn over several rows are not
-supported.
+means. Box-drawing and block characters also end an item, so a frame drawn
+one space from it is not part of it, and an item drawn inside a slot is not an
+item, since the slot is drawn over it. A run holding two keys, such as
+`[B]oards [E]-mail` with one space, is one item holding both: both count as
+drawn, it is blanked only for a caller who can use neither, and the console's
+check suggests two spaces between them. An item the caller cannot use is
+blanked: its cells are repainted as spaces in the background each cell shows,
+so frames and fills stay whole and the caller sees only what the generated
+menu would show. Items the caller can use that the art does not draw go into
+the art's `{menu}` region; art with no `{menu}` region and an undrawn item
+falls back to the generated menu, so nothing is ever hidden, and art that
+draws its items needs no `{menu}` region of its own. A drawn `[X]` that is no
+main-menu key is the SysOp's decoration: it stays as drawn, and the console's
+check lists it. Buttons drawn over several rows are not supported.
 
 *Pacing.* Art can be played at an emulated line speed so that it draws itself
 the way it did over a modem. NetBBS paces the bytes itself, in small chunks,
@@ -498,28 +504,6 @@ banners play in the order they were drawn, so cursor-moving ANSI animations
 work; slot art is rebuilt cell by cell and is revealed top to bottom. Callers
 can turn animations off in Profile ("Animations", on by default), and ASCII
 callers never get them.
-
-**Hand-drawn menu items (issue #929, step 5).** A SysOp may draw the menu's
-items into the art themselves instead of, or as well as, leaving a `{menu}`
-region. No token is needed: every bracketed key drawn in the art -- `[B]oards`,
-`Moder[a]tion` -- is an item, and the item is the run of text around the key,
-bounded by two or more spaces, the same rule the browser uses to turn a click
-into a key. Box-drawing and block characters also end an item, so a frame
-drawn one space from it is not part of it. A run holding two keys, such as
-`[B]oards [E]-mail` with one space, is one item holding both: both count as
-drawn, it is blanked only for a caller who can use neither, and the console's
-check suggests two spaces between them. An item drawn inside a slot is not an
-item, since the slot is drawn over it. For each caller, a drawn item whose key
-is a main-menu key the caller cannot use is blanked: its cells are repainted as
-spaces in the background each cell shows, so the frame and fill around it stay
-whole, and the item is neither visible nor clickable. A bracketed key that is
-no main-menu key at all is the SysOp's own decoration and stays as drawn. The
-caller's items that the art does not draw go into the `{menu}` region; art
-with no `{menu}` region must draw every item the caller has, or that caller
-gets the generated menu. Art that draws its items needs no `{menu}` region.
-Blanking was chosen over dimming: a dimmed item still advertises a key that
-does nothing, such as the SysOp console, and depends on a colour some
-terminals render faintly. Buttons drawn over several rows are deferred.
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
