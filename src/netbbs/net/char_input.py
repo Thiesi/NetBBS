@@ -1955,6 +1955,20 @@ async def discard_buffered_input(source: ByteSource) -> None:
             return
 
 
+async def take_waiting_key(source: ByteSource, timeout: float) -> bool:
+    """Wait up to `timeout` seconds for a keystroke, and take it (issue
+    #929): what paced art checks between chunks, so a key ends the
+    animation. The key is swallowed, with whatever else arrived behind it
+    -- an arrow's escape sequence, the LF of a CR LF -- so it doesn't act
+    at the prompt that follows: Enter must not submit an empty username.
+    A Telnet negotiation arriving instead of a key ends the wait early
+    and counts as no key."""
+    if await _read_byte_with_timeout(source, timeout) is None:
+        return False
+    await discard_buffered_input(source)
+    return True
+
+
 async def _read_high_character(source: ByteSource, lead_byte: int) -> str | None:
     """The character a byte above 0x7F starts, in the caller's terminal's
     character set (issue #929): a CP437 terminal sends one byte per

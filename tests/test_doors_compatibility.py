@@ -402,6 +402,52 @@ def test_remote_allowlist_tunnel_and_rlogin_handshake(db, lane, player):
     assert received == [b"\x00", b"1\x00", b"keeper\x00", b"ansi/38400\x00"]
 
 
+def test_rlogin_terminal_type_opens_one_game(db, lane, player):
+    # Issue #983: Synchronet-based door servers read the terminal-type field
+    # to launch one game, so a registration can be that game alone.
+    received = []
+    async def handler(reader, writer):
+        try:
+            for _ in range(4):
+                received.append(await reader.readuntil(b"\x00"))
+            writer.write(b"\x00LORD")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    async def scenario():
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        profile = DoorProfile(adapter="rlogin", options={"host": "127.0.0.1", "port": port,
+                 "allowed_destinations": [f"127.0.0.1:{port}"], "service_name": "Game server",
+                 "terminal_type": "xtrn=LORD408"})
+        door = create_door(db, "LORD", "lord", creator=player, profile=profile)
+        session = FakeSession()
+        try:
+            result = await run_door(session, lane, door, player)
+            assert result.reason == "exited", result
+            assert session.written == b"LORD"
+        finally:
+            server.close()
+            await server.wait_closed()
+    asyncio.run(scenario())
+    # Sent exactly as written: no speed appended.
+    assert received[3] == b"xtrn=LORD408\x00"
+
+
+@pytest.mark.parametrize("value", ["", "xtrn=LORD 408", "xtrn={handle}", "xtrn=LÖRD", "x" * 65, 408, "ansi\x00"])
+def test_rlogin_terminal_type_is_fixed_printable_ascii(value):
+    from netbbs.doors.remote import MAX_TERMINAL_TYPE_LENGTH, validate_remote
+    options = {"host": "127.0.0.1", "port": 1513, "allowed_destinations": ["127.0.0.1:1513"],
+               "service_name": "Game server"}
+    assert MAX_TERMINAL_TYPE_LENGTH == 64
+    validate_remote(DoorProfile(adapter="rlogin", options={**options, "terminal_type": "x" * 64}))
+    with pytest.raises(ValueError, match="terminal_type"):
+        validate_remote(DoorProfile(adapter="rlogin", options={**options, "terminal_type": value}))
+    with pytest.raises(ProfileError, match="terminal_type"):
+        DoorProfile(adapter="rlogin", options={**options, "terminal_type": value}).validate()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="DOSBox inherited POSIX socket")
 @pytest.mark.parametrize("fossil", [False, True])
 def test_real_dosbox_com1_cp437_round_trip(db, lane, player, tmp_path, fossil):

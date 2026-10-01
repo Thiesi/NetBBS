@@ -527,8 +527,11 @@ def test_dial_realtime_session_completes_a_handshake_and_registers_both_sides():
             )
             try:
                 await session_a.send(build_subscribe_frame("channel-1"))
-                await asyncio.sleep(0.05)
                 assert registry_a.get(bob.fingerprint) is session_a
+                # The frame reaching the listener is what the assertions
+                # below depend on: waited for, not slept for (issue #999).
+                # Its arrival also implies the listener admitted the session.
+                assert await _wait_until(lambda: len(received_by_b) >= 1, timeout=30.0)
                 assert registry_b.get(alice.fingerprint) is not None
                 assert session_a.remote_fingerprint == bob.fingerprint
             finally:
@@ -896,6 +899,89 @@ class _NodeDb:
     def close(self) -> None:
         self.lane.close()
         self.db.close()
+
+
+def test_one_refused_event_does_not_refuse_the_rest_of_a_push(tmp_path):
+    """Issue #897: a probationary caller's chat line refused the whole
+    events request, and the sender resent it unchanged every pass, so
+    nothing queued behind it ever arrived. Each event is judged on its own;
+    the refused one is named, the rest are taken."""
+    from netbbs.link.events import build_channel_message
+    from netbbs.link.transport import LinkPolicyRefused, push_events_partial
+
+    alice_identity = bootstrap_node_identity("partial-alice")
+    bob_identity = bootstrap_node_identity("partial-bob")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "partial-alice")
+    bob = _NodeDb(tmp_path, "partial-bob")
+    genesis = build_board_genesis(
+        signing_identity=alice_identity.signing_key, origin_fingerprint=alice_identity.fingerprint,
+        board_id="partial-board", name="Partial", created_at="2026-08-14T12:00:00+00:00",
+    )
+    chat = build_channel_message(
+        signing_identity=alice_identity.signing_key, home_node_fingerprint=alice_identity.fingerprint,
+        local_user_id="probation-user", channel_id="some-channel", body="hello",
+        created_at="2026-08-14T12:01:00+00:00",
+    )
+
+    async def scenario():
+        server = await _run_server(
+            bob_node, lambda: _hello_for(bob_node), bob.lane, enforce_trust_policy=True
+        )
+        base_url = f"http://127.0.0.1:{server.port}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(alice_node, session, base_url, _hello_for(alice_node), alice.lane)
+                subject = TrustSubject.node(alice_identity.fingerprint)
+                for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+                    set_trust_override(
+                        bob.db, subject, dimension, TrustState.ESTABLISHED,
+                        reason="known peer", now_iso="2026-08-14T12:00:30+00:00",
+                    )
+                accepted, refused = await push_events_partial(alice_node, session, base_url, [chat, genesis])
+                assert accepted == [genesis.content_id]
+                assert [(item.content_id, item.reason_code) for item in refused] == [
+                    (chat.content_id, "link_policy_user_probationary_approval_required"),
+                ]
+                assert bob.db.connection.execute(
+                    "SELECT 1 FROM link_events WHERE content_id = ?", (genesis.content_id,)
+                ).fetchone() is not None
+                # A refused event too malformed to have a content ID (a
+                # float, which content IDs refuse) is refused, not a 500 that
+                # loses the rest of the request (review of #998).
+                bad_chat = chat.to_dict()
+                bad_chat["envelope"] = {**bad_chat["envelope"],
+                                        "payload": {**bad_chat["envelope"]["payload"], "weight": 1.5}}
+                second = build_board_genesis(
+                    signing_identity=alice_identity.signing_key,
+                    origin_fingerprint=alice_identity.fingerprint,
+                    board_id="partial-board-2", name="Partial 2", created_at="2026-08-14T12:02:00+00:00",
+                )
+                url = f"{base_url}{LINK_PATH_PREFIX}/events/{alice_identity.fingerprint}"
+                async with session.post(url, json=[bad_chat, second.to_dict()]) as response:
+                    assert response.status == 200, await response.text()
+                    body = await response.json()
+                assert body["accepted"] == [second.content_id]
+                assert "refused" not in body, "an event with no content ID cannot be named"
+                # A request with nothing acceptable left is still refused
+                # outright -- a pushed letter keeps its 403 -- and names it.
+                with pytest.raises(LinkPolicyRefused) as refusal:
+                    await push_events_partial(alice_node, session, base_url, [chat])
+                assert refusal.value.reason_code == "link_policy_user_probationary_approval_required"
+                assert [item.content_id for item in refusal.value.refused] == [chat.content_id]
+                # `push_events`, for callers that send one thing, never reads
+                # a partial refusal as delivered.
+                with pytest.raises(LinkPolicyRefused):
+                    await push_events(alice_node, session, base_url, [chat, genesis])
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        alice.close()
+        bob.close()
 
 
 def test_real_transport_enforces_probation_quarantine_block_explains_and_recovers(
