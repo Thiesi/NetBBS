@@ -74,7 +74,9 @@ from netbbs.access_map import (
     GateKind,
     LadderStep,
     LevelSource,
+    LevelContext,
     account_level_change,
+    level_context,
     level_ladder,
     list_gates,
 )
@@ -9072,6 +9074,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             return _format_bytes(current["upload_bytes"])
         return f"{d['upload_mib']} MiB"
 
+    levels = await lane.run(level_context)
     fields = [
         FieldSpec(
             key="upload_mib", hotkey="u", menu_text=menu_key("U", "pload cap (MiB)"), label="Upload cap",
@@ -9121,7 +9124,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
         FieldSpec(
             key="map_level", hotkey="n", menu_text=menu_key("N", "ode map level"),
             label="Node map level",
-            render=lambda d: f"level {d['map_level']} and up",
+            render=lambda d: _setting_level_label(levels, d["map_level"]),
             prompt=_int_field("map_level", "Lowest level"),
             brief="Who may open the node map", section="Directory",
             help=(
@@ -9133,7 +9136,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
         FieldSpec(
             key="mail_level", hotkey="m", menu_text=menu_key("M", "ail level"),
             label="Mail level",
-            render=lambda d: f"level {d['mail_level']} and up",
+            render=lambda d: _setting_level_label(levels, d["mail_level"]),
             prompt=_int_field("mail_level", "Lowest level"),
             brief="Who may read and send mail", section="Mail",
             help=(
@@ -9628,6 +9631,7 @@ async def _mrc_settings_screen(
             lines.append(colored("(Changes apply the next time the node runs.)", fg_color=MUTED_COLOR))
         return "\r\n".join(lines)
 
+    levels = await lane.run(level_context)
     fields = [
         FieldSpec(
             key="enabled", hotkey="e", menu_text=menu_key("E", "nable/Disable"), label="Enabled",
@@ -9722,7 +9726,8 @@ async def _mrc_settings_screen(
         FieldSpec(
             key="open_min_level", hotkey="v", menu_text=menu_key("v", "el for open rooms", prefix="Le"),
             label="Minimum level (open rooms)",
-            render=lambda d: str(d["open_min_level"]), prompt=_int_field("open_min_level", "Minimum level"),
+            render=lambda d: _plain_level_label(levels, d["open_min_level"]),
+            prompt=_int_field("open_min_level", "Minimum level"),
             brief="Level needed to open or enter one", section="Open rooms",
         ),
         FieldSpec(
@@ -16999,6 +17004,69 @@ def _optional_int_label(value: int | None, *, none_word: str = "none") -> str:
     return str(value) if value is not None else none_word
 
 
+def _users_phrase(count: int) -> str:
+    return f"{count} user{'s' if count != 1 else ''}"
+
+
+def _plain_level_label(levels: LevelContext | None, level: int | None) -> str:
+    """A channel's, door's or setting's level, with how many enabled,
+    approved accounts it lets in (design doc §5.7, issue #1008)."""
+    if level is None:
+        return "none"
+    if levels is None:
+        return str(level)
+    return f"{level} \u00b7 {_users_phrase(levels.users_at_or_above(level))}"
+
+
+def _setting_level_label(levels: LevelContext, level: int) -> str:
+    return f"level {level} and up · {_users_phrase(levels.users_at_or_above(level))}"
+
+
+def _effective_draft_level(levels: LevelContext, draft: dict, key: str) -> tuple[int, str | None]:
+    """A board's or file area's read or write level as the draft stands:
+    `(level, where)`, `where` saying where an inherited level comes from."""
+    stored = draft.get(key)
+    if stored is not None:
+        return stored, None
+    community = levels.communities.get(draft.get("community_id"))
+    default = getattr(community, f"default_{key}", None) if community is not None else None
+    if default is not None:
+        return default, f"from Community {community.name}"
+    return 0, "the default"
+
+
+def _resource_level_label(levels: LevelContext | None, draft: dict, key: str) -> str:
+    """`min_read_level`/`min_write_level` on a board or file area editor:
+    the value, where an inherited one comes from, and how many accounts it
+    lets in. Posting needs reading too, so a write level below the read
+    level is counted at the read level and says so."""
+    if levels is None:
+        return _optional_int_label(draft.get(key))
+    level, where = _effective_draft_level(levels, draft, key)
+    shown = f"none: {level} {where}" if where is not None else str(level)
+    counted, extra = level, ""
+    if key == "min_write_level":
+        read_level, _ = _effective_draft_level(levels, draft, "min_read_level")
+        if read_level > level:
+            counted, extra = read_level, f" (reading needs {read_level})"
+    return f"{shown} \u00b7 {_users_phrase(levels.users_at_or_above(counted))}{extra}"
+
+
+def _community_default_label(levels: LevelContext | None, draft: dict, key: str, community_id: int | None) -> str:
+    """A Community's default read or write level, with how many accounts it
+    lets in and how many boards and file areas inherit it."""
+    value = draft.get(key)
+    label = _optional_int_label(value)
+    if levels is None:
+        return label
+    if value is not None:
+        label = f"{value} \u00b7 {_users_phrase(levels.users_at_or_above(value))}"
+    direction = "read" if "read" in key else "write"
+    inheriting = levels.inheriting.get((community_id, direction), {}) if community_id is not None else {}
+    parts = [f"{count} {what}{'s' if count != 1 else ''}" for what, count in sorted(inheriting.items())]
+    return label + (f" \u00b7 inherited by {', '.join(parts)}" if parts else "")
+
+
 # Tri-state "recommend this to Link peers" cycle -- `[L]ink this board`/
 # `[L]ink this file area`'s own `default_moderated` field (dogfood
 # report: converting these screens from their old fixed linear prompt
@@ -17253,7 +17321,9 @@ async def _draw_community_menu(
     await _choice_prompt(session)
 
 
-def _community_field_specs() -> list[FieldSpec]:
+def _community_field_specs(
+    *, levels: LevelContext | None = None, community_id: int | None = None
+) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_community_screen`. Unlike board/
     channel/file-area, a Community has no `community_id`/`category_id`
@@ -17290,7 +17360,7 @@ def _community_field_specs() -> list[FieldSpec]:
         FieldSpec(
             key="default_min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"),
             label="Default read level",
-            render=lambda d: _optional_int_label(d.get("default_min_read_level")),
+            render=lambda d: _community_default_label(levels, d, "default_min_read_level", community_id),
             prompt=_optional_int_field("default_min_read_level", "Default minimum read level"),
             brief="Default read level, inherited",
             help=(
@@ -17302,7 +17372,7 @@ def _community_field_specs() -> list[FieldSpec]:
         FieldSpec(
             key="default_min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"),
             label="Default write level",
-            render=lambda d: _optional_int_label(d.get("default_min_write_level")),
+            render=lambda d: _community_default_label(levels, d, "default_min_write_level", community_id),
             prompt=_optional_int_field("default_min_write_level", "Default minimum write level"),
             brief="Default write level, inherited",
             help=(
@@ -17390,7 +17460,10 @@ async def _community_screen(
     community = await edit_resource_draft(
         session, lane,
         title="Edit Community" if existing is not None else "Create Community",
-        fields=_community_field_specs(), draft=draft, save=save, error_type=CommunityError,
+        fields=_community_field_specs(
+            levels=await lane.run(level_context), community_id=existing.id if existing is not None else None,
+        ),
+        draft=draft, save=save, error_type=CommunityError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
@@ -17629,7 +17702,8 @@ async def _draw_board_menu(
 
 
 def _board_field_specs(
-    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+    levels: LevelContext | None = None,
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_board_screen`. `redraw_in_place`/
@@ -17655,7 +17729,7 @@ def _board_field_specs(
         ),
         FieldSpec(
             key="min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"), label="Min read level",
-            render=lambda d: _optional_int_label(d.get("min_read_level")),
+            render=lambda d: _resource_level_label(levels, d, "min_read_level"),
             prompt=_optional_int_field("min_read_level", "Minimum read level"),
             brief="Level required to read it",
             help=(
@@ -17667,7 +17741,7 @@ def _board_field_specs(
         ),
         FieldSpec(
             key="min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"), label="Min write level",
-            render=lambda d: _optional_int_label(d.get("min_write_level")),
+            render=lambda d: _resource_level_label(levels, d, "min_write_level"),
             prompt=_optional_int_field("min_write_level", "Minimum write level"),
             brief="Level required to post",
             help=(
@@ -17847,6 +17921,7 @@ async def _board_screen(
         fields=_board_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
+            levels=await lane.run(level_context),
         ),
         draft=draft, save=save, error_type=BoardError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
@@ -19487,7 +19562,8 @@ def _gc_report_section(report: GCReport) -> Section:
 
 
 def _area_field_specs(
-    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+    levels: LevelContext | None = None,
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_area_screen`. Identical shape to
@@ -19511,7 +19587,7 @@ def _area_field_specs(
         ),
         FieldSpec(
             key="min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"), label="Min read level",
-            render=lambda d: _optional_int_label(d.get("min_read_level")),
+            render=lambda d: _resource_level_label(levels, d, "min_read_level"),
             prompt=_optional_int_field("min_read_level", "Minimum read level"),
             brief="Level required to browse it",
             help=(
@@ -19523,7 +19599,7 @@ def _area_field_specs(
         ),
         FieldSpec(
             key="min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"), label="Min write level",
-            render=lambda d: _optional_int_label(d.get("min_write_level")),
+            render=lambda d: _resource_level_label(levels, d, "min_write_level"),
             prompt=_optional_int_field("min_write_level", "Minimum write level"),
             brief="Level required to upload",
             help=(
@@ -19678,6 +19754,7 @@ async def _area_screen(
         fields=_area_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
+            levels=await lane.run(level_context),
         ),
         draft=draft, save=save, error_type=FileAreaError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
@@ -20396,7 +20473,7 @@ async def _draw_door_menu(
     await _choice_prompt(session)
 
 
-def _door_field_specs(*, actor: User) -> list[FieldSpec]:
+def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> list[FieldSpec]:
     """One shared field list drives both create and edit, same "single
     source of truth" precedent as `_area_field_specs`/`_board_field_
     specs`. `args` is edited as one space-separated line and split with
@@ -20440,7 +20517,7 @@ def _door_field_specs(*, actor: User) -> list[FieldSpec]:
         ),
         FieldSpec(
             key="min_play_level", hotkey="p", menu_text=menu_key("P", "lay level"), label="Min play level",
-            render=lambda d: str(d.get("min_play_level")),
+            render=lambda d: _plain_level_label(levels, d.get("min_play_level")),
             prompt=_int_field("min_play_level", "Minimum play level"),
             brief="Level required to launch it",
             help="The permission level a caller needs to launch/play this door.",
@@ -20525,7 +20602,7 @@ async def _door_screen(
     door = await edit_resource_draft(
         session, lane,
         title="Edit door" if existing is not None else "Register door",
-        fields=_door_field_specs(actor=actor),
+        fields=_door_field_specs(actor=actor, levels=await lane.run(level_context)),
         draft=draft, save=save, error_type=DoorError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
@@ -21781,7 +21858,8 @@ async def _draw_channel_menu(
 
 
 def _channel_field_specs(
-    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False
+    *, actor: User, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+    levels: LevelContext | None = None,
 ) -> list[FieldSpec]:
     """One shared field list drives both create and edit (design doc,
     dogfood feature request) -- see `_channel_screen`."""
@@ -21804,7 +21882,7 @@ def _channel_field_specs(
         ),
         FieldSpec(
             key="min_level", hotkey="l", menu_text=menu_key("L", "evel"), label="Min level",
-            render=lambda d: str(d.get("min_level")),
+            render=lambda d: _plain_level_label(levels, d.get("min_level")),
             prompt=_int_field("min_level", "Minimum level"),
             brief="Level required to join",
             help=(
@@ -21990,6 +22068,7 @@ async def _channel_screen(
         fields=_channel_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
+            levels=await lane.run(level_context),
         ),
         draft=draft, save=save, error_type=ChannelError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),

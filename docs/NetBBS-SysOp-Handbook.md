@@ -500,6 +500,15 @@ verified-name requirement, a members-only channel) still applies. Picking a
 board, file area, channel or door there opens its own screen, where you can
 change its levels. `G` on the level list shows any level, in use or not.
 
+Every level field in an editor also says what its value means. Next to the
+level it shows how many enabled accounts that level lets in, for example
+`10 · 41 users`, and the count follows what you type before you save. A
+board or file area level left to inherit shows what it inherits and from
+where, for example `none: 10 from Community Market · 41 users`. A
+Community's default levels show how many boards and file areas inherit them.
+The count goes by level only: an age or verified-name requirement can still
+keep some of those accounts out.
+
 A small club rarely needs more than this:
 
 | Level | Who | Example use |
