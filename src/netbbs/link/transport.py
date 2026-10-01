@@ -72,7 +72,9 @@ from netbbs.link.channels import (
     materialize_carried_channel,
     materialize_carried_channel_message,
 )
+from netbbs.boards.content_id import ContentIdError
 from netbbs.link.events import (
+    event_content_id,
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
@@ -660,10 +662,13 @@ class LinkPolicyRefused(LinkTransportError):
     transport failure, the peer did hear the request and decided, so
     trying its next address would only ask the same question again."""
 
-    def __init__(self, message: str, reason_code: str) -> None:
+    def __init__(self, message: str, reason_code: str, refused: list[RefusedEvent] | None = None) -> None:
         super().__init__(message)
         self.status = 403
         self.reason_code = reason_code
+        #: Issue #897: the events the peer named as refused one by one. Empty
+        #: when the refusal was about the whole request (the sending node).
+        self.refused: list[RefusedEvent] = refused or []
 
 
 _NOISE_PROTOCOL_NAME = b"Noise_XX_25519_ChaChaPoly_BLAKE2s"
@@ -1963,11 +1968,13 @@ class LinkServer:
                 )
 
     @staticmethod
-    def _policy_rejection(decision: LinkPolicyDecision) -> web.Response:
-        return web.json_response(
-            {"error": "Link policy rejected this request", "reason_code": decision.reason_code},
-            status=403,
-        )
+    def _policy_rejection(
+        decision: LinkPolicyDecision, refused: list[dict] | None = None
+    ) -> web.Response:
+        body = {"error": "Link policy rejected this request", "reason_code": decision.reason_code}
+        if refused:
+            body["refused"] = refused
+        return web.json_response(body, status=403)
 
     async def _decide(self, fingerprint: str, action: LinkPolicyAction) -> LinkPolicyDecision | None:
         if not self._enforce_trust_policy:
@@ -2011,6 +2018,7 @@ class LinkServer:
             raw_events = await request.json(loads=strict_json_loads)
         except ValueError as exc:
             return web.json_response({"error": f"malformed events: {exc}"}, status=400)
+        refused: list[dict] = []
 
         if self._enforce_trust_policy:
             object_types = {
@@ -2027,13 +2035,32 @@ class LinkServer:
                 await self._record_refused_mail(raw_events, decision, fingerprint)
                 return self._policy_rejection(decision)
             if action != LinkPolicyAction.KEY_LIFECYCLE:
+                # Issue #897: each event is judged on its own. One probationary
+                # caller's chat line used to refuse the whole request, and the
+                # sender resent it unchanged every pass, so nothing queued
+                # behind it ever arrived. The rest are taken; the refused ones
+                # are named so the sender can set them aside. A request with
+                # nothing left is still refused outright, as before, so a
+                # single pushed letter keeps its 403.
+                admitted = []
+                first_refusal: LinkPolicyDecision | None = None
                 for raw in raw_events:
                     author_decision = await self._lane.run(
                         decide_event_authorship, raw, transport_peer_fingerprint=fingerprint
                     )
-                    if not author_decision.allowed:
-                        await self._record_refused_mail([raw], author_decision, fingerprint)
-                        return self._policy_rejection(author_decision)
+                    if author_decision.allowed:
+                        admitted.append(raw)
+                        continue
+                    await self._record_refused_mail([raw], author_decision, fingerprint)
+                    first_refusal = first_refusal or author_decision
+                    content_id = _raw_content_id(raw)
+                    if content_id is not None:
+                        refused.append(
+                            {"content_id": content_id, "reason_code": author_decision.reason_code}
+                        )
+                if first_refusal is not None and not admitted:
+                    return self._policy_rejection(first_refusal, refused)
+                raw_events = admitted
 
         try:
             accepted = self._node.handle_events(fingerprint, raw_events)
@@ -2055,6 +2082,8 @@ class LinkServer:
             # accepted event.
             await self._lane.run(save_peer, self._node.peers[fingerprint])
 
+        if refused:
+            return web.json_response({"accepted": accepted, "refused": refused})
         return web.json_response({"accepted": accepted})
 
     async def _handle_inventory(self, request: web.Request) -> web.Response:
@@ -2702,6 +2731,11 @@ async def push_events(
     newly accepted; purely informational, since the sender's own copies
     are already known-good on its own side.
 
+    A peer that refused some of the events and took the rest (issue #897)
+    is a refusal here, `LinkPolicyRefused` naming them: a caller that sends
+    one event, like a letter, must not read that as delivered. The content
+    push, which can set refused events aside, uses `push_events_partial`.
+
     Raises `LinkTransportError` for a transport-level failure. A
     peer rejecting one of the pushed events (e.g. an inconsistent
     chain) also surfaces as `LinkTransportError` here — unlike
@@ -2709,6 +2743,30 @@ async def push_events(
     error body, not as a `LinkProtocolError` raised locally, since
     nothing on this side re-runs the peer's own verification.
     """
+    accepted, refused = await push_events_partial(node, session, base_url, events, timeout=timeout)
+    if refused:
+        raise LinkPolicyRefused(
+            f"events push to {base_url} partly refused: "
+            + ", ".join(f"{item.content_id} ({item.reason_code})" for item in refused),
+            refused[0].reason_code, refused,
+        )
+    return accepted
+
+
+async def push_events_partial(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    events: list,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[list[str], list[RefusedEvent]]:
+    """`push_events`, returning the events the peer refused one by one
+    (issue #897) beside the ones it accepted, instead of raising for them.
+
+    Still raises `LinkPolicyRefused` when the peer refused the whole
+    request; its `refused` names the events when every one was refused on
+    its own account, and is empty when the refusal was about this node."""
     url = f"{base_url}{LINK_PATH_PREFIX}/events/{node.identity.fingerprint}"
     payload = [e.to_dict() for e in events]
     try:
@@ -2720,15 +2778,19 @@ async def push_events(
                 message = f"events push to {url} failed: HTTP {response.status}: {text}"
                 reason_code = _refusal_reason_code(text) if response.status == 403 else None
                 if reason_code is not None and reason_code.startswith("link_policy_"):
-                    raise LinkPolicyRefused(message, reason_code)
+                    try:
+                        refused = _refused_events(strict_json_loads(text))
+                    except ValueError:
+                        refused = []
+                    raise LinkPolicyRefused(message, reason_code, refused)
                 raise LinkTransportError(message)
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
     try:
-        return body["accepted"]
-    except (KeyError, TypeError) as exc:
+        return body["accepted"], _refused_events(body)
+    except (KeyError, TypeError, ValueError) as exc:
         raise LinkTransportError(f"malformed events response from {url}: {exc}") from exc
 
 
@@ -2939,6 +3001,45 @@ async def _read_bounded(response, limit: int, *, label: str = "response body") -
     if len(buffered) > limit:
         raise LinkTransportError(f"{label} exceeds {limit} bytes")
     return bytes(buffered).decode("utf-8", errors="replace")
+
+
+def _raw_content_id(raw: object) -> str | None:
+    """A pushed event's content ID, or None for one too malformed to have one.
+
+    Reached for an event refused before anything canonicalized it, so its
+    envelope may hold what content IDs refuse (a float, an unsafe integer,
+    keys that normalize alike): `ContentIdError`, which is not a
+    `ValueError`. Raised here it would turn one refusal back into a failed
+    request, the very thing issue #897 is about."""
+    try:
+        return event_content_id(raw["envelope"])
+    except (KeyError, TypeError, ValueError, ContentIdError):
+        return None
+
+
+@dataclass(frozen=True)
+class RefusedEvent:
+    """One event a peer's trust policy refused on its own (issue #897)."""
+
+    content_id: str
+    reason_code: str
+
+
+def _refused_events(body: object) -> list[RefusedEvent]:
+    """The per-event `refused` list of an events response, if it has one.
+
+    Bounded by what the request carried: the peer can only name events it
+    was sent, and anything else in the list is ignored by the caller."""
+    items = body.get("refused", []) if isinstance(body, dict) else []
+    if not isinstance(items, list):
+        raise ValueError("refused must be a list")
+    result = []
+    for item in items[:_MAX_EVENTS_PER_REQUEST]:
+        if not isinstance(item, dict) or not isinstance(item.get("content_id"), str):
+            raise ValueError("refused entries need a content_id")
+        reason = item.get("reason_code")
+        result.append(RefusedEvent(item["content_id"], reason if isinstance(reason, str) else "refused"))
+    return result
 
 
 def _refusal_reason_code(text: str | bytes) -> str | None:

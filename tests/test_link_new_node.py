@@ -246,9 +246,9 @@ def test_a_peer_that_holds_everything_is_no_longer_shown_refusing(tmp_path, monk
     node.peer_exchange["peer"] = PeerExchange(at=1.0, refused_reason=REASON_NODE_PROBATIONARY)
 
     async def no_push(*_args, **_kwargs):
-        return []
+        return [], []
 
-    monkeypatch.setattr(sync, "push_events", no_push)
+    monkeypatch.setattr(sync, "push_events_partial", no_push)
     try:
         asyncio.run(sync._push_own_events(
             node, None, "http://peer", local.lane, wanted=[], peer_fingerprint="peer",

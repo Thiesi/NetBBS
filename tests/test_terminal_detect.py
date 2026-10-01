@@ -13,6 +13,7 @@ from netbbs.net.telnet import IAC, NAWS, SB, SE, TTYPE, TTYPE_IS, WILL, WONT, Te
 from netbbs.net.terminal_detect import classify_terminal_types
 from netbbs.rendering.charset import ASCII, CP437, UTF8
 from tests.test_telnet import _FULL_NEGOTIATION_LEN, _TTYPE_SEND, answer_terminal_type
+from tests.eventually import eventually
 
 
 @pytest.mark.parametrize(
@@ -251,10 +252,12 @@ def test_a_flood_during_the_wait_ends_the_wait_early():
             started = time.monotonic()
             writer.write(b"x" * 5000 + bytes([13]))
             await writer.drain()
-            for _ in range(500):
-                if "line" in seen:
-                    break
-                await asyncio.sleep(0.01)
+            # The wait has ended once the handler runs. Waited for (issue
+            # #999): the old loop of 500 short sleeps waited for the line,
+            # which a flood this long never completes, so it always ran its
+            # full count and that alone could pass 10 s on a loaded machine.
+            # Any bound under the 30 s wait proves the flood ended it early.
+            assert await eventually(lambda: "charset" in seen, timeout=25.0), "the flood never ended the wait"
             writer.close()
             return time.monotonic() - started
         finally:
@@ -262,7 +265,7 @@ def test_a_flood_during_the_wait_ends_the_wait_early():
 
     elapsed = asyncio.run(scenario())
     assert seen["charset"] == ASCII
-    assert elapsed < 10.0
+    assert elapsed < 25.0
 
 
 # -- The connection's log line (#929 PR 6): a SysOp reads a client's

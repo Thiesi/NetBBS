@@ -559,6 +559,11 @@ your terminal:
   keys work as they do in other terminals.
 - **ASCII** is plain text that any terminal shows.
 
+Some nodes draw their welcome art or main-menu art slowly, at the speed of an
+old modem. Press any key to draw the rest at once; that key is used up, so it
+doesn't also act at the next prompt. **Profile → [Q]uick or animated banners**
+set to quick draws every banner at once.
+
 If your terminal did not say which it is, NetBBS asks once after you log in
 which of two sample lines looks right. If lines and arrows look wrong later,
 change this setting. If colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.

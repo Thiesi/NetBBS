@@ -84,6 +84,13 @@ class TransportConfig:
     #: says it cannot hand out links rather than printing one that
     #: fails in a browser.
     public_url: str | None = None
+    #: Web only (issue #980): the reverse proxies, as IP addresses or
+    #: networks, whose `X-Forwarded-For` names the real caller. Behind the
+    #: documented loopback-plus-proxy setup every browser caller otherwise
+    #: has the proxy's address, and so shares one login-throttle bucket.
+    #: Empty by default: the header is ignored unless the TCP peer is listed,
+    #: since anyone else could write any address into it.
+    trusted_proxies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -857,18 +864,42 @@ def _transport_from_toml(data: dict, name: str, current: TransportConfig) -> Tra
     table = data.get(name, {})
     if not isinstance(table, dict):
         raise ConfigError(f"[{name}] in the config file must be a table")
-    unknown = set(table) - {"enabled", "host", "port", "public_url"}
+    known = {"enabled", "host", "port", "public_url"} | ({"trusted_proxies"} if name == "web" else set())
+    unknown = set(table) - known
     if unknown:
         raise ConfigError(f"[{name}] has unknown setting(s): {', '.join(sorted(unknown))}")
     public_url = table.get("public_url", current.public_url)
     if public_url is not None and not isinstance(public_url, str):
         raise ConfigError(f"[{name}] public_url must be a string, got {type(public_url).__name__}")
+    trusted_proxies = current.trusted_proxies
+    if "trusted_proxies" in table:
+        trusted_proxies = _trusted_proxies_from_toml(table["trusted_proxies"], name)
     return TransportConfig(
         enabled=bool(table.get("enabled", current.enabled)),
         host=str(table.get("host", current.host)),
         port=int(table.get("port", current.port)),
         public_url=str(public_url).strip().rstrip("/") if public_url else None,
+        trusted_proxies=trusted_proxies,
     )
+
+
+def _trusted_proxies_from_toml(value: object, name: str) -> tuple[str, ...]:
+    """`[web] trusted_proxies`: a list of IP addresses or networks, each
+    normalized (`127.0.0.1` -> `127.0.0.1/32`). A hostname is refused rather
+    than resolved: what is trusted must not change with DNS."""
+    if not isinstance(value, list):
+        raise ConfigError(f"[{name}] trusted_proxies must be a list of IP addresses or networks")
+    result = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ConfigError(f"[{name}] trusted_proxies entries must be strings, got {item!r}")
+        try:
+            result.append(str(ipaddress.ip_network(item.strip(), strict=False)))
+        except ValueError as exc:
+            raise ConfigError(
+                f"[{name}] trusted_proxies entry {item!r} is not an IP address or network ({exc})"
+            ) from exc
+    return tuple(result)
 
 
 def _throttle_from_toml(data: dict, current: ThrottleConfig) -> ThrottleConfig:
@@ -1096,14 +1127,15 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
         config = replace(
             config,
             **{
-                transport: TransportConfig(
+                # `replace`, so every other setting is carried, not dropped
+                # (Codex review): a flag like --web-port must not silently
+                # unset the public URL or the trusted proxies a proxied node
+                # depends on.
+                transport: replace(
+                    current,
                     enabled=current.enabled if enabled is None else enabled,
                     host=current.host if host is None else host,
                     port=current.port if port is None else port,
-                    # Carried, not dropped (Codex review): a flag like
-                    # --web-port must not silently unset the public URL
-                    # a proxied node depends on for transfer links.
-                    public_url=current.public_url,
                 )
             },
         )
