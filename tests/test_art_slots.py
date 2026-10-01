@@ -170,3 +170,15 @@ def test_a_huge_menu_size_costs_no_more_than_the_art():
     assert any("runs past column 80" in p for p in art.problems)
     assert any("runs past row 200" in p for p in art.problems)
     assert art.height == 200
+
+
+def test_field_values_are_sanitized_before_drawing():
+    # The same contract as every other caller-visible string: controls and
+    # bidi overrides are stripped, the printable rest is shown as text.
+    from netbbs.rendering.sanitize import sanitize_text
+
+    value = "evil\x1b[31mred‮\x1b]0;title\x07"
+    art = parse_slot_art("{user 30}\r\n{menu 3x1}")
+    out = render_slot_art(art, fields={"user": value}, menu_rows=[""])
+    assert "\x1b[31m" not in out and "\x1b]0;" not in out and "‮" not in out
+    assert sanitize_text(value) in strip_ansi(out)

@@ -25,6 +25,7 @@ from netbbs.rendering.ansi import bg_rgb as ansi_bg_rgb
 from netbbs.rendering.ansi import fg as ansi_fg
 from netbbs.rendering.ansi import fg_rgb as ansi_fg_rgb
 from netbbs.rendering.screen_buffer import ScreenBuffer
+from netbbs.rendering.sauce import Sauce, split_sauce
 
 _Color = int | tuple[int, int, int]
 
@@ -44,10 +45,24 @@ def decode_ansi_bytes(data: bytes) -> str:
     heuristic; a SysOp who directly authors valid UTF-8/Unicode content
     gets that path instead, automatically.
     """
+    return decode_art_bytes(data)[0]
+
+
+def decode_art_bytes(data: bytes) -> tuple[str, Sauce | None]:
+    """`decode_ansi_bytes` that also returns the file's SAUCE record.
+
+    The record, its comment block and the EOF byte before them are removed
+    first (`netbbs.rendering.sauce.split_sauce`), so scene art no longer
+    shows its title, author and group as junk under the picture. A file
+    with a SAUCE record is classic ANSI art and is read as CP437 without
+    the UTF-8 attempt; one without keeps the UTF-8-then-CP437 guess."""
+    body, sauce = split_sauce(data)
+    if sauce is not None:
+        return body.decode("cp437"), sauce
     try:
-        return data.decode("utf-8")
+        return body.decode("utf-8"), None
     except UnicodeDecodeError:
-        return data.decode("cp437")
+        return body.decode("cp437"), None
 
 
 _CSI = re.compile(r"\x1b\[([0-9;?]*)([@-~])")
