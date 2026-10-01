@@ -670,6 +670,7 @@ from netbbs.net.main_menu_banner import (
     MASTHEAD_MODE,
     MAX_MASTHEAD_SIZE_BYTES,
     SLOTS_MODE,
+    is_main_menu_banner_enabled,
     load_main_menu_banner,
     main_menu_art_mode,
     main_menu_banner_path,
@@ -13662,7 +13663,19 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
     from netbbs.net.main_menu import slot_menu_preview
 
     art = await lane.run(_read_slot_art)
+    enabled, mode = await lane.run(lambda db: (is_main_menu_banner_enabled(db), main_menu_art_mode(db)))
     await session.write_line(colored("\r\nChecking the main-menu art for slots:", fg_color=MUTED_COLOR))
+    # Enabled and mode are separate switches: [D]isable leaves the mode
+    # alone, so say plainly when callers won't see this art at all.
+    if not enabled:
+        await session.write_line(colored(
+            "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+        ))
+    if mode != SLOTS_MODE:
+        await session.write_line(colored(
+            "Callers see this above the menu, not as it: [M]ode changes that.",
+            fg_color=WARNING_COLOR,
+        ))
     if art is None:
         await session.write_line("No usable art file. Apply a gallery sample, upload one, or draw one first.")
     else:
