@@ -19,15 +19,20 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from netbbs.attestation import attest_age, attest_name
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.boards.boards import create_board
+from netbbs.boards.posts import create_post, list_posts_page
 from netbbs.chat.channels import create_channel
 from netbbs.communities import create_community, get_effective_min_write_level
 from netbbs.files.areas import create_file_area
+from netbbs.files.entries import list_files_page, list_pinned_files, upload_file
 from netbbs.net.chat_flow import _authorize_channel_entry
 from netbbs.net.file_flow import visible_areas
 from netbbs.net.board_flow import visible_boards
+from netbbs.permissions import InsufficientLevelError
 from netbbs.storage.database import Database
 
 
@@ -138,3 +143,49 @@ def test_channel_age_gate_still_none_with_no_community(tmp_path):
     channel = create_channel(db, "lounge", creator=sysop)
 
     assert _authorize_channel_entry(db, channel, nobody_verified)[0] is True
+
+
+# -- the domain functions resolve an inherited level too, not only the flows
+
+
+def test_create_post_on_a_board_inheriting_its_write_level_enforces_the_communitys(tmp_path):
+    """`create_post` compared the stored, possibly-`None` write level
+    directly, so posting to any board inheriting its Community's default
+    raised `TypeError` -- the flows' own check passed first, then the
+    post itself crashed."""
+    db = _db(tmp_path)
+    sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
+    newcomer = create_user(db, "newcomer", password="hunter2pw", user_level=0)
+    member = create_user(db, "member", password="hunter2pw", user_level=50)
+    community = create_community(db, "Members", default_min_write_level=50, creator=sysop)
+    board = create_board(
+        db, "lounge", min_read_level=None, min_write_level=None, community_id=community.id, creator=sysop
+    )
+
+    with pytest.raises(InsufficientLevelError):
+        create_post(db, board, newcomer, "Hello", "first post")
+    create_post(db, board, member, "Hello", "first post")
+    assert [post.subject for post in list_posts_page(db, board, newcomer).posts] == ["Hello"]
+
+
+def test_file_area_inheriting_its_levels_enforces_the_communitys_on_upload_and_listing(tmp_path):
+    db = _db(tmp_path)
+    sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
+    newcomer = create_user(db, "newcomer", password="hunter2pw", user_level=0)
+    member = create_user(db, "member", password="hunter2pw", user_level=50)
+    community = create_community(
+        db, "Members", default_min_read_level=10, default_min_write_level=50, creator=sysop
+    )
+    area = create_file_area(
+        db, "uploads", min_read_level=None, min_write_level=None, community_id=community.id, creator=sysop
+    )
+
+    with pytest.raises(InsufficientLevelError):
+        upload_file(db, area, newcomer, "ink.txt", b"blue-black")
+    upload_file(db, area, member, "ink.txt", b"blue-black")
+    with pytest.raises(InsufficientLevelError):
+        list_files_page(db, area, newcomer)
+    with pytest.raises(InsufficientLevelError):
+        list_pinned_files(db, area, requesting_user=newcomer)
+    assert [entry.filename for entry in list_files_page(db, area, member).entries] == ["ink.txt"]
+    assert list_pinned_files(db, area, requesting_user=member) == []

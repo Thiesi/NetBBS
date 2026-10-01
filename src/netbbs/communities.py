@@ -327,13 +327,32 @@ def passes_level_gate(db: Database, user: User, minimum_level: int, resource, pe
     )
 
 
-def require_level_gate(db: Database, user: User, minimum_level: int, resource, permission) -> None:
-    """`passes_level_gate`, raising `InsufficientLevelError` as
-    `require_level` does when it fails."""
+def _require_level_gate(db: Database, user: User, minimum_level: int, resource, permission) -> None:
     from netbbs.permissions import InsufficientLevelError
 
     if not passes_level_gate(db, user, minimum_level, resource, permission):
         raise InsufficientLevelError(minimum_level, user.user_level)
+
+
+def require_read_gate(db: Database, user: User, resource) -> None:
+    """`meets_read_gate`, raising `InsufficientLevelError` as
+    `require_level` does when it fails.
+
+    Takes the resource, not a level: the stored `min_read_level` is
+    `None` on a board or area that inherits its Community's default, and
+    a caller handing that straight to a comparison crashed every post,
+    upload and file listing on such a resource."""
+    from netbbs.moderation.roles import BoardPermission
+
+    _require_level_gate(db, user, get_effective_min_read_level(db, resource), resource, BoardPermission.READ)
+
+
+def require_write_gate(db: Database, user: User, resource) -> None:
+    """`meets_write_gate`, raising `InsufficientLevelError` as
+    `require_level` does when it fails (see `require_read_gate`)."""
+    from netbbs.moderation.roles import BoardPermission
+
+    _require_level_gate(db, user, get_effective_min_write_level(db, resource), resource, BoardPermission.WRITE)
 
 
 def meets_read_gate(db: Database, user: User, resource) -> bool:
