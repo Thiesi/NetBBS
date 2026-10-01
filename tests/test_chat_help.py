@@ -201,6 +201,33 @@ def test_help_pages_fit_the_live_chat_viewport_and_wait_between_pages():
         assert end - start <= session.terminal_height - chat_flow._PINNED_ROWS - 1
 
 
+@pytest.mark.parametrize("width", [80, 40])
+def test_every_help_page_starts_descriptions_at_the_same_column(width):
+    """Issue #1044: the command column was sized from the commands still
+    left to show, so once the widest one had been shown the next page lined
+    its descriptions up further left. One column for the whole help."""
+    session = PagingSession(width=width, height=24)
+    # In `/help`'s own order (sorted by name), where the widest commands sit
+    # early and the last page used to come out narrower.
+    entries = [
+        chat_flow._COMMAND_INFO[name]
+        for name in sorted(name for name in chat_flow._COMMANDS if name in chat_flow._COMMAND_INFO)
+    ]
+    asyncio.run(chat_flow._show_help_pages(session, entries, pinned_ui_enabled=True))
+    visible = [strip_ansi(write).rstrip("\r\n") for write in session.written]
+    headers = [line for line in visible if line.startswith("COMMAND")]
+    assert len(headers) >= 2, "the help must span pages for this to mean anything"
+    columns = {line.index("DESCRIPTION") for line in headers}
+    assert len(columns) == 1, f"description column differs per page: {sorted(columns)}"
+    column = columns.pop()
+    # And every entry's description really starts there, not just the header.
+    commands = {chat_flow._help_syntax_parts(syntax)[0] for syntax, _description in entries}
+    first_rows = [line for line in visible if line.split(" ", 1)[0] in commands]
+    assert first_rows
+    for line in first_rows:
+        assert line[column - 2:column] == "  " and line[column] != " ", line
+
+
 def test_help_reflows_remaining_pages_after_a_terminal_resize():
     session = ResizingPagingSession(width=80, height=24)
     asyncio.run(
