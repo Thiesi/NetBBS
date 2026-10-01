@@ -36,6 +36,8 @@ from pathlib import Path
 
 from netbbs.config import get_config, set_config
 from netbbs.rendering import RESET, decode_banner_bytes_fitting
+from netbbs.net.list_art import CHAT_CHANNEL_PICKER, MASTHEAD_MODE, list_art_mode, load_list_slot_art
+from netbbs.rendering.art_slots import SlotArt
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -98,7 +100,9 @@ def load_chat_channel_picker_banner(db: Database, *, max_width: int | None = Non
     unattended on every channel-picker draw regardless of how the flag
     got set.
     """
-    if not is_chat_channel_picker_banner_enabled(db):
+    # In slots mode (issue #929) the art is the list itself, drawn by
+    # `load_chat_channel_picker_slot_art`, not a masthead above it.
+    if not is_chat_channel_picker_banner_enabled(db) or list_art_mode(db, CHAT_CHANNEL_PICKER) != MASTHEAD_MODE:
         return ""
 
     path = chat_channel_picker_banner_path(db)
@@ -134,3 +138,13 @@ def load_chat_channel_picker_banner(db: Database, *, max_width: int | None = Non
         _logger.info("chat channel picker banner at %s is wider than %d columns -- showing nothing", path, max_width)
         return ""
     return text + RESET
+
+
+def load_chat_channel_picker_slot_art(db: Database) -> SlotArt | None:
+    """The channel picker's art with its `{list}` region (issue #929), when the
+    masthead is enabled in slots mode, else `None`; see
+    `netbbs.net.list_art.load_list_slot_art`."""
+    return load_list_slot_art(
+        db, CHAT_CHANNEL_PICKER, enabled=is_chat_channel_picker_banner_enabled(db), path=chat_channel_picker_banner_path(db),
+        max_bytes=MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES,
+    )

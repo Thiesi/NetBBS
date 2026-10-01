@@ -28,6 +28,8 @@ from pathlib import Path
 
 from netbbs.config import get_config, set_config
 from netbbs.rendering import RESET, decode_banner_bytes_fitting
+from netbbs.net.list_art import BOARD_LIST, MASTHEAD_MODE, list_art_mode, load_list_slot_art
+from netbbs.rendering.art_slots import SlotArt
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -90,7 +92,9 @@ def load_board_list_banner(db: Database, *, max_width: int | None = None) -> str
     unattended on every board-list draw regardless of how the flag got
     set.
     """
-    if not is_board_list_banner_enabled(db):
+    # In slots mode (issue #929) the art is the list itself, drawn by
+    # `load_board_list_slot_art`, not a masthead above it.
+    if not is_board_list_banner_enabled(db) or list_art_mode(db, BOARD_LIST) != MASTHEAD_MODE:
         return ""
 
     path = board_list_banner_path(db)
@@ -123,3 +127,13 @@ def load_board_list_banner(db: Database, *, max_width: int | None = None) -> str
         _logger.info("board list banner at %s is wider than %d columns -- showing nothing", path, max_width)
         return ""
     return text + RESET
+
+
+def load_board_list_slot_art(db: Database) -> SlotArt | None:
+    """The board list's art with its `{list}` region (issue #929), when the
+    masthead is enabled in slots mode, else `None`; see
+    `netbbs.net.list_art.load_list_slot_art`."""
+    return load_list_slot_art(
+        db, BOARD_LIST, enabled=is_board_list_banner_enabled(db), path=board_list_banner_path(db),
+        max_bytes=MAX_BOARD_LIST_BANNER_SIZE_BYTES,
+    )

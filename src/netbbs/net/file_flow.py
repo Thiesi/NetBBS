@@ -87,7 +87,7 @@ from netbbs.files.categories import (
     list_top_level_categories,
 )
 from netbbs.files.diz import MAX_DESCRIPTION_BYTES, MAX_DESCRIPTION_LINES, read_archive_description
-from netbbs.files.entries import count_pending_files, count_visible_files
+from netbbs.files.entries import count_listed_files, count_pending_files, count_visible_files
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.file_refs import file_size_text
 from netbbs.net.file_transfer import (
@@ -117,7 +117,9 @@ from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import drafts_directory, save_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
-from netbbs.net.file_area_banner import load_file_area_banner
+from netbbs.net.file_area_banner import load_file_area_banner, load_file_area_slot_art
+from netbbs.net.list_art import list_slot_fields
+from netbbs.net.chat_flow import NAME_GATE_NOTE
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.picker import pick_item
@@ -322,6 +324,28 @@ async def _browse_areas_in_category(
     # category, a Community's scope), matching
     # `board_flow._browse_boards_in_category`'s own identical wiring.
     area_masthead = await lane.run(load_file_area_banner, max_width=physical_terminal_width(session))
+    # The SysOp's art as the list itself (issue #929), or None.
+    area_slot_art = await lane.run(load_file_area_slot_art)
+    area_slot_fields = (
+        await lane.run(lambda db: list_slot_fields(session, db, user)) if area_slot_art is not None else None
+    )
+    # Each area's one value in the art, read in one pass on the worker
+    # thread: the gate note when the caller can't upload yet (design doc
+    # §3.6), else how many files it holds.
+    area_slot_values: dict[int, str] = {}
+
+    def _slot_values(db: Database, areas: list[FileArea]) -> dict[int, str]:
+        values = {}
+        for area in areas:
+            if not meets_name_requirement(db, user, get_effective_name_requirement(db, area)):
+                values[area.id] = NAME_GATE_NOTE
+            else:
+                count, _ = count_listed_files(db, area)
+                values[area.id] = f"{count} file{'' if count == 1 else 's'}"
+        return values
+
+    def _slot_column_of(item: FileAreaCategory | FileArea) -> str:
+        return area_slot_values.get(item.id, "") if isinstance(item, FileArea) else ""
     mode_box = {"mode": current_mode}
 
     async def _persist_sort_choice(mode: str, scope_kwargs: dict) -> None:
@@ -345,6 +369,8 @@ async def _browse_areas_in_category(
     reopen_at: int | None = None
     while True:
         areas_here, categories_here, _, _ = await lane.run(_load, mode_box["mode"])
+        if area_slot_art is not None:
+            area_slot_values.update(await lane.run(_slot_values, areas_here))
         if not categories_here:
             async def on_sort_flat() -> list[FileArea] | None:
                 new_mode = await _run_sort_prompt()
@@ -373,6 +399,9 @@ async def _browse_areas_in_category(
                 header_color=await lane.run(effective_header_color_256),
                 masthead=area_masthead,
                 start_stable_id=reopen_at,
+                slot_art=area_slot_art,
+                slot_column_of=_slot_column_of,
+                slot_fields=area_slot_fields,
             )
             if area is None:
                 return
@@ -420,6 +449,9 @@ async def _browse_areas_in_category(
             header_color=await lane.run(effective_header_color_256),
             masthead=area_masthead,
             start_stable_id=reopen_at,
+            slot_art=area_slot_art,
+            slot_column_of=_slot_column_of,
+            slot_fields=area_slot_fields,
         )
         if selected is None:
             return

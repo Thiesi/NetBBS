@@ -174,7 +174,8 @@ from netbbs.messaging_preferences import invitation_refusal, live_message_refusa
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LineViewport, LiveInputBuffer, reject_unhandled_key
 from netbbs.net.char_input import move_cursor as relative_move_cursor
-from netbbs.net.chat_channel_picker_banner import load_chat_channel_picker_banner
+from netbbs.net.chat_channel_picker_banner import load_chat_channel_picker_banner, load_chat_channel_picker_slot_art
+from netbbs.net.list_art import list_slot_fields
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.notices import announce
@@ -621,6 +622,21 @@ async def _pick_channel(
     # banner's own module docstring for why that's a categorically
     # different rendering model, not just one level deeper.
     channel_masthead = await lane.run(load_chat_channel_picker_banner, max_width=physical_terminal_width(session))
+    # The SysOp's art as the list itself (issue #929), or None.
+    channel_slot_art = await lane.run(load_chat_channel_picker_slot_art)
+    channel_slot_fields = (
+        await lane.run(lambda db: list_slot_fields(session, db, user)) if channel_slot_art is not None else None
+    )
+
+    def _slot_column_of(item) -> str:
+        # The one value a row in the SysOp's art has room for: the gate
+        # note when the caller can't join yet (design doc §3.6), else who
+        # is in it.
+        if not isinstance(item, Channel):
+            return ""
+        if item.id in needs_name:
+            return NAME_GATE_NOTE
+        return f"{hub.participant_count(item.name)} online"
     title = "Chat channels" if title_prefix is not None else "Available chat channels"
     picker_breadcrumb = (title_prefix,) if title_prefix is not None else ()
     # Issue #300: at the top level, with MRC on and open rooms allowed,
@@ -663,6 +679,9 @@ async def _pick_channel(
             collapsed=collapsed,
             accent_color=flat_accent,
             masthead=channel_masthead,
+            slot_art=channel_slot_art,
+            slot_column_of=_slot_column_of,
+            slot_fields=channel_slot_fields,
         )
 
     leading: list[_MrcRoomsEntry] = [mrc_section] if mrc_section is not None else []
@@ -725,6 +744,9 @@ async def _pick_channel(
             collapsed=collapsed,
             accent_color=accent_color,
             masthead=channel_masthead,
+            slot_art=channel_slot_art,
+            slot_column_of=_slot_column_of,
+            slot_fields=channel_slot_fields,
         )
         if selected is None:
             return None

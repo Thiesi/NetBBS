@@ -26,6 +26,8 @@ from pathlib import Path
 
 from netbbs.config import get_config, set_config
 from netbbs.rendering import RESET, decode_banner_bytes_fitting
+from netbbs.net.list_art import FILE_AREA, MASTHEAD_MODE, list_art_mode, load_list_slot_art
+from netbbs.rendering.art_slots import SlotArt
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -88,7 +90,9 @@ def load_file_area_banner(db: Database, *, max_width: int | None = None) -> str:
     unattended on every file-area-list draw regardless of how the flag
     got set.
     """
-    if not is_file_area_banner_enabled(db):
+    # In slots mode (issue #929) the art is the list itself, drawn by
+    # `load_file_area_slot_art`, not a masthead above it.
+    if not is_file_area_banner_enabled(db) or list_art_mode(db, FILE_AREA) != MASTHEAD_MODE:
         return ""
 
     path = file_area_banner_path(db)
@@ -122,3 +126,13 @@ def load_file_area_banner(db: Database, *, max_width: int | None = None) -> str:
         _logger.info("file area banner at %s is wider than %d columns -- showing nothing", path, max_width)
         return ""
     return text + RESET
+
+
+def load_file_area_slot_art(db: Database) -> SlotArt | None:
+    """The file-area list's art with its `{list}` region (issue #929), when the
+    masthead is enabled in slots mode, else `None`; see
+    `netbbs.net.list_art.load_list_slot_art`."""
+    return load_list_slot_art(
+        db, FILE_AREA, enabled=is_file_area_banner_enabled(db), path=file_area_banner_path(db),
+        max_bytes=MAX_FILE_AREA_BANNER_SIZE_BYTES,
+    )

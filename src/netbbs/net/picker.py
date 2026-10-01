@@ -738,12 +738,19 @@ async def pick_item(
         for line in notice_lines:
             await session.write_line(line)
 
+    column_width_cache: tuple[int, int] | None = None
+
     def _slot_column_width() -> int:
         # Over the whole working set, not one page, so the value column
-        # and the name beside it stay put from page to page.
+        # and the name beside it stay put from page to page. Measured once
+        # per render: it is asked for several times while sizing a page.
+        nonlocal column_width_cache
         if slot_column_of is None:
             return 0
-        return max((display_width(sanitize_text(slot_column_of(item))) for item in working_set), default=0)
+        if column_width_cache is None or column_width_cache[0] != render_generation:
+            width = max((display_width(sanitize_text(slot_column_of(item))) for item in working_set), default=0)
+            column_width_cache = (render_generation, width)
+        return column_width_cache[1]
 
     def _trailer_line() -> str:
         # The standing state and the instructions after the nav row; see
