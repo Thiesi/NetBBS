@@ -1394,7 +1394,14 @@ def _audit_details_text(details: dict) -> str:
     return "; ".join(_pairs(details or {}, ""))
 
 
-def _banner_status_section(status, *, unicode_style: bool, credit_line: bool | None = None) -> Section:
+def _banner_status_section(
+    status,
+    *,
+    unicode_style: bool,
+    sauce: Sauce | None = None,
+    credit_line: bool | None = None,
+    too_wide: str = "no art",
+) -> Section:
     """Whether a banner or masthead is switched on, and the state of the file
     behind it -- the two facts every one of these seven menus leads with. They
     were one run-on line (`disabled -- file: x.ans (missing)`); a missing file
@@ -1403,8 +1410,10 @@ def _banner_status_section(status, *, unicode_style: bool, credit_line: bool | N
 
     A file with a SAUCE record (issue #929) also shows its credit, the width
     it was drawn for, and a warning when it was made for a font other than
-    CP437's. `credit_line` is the welcome banner's caller-facing credit
-    setting, shown when given."""
+    CP437's; the caller reads the record off the event loop
+    (`_banner_sauce`). `too_wide` is what a caller whose terminal is
+    narrower than the art sees instead. `credit_line` is the welcome
+    banner's caller-facing credit setting, shown when given."""
     fields = [
         Field(
             "Shown to callers",
@@ -1416,12 +1425,11 @@ def _banner_status_section(status, *, unicode_style: bool, credit_line: bool | N
         Field("On disk", _format_bytes(status.size_bytes), color=VALUE_COLOR) if status.exists
         else Field("On disk", "missing", color=ERROR_COLOR if status.enabled else MUTED_COLOR),
     ]
-    sauce = _banner_sauce(status)
     if sauce is not None:
         credit = "".join(ch for ch in sauce.credit if ch.isprintable())
         fields.append(Field("Art", credit or "(no credit in its SAUCE record)", color=VALUE_COLOR if credit else MUTED_COLOR))
         if sauce.width is not None:
-            fields.append(Field("Drawn for", f"{sauce.width} columns; narrower terminals get no art", color=VALUE_COLOR))
+            fields.append(Field("Drawn for", f"{sauce.width} columns; narrower terminals get {too_wide}", color=VALUE_COLOR))
         if not sauce.font_is_cp437:
             font = "".join(ch for ch in sauce.font if ch.isprintable())
             fields.append(Field("Font", f"made for {font}; shown with CP437's characters", color=WARNING_COLOR))
@@ -12938,7 +12946,11 @@ async def _draw_welcome_banner_menu(
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     credit_line = await lane.run(is_welcome_banner_credit_enabled)
     await _write_sections(
-        session, [_banner_status_section(status, unicode_style=unicode_style, credit_line=credit_line)],
+        session,
+        [_banner_status_section(
+            status, unicode_style=unicode_style, sauce=await asyncio.to_thread(_banner_sauce, status),
+            credit_line=credit_line, too_wide="the default banner",
+        )],
         unicode_style=unicode_style,
     )
     await session.write_line(
@@ -13592,7 +13604,8 @@ async def _draw_main_menu_banner_menu(
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line("")
     await _write_wrapped_subtitle(
         session,
@@ -13981,7 +13994,8 @@ async def _draw_logoff_banner_menu(
         "Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
         "timeout, kick, or account revocation.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14252,7 +14266,8 @@ async def _draw_new_account_banner_before_menu(
         "Shown once, right when a caller starts self-service signup -- before the Create "
         "account prompts, never repeated on a fixable retry.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14531,7 +14546,8 @@ async def _draw_new_account_banner_after_menu(
         "Shown once self-service signup succeeds -- covers both an immediate login and a "
         "pending-approval account, alongside the existing message either way.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -14887,7 +14903,8 @@ async def _draw_board_list_masthead_menu(
         "Shown above every board-browsing view -- the top level, a category, or a "
         "Community.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -15160,7 +15177,8 @@ async def _draw_file_area_masthead_menu(
         "Shown above every file-area-browsing view -- the top level, a category, or a "
         "Community.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [
@@ -15431,7 +15449,8 @@ async def _draw_chat_channel_picker_masthead_menu(
         "Shown above every channel-picker view -- the top level, a category, or a "
         "Community. Never inside a live channel.",
     )
-    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style)], unicode_style=unicode_style)
+    sauce = await asyncio.to_thread(_banner_sauce, status)
+    await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce)], unicode_style=unicode_style)
     await session.write_line(
         "\r\n" + _menu_row(
             [

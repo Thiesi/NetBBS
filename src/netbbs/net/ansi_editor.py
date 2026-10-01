@@ -68,7 +68,7 @@ from netbbs.rendering import (
     truncate,
 )
 from netbbs.rendering.charset import art_glyphs_to_cp437_controls
-from netbbs.rendering.sauce import Sauce, build_sauce
+from netbbs.rendering.sauce import Sauce, build_sauce, split_sauce
 
 _logger = logging.getLogger(__name__)
 
@@ -177,7 +177,10 @@ async def edit_ansi_art(
             draft_path.unlink()
         loaded_bytes = initial_bytes
 
-    loaded_sauce: Sauce | None = None
+    # The credit a save keeps (`_saved_bytes`) comes from the file being
+    # edited, even when a draft of it is resumed: drafts carry no SAUCE
+    # (review on #989).
+    loaded_sauce: Sauce | None = split_sauce(initial_bytes)[1] if initial_bytes else None
     if loaded_bytes is not None:
         # A draft is this editor's own output, always CP437
         # (`encode_ansi_bytes`); only a caller's `initial_bytes` may be an
@@ -187,7 +190,7 @@ async def edit_ansi_art(
         if from_draft:
             text = decode_cp437_art(loaded_bytes)
         else:
-            text, loaded_sauce = decode_art_bytes(loaded_bytes)
+            text = decode_art_bytes(loaded_bytes)[0]
         parse_ansi_into_buffer(text, buffer)
 
     state = _EditorState(buffer=buffer)

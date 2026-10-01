@@ -191,9 +191,14 @@ def test_the_console_status_shows_credit_width_and_a_font_warning(db):
     from netbbs.net.welcome_banner import welcome_banner_status
 
     _enable(db, "welcome", ART + build_sauce(width=80, lines=1, title="Nib Logo", author="InkWell", font="IBM VGA 850"))
-    text = _section_text(_banner_status_section(welcome_banner_status(db), unicode_style=False, credit_line=False))
+    from netbbs.net.admin_flow import _banner_sauce
+
+    status = welcome_banner_status(db)
+    text = _section_text(_banner_status_section(
+        status, unicode_style=False, sauce=_banner_sauce(status), credit_line=False, too_wide="the default banner",
+    ))
     assert "Nib Logo by InkWell" in text
-    assert "80 columns" in text
+    assert "80 columns; narrower terminals get the default banner" in text
     assert "made for IBM VGA 850" in text
     assert "Credit line" in text and "off" in text
 
@@ -203,7 +208,10 @@ def test_art_without_sauce_shows_no_sauce_rows(db):
     from netbbs.net.welcome_banner import welcome_banner_status
 
     _enable(db, "welcome", ART)
-    text = _section_text(_banner_status_section(welcome_banner_status(db), unicode_style=False))
+    from netbbs.net.admin_flow import _banner_sauce
+
+    status = welcome_banner_status(db)
+    text = _section_text(_banner_status_section(status, unicode_style=False, sauce=_banner_sauce(status)))
     assert "Drawn for" not in text and "Art" not in text.split("File")[0]
 
 
@@ -222,3 +230,21 @@ def test_no_credit_line_without_a_credit(db):
     _enable(db, "welcome", ART + build_sauce(width=80, lines=1))
     set_welcome_banner_credit_enabled(db, True)
     assert "art:" not in load_welcome_banner(db, max_width=80)
+
+
+def test_resuming_a_draft_keeps_the_files_credit(tmp_path):
+    # Review on #989: a resumed draft carries no SAUCE, and the save wrote
+    # an empty credit over the artist's.
+    from tests.test_ansi_editor import FakeSession
+    from netbbs.net.ansi_editor import edit_ansi_art
+    from netbbs.rendering.screen_buffer import ScreenBuffer
+    from netbbs.rendering import encode_ansi_bytes
+
+    draft = tmp_path / "draft.ans"
+    draft.write_bytes(encode_ansi_bytes(ScreenBuffer(80, 24)))
+    original = ART + build_sauce(width=80, lines=1, title="Nib Logo", author="InkWell", group="Quill")
+    session = FakeSession(["y", "CTRL+O"])
+    saved = asyncio.run(edit_ansi_art(session, initial_bytes=original, draft_path=draft))
+    assert saved is not None
+    _, sauce = split_sauce(saved)
+    assert sauce is not None and sauce.credit == "Nib Logo by InkWell/Quill"
