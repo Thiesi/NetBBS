@@ -1559,6 +1559,14 @@ async def _show_board(
         subject: str, body: str, *, layout: str = "prose", parent_post_id: str | None = None,
         files: list[FileRef] | None = None,
     ) -> bool:
+        # Asked again here, not only when the board was drawn: the origin may
+        # have changed who posts while this was being written, and a post made
+        # anyway would show on this node alone (review of PR #1024). The
+        # draft is kept, as for any refused post.
+        refusal = posting_refusal(db, board, own_fingerprint=own_fingerprint, is_reply=parent_post_id is not None)
+        if refusal is not None:
+            announce(session, f"Could not create post: {refusal}", tone="muted")
+            return False
         try:
             post = create_post(
                 db, board, user, subject, body, layout=layout, parent_post_id=parent_post_id, files=files,

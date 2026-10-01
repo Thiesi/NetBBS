@@ -5532,11 +5532,12 @@ board's current origin is kept as a signed event but not shown when the mode
 forbids it. A reply counts as one only when its parent is on this board: one
 naming a parent this node does not have would be shown as a new thread, so
 under `origin_threads` it waits as a kept event until a rebuild finds its
-parent. A node that is not the origin does not offer its callers `[P]ost` or `[R]eply` where
-the mode forbids them, and says why, and a door's post there is refused
-before it is written. The rule follows an origin transfer: a post the old
-origin wrote before the transfer and that arrives after it is refused, since
-`created_at` is not authoritative (§7.4).
+parent. A node that is not the origin does not offer its callers `[P]ost` or
+`[R]eply` where the mode forbids them, and says why; it asks again just
+before a post is written, in case the mode changed meanwhile, and a door's
+post there is refused before it is written. The rule follows an origin
+transfer: a post the old origin wrote before the transfer and that arrives
+after it is refused, since `created_at` is not authoritative (§7.4).
 
 `board_posting` is not part of the board's lifecycle chain (§9.4). An origin
 keeps only its latest lifecycle event, so a setting chained in would hide an
@@ -5548,9 +5549,10 @@ a node that is not the board's current origin (a former origin's, still
 relayed) is skipped on receipt, not refused, so it cannot fail the batch it
 came in; a former origin drops its own setting when the origin moves, and
 stops pushing it. A node with Link turned off still knows whether it is a
-board's origin from the fingerprint it records at every start. The origin keeps its
-own latest setting (`boards.link_posting_json`) and re-pushes and serves it
-like its lifecycle event; carrying nodes keep every one in `link_events`.
+board's origin from the fingerprint it records at every start. The origin
+keeps its own latest setting (`boards.link_posting_json`) and re-pushes and
+serves it like its lifecycle event; carrying nodes keep every one in
+`link_events`.
 
 ### 9.4 Origin succession
 

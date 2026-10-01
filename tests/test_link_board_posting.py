@@ -332,3 +332,49 @@ def test_the_origin_keeps_posting_on_its_board_with_link_off(db, alice, here):
     set_node_fingerprint(db, here.fingerprint)  # cached at every startup
 
     assert posting_here(db, board, own_fingerprint=None) == "all"
+
+
+def test_a_mode_changed_while_writing_refuses_the_post_at_publish(db, origin):
+    """The board offered [P]ost when it was drawn; the origin changed who
+    posts while the caller wrote. Published anyway, the post would show on
+    this node alone (review of PR #1024)."""
+    import asyncio
+
+    from netbbs.net import board_flow
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+    from tests.test_board_list_and_reader import FakeSession
+
+    class _Hooked(FakeSession):
+        def _run_hooks(self):
+            while self._inputs and callable(self._inputs[0]):
+                self._inputs.pop(0)()
+
+        async def read_key(self, echo=True):
+            self._run_hooks()
+            return await super().read_key(echo)
+
+        async def read_line(self, echo=True, history=None, completer=None, **kwargs):
+            self._run_hooks()
+            return await super().read_line(echo, history, completer, **kwargs)
+
+        async def read_editor_key(self, *, distinguish_ctrl_h=False):
+            self._run_hooks()
+            return await super().read_editor_key(distinguish_ctrl_h=distinguish_ctrl_h)
+
+    board = _carried(db, origin)
+    writer = create_user(db, "writer", password="hunter2pw", user_level=10)
+    set_redraw_in_place_enabled(db, writer, True)
+
+    def origin_closes_it():
+        materialize_carried_board_posting(db, _setting(origin, "origin_only", "2026-01-05T00:00:00Z"))
+
+    session = _Hooked(["p", "Hello", "Body", "/done", origin_closes_it, "p"])
+    # What follows the refusal (the draft kept open for editing) is not this
+    # test's business: the script simply ends there.
+    with pytest.raises(AssertionError, match="ran out of scripted input"):
+        asyncio.run(board_flow._show_board(session, db, board, writer))
+
+    assert "Could not create post: Only the board's origin node posts on this board." in " ".join(
+        session.visible().split()
+    )
+    assert db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0

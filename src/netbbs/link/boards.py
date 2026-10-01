@@ -1383,12 +1383,13 @@ def record_board_origin_change(
     # setting -- signed by a node that is no longer the origin, it is
     # nothing a peer can apply. The setting stays in force here until the
     # new origin sets one (design doc §9.3).
-    db.connection.execute(
-        """UPDATE boards SET link_posting_json = NULL
-            WHERE board_id = ? AND link_posting_json IS NOT NULL
-              AND json_extract(link_posting_json, '$.envelope.payload.origin_fingerprint') != ?""",
-        (board_id, new_origin_fingerprint),
-    )
+    row = db.connection.execute(
+        "SELECT id, link_posting_json FROM boards WHERE board_id = ?", (board_id,)
+    ).fetchone()
+    if row is not None and row["link_posting_json"] is not None:
+        own = BoardPosting.from_dict(json.loads(row["link_posting_json"]))
+        if own.payload["origin_fingerprint"] != new_origin_fingerprint:
+            db.connection.execute("UPDATE boards SET link_posting_json = NULL WHERE id = ?", (row["id"],))
     if commit:
         db.connection.commit()
 
