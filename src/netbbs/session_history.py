@@ -115,6 +115,9 @@ def record_session_start(db: Database, user: User) -> int:
         (user.id, user.username, utc_now_iso(), int(session_history_name_visible(db, user))),
     )
     row_id = db.connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    # Issue #992: the count the promotion rules use. Kept on the account,
+    # since the rows above are pruned to a few per account.
+    db.connection.execute("UPDATE users SET login_count = login_count + 1 WHERE id = ?", (user.id,))
     _prune_session_history(db)
     db.connection.commit()
     return row_id

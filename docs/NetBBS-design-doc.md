@@ -1291,6 +1291,33 @@ is what stops a demoted operator in the standalone CLI. Moderator grants
 (§5.2) need no watcher: they are read from the database at each check, so a
 grant or a revocation governs the holder's next action in every session.
 
+**Automatic promotion** (issue #992). A SysOp can set promotion rules
+(`Users ▸ Promotion rules`). Each rule raises an account from one level to a
+higher one once the account is old enough, has logged in often enough and,
+optionally, has posted enough.
+
+- **When.** Rules are checked at login, after the login is counted and before
+  the session takes its level. The session starts at the new level and the
+  caller is told once, on the first main menu. An account that qualifies
+  while away is promoted at its next login, the first time the level
+  matters. Nothing runs on a timer.
+- **Shape.** One rule per starting level, so which rule applies is never a
+  guess. A rule never demotes and never reaches 255. One rule applies per
+  login, so an account climbs a ladder of rules one step per call.
+- **Who is left alone.** The guest account (whether guest login is on or
+  not), pending and disabled accounts, staff and SysOps, and every account
+  whose level a person has set. A level set by hand takes the account out of
+  the rules, so a demotion is not undone at the next login; a starting level
+  other than 0 counts as set by hand. The account screen shows whether the
+  rules apply and turns them back on.
+- **Counting.** Logins are counted on the account itself, since session
+  history keeps only a few rows per account. Posts are the account's
+  approved posts on this node, each counted once however often edited.
+- **Audit.** An automatic promotion is recorded in the moderation log with
+  no acting account, shown as "(system)", and names the rule.
+
+Rules are node configuration and travel in backups.
+
 Hard deletion preserves content provenance through denormalized display labels
 or nullable author/uploader references. Personal access rows and private state
 which cannot meaningfully outlive the account are deleted according to explicit
@@ -14422,6 +14449,33 @@ it is a handful of short strings read together.
 screen and the Levels screen, not in the resource editors.** Those are where
 a SysOp thinks in names (promote alice to Member). A resource editor's level
 fields keep taking numbers, and show the name beside the value.
+
+### Issue #992 — automatic level promotion — decided
+
+A public node either checked new accounts by hand every day or opened
+everything to brand-new accounts; ReLink ran its own cron script. Normative
+description: §4.3.
+
+**Decision 1 — checked at login, not on a timer.** A level matters only
+while the account is logged in, so the login is the moment to decide, and
+the caller can be told. Rejected: a periodic sweep, which promotes accounts
+nobody is using and needs a task of its own.
+
+**Decision 2 — a level set by hand takes the account out of the rules**
+(the maintainer's decision). Otherwise a rule undoes a SysOp's demotion at
+the next login. The account screen turns the rules back on. At upgrade only
+accounts the moderation log shows demoted start marked; earlier promotions
+cannot be told from ReLink's scripted ones, and are left free to climb.
+
+**Decision 3 — logins counted on the account.** Session history keeps at
+most a few rows per account and prunes them as others log in, so a quiet
+newcomer's count could fall. `users.login_count` starts from the rows still
+there.
+
+**Decision 4 — the node acts, and the log says so.** An automatic promotion
+is logged with no acting account ("(system)"), not in a SysOp's name: no
+person made that change at that moment. Rejected: naming the SysOp who set
+the rule, which is what ReLink's script did.
 
 ### Issue #993 — who may post on a Linked board — decided
 

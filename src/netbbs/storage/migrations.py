@@ -3909,6 +3909,27 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #992: automatic level promotion. `users.login_count` counts an account's logins, "
+            "since `session_history` keeps only a few rows per account; it starts from the rows "
+            "still there. `users.level_set_by_hand` marks an account whose level a person set, "
+            "which keeps the promotion rules away from it. Before this, only a demotion is known "
+            "to have been a person's choice that a rule must not undo, so accounts the moderation "
+            "log shows demoted start marked; promotions made before rules existed are left free "
+            "to climb further."
+        ),
+        sql="""
+        ALTER TABLE users ADD COLUMN login_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE users ADD COLUMN level_set_by_hand INTEGER NOT NULL DEFAULT 0;
+        UPDATE users SET login_count = (
+            SELECT COUNT(*) FROM session_history WHERE session_history.user_id = users.id
+        );
+        UPDATE users SET level_set_by_hand = 1 WHERE id IN (
+            SELECT target_user_id FROM moderation_log WHERE action = 'demote' AND target_user_id IS NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #993: who may post on a Linked board, set by its current origin with a signed "
             "`board_posting` event. `boards.link_posting` is the mode in force (NULL = anyone), "
             "`link_posting_at` the `created_at` of the setting it came from (the latest wins), "
