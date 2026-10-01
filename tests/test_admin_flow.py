@@ -5211,7 +5211,7 @@ def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
     from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
     from netbbs.net.main_menu import slot_menu_preview
     from netbbs.rendering import decode_banner_bytes
-    from netbbs.rendering.art_slots import parse_slot_art
+    from netbbs.rendering.art_slots import layout_menu_slot, parse_slot_art
 
     samples = [p for p in MAIN_MENU_BANNER_PRESETS if p.mode == "slots"]
     assert len(samples) >= 2
@@ -5221,6 +5221,15 @@ def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
         for level in (None, 0):
             plan = slot_menu_preview(FakeSession(), db, sysop, art, level=level)
             assert plan.text is not None, (preset.key, level, plan.reason)
+        # Every optional item at once, with long counts: the longest menu
+        # any caller can have (main_menu_entries' full set).
+        longest = [
+            "[M]essage boards", "[C]hat", "[F]iles", "[G]ames", "C[o]mmunities", "[N]ew scan", "[/] Find",
+            "[?] Help", "[D]irectory", "[P]rofile", "[E]-mail (999 unread)", "[H]istory", "P[r]evious callers",
+            "[W]ho's online", "S[t]aff list", "[I]nvitations", "[V]erify", "[S]ysOp", "Moder[a]tion (999)",
+            "[S]taff", "[L]ogoff",
+        ]
+        assert layout_menu_slot(longest, art.menu.width, art.menu.height) is not None, preset.key
 
 
 def test_masthead_gallery_applying_a_slot_preset_makes_it_the_menu(db, lane, sysop):

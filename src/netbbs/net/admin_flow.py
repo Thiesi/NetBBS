@@ -13572,9 +13572,9 @@ async def _draw_main_menu_banner_menu(
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
                 MenuEntry(
                     label=menu_key("M", "ode"),
-                    brief="Use the art as the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
+                    brief="Make the art the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
                 ),
-                MenuEntry(label=menu_key("C", "heck"), brief="List the art's slots and whether the menu fits"),
+                MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and menu fit"),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
