@@ -4426,8 +4426,10 @@ bundle replacing an older one, bundles from at most 32 issuers per recipient,
 each kept at most 90 days. They never take one of a recipient's mail slots.
 Pickup hands them over beside the mail, in a `bundles` key an older recipient
 ignores; an issuer deposits one only at a relay whose descriptor advertises
-`sealed_attestations`. A relay that knows the issuer verifies the outer
-signature before a bundle may replace another.
+`sealed_attestations`. A bundle is deposited with its issuer's hello bundle;
+the relay accepts it only if its outer signature verifies under the issuer's
+current key as that hello (merged with any chain on file) establishes it, so
+only the issuer can fill or replace its slot.
 
 Reliability scoring is direct-observation operational data, not Phase-4 social
 reputation.
@@ -14678,10 +14680,15 @@ lifetime, the window §5.5 already accepts for an issuer that goes dark.
 when.** The plaintext is padded to a power of two from 4 KiB, so the size says
 little, and no user identifier is outside the seal. The relay is the
 recipient's chosen agent, under its signed consent, and already sees more of
-a letter (sender and recipient user IDs). A relay that knows the issuer checks
-the outer signature, so a third party cannot push a genuine snapshot out of
-its slot with a forged one; an issuer it has never met is taken unverified, as
-mail is, and the recipient checks everything itself.
+a letter (sender and recipient user IDs). Because a bundle can displace
+another in its slot, a relay never takes one on an unverifiable claim, unlike
+a letter: the deposit carries the issuer's own hello bundle, which
+authenticates itself against its root key (whose hash is the issuer's
+fingerprint), is merged with any chain the relay already holds so a stale one
+cannot revive a compromised key, and names the key the snapshot's outer
+signature must verify under. Only the issuer can fill or replace its slot; a
+deposit in another issuer's name is refused, whatever sequence it claims. The
+recipient still checks everything itself.
 
 **Decision 4 — the recipient's relays, learned from its descriptor.** Sealing
 needs the recipient's key and verifying needs the issuer's, and two
