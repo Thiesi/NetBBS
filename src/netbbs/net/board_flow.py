@@ -124,7 +124,7 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.net.session import Session, post_body_width, write_prompt
+from netbbs.net.session import Session, physical_terminal_width, post_body_width, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -293,7 +293,7 @@ async def _browse_boards_in_category(
     # category, a Community's scope), not only the very
     # first unfiltered screen, matching this feature's own scoping
     # decision.
-    board_masthead = load_board_list_banner(db)
+    board_masthead = load_board_list_banner(db, max_width=physical_terminal_width(session))
 
     def _load(order_by: str) -> tuple[list[Board], list[Category]]:
         all_boards = [
