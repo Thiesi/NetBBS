@@ -2077,6 +2077,51 @@ Staff permissions, the Staff list and the away notice are local to the node.
 None of them is carried over Link: a staff member's moderation of carried
 content follows §5.2 and §9.5 exactly as a moderator's does.
 
+### 5.7 The access map (issue #1004)
+
+Level gates are set in many places: on each board, file area, channel and
+door, as Community defaults, and in node settings. The access map is the one
+list of all of them, so a SysOp can see what a level opens and what a level
+change gains or loses without opening every resource. The SysOp's level
+screens (#1006-#1009) show it; this section says what it contains.
+
+**What is on it.** One gate per thing a level opens:
+
+- each board and file area twice, for reading and for posting or uploading;
+- each chat channel (entering it) and each door (playing it);
+- the node-wide gates: the node map, mail, opening new MRC rooms, and the
+  SysOp console at 255.
+
+Resources excluded from this node (§9.5) are left out, since nobody reaches
+them.
+
+**Each gate says where its level comes from:** set on the resource, inherited
+from its Community's default, the system default of 0, a node setting, or
+fixed (the SysOp level).
+
+**The level a gate opens at.** Usually its own level. Posting on a board or
+uploading to an area also needs its read level, since a caller who cannot
+open the board cannot post on it, so a write gate opens at the higher of the
+two.
+
+**Levels only.** The map answers what a level opens. It does not claim more:
+
+- Age, verified-name, members-only and hidden are facts about each account
+  or each channel's membership. The map names them as the gate's conditions,
+  such as "age 18+", rather than counting them in.
+- A read or write grant (§5.2) lets one account past one resource's level.
+  It belongs to that account, not to a level, so the map does not list it.
+- A gate that opens for nobody right now says why: a closed board, Link off
+  for the node map, MRC open rooms switched off.
+- A carried Linked board's write level holds only this node's callers: posts
+  carried in from other nodes are not held to it (issue #993). The map says
+  so on that gate.
+
+**It agrees with the checks.** The map is built from the same effective-level
+functions the checks use, and the test suite holds each gate's answer to the
+real check for accounts at every threshold. Every level check in the code is
+either on the map or recorded as not a gate, so a new gate cannot be left off.
+
 ---
 
 ## 6. Local product domains
@@ -14219,6 +14264,31 @@ can emulate a line speed itself (`CSI Ps1 ; Ps2 * r`), but bytes already sent
 cannot be skipped, it works only in SyncTERM, and turning it off again queues
 behind the art. Server-side pacing works on every terminal and stops at once
 on a key.
+
+### Issue #1004 — the access map — decided
+
+Dogfooding found that a SysOp could not tell what giving an account a level
+meant without opening every board, file area, channel, door, Community and
+setting, nor be sure a promotion opened nothing unwanted. Normative
+description: §5.7. Step 1 (#1005) builds the map; the screens follow.
+
+**Decision 1 — one map, held to the checks by tests.** The map is computed
+from the same effective-level functions the checks use, a test compares each
+gate with the real check at every threshold, and a scan of the source fails
+on any level check the map does not account for. Rejected: routing every
+check through the map, which would rewrite every flow's gate for no change in
+behaviour; and a hand-kept list, which is the drift the map exists to end.
+
+**Decision 2 — levels only; conditions named, grants left out.** Age,
+verified-name, members-only and hidden appear as a gate's conditions, and
+read or write grants are not on the map, because they belong to accounts,
+not to levels. Rejected: answering "what can this account do" in the same
+structure, which the change preview (#1006) does per account where it needs
+to.
+
+**Decision 3 — a write gate opens at the higher of its read and write
+levels.** That is what a caller experiences. The gate still shows its own
+write level and where it comes from.
 
 ### SFTP over the SSH transport — declined
 
