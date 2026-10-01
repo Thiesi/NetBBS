@@ -501,7 +501,8 @@ anyone to 255.
 The rules never touch the guest account, staff, SysOps, or pending and
 disabled accounts. They also leave alone any account whose level you set by
 hand, so a caller you demote stays demoted. The account screen shows
-**Auto promotion: on** or **off** and why; `U` turns it back on, or off.
+**Auto promotion: on**, **off (level set by hand)**, or **on, but skipped**
+with the reason (a pending account, for example); `U` turns it on or off.
 Each automatic promotion appears in the moderation log as **(system)**,
 naming the rule.
 

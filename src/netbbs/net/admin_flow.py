@@ -6931,7 +6931,7 @@ async def _draw_user_detail(
             ),
             _editable("i", "Can verify identity", f"{_yes_no(target.can_verify_identity)} (age/name attestation)"),
             # Issue #992: last, so the arrow order of the fields above holds.
-            _editable("u", "Auto promotion", _auto_promotion_label(await lane.run(kept_from_rules, target))),
+            _editable("u", "Auto promotion", _auto_promotion_label(target, await lane.run(kept_from_rules, target))),
             _grants_field(await lane.run(_grant_summaries, target)),
         ]),
     ]
@@ -6987,9 +6987,14 @@ _USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "s", "i", "u")
 _ALL_USER_DETAIL_KEYS = frozenset("alutrkpsihd")
 
 
-def _auto_promotion_label(kept: str | None) -> str:
-    """Whether the promotion rules (issue #992) may raise this account."""
-    return "on" if kept is None else f"off ({kept})"
+def _auto_promotion_label(target: User, kept: str | None) -> str:
+    """Whether the promotion rules (issue #992) may raise this account. The
+    on/off is the switch `A[u]to promotion` flips (a level set by hand turns
+    it off); anything else keeping the rules away is said beside it, since
+    the switch does not change it."""
+    if target.level_set_by_hand:
+        return "off (level set by hand)"
+    return "on" if kept is None else f"on, but skipped ({kept})"
 
 
 def _user_detail_keys(actor: User, target: User) -> frozenset[str]:

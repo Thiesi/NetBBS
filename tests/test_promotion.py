@@ -174,11 +174,12 @@ def test_the_rules_leave_the_guest_staff_disabled_and_pending_alone(db, sysop, r
 
 
 def test_count_qualifying(db, sysop, rules):
-    for name, logins in (("alice", 2), ("bob", 1), ("carol", 3)):
+    # Ready means at the next login, which counts too: bob's makes two.
+    for name, logins in (("alice", 2), ("bob", 1), ("dave", 0), ("carol", 3)):
         create_user(db, name, password="hunter2")
         _log_in(db, name, logins)
 
-    assert count_qualifying(db, rules[0], now=LATER) == 2
+    assert count_qualifying(db, rules[0], now=LATER) == 3
     assert count_qualifying(db, rules[0]) == 0  # nobody is a day old yet
 
 
@@ -306,3 +307,18 @@ def test_a_caller_is_promoted_at_login_and_told_on_the_first_menu(db, sysop):
     assert session.output.count("You're now level") == 1
     bob = get_user_by_username(db, "bob")
     assert (bob.user_level, bob.login_count) == (10, 1)
+
+
+def test_the_switch_shows_and_flips_only_the_hand_set_mark(db, lane, sysop, rules):
+    """A pending account is skipped by the rules whatever the switch says;
+    the screen says so beside "on", and the switch still turns them off and
+    back on rather than reading the skip as "off" (review of PR #1023)."""
+    create_user(db, "waiting", password="hunter2", pending_approval=True)
+
+    text = _screen(lane, sysop, ["u", "l", "s", "waiting"], height=40)
+    assert "Auto promotion: on, but skipped (awaiting approval)" in text
+
+    _screen(lane, sysop, ["u", "l", "s", "waiting", "u"], height=40)
+    assert get_user_by_username(db, "waiting").level_set_by_hand
+    _screen(lane, sysop, ["u", "l", "s", "waiting", "u"], height=40)
+    assert not get_user_by_username(db, "waiting").level_set_by_hand

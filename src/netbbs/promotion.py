@@ -145,14 +145,19 @@ def kept_from_rules(db: Database, user: User) -> str | None:
     return None
 
 
-def qualifies(db: Database, user: User, rule: PromotionRule, *, now: datetime.datetime | None = None) -> bool:
-    """Whether `rule` would promote `user` now."""
+def qualifies(
+    db: Database, user: User, rule: PromotionRule, *, now: datetime.datetime | None = None,
+    next_login: bool = False,
+) -> bool:
+    """Whether `rule` would promote `user` now, at a login already counted.
+    With `next_login`, whether it would at the account's next login, which
+    that login's own count still has to reach."""
     if user.user_level != rule.from_level or kept_from_rules(db, user) is not None:
         return False
     now = now or datetime.datetime.now(datetime.timezone.utc)
     if now - parse_utc_iso(user.created_at) < datetime.timedelta(hours=rule.min_age_hours):
         return False
-    if user.login_count < rule.min_logins:
+    if user.login_count + (1 if next_login else 0) < rule.min_logins:
         return False
     return rule.min_posts == 0 or _approved_posts(db, user) >= rule.min_posts
 
@@ -178,4 +183,7 @@ def count_qualifying(db: Database, rule: PromotionRule, *, now: datetime.datetim
     ids = [row[0] for row in db.connection.execute(
         "SELECT id FROM users WHERE user_level = ? AND level_set_by_hand = 0", (rule.from_level,)
     )]
-    return sum(1 for user_id in ids if (user := get_user_by_id(db, user_id)) and qualifies(db, user, rule, now=now))
+    return sum(
+        1 for user_id in ids
+        if (user := get_user_by_id(db, user_id)) and qualifies(db, user, rule, now=now, next_login=True)
+    )
