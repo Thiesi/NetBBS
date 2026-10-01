@@ -281,8 +281,8 @@ Two rules apply to every row:
       two-domain threshold and record the explanation shown by node B,
       including counted domains/weight and the stated release condition.
       *(2026-09: not crossed, as expected. But below the threshold the
-      explanation shows no counted domains, weight or release condition, only
-      `active_trigger_count`, issue #752.)*
+      explanation showed no counted domains, weight or release condition, only
+      `active_trigger_count`, issue #752; since fixed.)*
 - [x] Introduce the second independent signal. Confirm node B quarantines
       only the affected dimension, ordinary transport/content behavior matches
       the documented enforcement boundary, and already accepted objects remain
