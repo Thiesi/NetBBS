@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, replace
 
 from netbbs.auth.users import (
     SYSOP_LEVEL, User, current_account, describe_staff_permissions, is_usable_sysop, list_users,
@@ -135,6 +136,123 @@ _MENU_ACTIVITY = {
 }
 
 
+@dataclass(frozen=True)
+class MainMenuEntries:
+    explore: list[MenuEntry]
+    personal: list[MenuEntry]
+    system: list[MenuEntry]
+    has_mail: bool
+    unread: int
+
+    @property
+    def labels(self) -> list[str]:
+        return [entry.label for entry in (*self.explore, *self.personal, *self.system)]
+
+
+def main_menu_entries(
+    session: Session, db: Database, user: User, node_controls: NodeControls | None = None,
+    *, whos_online: bool | None = None,
+) -> MainMenuEntries:
+    """The main menu's items for `user`, in its three sections -- the one
+    list both the generated menu and slot art (issue #929) draw, so art
+    can never offer something the generated menu wouldn't. `whos_online`
+    overrides whether `[W]ho's online` is offered (a running node always
+    offers it; the console's preview has no node controls to ask)."""
+    has_mail = caller_mail_refusal(session, db, user) is None
+    unread = unread_mail_count(db, user) if has_mail else 0
+    mail_label = f"-mail ({unread} unread)" if unread else "-mail"
+    # Brief descriptions are kept to roughly 34 characters or less --
+    # the actual available width once this renders in two columns at
+    # the classic 80-column terminal (menu_grid's own column_width
+    # minus its description indent). Longer, fuller text belongs in
+    # `detailed`, shown only when a caller opts into that verbosity.
+    explore_options = [
+        MenuEntry(label=menu_key("M", "essage boards"), brief="Read and post messages"),
+        MenuEntry(label=menu_key("C", "hat"), brief="Talk live with other callers"),
+        MenuEntry(label=menu_key("F", "iles"), brief="Download and upload files"),
+    ]
+    if has_visible_doors(db, user):
+        explore_options.append(MenuEntry(label=menu_key("G", "ames"), brief="Play a door game"))
+    if _has_visible_communities(db, user):
+        explore_options.append(MenuEntry(
+            label=menu_key("o", "mmunities", prefix="C"),
+            brief="This node's topic spaces",
+            detailed="Browse Communities -- the SysOp's topics, each with its own boards, chat and files.",
+        ))
+    explore_options.extend(
+        [
+            MenuEntry(
+                label=menu_key("N", "ew scan"),
+                brief="Activity since your last visit",
+                detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
+            ),
+            # Find names what it searches (issue #811): the caller's own
+            # mail too (issue #824), for a caller mail is open to -- named
+            # first, as its results are listed first (issue #918).
+            MenuEntry(
+                label=menu_key("/", " Find"),
+                brief="Search mail, posts, files, chat" if has_mail else "Search posts, files, and chat",
+                detailed=(
+                    "Find your own mail, posts, files, and retained chat on this node." if has_mail
+                    else "Find posts, files, and retained chat on this node."
+                ),
+            ),
+            # Issue #840 (F116): the main menu had no help at all.
+            MenuEntry(label=menu_key("?", " Help"), brief="How this board works"),
+        ]
+    )
+    personal_options = [
+            MenuEntry(label=menu_key("D", "irectory"), brief="Look up other callers"),
+            MenuEntry(
+                label=menu_key("P", "rofile"),
+                brief="Your bio and preferences",
+                detailed="Edit your bio, visibility, and preferences -- including these menu descriptions.",
+            ),
+            *([MenuEntry(label=menu_key("E", mail_label), brief="Read and send private mail")] if has_mail else []),
+            MenuEntry(label=menu_key("H", "istory"), brief="Your recent sessions"),
+            MenuEntry(
+                label=menu_key("R", "evious callers", prefix="P"),
+                brief="Who else called this node",
+                detailed=(
+                    "The node's recent callers -- the same roll shown after login, "
+                    "on demand."
+                ),
+            ),
+    ]
+    if (node_controls is not None) if whos_online is None else whos_online:
+        personal_options.append(
+            MenuEntry(label=menu_key("W", "ho's online"), brief="See who's connected now")
+        )
+    if sees_staff_list(db, user):
+        # Issue #836 (design doc §5.6): who runs the node, and who is away.
+        personal_options.append(MenuEntry(label=menu_key("t", "aff list", prefix="S"), brief="Who runs this node"))
+    if list_pending_invitations_for_user(db, user):
+        personal_options.append(
+            MenuEntry(label=menu_key("I", "nvitations"), brief="Pending invitations for you")
+        )
+    if user.can_verify_identity or meets_level(user, SYSOP_LEVEL):
+        personal_options.append(
+            MenuEntry(label=menu_key("V", "erify"), brief="Verify a caller's identity")
+        )
+    system_options = []
+    if meets_level(user, SYSOP_LEVEL):
+        system_options.append(
+            MenuEntry(label=menu_key("S", "ysOp"), brief="Node administration console")
+        )
+    else:
+        # Issue #836 (design doc §5.2, §5.6): a moderator is told what waits
+        # for them, and a staff member reaches their own console.
+        if has_moderation_scope(db, user):
+            system_options.append(MenuEntry(
+                label=menu_key("a", f"tion ({count_moderation_items(db, user)})", prefix="Moder"),
+                brief="Held posts and uploads to decide",
+            ))
+        if is_staff(user):
+            system_options.append(MenuEntry(label=menu_key("S", "taff"), brief="Your staff console"))
+    system_options.append(MenuEntry(label=menu_key("L", "ogoff"), brief="Disconnect from this node"))
+    return MainMenuEntries(explore_options, personal_options, system_options, has_mail, unread)
+
+
 async def _draw_main_menu(
     session: Session, db: Database, mailbox: MessageMailbox, user: User,
     *, node_controls: NodeControls | None = None, notice: str | None = None,
@@ -245,98 +363,9 @@ async def _draw_main_menu(
     for text, created_at in mailbox.flush(session):
         announce_styled(session, format_with_preference(db, user, text, created_at))
 
-    has_mail = caller_mail_refusal(session, db, user) is None
-    unread = unread_mail_count(db, user) if has_mail else 0
-    mail_label = f"-mail ({unread} unread)" if unread else "-mail"
-    # Brief descriptions are kept to roughly 34 characters or less --
-    # the actual available width once this renders in two columns at
-    # the classic 80-column terminal (menu_grid's own column_width
-    # minus its description indent). Longer, fuller text belongs in
-    # `detailed`, shown only when a caller opts into that verbosity.
-    explore_options = [
-        MenuEntry(label=menu_key("M", "essage boards"), brief="Read and post messages"),
-        MenuEntry(label=menu_key("C", "hat"), brief="Talk live with other callers"),
-        MenuEntry(label=menu_key("F", "iles"), brief="Download and upload files"),
-    ]
-    if has_visible_doors(db, user):
-        explore_options.append(MenuEntry(label=menu_key("G", "ames"), brief="Play a door game"))
-    if _has_visible_communities(db, user):
-        explore_options.append(MenuEntry(
-            label=menu_key("o", "mmunities", prefix="C"),
-            brief="This node's topic spaces",
-            detailed="Browse Communities -- the SysOp's topics, each with its own boards, chat and files.",
-        ))
-    explore_options.extend(
-        [
-            MenuEntry(
-                label=menu_key("N", "ew scan"),
-                brief="Activity since your last visit",
-                detailed="Scan every accessible message board/chat channel/file area for activity since your last visit.",
-            ),
-            # Find names what it searches (issue #811): the caller's own
-            # mail too (issue #824), for a caller mail is open to -- named
-            # first, as its results are listed first (issue #918).
-            MenuEntry(
-                label=menu_key("/", " Find"),
-                brief="Search mail, posts, files, chat" if has_mail else "Search posts, files, and chat",
-                detailed=(
-                    "Find your own mail, posts, files, and retained chat on this node." if has_mail
-                    else "Find posts, files, and retained chat on this node."
-                ),
-            ),
-            # Issue #840 (F116): the main menu had no help at all.
-            MenuEntry(label=menu_key("?", " Help"), brief="How this board works"),
-        ]
-    )
-    personal_options = [
-            MenuEntry(label=menu_key("D", "irectory"), brief="Look up other callers"),
-            MenuEntry(
-                label=menu_key("P", "rofile"),
-                brief="Your bio and preferences",
-                detailed="Edit your bio, visibility, and preferences -- including these menu descriptions.",
-            ),
-            *([MenuEntry(label=menu_key("E", mail_label), brief="Read and send private mail")] if has_mail else []),
-            MenuEntry(label=menu_key("H", "istory"), brief="Your recent sessions"),
-            MenuEntry(
-                label=menu_key("R", "evious callers", prefix="P"),
-                brief="Who else called this node",
-                detailed=(
-                    "The node's recent callers -- the same roll shown after login, "
-                    "on demand."
-                ),
-            ),
-    ]
-    if node_controls is not None:
-        personal_options.append(
-            MenuEntry(label=menu_key("W", "ho's online"), brief="See who's connected now")
-        )
-    if sees_staff_list(db, user):
-        # Issue #836 (design doc §5.6): who runs the node, and who is away.
-        personal_options.append(MenuEntry(label=menu_key("t", "aff list", prefix="S"), brief="Who runs this node"))
-    if list_pending_invitations_for_user(db, user):
-        personal_options.append(
-            MenuEntry(label=menu_key("I", "nvitations"), brief="Pending invitations for you")
-        )
-    if user.can_verify_identity or meets_level(user, SYSOP_LEVEL):
-        personal_options.append(
-            MenuEntry(label=menu_key("V", "erify"), brief="Verify a caller's identity")
-        )
-    system_options = []
-    if meets_level(user, SYSOP_LEVEL):
-        system_options.append(
-            MenuEntry(label=menu_key("S", "ysOp"), brief="Node administration console")
-        )
-    else:
-        # Issue #836 (design doc §5.2, §5.6): a moderator is told what waits
-        # for them, and a staff member reaches their own console.
-        if has_moderation_scope(db, user):
-            system_options.append(MenuEntry(
-                label=menu_key("a", f"tion ({count_moderation_items(db, user)})", prefix="Moder"),
-                brief="Held posts and uploads to decide",
-            ))
-        if is_staff(user):
-            system_options.append(MenuEntry(label=menu_key("S", "taff"), brief="Your staff console"))
-    system_options.append(MenuEntry(label=menu_key("L", "ogoff"), brief="Disconnect from this node"))
+    entries = main_menu_entries(session, db, user, node_controls)
+    explore_options, personal_options, system_options = entries.explore, entries.personal, entries.system
+    has_mail, unread = entries.has_mail, entries.unread
 
     unicode_style = unicode_style_enabled(db, user)
     extra_lines: list[str] = []
@@ -446,41 +475,98 @@ def _slot_fields(
     return fields
 
 
+@dataclass(frozen=True)
+class SlotMenuPlan:
+    """How the main menu would be drawn as slot art (issue #929, step 4):
+    `text` is the full-screen draw, or `None` with `reason` saying why
+    this caller gets the generated menu instead."""
+
+    text: str | None
+    reason: str
+    prompt_at_slot: bool = False
+
+
+def plan_slot_main_menu(
+    session: Session, art: SlotArt, labels: list[str], fields: dict[str, str], *, rows_below: int, prompt: str
+) -> SlotMenuPlan:
+    """Decide whether this caller gets the slot art, and draw it if so.
+    The generated menu is used for art with problems, an ASCII-only
+    caller, a terminal narrower than the art or too short for it plus
+    `rows_below`, or items that don't fit the `{menu}` region. Nothing is
+    ever left out to make the art fit."""
+    if art.problems or art.menu is None:
+        return SlotMenuPlan(None, "the art has problems: " + "; ".join(art.problems or ("no {menu} slot",)))
+    if getattr(session, "output_charset", None) == ASCII:
+        return SlotMenuPlan(None, "this caller reads plain ASCII")
+    physical_width = getattr(session, "physical_width", session.terminal_width)
+    prompt_at_slot = art.prompt is not None and (
+        art.prompt.col + display_width(strip_ansi(prompt)) + 2 <= physical_width
+    )
+    rows_needed = art.height + rows_below + (0 if prompt_at_slot else 1)
+    if art.width > physical_width:
+        return SlotMenuPlan(None, f"the art is {art.width} columns, the terminal {physical_width}")
+    # Nothing is drawn on the last row, so a terminal that wraps the moment
+    # it writes the bottom-right cell never scrolls the art (issue #964).
+    if rows_needed >= session.terminal_height:
+        return SlotMenuPlan(None, f"the art needs {rows_needed + 1} rows, the terminal has {session.terminal_height}")
+    menu_rows = layout_menu_slot(labels, art.menu.width, art.menu.height)
+    if menu_rows is None:
+        return SlotMenuPlan(
+            None, f"{len(labels)} items don't fit the {art.menu.width}x{art.menu.height} {{menu}} slot"
+        )
+    text = render_slot_art(art, fields=fields, menu_rows=menu_rows, ellipsis=ellipsis_for(session))
+    return SlotMenuPlan(text, "drawn as slot art", prompt_at_slot)
+
+
+#: Rows the console's check leaves below the art: one result line, as a
+#: running node often shows (a carried outcome, the SysOp's "no boards yet").
+PREVIEW_ROWS_BELOW = 1
+
+
+def slot_menu_preview(session: Session, db: Database, user: User, art: SlotArt, *, level: int | None = None) -> SlotMenuPlan:
+    """The slot main menu as `user` would see it on a running node -- or as
+    a new caller at `level` with no mail, invitations or grants of their
+    own -- for the SysOp console's preview and check. A running node
+    always offers `[W]ho's online`, so the preview does too, and one result
+    line is budgeted below the art."""
+    if level is None:
+        who = user
+    else:
+        # A stand-in account that matches no row: the SysOp's own unread
+        # mail, invitations and moderator grants are keyed by their id.
+        who = replace(
+            user, id=-1, username="caller", user_level=level, staff_permissions=0, can_verify_identity=False,
+            pending_approval=False,
+        )
+    entries = main_menu_entries(session, db, who, whos_online=True)
+    fields = _slot_fields(session, db, who, None, has_mail=entries.has_mail, unread=entries.unread)
+    return plan_slot_main_menu(
+        session, art, entries.labels, fields, rows_below=PREVIEW_ROWS_BELOW, prompt="Choice: "
+    )
+
+
 async def _draw_slot_main_menu(
     session: Session, art: SlotArt, labels: list[str], fields: dict[str, str], extra_lines: list[str], prompt: str
 ) -> bool:
-    """Draw the main menu as the SysOp's slot art (issue #929, step 4), or
-    return `False` without writing anything when this caller gets the
-    generated menu instead: art with problems, an ASCII-only caller, a
-    terminal narrower than the art or too short for it plus what goes
-    below it, or items that don't fit the `{menu}` region. Nothing is
-    ever left out to make the art fit."""
-    if art.problems or art.menu is None or getattr(session, "output_charset", None) == ASCII:
-        return False
-    physical_width = getattr(session, "physical_width", session.terminal_width)
+    """Draw the main menu as the SysOp's slot art, or return `False`
+    without writing anything when this caller gets the generated menu
+    (see `plan_slot_main_menu`)."""
     # Rows as written: a carried notice can hold several lines joined by
     # CR LF (an access change), and long lines wrap.
     width = max(1, session.terminal_width)
     below = sum(wrap_terminal_text(line, width).count("\r\n") + 1 for line in extra_lines)
     below += pending_notice_rows(session)
-    prompt_at_slot = art.prompt is not None and (
-        art.prompt.col + display_width(strip_ansi(prompt)) + 2 <= physical_width
-    )
-    rows_needed = art.height + below + (0 if prompt_at_slot else 1)
-    # Nothing is drawn on the last row, so a terminal that wraps the moment
-    # it writes the bottom-right cell never scrolls the art (issue #964).
-    if art.width > physical_width or rows_needed >= session.terminal_height:
+    plan = plan_slot_main_menu(session, art, labels, fields, rows_below=below, prompt=prompt)
+    if plan.text is None:
+        if "don't fit" in plan.reason:
+            _log_slot_overflow(len(labels), art)
         return False
-    menu_rows = layout_menu_slot(labels, art.menu.width, art.menu.height)
-    if menu_rows is None:
-        _log_slot_overflow(len(labels), art)
-        return False
-    await session.write(render_slot_art(art, fields=fields, menu_rows=menu_rows, ellipsis=ellipsis_for(session)))
+    await session.write(plan.text)
     await session.write(move_cursor(art.height + 1, 1))
     for line in extra_lines:
         await session.write_line(line)
     await write_notices(session)
-    if prompt_at_slot:
+    if plan.prompt_at_slot:
         await session.write(move_cursor(art.prompt.row + 1, art.prompt.col + 1))
     await write_prompt(session, prompt)
     return True

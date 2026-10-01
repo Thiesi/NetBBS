@@ -1306,6 +1306,43 @@ saves, and **Ctrl+X** quits.
 The welcome gallery ends with three quiet designs for clubs that don't want
 neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
 
+#### The main menu as your own art
+
+The main-menu masthead can also be the menu itself. On its screen, **Mode**
+switches between *above the menu* (the default) and *the menu itself*. In the
+second mode your art is the whole main menu, and NetBBS draws each caller's own
+items and a few live values into places you mark in it. You mark a place by
+drawing a token in plain text, in the colour its content should take:
+
+| Token | What goes there |
+| --- | --- |
+| `{menu 74x7}` | The caller's menu items, in a region 74 columns wide and 7 rows tall, starting at the `{`. Required. |
+| `{prompt}` | The prompt. Without one, it goes below the art. |
+| `{user 16}` | The caller's name, cut to 16 columns |
+| `{node 30}` | Your node's name |
+| `{level 9}` | `level 20` |
+| `{mail 18}` | `3 unread` or `mail caught up` |
+| `{time 5}`, `{date 10}` | The node's time and date, in its timezone |
+| `{online 12}` | `4 online` |
+
+Without a number, a field is as wide as its token. Brace text that is not one
+of these stays part of the art.
+
+The art only decorates. Each caller sees exactly the items the normal menu
+would show them, with the same keys; the art can't add or hide any. A caller
+gets the normal menu instead whenever the art can't be used as drawn:
+- **their items don't fit** the `{menu}` region (a SysOp's menu is the longest);
+- **the art has a problem**, such as no `{menu}` or two slots overlapping;
+- **their terminal is too small**, narrower than the art or too short for it;
+- **they read plain ASCII.**
+
+**Check** lists the tokens it found and any problems, and says whether your menu
+and a level-0 caller's fit, on a terminal the size of yours. **Preview** shows
+the menu as you see it, then as a level-0 caller sees it. The gallery's
+**Quill Ledger** and **Inkwell Blocks** samples are drawn this way, in 16
+colours with characters classic terminals have; applying one switches the mode
+for you.
+
 Every caller gets text in the character set their terminal reads:
 
 - **Detection when they connect:**
