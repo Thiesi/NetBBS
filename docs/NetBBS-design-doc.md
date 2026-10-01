@@ -5513,7 +5513,46 @@ can rename it like any carried resource, and peers keep seeing the genesis
 name. Only with every candidate taken is it refused, as the cap refuses.
 
 Origin recommendations never override the carrying node’s local access,
-moderation, retention, or legal policy.
+moderation, retention, or legal policy. Two origin settings are not
+recommendations but authority, binding on every carrying node: closure
+(§9.5) and who may post.
+
+**Who may post** (issue #993). The board's current origin signs a
+`board_posting` event naming one of three modes:
+
+- `anyone`, the default: any node's callers post, each node's own write
+  level holding its own callers;
+- `origin_threads`: only the origin node's own callers start threads;
+  anyone may reply;
+- `origin_only`: only the origin node's own callers post, replies included.
+
+A carried `board_post` whose author's home node (the signed
+`author.home_node_fingerprint`, not the node that relayed it) is not the
+board's current origin is kept as a signed event but not shown when the mode
+forbids it. A reply counts as one only when its parent is on this board: one
+naming a parent this node does not have would be shown as a new thread, so
+under `origin_threads` it waits as a kept event until a rebuild finds its
+parent. A node that is not the origin does not offer its callers `[P]ost` or
+`[R]eply` where the mode forbids them, and says why; it asks again just
+before a post is written, in case the mode changed meanwhile, and a door's
+post there is refused before it is written. The rule follows an origin
+transfer: a post the old origin wrote before the transfer and that arrives
+after it is refused, since `created_at` is not authoritative (§7.4).
+
+`board_posting` is not part of the board's lifecycle chain (§9.4). An origin
+keeps only its latest lifecycle event, so a setting chained in would hide an
+earlier transfer from a peer that missed it. Instead each node verifies the
+event against the board's origin at the time it arrives, and the setting with
+the latest `created_at` is in force; an origin transfer leaves the old
+origin's setting in force until the new origin sets one. A setting signed by
+a node that is not the board's current origin (a former origin's, still
+relayed) is skipped on receipt, not refused, so it cannot fail the batch it
+came in; a former origin drops its own setting when the origin moves, and
+stops pushing it. A node with Link turned off still knows whether it is a
+board's origin from the fingerprint it records at every start. The origin
+keeps its own latest setting (`boards.link_posting_json`) and re-pushes and
+serves it like its lifecycle event; carrying nodes keep every one in
+`link_events`.
 
 ### 9.4 Origin succession
 
@@ -5557,8 +5596,10 @@ board — closure is terminal, not reversible in this slice. Closure stops new
 posts (`board_post`) to the board; it does not restrict moderator edits or
 tombstones of existing content, since an archived board may still need
 cleanup. Materializes locally as a `boards.link_closed_at` timestamp,
-enforced by `netbbs.boards.posts.create_post` the same way any other
-board-level gate already is.
+enforced by `netbbs.boards.posts.create_post` for this node's own callers and
+by `materialize_carried_post` for posts carried in from other nodes (issue
+#1021: before, a carried post still landed on a closed board). A post that
+arrives after the closure is known is not shown, whenever it was written.
 
 **`board_post_moderator_edit`.** Structurally identical to `board_post_edit`
 (§9.2) — extends the same per-post `previous_event_id` chain — but signed by
@@ -14444,6 +14485,31 @@ there.
 is logged with no acting account ("(system)"), not in a SysOp's name: no
 person made that change at that moment. Rejected: naming the SysOp who set
 the rule, which is what ReLink's script did.
+
+### Issue #993 — who may post on a Linked board — decided
+
+ReLink Linked an announcements board, and any caller of any node carrying it
+could post there: a carried post was held to nothing but the board's identity
+policy. Normative description: §9.3.
+
+**Decision 1 — origin authority, not a recommendation.** The origin chooses
+who posts, and every carrying node enforces it, like closure. Rejected: a
+local "accept carried posts" switch on each node, which cleans one node's
+copy and leaves every other node's to its SysOp.
+
+**Decision 2 — three modes, the origin chooses** (the maintainer's
+decision): anyone, origin starts threads, origin only. "Announcements" and
+"announcements with discussion" are both common.
+
+**Decision 3 — its own event, latest wins, outside the lifecycle chain.**
+Rejected: a field in `board_genesis`, which cannot change and so would only
+reach boards Linked afterwards; and a chained lifecycle event, since an
+origin keeps only its latest lifecycle event and a setting would push an
+earlier transfer out of reach of a peer that missed it.
+
+**Decision 4 — no capability gating.** Every node is updated before origins
+set this (the maintainer's call); an older node would refuse the unknown
+event type (#1022).
 
 ### SFTP over the SSH transport — declined
 

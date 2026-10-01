@@ -33,6 +33,7 @@ from netbbs.link.boards import (
     BoardCarryLimitError,
     materialize_carried_board,
     materialize_carried_board_closure,
+    materialize_carried_board_posting,
     rebuild_carried_post_materialization,
     record_board_origin_change,
 )
@@ -44,12 +45,14 @@ from netbbs.link.channels import (
 from netbbs.link.events import (
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
+    BOARD_POSTING_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     CHANNEL_GENESIS_OBJECT_TYPE,
     CHANNEL_MESSAGE_OBJECT_TYPE,
     FILE_AREA_GENESIS_OBJECT_TYPE,
     FILE_DESCRIPTOR_OBJECT_TYPE,
     BoardClosure,
+    BoardPosting,
     BoardGenesis,
     BoardOriginTransferAccepted,
     ChannelGenesis,
@@ -371,9 +374,9 @@ def _replay_board_lifecycle(db: Database, board_id: str) -> None:
     open."""
     for row in db.connection.execute(
         """SELECT object_type, envelope_json FROM link_events
-            WHERE board_id = ? AND object_type IN (?, ?)
+            WHERE board_id = ? AND object_type IN (?, ?, ?)
             ORDER BY received_at ASC""",
-        (board_id, BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE, BOARD_CLOSURE_OBJECT_TYPE),
+        (board_id, BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE, BOARD_CLOSURE_OBJECT_TYPE, BOARD_POSTING_OBJECT_TYPE),
     ).fetchall():
         envelope = json.loads(row["envelope_json"])
         if row["object_type"] == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
@@ -381,6 +384,8 @@ def _replay_board_lifecycle(db: Database, board_id: str) -> None:
             record_board_origin_change(
                 db, board_id, accepted.payload["new_origin_fingerprint"], commit=False
             )
+        elif row["object_type"] == BOARD_POSTING_OBJECT_TYPE:
+            materialize_carried_board_posting(db, BoardPosting.from_dict(envelope), commit=False)
         else:
             materialize_carried_board_closure(db, BoardClosure.from_dict(envelope), commit=False)
 

@@ -77,6 +77,8 @@ from netbbs.link.events import (
     canonical_bytes,
     event_content_id,
     BOARD_CLOSURE_OBJECT_TYPE,
+    BOARD_POSTING_MODES,
+    BOARD_POSTING_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
@@ -94,6 +96,7 @@ from netbbs.link.events import (
     LINK_MESSAGE_OBJECT_TYPE,
     NETBBS_PROTOCOL_VERSION,
     BoardClosure,
+    BoardPosting,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
@@ -114,6 +117,7 @@ from netbbs.link.events import (
     RelayConsentResponse,
     build_endpoint_descriptor,
     verify_board_closure,
+    verify_board_posting,
     verify_board_genesis,
     verify_board_origin_transfer_accepted,
     verify_board_origin_transfer_offer,
@@ -4138,6 +4142,53 @@ class LinkNode:
                 self.known_event_ids.add(closure.content_id)
                 self.events[closure.content_id] = raw
                 accepted.append(closure.content_id)
+
+            elif object_type == BOARD_POSTING_OBJECT_TYPE:
+                # Design doc §9.3, issue #993: who may post, set by the
+                # board's current origin. Outside the lifecycle chain (see
+                # BoardPosting): verified against whoever is the origin now;
+                # which setting is in force is the projection's call
+                # (`materialize_carried_board_posting`, latest wins).
+                posting = BoardPosting.from_dict(raw)
+                if posting.content_id in self.known_event_ids:
+                    continue
+
+                board_id = posting.payload.get("board_id")
+                if self.board_events.genesis_for(board_id) is None:
+                    raise MissingDependency(
+                        f"received a board_posting for board_id {board_id!r}, which has no "
+                        "verified board_genesis on file -- refusing (no relay from a stranger yet)"
+                    )
+                if posting.payload.get("posting") not in BOARD_POSTING_MODES:
+                    raise LinkProtocolError(
+                        f"board_posting for board_id {board_id!r} names an unknown posting mode"
+                    )
+                current_origin = self.current_board_origin(board_id)
+                if posting.payload.get("origin_fingerprint") != current_origin:
+                    # A setting the board's origin before a transfer signed,
+                    # still relayed by a peer that has it on file: nothing to
+                    # apply, and no reason to refuse the batch it came in
+                    # (review of PR #1024). Skipped, not stored -- it cannot be
+                    # verified against the current origin's keys.
+                    continue
+                origin_peer = self.known_identity(current_origin)
+                if origin_peer is None:
+                    raise MissingDependency(
+                        f"received a board_posting for board_id {board_id!r} whose current origin "
+                        f"({current_origin!r}) has no completed hello with this node -- refusing "
+                        "(no relay from a stranger)",
+                        missing_identity=current_origin,
+                    )
+                signing_verify_keys = self._resolve_sender_content_keys(origin_peer, current_origin, "board_posting")
+                if not any(verify_board_posting(posting, key) for key in signing_verify_keys):
+                    raise LinkProtocolError(
+                        f"board_posting from current origin {current_origin} does not verify "
+                        "against its signing keys"
+                    )
+
+                self.known_event_ids.add(posting.content_id)
+                self.events[posting.content_id] = raw
+                accepted.append(posting.content_id)
 
             elif object_type == LINK_MESSAGE_OBJECT_TYPE:
                 message = LinkMessage.from_dict(raw)

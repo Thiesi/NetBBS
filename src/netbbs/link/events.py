@@ -112,6 +112,12 @@ BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE = "board_origin_transfer_accepted"
 # extends -- see BoardClosure's own docstring.
 BOARD_CLOSURE_OBJECT_TYPE = "board_closure"
 
+# Design doc §9.3, issue #993: who may post on a Linked board, set by its
+# current origin. Not part of the lifecycle chain: the latest one the
+# board's current origin signed wins (see BoardPosting).
+BOARD_POSTING_OBJECT_TYPE = "board_posting"
+BOARD_POSTING_MODES = ("anyone", "origin_threads", "origin_only")
+
 # Design doc §9.6, issue #87: the channel-side counterpart to board_
 # genesis/board_post -- structurally identical minus what doesn't apply
 # (no edit chain; channel messages have no local edit concept at all).
@@ -1974,6 +1980,81 @@ def verify_board_closure(closure: BoardClosure, signing_verify_key: nacl.signing
     both the caller's job, same division of responsibility as `verify_
     board_origin_transfer_offer`."""
     return verify_signature(signing_verify_key, canonical_bytes(closure.envelope), closure.signature)
+
+
+@dataclass(frozen=True)
+class BoardPosting:
+    """
+    One signed `board_posting` event (design doc §9.3, issue #993): who may
+    post on a Linked board, set by its *current* origin and binding on every
+    node that carries it -- an exception to "origin settings are only
+    recommendations", like closure.
+
+    `posting` is one of `BOARD_POSTING_MODES`: `anyone`, `origin_threads`
+    (only the origin node's own callers start threads; anyone may reply)
+    or `origin_only` (only the origin node's own callers post at all).
+
+    Deliberately *not* chained into the board's lifecycle head: an origin
+    keeps only its latest lifecycle event, so a setting chained in would
+    hide an earlier transfer from a peer that missed it. Instead the setting
+    with the latest `created_at`, signed by whichever node is the board's
+    origin when it is received, is the one in force. An origin transfer
+    leaves the old origin's setting in force until the new origin sets one.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BoardPosting":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_board_posting(
+    *,
+    signing_identity: Identity,
+    origin_fingerprint: str,
+    board_id: str,
+    posting: str,
+    created_at: str,
+    nonce: str | None = None,
+) -> BoardPosting:
+    """Build and sign one `board_posting` event with the origin's current
+    signing key. `origin_fingerprint` is the signer's own, named so a
+    receiver checks it against the board's current origin before
+    resolving keys."""
+    if posting not in BOARD_POSTING_MODES:
+        raise ValueError(f"unknown posting mode {posting!r}")
+    payload = {
+        "board_id": board_id,
+        "origin_fingerprint": origin_fingerprint,
+        "posting": posting,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+    envelope = build_envelope(BOARD_POSTING_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return BoardPosting(envelope=envelope, signature=signature)
+
+
+def verify_board_posting(posting: BoardPosting, signing_verify_key: nacl.signing.VerifyKey) -> bool:
+    """Verify `posting`'s signature against the board's current origin's
+    signing key; confirming the signer is that origin is the caller's job."""
+    return verify_signature(signing_verify_key, canonical_bytes(posting.envelope), posting.signature)
 
 
 @dataclass(frozen=True)

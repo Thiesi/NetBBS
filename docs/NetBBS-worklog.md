@@ -739,6 +739,21 @@ viewers show as "(system)". Every person-made level change goes through
 or a demotion becomes something the next login undoes. Count logins from
 `users.login_count`, never from `session_history`, which is pruned.
 
+### Who may post on a Linked board is checked on receipt (issue #993)
+
+`materialize_carried_post` is where a carried post is refused: identity
+policy, the rejection list, a closed board (#1021) and the origin's posting
+mode (`_posting_allows`). A refusal keeps the signed event in `link_events`
+and adds no `posts` row, and `rebuild_carried_post_materialization` goes
+through the same function, so it cannot bring one back. The posting mode is
+judged against the author's home node, never the transport sender. Local
+callers are refused before writing, in the Link-aware layer
+(`posting_refusal`), because `netbbs.boards.posts` does not know this node's
+own fingerprint: board_flow and the door outbound path both check first.
+`board_posting` is deliberately outside the lifecycle chain; see design doc
+§9.3 before chaining anything else into `link_lifecycle_json`, which holds
+one event per board.
+
 ### The access map is held to the checks (issue #1005)
 
 `netbbs.access_map` lists every level gate for the SysOp's level screens.

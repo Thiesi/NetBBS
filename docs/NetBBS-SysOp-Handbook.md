@@ -892,6 +892,24 @@ other. Deleting a board, channel or file area this node originated is still a
 real delete. Link status shows `carried/cap` for all three kinds and how many are
 offered and excluded.
 
+On a Linked board this node originated, the board's screen has **[W]ho posts**,
+which steps through three settings that every node carrying the board
+follows:
+
+- **anyone** (the default): every node's callers post, each node's own write
+  level holding its own callers;
+- **the origin's callers start threads; anyone replies**: for announcements
+  people can answer;
+- **the origin's callers only**: for announcements nobody else writes in.
+
+A post from another node that the setting does not allow is not shown
+anywhere, and callers on other nodes are not offered **[P]ost** (or
+**[R]eply**) where it would be refused; the board tells them why. The setting
+reaches other nodes with the next sync pass. Every board's screen shows it as
+**Who posts**. Your own write level still holds your own callers: an
+announcements board is write level 255 here and "origin's callers only"
+everywhere. A closed board takes no new post from any node.
+
 There is nothing to subscribe to: what an established peer shares arrives on
 its own, within the caps. A node's screen under **Link status → Peers** lists
 what this node already carries from it and, while it is on probation here,

@@ -3928,4 +3928,18 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #993: who may post on a Linked board, set by its current origin with a signed "
+            "`board_posting` event. `boards.link_posting` is the mode in force (NULL = anyone), "
+            "`link_posting_at` the `created_at` of the setting it came from (the latest wins), "
+            "and `link_posting_json` the origin's own latest `board_posting`, which it re-pushes "
+            "and serves like its lifecycle event."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN link_posting TEXT;
+        ALTER TABLE boards ADD COLUMN link_posting_at TEXT;
+        ALTER TABLE boards ADD COLUMN link_posting_json TEXT;
+        """,
+    ),
 ]

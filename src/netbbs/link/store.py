@@ -37,6 +37,7 @@ from netbbs.identity.keys import Identity
 from netbbs.link.events import (
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
+    BOARD_POSTING_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
@@ -46,6 +47,7 @@ from netbbs.link.events import (
     FILE_AREA_GENESIS_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
     BoardClosure,
+    BoardPosting,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
@@ -161,6 +163,16 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     # since learned of that same transfer completing via link_events
     # (below, processed in received_at order), that more current fact
     # must win over this node's own now-stale offer, not the reverse.
+    # Issue #993: this node's own latest `board_posting`, known so that an
+    # echo of it from a peer is not taken for news.
+    for row in db.connection.execute(
+        "SELECT link_posting_json FROM boards WHERE link_posting_json IS NOT NULL"
+    ):
+        raw = json.loads(row["link_posting_json"])
+        own_posting_id = event_content_id(raw["envelope"])
+        node.known_event_ids.add(own_posting_id)
+        node.events[own_posting_id] = raw
+
     for row in db.connection.execute(
         "SELECT link_lifecycle_json FROM boards WHERE link_lifecycle_json IS NOT NULL"
     ):
@@ -607,6 +619,7 @@ _BOARD_SCOPED_OBJECT_TYPES = frozenset(
         BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
         BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
         BOARD_CLOSURE_OBJECT_TYPE,
+        BOARD_POSTING_OBJECT_TYPE,
     }
 )
 
@@ -1212,7 +1225,8 @@ def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
     events: dict[str, dict] = {}
 
     board_row = db.connection.execute(
-        "SELECT id, link_genesis_json, link_lifecycle_json, link_hidden_at FROM boards WHERE board_id = ?",
+        "SELECT id, link_genesis_json, link_lifecycle_json, link_posting_json, link_hidden_at FROM boards "
+        "WHERE board_id = ?",
         (board_id,),
     ).fetchone()
     if board_row is None or board_row["link_hidden_at"] is not None:
@@ -1230,6 +1244,11 @@ def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
         # need to reconstruct the specific dataclass just to key this
         # dict by its content_id.
         raw = json.loads(board_row["link_lifecycle_json"])
+        events[event_content_id(raw["envelope"])] = raw
+    if board_row["link_posting_json"] is not None:
+        # Issue #993: the origin's own latest posting setting
+        # (`record_board_origin_change` drops it once the origin moves).
+        raw = json.loads(board_row["link_posting_json"])
         events[event_content_id(raw["envelope"])] = raw
 
     for row in db.connection.execute(

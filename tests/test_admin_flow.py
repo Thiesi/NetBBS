@@ -10928,3 +10928,23 @@ def test_main_menu_masthead_speed_wraps_back_to_off(db, lane, sysop):
     _run(session, lane, sysop)
     assert art_speed(db, MAIN_MENU_ART) == 0
     assert "Drawn at once" in _written_text(session)
+
+
+def test_who_posts_steps_through_the_modes_on_an_originated_board(db, lane, sysop):
+    """Issue #993: [W]ho posts on a Linked board this node originated signs a
+    board_posting and steps anyone -> origin starts threads -> origin only."""
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import board_posting_mode, link_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+
+    session = FakeSession(["m", "m", "l", "0", "1", "w", "w", "b", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _visible(_written_text(session))
+    assert board_posting_mode(db, board) == "origin_only"
+    assert "Who posts on 'General': the origin's callers only." in text
+    assert len([event for event in link_context.link_node.events.values()
+                if event["envelope"]["object_type"] == "board_posting"]) == 2
