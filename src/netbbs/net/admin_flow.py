@@ -668,7 +668,9 @@ from netbbs.net.banner_presets import (
 )
 from netbbs.net.main_menu_banner import (
     MAX_MASTHEAD_SIZE_BYTES,
+    SLOTS_MODE,
     load_main_menu_banner,
+    main_menu_art_mode,
     main_menu_banner_path,
     main_menu_banner_status,
     set_main_menu_banner_enabled,
@@ -13582,9 +13584,18 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     banner's own custom-file path)."""
 
     def _load(db: Database) -> tuple:
-        return main_menu_banner_status(db), load_main_menu_banner(db)
+        return main_menu_banner_status(db), load_main_menu_banner(db), main_menu_art_mode(db)
 
-    status, masthead = await lane.run(_load)
+    status, masthead, mode = await lane.run(_load)
+    if mode == SLOTS_MODE:
+        # Issue #929: in slots mode the art is the menu itself and is never
+        # shown above it, so "callers see no masthead" would be misleading.
+        await session.write_line(colored(
+            "\r\nThis art is set to be the main menu itself, not a masthead above it.", fg_color=MUTED_COLOR
+        ))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_any_key()
+        return
     await session.write_line(colored("\r\nPreviewing the masthead as shown above the main menu:", fg_color=MUTED_COLOR))
     if not masthead:
         await _write_banner_not_live(session, status, callers_see="no masthead")
