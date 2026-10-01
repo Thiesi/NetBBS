@@ -13722,9 +13722,16 @@ async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, acto
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
+    # [D]isable leaves the mode alone, so a switched-off banner still lands
+    # here: say under each draw that callers get the plain menu meanwhile.
+    enabled = await lane.run(is_main_menu_banner_enabled)
     for intro, level in (("as you see it", None), ("as a level-0 caller sees it", 0)):
         # The art clears the screen, so what is being shown is said below it.
         await _write_slot_art_preview(session, lane, actor, art, level=level)
+        if not enabled:
+            await session.write_line(colored(
+                "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+            ))
         await session.write_line(colored(f"(the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
 
