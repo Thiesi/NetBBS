@@ -10568,6 +10568,8 @@ def test_the_subject_screen_says_how_far_remote_reports_are_from_quarantine(db, 
         evidence_class=EvidenceClass.SELF_VERIFYING,
         observed_at=stamp(now - timedelta(hours=2)), issued_at=stamp(now - timedelta(hours=1)),
         expires_at=stamp(now + timedelta(days=30)), now_iso=stamp(now),
+        # Issue #1036: only a signal whose evidence reproduced here counts.
+        evidence_verified_at=stamp(now),
     )
     session = FakeSession(["s", "p", "s", "0", "1", "b", "b", "b", "b"])
 
