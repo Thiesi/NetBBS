@@ -1045,11 +1045,44 @@ def clear_trust_override(
         )
 
 
-def recompute_all_trust_states(db: Database, *, now_iso: str | None = None) -> None:
-    """Rebuild every persisted projection at startup or after policy changes."""
+@dataclass(frozen=True)
+class TrustTransition:
+    """One effective-state change a recompute made."""
+
+    subject_id: str
+    dimension: str
+    previous_state: str | None
+    new_state: str
+    reason_code: str
+
+
+def recompute_all_trust_states(db: Database, *, now_iso: str | None = None) -> list[TrustTransition]:
+    """Re-evaluate every persisted projection against the current time and
+    return the state changes that made.
+
+    Some changes are due to time alone: a recovery hold's release, an
+    override's or a signal's expiry, probation's age requirement. Nothing
+    else touches a quiet subject, so the Link sync loop calls this every
+    pass (issue #802); the startup call in `maintain_trust_state` covers the
+    time a node was down."""
     now_value, now = _now(now_iso)
     with db.connection:
+        before = db.connection.execute(
+            "SELECT COALESCE(MAX(audit_id), 0) FROM link_trust_decision_audit"
+        ).fetchone()[0]
         _recompute_all(db, now_value, now, actor_user_id=None)
+        rows = db.connection.execute(
+            """SELECT subject_id, dimension, previous_state, new_state, reason_code
+               FROM link_trust_decision_audit WHERE audit_id > ? ORDER BY audit_id""",
+            (before,),
+        ).fetchall()
+    return [
+        TrustTransition(
+            row["subject_id"], row["dimension"], row["previous_state"],
+            row["new_state"], row["reason_code"],
+        )
+        for row in rows
+    ]
 
 
 def maintain_trust_state(

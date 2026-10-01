@@ -4924,12 +4924,9 @@ def test_main_menu_masthead_subtitle_wraps_on_a_narrow_terminal(db, lane, sysop)
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
-    full_sentence = (
-        "Shown above the main menu, which stays fully live/dynamic underneath "
-        "it -- disabled by default, no effect on any existing node."
-    )
+    full_sentence = "Mode: above the menu. The art is shown above the main menu, which stays live underneath it."
     assert full_sentence not in text
-    assert "Shown above the main menu" in text
+    assert "Mode: above the menu." in text
     for line in text.split("\n"):
         assert len(line.rstrip("\r")) <= 60
 
@@ -5109,6 +5106,183 @@ def test_masthead_gallery_declining_the_apply_prompt_leaves_the_masthead_disable
     _run(session, lane, sysop)
     assert "Applied and enabled." not in _written_text(session)
     assert is_main_menu_banner_enabled(db) is False
+
+
+# -- main-menu slot art (issue #929, step 4) ---------------------------------
+
+
+def _slot_preset_keys():
+    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS
+
+    index = next(i for i, p in enumerate(MAIN_MENU_BANNER_PRESETS, start=1) if p.mode == "slots")
+    return list(f"{index:02d}"), MAIN_MENU_BANNER_PRESETS[index - 1]
+
+
+def test_masthead_menu_mode_toggles_to_slots_and_back(db, lane, sysop):
+    from netbbs.net.main_menu_banner import MASTHEAD_MODE, SLOTS_MODE, main_menu_art_mode
+
+    session = FakeSession(["s", "m", "m", "m", "m", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert main_menu_art_mode(db) == SLOTS_MODE
+    assert "The art is now the main menu itself." in _written_text(session)
+    rows = db.connection.execute(
+        "SELECT detail FROM moderation_log WHERE action = 'set_main_menu_art_mode'"
+    ).fetchall()
+    assert [r["detail"] for r in rows] == [SLOTS_MODE]
+
+    session = FakeSession(["s", "m", "m", "m", "m", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert main_menu_art_mode(db) == MASTHEAD_MODE
+
+
+def test_masthead_menu_check_without_art_says_so(db, lane, sysop):
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "No usable art file." in _written_text(session)
+
+
+def test_masthead_menu_check_lists_slots_problems_and_fit(db, lane, sysop):
+    from netbbs.net.main_menu_banner import main_menu_banner_path
+
+    main_menu_banner_path(db).write_bytes(b"{menu 74x7}\r\n\r\n\r\n\r\n\r\n\r\n\r\n{user 10} {user 10}")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "{menu 74x7} at row 1, column 1" in text
+    assert "{user} at row 8, column 1, 10 wide" in text
+    assert "Your menu: fits." in text
+    assert "A level-0 caller's menu: fits." in text
+
+    main_menu_banner_path(db).write_bytes(b"{menu 10x1}")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Your menu: generated menu instead" in text
+    assert "don't fit the 10x1 {menu} slot" in text
+
+    main_menu_banner_path(db).write_bytes(b"no slots here")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "Problem: no {menu WxH} slot" in _visible(_written_text(session))
+
+
+def test_masthead_menu_check_says_when_callers_do_not_see_the_art(db, lane, sysop):
+    from netbbs.net.main_menu_banner import (
+        SLOTS_MODE,
+        main_menu_banner_path,
+        set_main_menu_art_mode,
+        set_main_menu_banner_enabled,
+    )
+
+    main_menu_banner_path(db).write_bytes(b"{menu 74x7}")
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "it's switched off. Use [E]nable." in text
+    assert "[M]ode changes that." in text
+
+    set_main_menu_banner_enabled(db, True)
+    set_main_menu_art_mode(db, SLOTS_MODE)
+    session = FakeSession(["s", "m", "m", "m", "c", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "switched off" not in text and "[M]ode changes that" not in text
+
+
+def _slot_screen(text: str) -> str:
+    from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
+    from netbbs.rendering.screen_buffer import ScreenBuffer
+
+    buffer = ScreenBuffer(80, 24)
+    parse_ansi_into_buffer(text, buffer)
+    return "\n".join("".join(buffer.get_cell(r, c).char for c in range(80)) for r in range(24))
+
+
+def test_slot_preview_counts_whos_online_and_ignores_the_sysops_own_mail(db, sysop):
+    from netbbs.mail import send_mail
+    from netbbs.net.main_menu import main_menu_entries, slot_menu_preview
+    from netbbs.rendering.art_slots import parse_slot_art
+
+    session = FakeSession()
+    # The SysOp has unread mail; a level-0 caller in the preview must not.
+    other = create_user(db, "harold", password="parker51", user_level=10)
+    send_mail(db, sender=other, recipient=sysop, subject="hi", body="hello")
+    art = parse_slot_art("{menu 78x12}")
+    plan = slot_menu_preview(session, db, sysop, art, level=0)
+    assert plan.text is not None
+    visible = _slot_screen(plan.text)
+    assert "[W]ho's online" in visible
+    assert "unread" not in visible
+    # Your own preview keeps your mail.
+    assert "unread" in _slot_screen(slot_menu_preview(session, db, sysop, art).text)
+    # A running node offers [W]ho's online; without node controls it isn't.
+    assert "[W]ho's online" not in "".join(_visible(e) for e in main_menu_entries(session, db, sysop).labels)
+
+
+def test_masthead_preview_in_slots_mode_says_when_the_art_is_switched_off(db, lane, sysop):
+    from netbbs.net.banner_presets import load_main_menu_banner_preset
+    from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_banner_path, set_main_menu_art_mode
+
+    _keys, preset = _slot_preset_keys()
+    main_menu_banner_path(db).write_bytes(load_main_menu_banner_preset(preset))
+    set_main_menu_art_mode(db, SLOTS_MODE)  # enabled is still off
+    session = FakeSession(["s", "m", "m", "m", "p", " ", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert _visible(_written_text(session)).count("it's switched off. Use [E]nable.") == 2
+
+
+def test_every_slot_sample_fits_a_sysops_longest_menu(db, sysop):
+    from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
+    from netbbs.net.main_menu import slot_menu_preview
+    from netbbs.rendering import decode_banner_bytes
+    from netbbs.rendering.art_slots import layout_menu_slot, parse_slot_art
+
+    samples = [p for p in MAIN_MENU_BANNER_PRESETS if p.mode == "slots"]
+    assert len(samples) >= 2
+    for preset in samples:
+        art = parse_slot_art(decode_banner_bytes(load_main_menu_banner_preset(preset)))
+        assert art.problems == (), preset.key
+        for level in (None, 0):
+            plan = slot_menu_preview(FakeSession(), db, sysop, art, level=level)
+            assert plan.text is not None, (preset.key, level, plan.reason)
+        # Every optional item at once, with long counts: the longest menu
+        # any caller can have (main_menu_entries' full set).
+        longest = [
+            "[M]essage boards", "[C]hat", "[F]iles", "[G]ames", "C[o]mmunities", "[N]ew scan", "[/] Find",
+            "[?] Help", "[D]irectory", "[P]rofile", "[E]-mail (999 unread)", "[H]istory", "P[r]evious callers",
+            "[W]ho's online", "S[t]aff list", "[I]nvitations", "[V]erify", "[S]ysOp", "Moder[a]tion (999)",
+            "[S]taff", "[L]ogoff",
+        ]
+        assert layout_menu_slot(longest, art.menu.width, art.menu.height) is not None, preset.key
+
+
+def test_masthead_gallery_applying_a_slot_preset_makes_it_the_menu(db, lane, sysop):
+    from netbbs.net.banner_presets import load_main_menu_banner_preset
+    from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_art_mode, main_menu_banner_path
+
+    keys, preset = _slot_preset_keys()
+    session = FakeSession(["s", "m", "m", "m", "g", *keys, "a", "b", "b", "b", "b", "b"])
+    session.terminal_height = 60  # every preset on one page, so its number picks it
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "as the main menu" in text
+    assert main_menu_art_mode(db) == SLOTS_MODE
+    assert main_menu_banner_path(db).read_bytes() == load_main_menu_banner_preset(preset)
+
+
+def test_masthead_preview_in_slots_mode_shows_both_menus(db, lane, sysop):
+    from netbbs.net.banner_presets import load_main_menu_banner_preset
+    from netbbs.net.main_menu_banner import SLOTS_MODE, main_menu_banner_path, set_main_menu_art_mode
+
+    _keys, preset = _slot_preset_keys()
+    main_menu_banner_path(db).write_bytes(load_main_menu_banner_preset(preset))
+    set_main_menu_art_mode(db, SLOTS_MODE)
+    session = FakeSession(["s", "m", "m", "m", "p", " ", " ", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "(the main menu as you see it)" in text
+    assert "(the main menu as a level-0 caller sees it)" in text
+    assert text.count("Signed in as") == 2
 
 
 # -- masthead filesystem picker (issue #170) ---------------------------------

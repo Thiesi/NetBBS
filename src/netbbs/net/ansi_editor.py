@@ -57,6 +57,7 @@ from netbbs.rendering import (
     clear_screen,
     colored,
     decode_ansi_bytes,
+    decode_cp437_art,
     diff_ansi,
     encode_ansi_bytes,
     full_render_ansi,
@@ -65,6 +66,7 @@ from netbbs.rendering import (
     parse_ansi_into_buffer,
     truncate,
 )
+from netbbs.rendering.charset import art_glyphs_to_cp437_controls
 
 _logger = logging.getLogger(__name__)
 
@@ -179,7 +181,7 @@ async def edit_ansi_art(
         # external file for `decode_ansi_bytes` to guess about. Guessing on
         # a draft read two glyphs whose bytes form UTF-8 as one other
         # character (Codex review on #753).
-        text = loaded_bytes.decode("cp437") if from_draft else decode_ansi_bytes(loaded_bytes)
+        text = decode_cp437_art(loaded_bytes) if from_draft else decode_ansi_bytes(loaded_bytes)
         parse_ansi_into_buffer(text, buffer)
 
     state = _EditorState(buffer=buffer)
@@ -188,7 +190,7 @@ async def edit_ansi_art(
     )
     try:
         previous = buffer.snapshot()
-        await session.write(full_render_ansi(previous))
+        await session.write_art(full_render_ansi(previous))
         await _flush(session, state)
 
         while True:
@@ -215,7 +217,7 @@ async def edit_ansi_art(
                 # the prose editor's own Ctrl+X handling; a real full
                 # clear-and-repaint is the only redraw that erases it.
                 previous = state.buffer.snapshot()
-                await session.write(full_render_ansi(previous))
+                await session.write_art(full_render_ansi(previous))
                 await _flush(session, state)
                 continue
 
@@ -228,7 +230,7 @@ async def edit_ansi_art(
                 # Ctrl+L repaints everything, as it does at every picker
                 # and menu (issue #841: it did nothing here).
                 previous = buffer.snapshot()
-                await session.write(full_render_ansi(previous))
+                await session.write_art(full_render_ansi(previous))
                 await _flush(session, state)
                 continue
 
@@ -271,7 +273,7 @@ async def edit_ansi_art(
                     unicode_style=unicode_style,
                 )
                 previous = buffer.snapshot()
-                await session.write(full_render_ansi(previous))
+                await session.write_art(full_render_ansi(previous))
                 await _flush(session, state)
                 continue
 
@@ -401,7 +403,7 @@ def _savable(char: str) -> bool:
     that does not would be painted, then saved as "?" (Codex review on
     #753), so it is not painted at all."""
     try:
-        char.encode("cp437")
+        art_glyphs_to_cp437_controls(char).encode("cp437")
     except UnicodeEncodeError:
         return False
     return True
@@ -442,7 +444,7 @@ async def _repaint(session: Session, state: _EditorState) -> Snapshot:
     nothing about, so after one only a full repaint puts the drawing back
     (issue #841: the picker's rows stayed on screen instead)."""
     current = state.buffer.snapshot()
-    await session.write(full_render_ansi(current))
+    await session.write_art(full_render_ansi(current))
     await _flush(session, state)
     return current
 
@@ -451,7 +453,7 @@ async def _redraw(session: Session, state: _EditorState, previous: Snapshot) -> 
     current = state.buffer.snapshot()
     diff = diff_ansi(previous, current)
     if diff:
-        await session.write(diff)
+        await session.write_art(diff)
     await _flush(session, state)
     return current
 
