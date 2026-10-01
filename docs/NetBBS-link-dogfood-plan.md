@@ -237,9 +237,9 @@ Two rules apply to every row:
       their narrowly scoped reporters through `[S]ysOp` → `[S]ettings` →
       `[P]olicy trust`. Record the node fingerprints, category scopes, and
       configuration times. **Name each scope's category concretely,** for
-      example `identity_integrity:signed_equivocation`. A `*` category is
-      accepted but matches nothing, and the reporter's objects are then
-      silently discarded (issue #745).
+      example `identity_integrity:signed_equivocation`. `identity_integrity:*`
+      grants every identity category this version knows and is saved as that
+      list (issue #745; before the fix a `*` matched nothing).
 - [x] Two nodes that never meet. With the full node R originating a linked
       board that both outgoing-only nodes A and B carry, post on A. On B,
       confirm R's own posts keep arriving, that A appears under `[S]ubjects`

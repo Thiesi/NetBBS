@@ -6121,7 +6121,11 @@ Establishment and authority to influence policy are different roles:
 - a **trust anchor** is explicitly configured by the SysOp;
 - an **established identity** has graduated or was established manually;
 - a **trusted reporter** is explicitly configured for named dimensions and
-  categories;
+  categories. `dimension:*` is shorthand, expanded when the grant is saved into
+  every category of that dimension the node's version knows; a category added
+  by a later version is never granted implicitly. A category the version does
+  not know may still be named (its signals are retained without effect), and
+  the console says so when the grant is saved (issue #745);
 - a **trust domain** locally groups reporters which may share control or
   incentives.
 
