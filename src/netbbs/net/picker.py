@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 
 from netbbs.digits import is_ascii_number
+from netbbs.net.art_pacing import write_paced_art, write_paced_art_text
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
 from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import move_cursor, strip_ansi
@@ -298,6 +299,8 @@ async def pick_item(
     slot_art: SlotArt | None = None,
     slot_column_of: Callable[[T], str] | None = None,
     slot_fields: Mapping[str, str] | None = None,
+    art_speed: int = 0,
+    art_once: str = "",
 ) -> T | None:
     """
     Let the user browse/search/jump through `items` and pick one, or
@@ -538,6 +541,14 @@ async def pick_item(
     The art's `{title}`, `{page}` and `{count}` fields are filled here,
     and any other field from `slot_fields`. `None` (every caller that has
     no art) draws the generated list, byte for byte as before.
+
+    `art_speed` and `art_once` (issue #929, step 6) pace this list's art --
+    the slot art, or the masthead above the generated list -- at the
+    SysOp's speed the first time it is drawn: `art_once` names the list
+    (`list_art.BOARD_LIST`, ...), so it plays once per session
+    (`art_pacing.will_pace` holds the other rules). Every later draw in
+    this call -- a page, a cursor move, a search, a redraw -- sends the art
+    at once. The defaults never pace.
     """
     if (columns is None) != (column_values_of is None):
         raise ValueError("pick_item: columns and column_values_of must be given together")
@@ -727,6 +738,23 @@ async def pick_item(
     # was: the first page is sized with it.
     masthead_text = "" if callable(masthead) else masthead
     notice_lines: list[str] = []
+    # Whether this call has drawn its art yet: only the first draw may be
+    # paced (issue #929, step 6).
+    art_drawn = False
+
+    async def _write_list_art(text: str, *, laid_out: bool) -> None:
+        nonlocal art_drawn
+        first = not art_drawn
+        art_drawn = True
+        if first and art_once and art_speed:
+            if laid_out:
+                await write_paced_art_text(session, text, speed=art_speed, once=art_once)
+            else:
+                await write_paced_art(session, text, speed=art_speed, once=art_once)
+        elif laid_out:
+            await write_art_text(session, text)
+        else:
+            await write_preformatted_line(session, text)
 
     async def _refresh_masthead() -> None:
         nonlocal masthead_text, notice_lines
@@ -955,7 +983,7 @@ async def pick_item(
             page_history.clear()
             prefix = _masthead_prefix()
             if prefix:
-                await write_preformatted_line(session, prefix)
+                await _write_list_art(prefix, laid_out=False)
             elif redraw_in_place:
                 # Codex review. This branch used to be a dead end that
                 # printed one line and returned, so nothing depended on
@@ -1084,7 +1112,7 @@ async def pick_item(
             if drawn is not None:
                 # As the main menu draws its slot art: iCE colours, CTerm's
                 # bright backgrounds and the pictographs for a CP437 terminal.
-                await write_art_text(session, drawn)
+                await _write_list_art(drawn, laid_out=True)
                 await session.write(move_cursor(slot_art.height + 1, 1))
                 for line in _slot_nav_lines(
                     include_next=page_start + len(page_items) < len(working_set),
@@ -1103,7 +1131,7 @@ async def pick_item(
                 return page_items
 
         if masthead_text:
-            await write_preformatted_line(session, _masthead_prefix())
+            await _write_list_art(_masthead_prefix(), laid_out=False)
         await session.write_line(
             "\r\n" + screen_title(
                 title,

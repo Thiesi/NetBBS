@@ -15895,6 +15895,10 @@ async def _board_list_masthead_menu(session: Session, lane: DatabaseLane, actor:
             await session.write_line("")
             await _toggle_list_art_mode(session, lane, actor, BOARD_LIST)
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "s":
+            await session.write_line("")
+            await _cycle_art_speed(lane, actor, BOARD_LIST)
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _check_list_slot_art_screen(session, lane, actor, BOARD_LIST)
@@ -15933,6 +15937,7 @@ async def _draw_board_list_masthead_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, BOARD_LIST))),
                 MenuEntry(
                     label=menu_key("M", "ode"),
                     brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
@@ -16190,6 +16195,10 @@ async def _file_area_masthead_menu(session: Session, lane: DatabaseLane, actor: 
             await session.write_line("")
             await _toggle_list_art_mode(session, lane, actor, FILE_AREA)
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "s":
+            await session.write_line("")
+            await _cycle_art_speed(lane, actor, FILE_AREA)
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _check_list_slot_art_screen(session, lane, actor, FILE_AREA)
@@ -16228,6 +16237,7 @@ async def _draw_file_area_masthead_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, FILE_AREA))),
                 MenuEntry(
                     label=menu_key("M", "ode"),
                     brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
@@ -16483,6 +16493,10 @@ async def _chat_channel_picker_masthead_menu(session: Session, lane: DatabaseLan
             await session.write_line("")
             await _toggle_list_art_mode(session, lane, actor, CHAT_CHANNEL_PICKER)
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "s":
+            await session.write_line("")
+            await _cycle_art_speed(lane, actor, CHAT_CHANNEL_PICKER)
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _check_list_slot_art_screen(session, lane, actor, CHAT_CHANNEL_PICKER)
@@ -16521,6 +16535,7 @@ async def _draw_chat_channel_picker_masthead_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, CHAT_CHANNEL_PICKER))),
                 MenuEntry(
                     label=menu_key("M", "ode"),
                     brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
