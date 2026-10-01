@@ -13767,7 +13767,7 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
         if art.items:
             await session.write_line("Drawn items:")
             for item, line in zip(art.items, describe_items(art)):
-                if item.key in MAIN_MENU_KEYS:
+                if any(key in MAIN_MENU_KEYS for key in item.keys):
                     await session.write_line(f"  {line}")
                 else:
                     await session.write_line(colored(
@@ -13820,8 +13820,6 @@ async def _write_slot_art_preview(
         return
     await write_art_text(session, plan.text)
     await session.write(move_cursor(art.height + 1, 1))
-    for line in _drawn_item_outcome(plan):
-        await session.write_line(colored(line, fg_color=MUTED_COLOR))
 
 
 async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, actor: User) -> None:

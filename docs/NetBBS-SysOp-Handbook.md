@@ -1406,7 +1406,9 @@ or `Moder[a]tion`, instead of leaving all of them to `{menu}`:
 - **Items a caller can't use are blanked.** A level-20 caller doesn't see your
   drawn `[S]ysOp console` at all: its cells are painted over in the colour
   behind them, so your frame and fill stay whole. Putting staff-only items on
-  their own row keeps the gap tidy.
+  their own row keeps the gap tidy. A staff member's `[S]` opens the Staff
+  console, so they don't see a drawn `[S]ysOp` either: their `[S]taff` goes
+  into `{menu}` instead.
 - **Items you didn't draw go into `{menu}`.** Games, Communities, Who's online,
   Moderation and Invitations appear only for some callers. Leave a `{menu}`
   region for them: without one, a caller with an item you didn't draw gets the
@@ -1415,8 +1417,9 @@ or `Moder[a]tion`, instead of leaving all of them to `{menu}`:
   since X is no menu key.
 
 **Check** lists the items it found and says which items it blanks, and which
-go into `{menu}`, for you and for a level-0 caller. **Preview** shows the same
-under each menu. The gallery's **Card Catalogue** sample is drawn this way.
+go into `{menu}`, for you and for a level-0 caller. **Preview** shows both
+menus with those items already blanked and moved. The gallery's **Card
+Catalogue** sample is drawn this way.
 
 The welcome and log-off banners take the field tokens too, but not `{menu}`
 or `{prompt}`. The welcome banner is shown before anyone signs in, so it fills
