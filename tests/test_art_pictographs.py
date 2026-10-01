@@ -132,3 +132,24 @@ def test_the_art_editor_canvas_sends_pictograph_bytes_to_a_cp437_terminal():
     asyncio.run(session.write_art(full_render_ansi(buffer.snapshot())))
     sent = "".join(session.sent)
     assert "\x03\x01" in sent and "*@" not in sent
+
+
+def test_a_break_in_repaint_puts_art_pictographs_back_as_bytes():
+    # Re-review on #987: end_break_in restores the caller's screen from the
+    # copy, which holds art's glyphs; on CP437 they must go back as bytes,
+    # not as the "o" and "*" substitutes ordinary text gets.
+    session = _Session(CP437)
+    session.terminal_height = 24
+    asyncio.run(write_preformatted_line(session, decode_banner_bytes(b"\x0b\x03")))
+    session.sent.clear()
+    session.begin_break_in()
+    asyncio.run(session.end_break_in())
+    repaint = "".join(session.sent)
+    assert "\x0b\x03" in repaint
+
+
+def test_break_in_chat_text_is_never_turned_into_control_bytes():
+    session = _Session(CP437)
+    session.terminal_height = 24
+    asyncio.run(session.write_through("I ♥ pens"))
+    assert "".join(session.sent) == "I * pens"
