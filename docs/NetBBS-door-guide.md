@@ -1486,6 +1486,24 @@ session until shared-file locking is proven does not apply. `max_sessions: 1`
 on a remote template only means one caller from this BBS at a time; raise it
 to the number of simultaneous callers the provider allows.
 
+### One game per registration: `terminal_type`
+
+The RLogin handshake carries a terminal-type field. NetBBS sends `ansi/<baud>`
+there unless the profile sets `options.terminal_type`, which is then sent
+**exactly as written**, with no speed appended. Door servers built on
+Synchronet use this field to choose where a caller lands: `xtrn=<code>` starts
+one door, and `xtrn_sec=<section>` opens one section of the server's menu. So
+you can register the same server several times, once per game, and put
+"LORD" or "Wordle" on your door menu as entries of their own. Use the codes
+the provider publishes, for example `"terminal_type": "xtrn=LORD408"`. Without
+the option, the caller gets the server's own menu.
+
+The value is fixed per registration, never something a caller chooses: 1 to
+64 printable ASCII characters, with no spaces and no `{...}` substitutions.
+NetBBS refuses to save a profile with anything else, and **Check setup**
+reports it. If a server needs a speed in the
+field as well, write it in: `xtrn=LORD408/38400`.
+
 ### DoorParty provider template
 
 The `remote-doorparty` preset uses the provider's documented RLogin identity
