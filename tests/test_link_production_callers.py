@@ -52,8 +52,9 @@ ALLOWED: dict[str, str] = {
     # Issue #1036 built how equivocation evidence is reproduced; #589's
     # automatic issuance is what builds it.
     "build_equivocation_evidence": "#589",
-    "activate_reproduced_digest_signal": "#589",
-    "fetch_trust_evidence": "#589",
+    # Its only caller, the digest path, was deleted with #1036; #589's
+    # automatic issuance records observed equivocation with it.
+    "record_local_observation": "#589",
     "record_activity": "#589",
     "clear_local_observation": "#589",
 }

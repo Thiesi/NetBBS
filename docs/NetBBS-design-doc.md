@@ -6675,9 +6675,11 @@ Receivers clamp active lifetimes:
 - vouches: 180 days.
 
 Renewal requires a fresh signal. Expired/revoked signals leave automatic policy
-but remain under bounded audit retention. Digest-only evidence is not
-self-verifying until fetched, size-checked, hashed, parsed, and reproduced;
-failure to fetch is not evidence against the subject.
+but remain under bounded audit retention. Digest-only evidence (`mode: digest`)
+is stored and served like any object and never counts: a node does not fetch
+from a locator, so nothing could reproduce it (issue #1036). Failure to fetch is
+not evidence against the subject; an issuer that wants its signal to count
+embeds the proof.
 
 A self-verifying signal counts only when this receiver reproduces its
 evidence itself (issue #1036). On Link v1 the one integrity violation a
@@ -14671,6 +14673,13 @@ digest path. With automatic issuance (#589), promotion would let one issuing
 node quarantine its subject everywhere; the two-domain rule keeps the
 independence §12.7 is built on. Existing signals stop counting until their
 evidence reproduces here (migration 111; release note).
+
+**Decision 4 — the digest-evidence path is deleted.** `fetch_trust_evidence`,
+`verify_evidence_bytes` and `activate_reproduced_digest_signal` had no
+production caller, and the last promoted reproduced evidence to a local
+observation, which Decision 3 rejects. Equivocation evidence always fits
+inline, and fetching an issuer-named locator was network access with no
+remaining use.
 
 ### Issue #914 — a compromise reaching a node that knows the signer only by introduction — decided
 

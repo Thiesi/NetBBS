@@ -289,6 +289,7 @@ from netbbs.link.equivocation import SubjectKeys, reproduce_equivocation, subjec
 from netbbs.link.trust import (
     TrustState,
     mark_signal_evidence_verified,
+    mark_signal_reverify_attempted,
     recompute_all_trust_states,
     trust_policy_generation,
     unverified_equivocation_signals,
@@ -1840,9 +1841,11 @@ async def _reverify_signal_evidence(node: LinkNode, lane: DatabaseLane) -> None:
     except sqlite3.Error as exc:
         _logger.warning("Link trust: could not list unverified signals: %s", exc)
         return
+    failed: list[str] = []
     for content_id, fingerprint, data in pending:
         keys = _known_subject_keys(node, fingerprint)
         if keys is None or not reproduce_equivocation(data, subject_fingerprint=fingerprint, keys=keys):
+            failed.append(content_id)
             continue
         try:
             if await lane.run(mark_signal_evidence_verified, content_id):
@@ -1852,6 +1855,10 @@ async def _reverify_signal_evidence(node: LinkNode, lane: DatabaseLane) -> None:
                 )
         except (ValueError, sqlite3.Error) as exc:
             _logger.warning("Link trust: could not record verified evidence for %s: %s", content_id, exc)
+    try:
+        await lane.run(mark_signal_reverify_attempted, failed)
+    except sqlite3.Error as exc:
+        _logger.warning("Link trust: could not record re-check attempts: %s", exc)
 
 
 async def _reevaluate_trust_over_time(node: LinkNode, lane: DatabaseLane) -> None:

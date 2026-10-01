@@ -80,7 +80,6 @@ from netbbs.link.transport import (
     establish_noise_xx_responder,
     deposit_into_relay_mailbox,
     dial_hello,
-    fetch_trust_evidence,
     pickup_from_relay_mailbox,
     push_events,
     request_inventory,
@@ -1215,41 +1214,6 @@ def test_real_transport_enforces_probation_quarantine_block_explains_and_recover
     finally:
         alice.close()
         bob.close()
-
-
-def test_trust_evidence_fetch_is_bounded_and_same_origin():
-    body = b'{"proof":"checked"}'
-    evidence = {
-        "mode": "digest", "sha256": hashlib.sha256(body).hexdigest(),
-        "size": len(body), "locator": "/evidence/one",
-    }
-
-    async def scenario():
-        async def serve_evidence(request):
-            return web.Response(body=body)
-
-        app = web.Application()
-        app.router.add_get("/evidence/one", serve_evidence)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
-        try:
-            async with aiohttp.ClientSession() as session:
-                content, parsed = await fetch_trust_evidence(
-                    session, f"http://127.0.0.1:{port}", evidence
-                )
-                assert content == body and parsed == {"proof": "checked"}
-                with pytest.raises(LinkTransportError, match="reporter origin"):
-                    await fetch_trust_evidence(
-                        session, f"http://127.0.0.1:{port}",
-                        {**evidence, "locator": "http://127.0.0.1:1/private"},
-                    )
-        finally:
-            await runner.cleanup()
-
-    asyncio.run(scenario())
 
 
 # -- hello: real HTTP round trip -------------------------------------------

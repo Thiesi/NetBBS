@@ -9,12 +9,11 @@ bounds; :mod:`netbbs.link.trust` remains the synchronous policy engine.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 import nacl.signing
 
@@ -30,7 +29,6 @@ from netbbs.link.trust import (
     EvidenceClass,
     TrustDimension,
     TrustSubject,
-    record_reproduced_signal_observation,
     record_trust_signal,
     record_vouch,
     register_subject,
@@ -788,68 +786,3 @@ def save_trust_pull_cursor(
                    updated_at = excluded.updated_at""",
             (responder_fingerprint, issuer_fingerprint, after_content_id, now_iso or utc_now_iso()),
         )
-
-
-def verify_evidence_bytes(evidence: dict[str, Any], content: bytes) -> Any:
-    """Size/hash/parse a digest-only evidence body; this does not reproduce its claim."""
-    checked = _validate_evidence(evidence)
-    if checked["mode"] != "digest":
-        raise TrustWireError("evidence is not digest-referenced")
-    if len(content) != checked["size"] or len(content) > MAX_EMBEDDED_EVIDENCE_BYTES:
-        raise TrustWireError("evidence body size does not match the signed claim")
-    if hashlib.sha256(content).hexdigest() != checked["sha256"]:
-        raise TrustWireError("evidence body hash does not match the signed claim")
-    try:
-        return json.loads(content)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise TrustWireError("evidence body is not valid UTF-8 JSON") from exc
-
-
-def activate_reproduced_digest_signal(
-    db: Database,
-    content_id: str,
-    evidence_content: bytes,
-    *,
-    observation_id: str,
-    reproduce: Callable[[Any], bool],
-    now_iso: str | None = None,
-) -> bool:
-    """Activate digest evidence only after bounded verification and reproduction.
-
-    ``reproduce`` owns the category-specific semantic check.  Merely fetching,
-    hashing, and parsing reporter-provided JSON can never make it local policy
-    evidence.  A successful callback records both the remote signal and an
-    independent local observation.
-    """
-    row = db.connection.execute(
-        """SELECT envelope_json, revoked_at FROM link_trust_wire_objects
-           WHERE content_id = ? AND object_type = 'trust_signal'""",
-        (content_id,),
-    ).fetchone()
-    if row is None:
-        raise TrustWireError("unknown digest trust signal")
-    if row[1] is not None:
-        raise TrustWireError("digest trust signal has been revoked")
-    payload = json.loads(row[0])["payload"]
-    evidence = payload["evidence"]
-    if payload["evidence_class"] != EvidenceClass.SELF_VERIFYING.value:
-        raise TrustWireError("only self-verifying digest evidence can be reproduced locally")
-    parsed = verify_evidence_bytes(evidence, evidence_content)
-    if not reproduce(parsed):
-        raise TrustWireError("evidence claim could not be independently reproduced")
-    now = now_iso or utc_now_iso()
-    subject = _subject_from_dict(payload["subject"])
-    with db.connection:
-        register_subject(db, subject, first_accepted_at=now, now_iso=now)
-        inserted = record_trust_signal(
-            db, content_id=content_id, issuer_fingerprint=payload["issuer_fingerprint"],
-            subject=subject, dimension=payload["dimension"], category=payload["category"],
-            evidence_class=payload["evidence_class"], observed_at=payload["observed_at"],
-            issued_at=payload["issued_at"], expires_at=payload["expires_at"],
-            evidence=evidence, explanation=payload["explanation"], now_iso=now,
-        )
-        if inserted:
-            record_reproduced_signal_observation(
-                db, content_id, observation_id=observation_id, now_iso=now
-            )
-        return inserted
