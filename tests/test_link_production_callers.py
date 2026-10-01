@@ -44,13 +44,9 @@ LINK = SRC / "netbbs" / "link"
 # subsystem shipped with no production caller, which is the thing the check
 # exists to stop.
 ALLOWED: dict[str, str] = {
-    # Issue #632, part 1 of 3: the sealed-bundle wire format lands before the
-    # sync pass that sends and opens bundles (part 2), which takes these off.
-    "build_sealed_attestation_bundle": "#632",
-    "open_sealed_attestation_bundle": "#632",
-    "snapshot_digest": "#632",
-    "prune_expired_relay_attestation_bundles": "#632",
-    "deposit_attestation_bundle": "#632",
+    # Issue #632, part 2 of 3: the per-recipient delivery status lands before
+    # the Published identity screen that shows it (part 3), which takes it off.
+    "list_attestation_delivery_status": "#632",
 }
 
 

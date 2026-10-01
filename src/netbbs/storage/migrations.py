@@ -4025,4 +4025,35 @@ MIGRATIONS = [
             ON link_relay_attestation_bundles(recipient_fingerprint);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #632: both ends of sealed attestation snapshots. "
+            "`link_attestation_bundle_ledger` is the issuer's record per recipient -- the last "
+            "sequence used, what was last delivered (digest, time, route, and the content ids "
+            "of the objects it holds, so a caller can be told whether their own value got there), "
+            "why the last attempt failed, and for a removed recipient when it was removed, since "
+            "it is owed one final, empty snapshot. `link_attestation_bundles_received` is the recipient's per issuer: "
+            "the last applied sequence, which replaces the pull cursor, and objects waiting for a "
+            "subject this node has not met yet. Both empty on upgrade."
+        ),
+        sql="""
+        CREATE TABLE link_attestation_bundle_ledger (
+            recipient_fingerprint TEXT PRIMARY KEY,
+            sequence              INTEGER NOT NULL DEFAULT 0,
+            sent_digest           TEXT,
+            sent_at               TEXT,
+            route                 TEXT,
+            last_attempt_at       TEXT,
+            last_error            TEXT,
+            removed_at            TEXT,
+            delivered_ids_json    TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE link_attestation_bundles_received (
+            issuer_fingerprint TEXT PRIMARY KEY,
+            sequence           INTEGER NOT NULL,
+            applied_at         TEXT NOT NULL,
+            pending_json       TEXT NOT NULL DEFAULT '[]'
+        );
+        """,
+    ),
 ]

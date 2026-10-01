@@ -80,7 +80,7 @@ from netbbs.link.transport import (
     establish_noise_xx_responder,
     deposit_into_relay_mailbox,
     dial_hello,
-    pickup_from_relay_mailbox,
+    pickup_from_relay_mailbox_all,
     push_events,
     request_inventory,
     request_peer_list,
@@ -1385,9 +1385,9 @@ def test_relay_mailbox_pickup_refreshes_local_claims_before_persisting_the_peer(
         server = await _run_server(relay_node, RefreshableHello(), relay.lane)
         try:
             async with aiohttp.ClientSession() as session:
-                assert await pickup_from_relay_mailbox(
+                assert (await pickup_from_relay_mailbox_all(
                     session, f"http://127.0.0.1:{server.port}", caller_hello
-                ) == []
+                )).envelopes == []
         finally:
             await server.stop()
 
@@ -2661,11 +2661,11 @@ def test_deposit_and_pickup_relay_mailbox_round_trips_over_http(tmp_path):
                     session, f"http://127.0.0.1:{bob_server.port}", carol_identity.fingerprint, message
                 )
                 carol_node = LinkNode(identity=carol_identity)
-                return await pickup_from_relay_mailbox(
+                return (await pickup_from_relay_mailbox_all(
                     session,
                     f"http://127.0.0.1:{bob_server.port}",
                     _hello_for(carol_node),
-                )
+                )).envelopes
         finally:
             await bob_server.stop()
 
@@ -2700,9 +2700,9 @@ def test_pickup_returns_nothing_held_for_a_different_fingerprint(tmp_path):
                     session, f"http://127.0.0.1:{bob_server.port}", carol_identity.fingerprint, message
                 )
                 dan_node = LinkNode(identity=dan_identity)
-                return await pickup_from_relay_mailbox(
+                return (await pickup_from_relay_mailbox_all(
                     session, f"http://127.0.0.1:{bob_server.port}", _hello_for(dan_node)
-                )
+                )).envelopes
         finally:
             await bob_server.stop()
 
@@ -3140,6 +3140,10 @@ def test_attestation_pull_uses_real_transport_and_refuses_a_third_party_issuer(t
                     subscriber_node, session, base_url, pull
                 )
                 assert len(raw) == 1
+                # Issue #632: the issuer records what this recipient fetched.
+                from netbbs.link.attestation_delivery import list_attestation_delivery_status
+                [status] = list_attestation_delivery_status(issuer.db)
+                assert status.route == "pull" and len(status.delivered_ids) == 1
                 with pytest.raises(LinkTransportError, match="recent nonce"):
                     await request_remote_attestations(
                         subscriber_node, session, base_url, pull

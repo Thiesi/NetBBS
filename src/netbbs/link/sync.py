@@ -179,9 +179,21 @@ from netbbs.link.events import (
     FileAreaGenesis,
     LinkMessage,
     LinkMessageBounced,
+    SEALED_ATTESTATIONS_CAPABILITY,
     canonical_bytes,
     descriptor_has_capability,
     event_content_id,
+)
+from netbbs.timeutil import utc_now_iso
+from netbbs.link.attestation_bundles import BundleTooLarge, SealedAttestationBundle, build_sealed_attestation_bundle
+from netbbs.link.attestation_delivery import (
+    has_attestation_snapshot_from,
+    plan_attestation_deliveries,
+    receive_attestation_bundle_safely,
+    record_attestation_delivery,
+    record_attestation_delivery_failure,
+    record_legacy_attestation_recipient,
+    retry_pending_attestations,
 )
 from netbbs.link.enforcement import (
     REASON_NODE_PROBATIONARY,
@@ -211,6 +223,7 @@ from netbbs.link.protocol import (
 from netbbs.link.relay_mailbox import (
     RELAY_MAILBOX_RETENTION_DAYS,
     RelayableEnvelope,
+    prune_expired_relay_attestation_bundles,
     prune_expired_relay_mailbox_envelopes,
 )
 from netbbs.link.relay_selection import TARGET_RELAY_COUNT, relays_needing_replacement, select_relay_candidates
@@ -258,7 +271,10 @@ from netbbs.link.transport import (
     dial_hello,
     persist_accepted_events,
     persist_stale_copy_changes,
-    pickup_from_relay_mailbox,
+    RelayPickup,
+    pickup_from_relay_mailbox_all,
+    send_attestation_bundle,
+    deposit_attestation_bundle,
     RefusedEvent,
     push_events,
     push_events_partial,
@@ -547,9 +563,12 @@ async def run_link_sync(
         # below, so a toggle flipped since the last pass is already reflected
         # in what a subscriber reads this pass rather than next.
         await _reconcile_own_attestations(node, lane)
+        # Issue #632: and then sent, sealed, to each recipient that takes it.
+        await _deliver_attestation_bundles(node, session, lane, own_hello_provider)
         await _pull_attestation_authorities(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
+        await retry_pending_attestations(node, lane)
         await _forget_retired_attestations(lane)
         await _reverify_signal_evidence(node, lane)
         await _reevaluate_trust_over_time(node, lane)
@@ -1835,6 +1854,124 @@ async def _reconcile_own_attestations(node: LinkNode, lane: DatabaseLane) -> Non
         )
 
 
+def _known_descriptor(node: LinkNode, fingerprint: str) -> EndpointDescriptor | None:
+    """The freshest descriptor on file for `fingerprint`: a peer's, an
+    introduced identity's, or a peer list's candidate."""
+    for record in (node.peers.get(fingerprint), node.introduced.get(fingerprint)):
+        if record is not None and record.descriptor is not None:
+            return record.descriptor
+    return node.candidate_descriptors.get(fingerprint)
+
+
+def _bundle_relay_urls(node: LinkNode, descriptor: EndpointDescriptor) -> list[str]:
+    """Addresses of the relays `descriptor` names that this node can dial and
+    that take sealed attestation bundles (issue #632). An older relay would
+    refuse the type, so it is not tried."""
+    urls: list[str] = []
+    for relay_fingerprint in descriptor.payload.get("relays") or []:
+        relay_descriptor = _known_descriptor(node, relay_fingerprint)
+        if relay_descriptor is not None and descriptor_has_capability(
+            relay_descriptor, SEALED_ATTESTATIONS_CAPABILITY
+        ):
+            urls.extend(_dialable_addresses(relay_descriptor))
+    return urls
+
+
+async def _send_bundle_one(session: ClientSession, base_url: str, bundle: SealedAttestationBundle) -> bool:
+    try:
+        await send_attestation_bundle(session, base_url, bundle)
+        return True
+    except LinkTransportError:
+        return False
+
+
+async def _deposit_bundle_one(
+    session: ClientSession, base_url: str, recipient: str, bundle: SealedAttestationBundle, hello: HelloMessage,
+) -> bool:
+    try:
+        await deposit_attestation_bundle(session, base_url, recipient, bundle, hello)
+        return True
+    except LinkTransportError:
+        return False
+
+
+async def _deliver_attestation_bundles(
+    node: LinkNode, session: ClientSession, lane: DatabaseLane,
+    own_hello_provider: Callable[[], HelloMessage],
+) -> None:
+    """Send each due recipient its sealed snapshot (issue #632).
+
+    Directly when the recipient can be dialed, otherwise at one of the relays
+    it names. Every outcome is recorded per recipient for the Published
+    identity screen; nothing is dropped silently."""
+    try:
+        plans = await lane.run(plan_attestation_deliveries)
+    except sqlite3.Error as exc:
+        _logger.warning("Link attestations: could not plan snapshot deliveries: %s", exc)
+        return
+    for plan in plans:
+        recipient = plan.recipient_fingerprint
+        descriptor = _known_descriptor(node, recipient)
+        if descriptor is None:
+            await lane.run(
+                record_attestation_delivery_failure, recipient,
+                "this node knows no address or relay for the recipient yet",
+            )
+            continue
+        if not descriptor_has_capability(descriptor, SEALED_ATTESTATIONS_CAPABILITY):
+            # It still pulls this release; not a failure (review of #1045).
+            await lane.run(record_legacy_attestation_recipient, recipient)
+            continue
+        try:
+            recipient_key = node.resolve_known_signing_key(recipient, "attestation recipient")
+        except (LinkProtocolError, NodeIdentityError, ValueError):
+            await lane.run(
+                record_attestation_delivery_failure, recipient, "this node does not know the recipient's key yet",
+            )
+            continue
+        try:
+            bundle = build_sealed_attestation_bundle(
+                signing_key=node.identity.signing_key.signing_key,
+                issuer_fingerprint=node.identity.fingerprint,
+                recipient_fingerprint=recipient,
+                recipient_verify_key=recipient_key,
+                objects=plan.objects,
+                sequence=plan.sequence,
+                created_at=utc_now_iso(),
+            )
+        except BundleTooLarge as exc:
+            await lane.run(record_attestation_delivery_failure, recipient, str(exc))
+            _logger.warning("Link attestations: snapshot for %s is too large to send: %s", recipient, exc)
+            continue
+        route = None
+        direct = _dialable_addresses(descriptor)
+        if direct and await _try_addresses_via(direct, lambda url: _send_bundle_one(session, url, bundle)):
+            route = "direct"
+        else:
+            relays = _bundle_relay_urls(node, descriptor)
+            if relays and await _try_addresses_via(
+                # With this node's own hello bundle, which is how the relay
+                # knows the deposit really comes from the issuer.
+                relays, lambda url: _deposit_bundle_one(session, url, recipient, bundle, own_hello_provider())
+            ):
+                route = "relay"
+        if route is None:
+            reason = (
+                "no route took it" if direct or descriptor.payload.get("relays")
+                else "the recipient cannot be dialed and names no relay"
+            )
+            await lane.run(record_attestation_delivery_failure, recipient, reason)
+            continue
+        await lane.run(
+            record_attestation_delivery, recipient, digest=plan.digest, route=route, final=plan.final,
+            content_ids=plan.content_ids,
+        )
+        _logger.info(
+            "Link attestations: sent %s snapshot %d to %s via %s",
+            "final, empty" if plan.final else "the", plan.sequence, recipient, route,
+        )
+
+
 async def _prune_relay_mailbox(lane: DatabaseLane) -> None:
     """Drop relay-mailbox envelopes older than `RELAY_MAILBOX_RETENTION_DAYS`
     (issue #891) and say what went. A WARNING, so it reaches the SysOp's
@@ -1842,9 +1979,15 @@ async def _prune_relay_mailbox(lane: DatabaseLane) -> None:
     and neither end hears it from this node."""
     try:
         dropped = await lane.run(prune_expired_relay_mailbox_envelopes)
+        bundles = await lane.run(prune_expired_relay_attestation_bundles)
     except sqlite3.Error as exc:
         _logger.warning("Link relay mailbox: could not drop expired envelopes: %s", exc)
         return
+    if bundles:
+        # Issue #632: a snapshot its issuer stopped refreshing and its
+        # recipient never collected. Nothing personal is lost -- the issuer
+        # re-sends while it has anything to say -- so INFO, not WARNING.
+        _logger.info("Link relay mailbox: dropped %d attestation bundle(s) held over 90 days", bundles)
     if dropped:
         _logger.warning(
             "Link relay mailbox: dropped %d envelope(s) held longer than %d days for %d "
@@ -1959,6 +2102,10 @@ async def _pull_attestation_authorities(
     node has no claim to do that.
     """
     for issuer in await lane.run(list_attestation_authority_fingerprints):
+        # Issue #632, Decision 5: one path. An issuer that sends this node
+        # snapshots is not also pulled, so the two never disagree.
+        if await lane.run(has_attestation_snapshot_from, issuer):
+            continue
         if enforce_trust_policy:
             state = await lane.run(node_transport_state, issuer)
             if state != TrustState.ESTABLISHED:
@@ -2567,7 +2714,7 @@ async def _maintain_relay_selection(
 
 async def _pickup_one_relay_mailbox(
     session: ClientSession, base_urls: list[str], own_hello_provider: Callable[[], HelloMessage]
-) -> list[RelayableEnvelope]:
+) -> RelayPickup:
     """Try each of `base_urls` in turn (issue #58's own multi-address
     "peers try them in order" convention), returning whatever the first
     reachable one hands back. Raises `LinkTransportError` only once
@@ -2575,7 +2722,7 @@ async def _pickup_one_relay_mailbox(
     last_error: LinkTransportError | None = None
     for url in base_urls:
         try:
-            return await pickup_from_relay_mailbox(session, url, own_hello_provider())
+            return await pickup_from_relay_mailbox_all(session, url, own_hello_provider())
         except LinkTransportError as exc:
             last_error = exc
     raise last_error or LinkTransportError("no addresses to try")
@@ -2642,11 +2789,23 @@ async def _pickup_relay_mail(
         if not base_urls:
             continue
         try:
-            messages = await _pickup_one_relay_mailbox(session, base_urls, own_hello_provider)
+            pickup = await _pickup_one_relay_mailbox(session, base_urls, own_hello_provider)
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not pick up mail from relay %s: %s", relay_fingerprint, exc)
             continue
         reached_a_relay = True
+        messages = pickup.envelopes
+        for bundle in pickup.bundles:
+            # Issue #632. Checked and applied exactly as a directly delivered
+            # one; the relay is only where it waited.
+            result = await receive_attestation_bundle_safely(
+                node, lane, bundle, enforce_trust_policy=enforce_trust_policy, via="relay",
+            )
+            if not result.applied and result.reason not in {"stale_sequence"}:
+                _logger.info(
+                    "Link attestations: did not apply a snapshot from %s picked up at relay %s (%s)",
+                    bundle.issuer_fingerprint, relay_fingerprint, result.reason,
+                )
 
         for message in messages:
             object_type = message.envelope.get("object_type")

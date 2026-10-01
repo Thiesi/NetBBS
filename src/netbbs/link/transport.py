@@ -183,6 +183,7 @@ from netbbs.link.protocol import (
 from netbbs.link.carry import KIND_LABELS, accept_genesis, genesis_kind
 from netbbs.link.store import event_is_stored, forget_opaque_event, opaque_events_to_rejudge, store_opaque_event
 from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
+from netbbs.link.attestation_delivery import record_attestation_pull, receive_attestation_bundle_safely
 from netbbs.link.attestation_bundles import (
     SEALED_ATTESTATION_BUNDLE_OBJECT_TYPE,
     MalformedBundle,
@@ -2017,6 +2018,7 @@ class LinkServer:
             f"{LINK_PATH_PREFIX}/relay-mailbox/{{fingerprint}}/deposit", self._handle_relay_mailbox_deposit
         )
         app.router.add_post(f"{LINK_PATH_PREFIX}/relay-mailbox/pickup", self._handle_relay_mailbox_pickup)
+        app.router.add_post(f"{LINK_PATH_PREFIX}/attestation-bundle", self._handle_attestation_bundle)
         app.router.add_post(f"{LINK_PATH_PREFIX}/inventory/{{fingerprint}}", self._handle_inventory)
         app.router.add_post(f"{LINK_PATH_PREFIX}/trust-pull/{{fingerprint}}", self._handle_trust_pull)
         app.router.add_post(
@@ -2485,6 +2487,9 @@ class LinkServer:
             return web.json_response({"error": f"malformed attestation pull: {exc}"}, status=400)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=403)
+        # Issue #632: the legacy path, recorded per recipient so the issuer's
+        # screens can say what it holds (review of #1045).
+        await self._lane.run(record_attestation_pull, fingerprint, objects)
         return web.json_response({"objects": objects, "more_available": more})
 
     async def _handle_file_chunk_request(self, request: web.Request) -> web.Response:
@@ -2756,6 +2761,26 @@ class LinkServer:
             return web.json_response({"error": str(exc)}, status=507)
 
         return web.json_response({"deposited": True})
+
+    async def _handle_attestation_bundle(self, request: web.Request) -> web.Response:
+        """Issue #632: an issuer delivering this node's own snapshot directly.
+
+        Like a relay deposit, the caller need not be a peer and is not
+        authenticated as one: the bundle authenticates itself (signed by its
+        issuer, sealed to this node, newer than the last one applied). The
+        answer says whether it was applied, but any 200 tells the issuer the
+        route worked; whether to use what it carries is this node's own
+        decision, the same one the pull makes."""
+        try:
+            bundle = SealedAttestationBundle.from_dict(await request.json(loads=strict_json_loads))
+        except (ValueError, MalformedBundle) as exc:
+            return web.json_response({"error": f"malformed attestation bundle: {exc}"}, status=400)
+        if bundle.recipient_fingerprint != self._node.identity.fingerprint:
+            return web.json_response({"error": "bundle is addressed to another node"}, status=400)
+        result = await receive_attestation_bundle_safely(
+            self._node, self._lane, bundle, enforce_trust_policy=self._enforce_trust_policy,
+        )
+        return web.json_response({"applied": result.applied, "reason": result.reason})
 
     async def _deposit_attestation_bundle(self, recipient_fingerprint: str, body: object) -> web.Response:
         """Issue #632: hold a sealed attestation bundle in its (issuer,
@@ -3892,15 +3917,23 @@ async def deposit_into_relay_mailbox(
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
 
-async def pickup_from_relay_mailbox(
+async def send_attestation_bundle(
     session: ClientSession,
-    relay_base_url: str,
-    hello: HelloMessage,
+    base_url: str,
+    bundle: SealedAttestationBundle,
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> list[RelayableEnvelope]:
-    """`pickup_from_relay_mailbox_all`, mail only."""
-    return (await pickup_from_relay_mailbox_all(session, relay_base_url, hello, timeout=timeout)).envelopes
+) -> None:
+    """Deliver `bundle` directly to its recipient at `base_url` (issue #632).
+    Raises `LinkTransportError` unless the recipient answered 200."""
+    url = f"{base_url}{LINK_PATH_PREFIX}/attestation-bundle"
+    try:
+        async with session.post(url, json=bundle.to_dict(), timeout=ClientTimeout(total=timeout)) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(f"attestation bundle to {url} failed: HTTP {response.status}: {text}")
+    except (ClientError, TimeoutError) as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
 
 @dataclass(frozen=True)

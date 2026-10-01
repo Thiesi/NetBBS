@@ -497,15 +497,28 @@ def ingest_remote_attestation(
             raise UnknownAttestationSubject(
                 "remote attestation subject must already be a verified Link identity"
             )
-        db.connection.execute(
+        inserted = db.connection.execute(
             """INSERT OR IGNORE INTO link_remote_attestations
                (content_id, issuer_fingerprint, subject_id, attribute, attested_value,
                 subject_opt_in, issued_at, expires_at, envelope_json, signature_b64, received_at)
                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
             (content_id, issuer, subject.subject_id, attribute, value, issued_at, expires_at,
              json.dumps(envelope, sort_keys=True), signature_b64, now_value),
-        )
-        _audit(db, subject.subject_id, "attestation", content_id, "received", {"issuer": issuer, "attribute": attribute}, None, now_value)
+        ).rowcount
+        if not inserted:
+            # Issue #632: an object a snapshot withdrew -- revoked, but by no
+            # revoking object -- comes back when a later snapshot or the pull
+            # carries it again, e.g. after this node is named a recipient
+            # once more. A revocation is final; a withdrawal is not.
+            inserted = db.connection.execute(
+                """UPDATE link_remote_attestations
+                   SET attested_value = ?, envelope_json = ?, signature_b64 = ?, received_at = ?,
+                       revoked_at = NULL, redacted_at = NULL
+                   WHERE content_id = ? AND revoked_at IS NOT NULL AND revoked_by_content_id IS NULL""",
+                (value, json.dumps(envelope, sort_keys=True), signature_b64, now_value, content_id),
+            ).rowcount
+        if inserted:
+            _audit(db, subject.subject_id, "attestation", content_id, "received", {"issuer": issuer, "attribute": attribute}, None, now_value)
         _recompute_subject_id(db, subject.subject_id, now_value)
     return content_id
 
@@ -943,6 +956,12 @@ def configure_attestation_recipient(
                  actor_user_id = excluded.actor_user_id, updated_at = excluded.updated_at""",
             (fingerprint, reason, actor_user_id, now_value, now_value),
         )
+        # Issue #632: a re-added recipient is no longer owed a retraction.
+        db.connection.execute(
+            "UPDATE link_attestation_bundle_ledger SET removed_at = NULL, last_attempt_at = NULL "
+            "WHERE recipient_fingerprint = ?",
+            (fingerprint,),
+        )
         _audit(
             db, None, "recipient", fingerprint, "updated" if exists else "created",
             {"reason": reason}, actor_user_id, now_value,
@@ -956,11 +975,12 @@ def remove_attestation_recipient(
     actor_user_id: int | None = None,
     now_iso: str | None = None,
 ) -> None:
-    """Stop serving `fingerprint`. A statement about the future only.
+    """Stop serving `fingerprint`, and retract what it holds.
 
-    What the node already pulled stays with it until each object's own expiry;
-    a removed recipient is refused outright, so it receives no further
-    revocations either (Decision 3 records why that cost is accepted).
+    A removed recipient is refused by the pull, and is owed one final, empty
+    snapshot (issue #632, Decision 2), which makes a recipient running NetBBS
+    forget everything it holds from this node. The sync pass sends it, retried
+    for up to 90 days.
     """
     now_value, _ = _now(now_iso)
     with db.connection:
@@ -971,6 +991,13 @@ def remove_attestation_recipient(
             raise ValueError("attestation recipient is missing or already removed")
         db.connection.execute(
             "DELETE FROM link_attestation_recipients WHERE fingerprint = ?", (fingerprint,)
+        )
+        db.connection.execute(
+            """INSERT INTO link_attestation_bundle_ledger (recipient_fingerprint, removed_at)
+               VALUES (?, ?)
+               ON CONFLICT(recipient_fingerprint) DO UPDATE SET removed_at = excluded.removed_at,
+                 last_attempt_at = NULL, last_error = NULL""",
+            (fingerprint, now_value),
         )
         _audit(db, None, "recipient", fingerprint, "removed", {"reason": row["reason"]}, actor_user_id, now_value)
 
