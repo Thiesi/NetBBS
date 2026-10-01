@@ -1736,6 +1736,25 @@ visible. Local maintenance follows:
 with a grace period between expiration and deletion. Local pruning never
 becomes a network-wide deletion instruction.
 
+A revision ages from the later of its own `created_at` and its post's first
+revision's (issue #793). This applies to every revision: edits, withdrawals and
+moderator edits.
+- **Why not its own alone:** a revision carried over the Link is stamped by its
+  author's clock, display metadata that may run far behind (§7.2). Aged by its
+  own stamp, an edit from a node with a badly wrong clock expired on arrival,
+  and the post fell back to the revision before it. For a withdrawal, that
+  re-showed the withdrawn text. Now an edit can never expire before its post.
+- **A genuine later edit still keeps a post alive,** as before: its own stamp
+  is the later one.
+- **If the first revision was also stamped by the bad clock,** the post and its
+  edits expire together, which is the accepted cost.
+- **Receipt time was rejected:** ageing carried content by when this node
+  received it would keep old history, carried late to a newly subscribing
+  node, alive for a full maximum age.
+- **Where it applies:** the sweep's expire and delete steps, the read-only
+  listed count and the board rankings. A file has no revisions and ages by its
+  own `created_at`.
+
 **Pinning and keeping** (issue #675). A moderator with the board's or area's
 edit permission can pin a post or file, and can keep it from expiring:
 - **Where:** from the post reader (`P[i]n`, `[K]eep`) or the file area screen,
@@ -6971,7 +6990,16 @@ time alone (a recovery hold's release, an override's or a signal's expiry,
 probation's age requirement), which have no input change of their own; without
 it a running node applied them only at its next restart (issue #802). For every restriction the SysOp can inspect the subject,
 dimension, effects, rule/threshold, evidence, counted domains/weights, times,
-overrides, audit history, and requirements for release. Caller-facing behavior
+overrides, audit history, and requirements for release. Counted domains and
+weight appear whenever the dimension has a self-verifying identity report that
+counts toward the two-domain threshold, whatever decided its state; a
+dimension that cannot quarantine by that threshold never shows them. The
+console states them as the distance to quarantine
+("1 of 2 domains, weight 1.0 of 2.0"), so a SysOp sees how close one more
+report would bring the subject (issue #752). Probation's
+`active_trigger_count` counts every applicable dimension, because any trigger
+blocks graduation in all of them; `dimension_trigger_count` beside it counts
+only the dimension shown. Caller-facing behavior
 states that local policy restricted content/delivery without claiming a
 network-wide verdict or leaking private evidence.
 

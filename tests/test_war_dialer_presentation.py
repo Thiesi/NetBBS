@@ -587,7 +587,14 @@ def _running_door(tmp_path, *, new_player=False, event=False):
             process.kill()
         process.wait(timeout=PROC_WAIT)
         reader.join(timeout=PROC_WAIT)
-        process.stdin.close()
+        # A write the door never read is still buffered here when the door
+        # ended the visit itself, and closing flushes it into a pipe nobody
+        # holds: EINVAL on Windows, EPIPE elsewhere (issue #896). The door is
+        # gone either way; failing cleanup would hide the test's own result.
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
         process.stdout.close()
         process.stderr.close()
 
@@ -859,9 +866,81 @@ def test_idle_zero_turn_menu_accepts_action_after_refill(tmp_path, monkeypatch):
     conn.close()
 
 
-@pytest.mark.timing_sensitive  # 50ms gaps against a 100ms escape lookahead
+# The gap between a mouse report's fragments: past the 20 ms burst window,
+# well inside the door's 100 ms escape lookahead.
+_FRAGMENT_GAP_SECONDS = 0.03
+# How long a gap may really get before the attempt no longer tests a report
+# fragmented *within* the lookahead (issue #896): margin under 100 ms for the
+# time the door itself takes to start waiting again.
+_FRAGMENT_GAP_LIMIT_SECONDS = 0.08
+_FRAGMENT_ATTEMPTS = 5
+
+
+def _send_fragmented_x10_report(send) -> bool:
+    """Send an X10 mouse report in four writes. False when the attempt is
+    void: a gap between two writes reached the limit, so the door may rightly
+    have ended the visit on an incomplete report (issue #896). That says
+    nothing about fragments that arrive in time; under a saturated CPU the
+    scheduler, not the door, decides the gaps.
+
+    A write that fails while every gap so far stayed under the limit is not
+    void: the door ended the visit although the report arrived in time, which
+    is the bug this test exists for, so the error is raised (review of #1033).
+    """
+    send(b"\x1b[M")  # The door is waiting for input: a failure here is real.
+    last = time.monotonic()
+    for byte in (b" ", b"C", b"C"):
+        time.sleep(_FRAGMENT_GAP_SECONDS)
+        try:
+            send(byte)
+        except OSError:  # EINVAL on Windows, EPIPE elsewhere: the door ended it
+            if time.monotonic() - last >= _FRAGMENT_GAP_LIMIT_SECONDS:
+                return False
+            raise
+        now = time.monotonic()
+        if now - last >= _FRAGMENT_GAP_LIMIT_SECONDS:
+            return False
+        last = now
+    return True
+
+
+def test_a_door_that_ends_the_visit_on_a_timely_report_fails_the_attempt(monkeypatch):
+    """The void rule must not hide the regression it guards against: a door
+    that stops reading although every fragment arrived in time makes the
+    helper raise, while one that stops after a gap past the limit voids it."""
+    clock = {"now": 100.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    writes = []
+
+    def closed_after_first(data):
+        if writes:
+            raise OSError(22, "Invalid argument")
+        writes.append(data)
+
+    with pytest.raises(OSError):
+        _send_fragmented_x10_report(closed_after_first)
+
+    writes.clear()
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + 0.2))
+    assert _send_fragmented_x10_report(closed_after_first) is False
+
+
+@pytest.mark.timing_sensitive  # fragment gaps against a 100ms escape lookahead
 @pytest.mark.parametrize("stage", ["onboarding", "receipt", "menu", "target"])
 def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
+    for attempt in range(_FRAGMENT_ATTEMPTS):
+        attempt_path = tmp_path / f"attempt-{attempt}"
+        attempt_path.mkdir()
+        if _fragmented_x10_attempt(attempt_path, stage):
+            return
+    pytest.skip(
+        f"no attempt in {_FRAGMENT_ATTEMPTS} kept the fragments under "
+        f"{_FRAGMENT_GAP_LIMIT_SECONDS * 1000:.0f} ms apart: the CPU is too busy to test this"
+    )
+
+
+def _fragmented_x10_attempt(tmp_path, stage) -> bool:
     with _running_door(
         tmp_path, new_player=stage == "onboarding", event=stage == "receipt",
     ) as (process, path, wait_for, send, output, reach, screen):
@@ -872,10 +951,8 @@ def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
             if stage == "target":
                 send(b"x")
                 wait_for(b"Cancel")
-        send(b"\x1b[M")
-        for byte in (b" ", b"C", b"C"):
-            time.sleep(0.05)  # Beyond burst detection, within sequence lookahead.
-            send(byte)
+        if not _send_fragmented_x10_report(send):
+            return False
         if stage in ("onboarding", "receipt"):
             wait_for(DIAL)
         time.sleep(0.15)
@@ -891,6 +968,7 @@ def test_fragmented_x10_mouse_report_never_spends_a_turn(tmp_path, stage):
             send(b"q")
         assert process.wait(timeout=PROC_WAIT) == 0
         assert process.stderr.read() == b""
+    return True
 
 
 @pytest.mark.parametrize("stage", ["onboarding", "receipt", "menu", "target"])
@@ -906,15 +984,16 @@ def test_extended_x10_mouse_encoding_stops_without_spending_a_turn(tmp_path, sta
                 send(b"x")
                 wait_for(b"Cancel")
         send(b"\x1b[M \xc4\x80C")  # UTF-8 coordinate, then an ASCII coordinate.
-        time.sleep(0.25)
+        # Waited for, not read after the exit: the drain thread may not have
+        # copied the door's last line yet when `wait` returns (issue #896).
+        wait_for(b"Unsupported mouse encoding")
+        assert process.wait(timeout=PROC_WAIT) == 0  # the door said why itself (#649)
         conn = wd.connect(path)
         try:
             assert wd.read_player(conn, 0).turns_used == 0
             assert all(e.controller_user_id is None for e in wd.list_exchanges(conn))
         finally:
             conn.close()
-        assert process.wait(timeout=PROC_WAIT) == 0  # the door said why itself (#649)
-        assert b"Unsupported mouse encoding" in output
         assert process.stderr.read() == b""
 
 
