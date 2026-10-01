@@ -179,3 +179,72 @@ def test_a_sync_pass_counts_the_seed_it_reached(tmp_path):
     finally:
         dialer.close()
         seed.close()
+
+
+def test_a_quarantined_node_saying_hello_banks_no_days(tmp_path):
+    """Review of #1038: policy lets a quarantined node still say hello, so its
+    hellos must not count, or it could graduate straight past probation the
+    moment its trigger clears."""
+    dialer_identity = bootstrap_node_identity("quarantined-dialer")
+    seed_identity = bootstrap_node_identity("quarantined-seed")
+    dialer_node = LinkNode(identity=dialer_identity)
+    seed_node = LinkNode(identity=seed_identity)
+    dialer = _NodeDb(tmp_path, "quarantined-dialer")
+    seed = _NodeDb(tmp_path, "quarantined-seed")
+    subject = TrustSubject.node(dialer_identity.fingerprint)
+    ensure_node_subject(seed.db, dialer_identity.fingerprint)
+    set_trust_override(seed.db, subject, TrustDimension.RESOURCE_BEHAVIOR, TrustState.QUARANTINED, reason="flood")
+
+    async def scenario():
+        server = await _run_server(
+            seed_node, lambda: _hello_for(seed_node), seed.lane, enforce_trust_policy=True,
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    dialer_node, session, f"http://127.0.0.1:{server.port}", _hello_for(dialer_node), dialer.lane,
+                )
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert _activity_days(seed.db, subject) == 0
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_days_before_a_quarantine_do_not_count_after_recovery(db):
+    """Recovery returns to probation (§12.9): the count restarts after the
+    subject's most recent quarantine or block. Earlier dates are kept."""
+    peer = "q" * 32
+    subject = TrustSubject.node(peer)
+    ensure_node_subject(db, peer, accepted_at=stamp(NOW - timedelta(days=60)))
+    configure_reporter(db, "reporter-a", "domain-a", node_vouch=True)
+    configure_reporter(db, "reporter-b", "domain-b", node_vouch=True)
+    add_vouch(db, subject, "reporter-a", 1)
+    add_vouch(db, subject, "reporter-b", 2)
+    for days_ago in (10, 9, 8):
+        record_direct_activity(db, peer, now_iso=stamp(NOW - timedelta(days=days_ago)))
+    assert get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY).state == TrustState.ESTABLISHED
+
+    override = set_trust_override(
+        db, subject, TrustDimension.RESOURCE_BEHAVIOR, TrustState.QUARANTINED, reason="flood",
+        now_iso=stamp(NOW - timedelta(days=5)),
+    )
+    from netbbs.link.trust import clear_trust_override
+
+    clear_trust_override(db, override, now_iso=stamp(NOW - timedelta(days=4, hours=12)))
+    # Still in its 24-hour recovery hold: a day now is not banked.
+    record_direct_activity(db, peer, now_iso=stamp(NOW - timedelta(days=4)))
+    assert _activity_days(db, subject) == 3, "the earlier dates are kept, only not counted"
+    recompute_all_trust_states(db, now_iso=stamp(NOW - timedelta(days=3, hours=6)))
+    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert state.state == TrustState.PROBATIONARY
+    assert state.explanation["activity_days"] == 0
+
+    for days_ago in (3, 2, 1):
+        record_direct_activity(db, peer, now_iso=stamp(NOW - timedelta(days=days_ago)))
+    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert (state.state, state.reason_code) == (TrustState.ESTABLISHED, "automatic_graduation")

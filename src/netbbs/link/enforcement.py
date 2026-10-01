@@ -113,6 +113,17 @@ def record_author_activity(
 def _record_activity_day(db: Database, subject: TrustSubject, *, direct: bool, now_iso: str) -> None:
     """One write per subject per UTC date: `record_activity` recomputes the
     subject's trust, which a busy author must not pay for on every event."""
+    # A restricted subject banks no days (review of #1038). Policy lets a
+    # quarantined node still say hello and rotate keys, so without this it
+    # could gather three days while quarantined and graduate straight to
+    # established when its trigger clears. Every hook site goes through here.
+    restricted = db.connection.execute(
+        """SELECT 1 FROM link_trust_effective_states
+           WHERE subject_id = ? AND state IN ('quarantined', 'blocked')""",
+        (subject.subject_id,),
+    ).fetchone()
+    if restricted is not None:
+        return
     moment = datetime.fromisoformat(now_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
     activity_date = moment.date().isoformat()
     row = db.connection.execute(
