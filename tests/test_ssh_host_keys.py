@@ -118,6 +118,25 @@ def test_an_existing_readable_host_key_is_restricted_and_logged(db, monkeypatch,
         assert stat.S_IMODE(ed25519_path.stat().st_mode) == 0o600
 
 
+def test_a_host_key_that_cannot_be_restricted_still_starts_the_listener(db, monkeypatch, caplog):
+    # Review of #976: a key owned by another account (the service user only
+    # in its group) or on a read-only mount cannot be chmod-ed. That was a
+    # working start before this check existed, so it must stay one.
+    monkeypatch.setattr(ssh_module, "_POSIX_MODES", True)
+    paths = ensure_host_keys(db)
+    for path in paths:
+        os.chmod(path, 0o644)
+
+    def refuse(path, mode, *args, **kwargs):
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(ssh_module.os, "chmod", refuse)
+    with caplog.at_level(logging.WARNING, logger=ssh_module._logger.name):
+        assert ensure_host_keys(db) == paths
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("could not be restricted" in message for message in messages) == 2
+
+
 @_POSIX_ONLY
 def test_an_owner_only_host_key_is_left_alone(db, caplog):
     ensure_host_keys(db)

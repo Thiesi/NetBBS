@@ -186,16 +186,28 @@ def _restrict_host_key(path: Path) -> None:
     then, kept the umask's mode. Fixed at the next start, and logged so
     the SysOp knows the key was readable and can judge whether to rotate
     it. POSIX only: Windows mode bits do not describe who can read a
-    file."""
+    file.
+
+    A key this process may read but not change (owned by another
+    account, on a read-only mount) is left as it is and logged: the
+    listener started with it before, and still does."""
     if not _POSIX_MODES:
         return
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if not mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError as exc:
         _logger.warning(
-            "SSH host key %s was readable by other accounts (mode %04o); "
-            "restricted it to its owner (0600)", path, mode,
+            "SSH host key %s is readable by other accounts and could not be "
+            "restricted to its owner: %s; make it owner-only (0600) by hand", path, exc,
         )
+        return
+    _logger.warning(
+        "SSH host key %s was readable by other accounts (mode %04o); "
+        "restricted it to its owner (0600)", path, mode,
+    )
 
 
 def ensure_host_key(db: Database) -> Path:
