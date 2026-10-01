@@ -17,10 +17,10 @@ pretending the level is the whole answer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
-from netbbs.auth.users import SYSOP_LEVEL
+from netbbs.auth.users import SYSOP_LEVEL, User
 from netbbs.boards.boards import Board, list_boards
 from netbbs.chat.channels import list_channels
 from netbbs.communities import (
@@ -252,6 +252,123 @@ def level_change(gates: list[Gate], old_level: int, new_level: int) -> LevelChan
     gained = tuple(g for g in gates if g.opens_for(new_level) and not g.opens_for(old_level))
     lost = tuple(g for g in gates if g.opens_for(old_level) and not g.opens_for(new_level))
     return LevelChange(old_level, new_level, gained, lost)
+
+
+@dataclass(frozen=True)
+class AccountChange:
+    """What moving one account to `new_level` changes for that account
+    (design doc §5.7): `gained` and `lost` count its read and write grants
+    (§5.2) and leave out what another gate kept it from anyway, and
+    `blocked` is what the new level opens that another gate still keeps it
+    out of, each with the conditions it fails."""
+
+    old_level: int
+    new_level: int
+    gained: tuple[Gate, ...]
+    lost: tuple[Gate, ...]
+    blocked: tuple[tuple[Gate, tuple[str, ...]], ...]
+
+    @property
+    def changes_nothing(self) -> bool:
+        return not (self.gained or self.lost or self.blocked)
+
+
+_GRANT_KINDS = {
+    GateKind.BOARD_READ: ("board", "READ"),
+    GateKind.BOARD_WRITE: ("board", "WRITE"),
+    GateKind.AREA_READ: ("file_area", "READ"),
+    GateKind.AREA_WRITE: ("file_area", "WRITE"),
+}
+_READ_GATE_OF = {GateKind.BOARD_WRITE: GateKind.BOARD_READ, GateKind.AREA_WRITE: GateKind.AREA_READ}
+
+
+def account_level_change(db: Database, user: User, new_level: int) -> AccountChange:
+    """What moving `user` from their level to `new_level` gains, loses and
+    still leaves blocked for them -- the preview a SysOp sees before
+    applying a level change (issue #1006)."""
+    from netbbs.attestation import meets_age, meets_name_requirement
+    from netbbs.chat.membership import has_pending_invitation, is_member
+    from netbbs.guest import guest_is_eligible
+    from netbbs.moderation.roles import BoardPermission, has_permission
+    from netbbs.mrc.settings import load_open_room_settings
+
+    gates = list_gates(db)
+    by_key = {(gate.kind, gate.object_id): gate for gate in gates}
+    resources = {
+        "board": {board.id: board for board in list_boards(db)},
+        "file_area": {area.id: area for area in list_file_areas(db)},
+    }
+    channels = {channel.id: channel for channel in list_channels(db)}
+
+    # Every check that depends on the level -- the SysOp's bypass in
+    # has_permission, whether the guest login still treats the account as
+    # the guest -- is asked of the account as it would be at that level.
+    before_account, after_account = user, replace(user, user_level=new_level)
+
+    def granted(gate: Gate, account: User) -> bool:
+        object_type, bit = _GRANT_KINDS[gate.kind]
+        return has_permission(
+            db, account, object_type=object_type, object_id=gate.object_id, permission=BoardPermission[bit]
+        )
+
+    def passes(gate: Gate, account: User) -> bool:
+        level = account.user_level
+        if gate.off is not None:
+            return False
+        if gate.kind not in _GRANT_KINDS:
+            return level >= gate.opens_at
+        if gate.kind in _READ_GATE_OF and not passes(by_key[(_READ_GATE_OF[gate.kind], gate.object_id)], account):
+            return False
+        return level >= gate.level or granted(gate, account)
+
+    def unmet(gate: Gate, account: User) -> tuple[str, ...]:
+        if gate.kind in _GRANT_KINDS:
+            resource = resources[_GRANT_KINDS[gate.kind][0]][gate.object_id]
+            fails = () if meets_age(db, account, get_effective_min_age(db, resource)) else _age_condition(
+                get_effective_min_age(db, resource)
+            )
+            if gate.kind in _READ_GATE_OF and not meets_name_requirement(
+                db, account, get_effective_name_requirement(db, resource)
+            ):
+                fails += _name_condition(get_effective_name_requirement(db, resource))
+            return fails
+        if gate.kind is GateKind.CHANNEL:
+            channel = channels[gate.object_id]
+            fails = () if meets_age(db, account, get_effective_min_age(db, channel)) else _age_condition(
+                get_effective_min_age(db, channel)
+            )
+            if not meets_name_requirement(db, account, get_effective_name_requirement(db, channel)):
+                fails += _name_condition(get_effective_name_requirement(db, channel))
+            if channel.members_only and not (
+                is_member(db, channel, account) or has_pending_invitation(db, channel, account)
+            ):
+                fails += ("members only",)
+            return fails
+        if gate.kind is GateKind.MRC_OPEN_ROOM:
+            rooms = load_open_room_settings(db)
+            fails = () if meets_age(db, account, rooms.min_age) else _age_condition(rooms.min_age)
+            if not meets_name_requirement(db, account, rooms.name_requirement):
+                fails += _name_condition(rooms.name_requirement)
+            return fails
+        if gate.kind is GateKind.MAIL and guest_is_eligible(db, account):
+            return ("the guest account",)
+        return ()
+
+    gained, lost, blocked = [], [], []
+    for gate in gates:
+        before, after = passes(gate, before_account), passes(gate, after_account)
+        if before == after:
+            continue
+        if after:
+            fails = unmet(gate, after_account)
+            if fails:
+                blocked.append((gate, fails))
+            else:
+                gained.append(gate)
+        elif not unmet(gate, before_account):
+            # Something it was kept out of anyway is not a loss.
+            lost.append(gate)
+    return AccountChange(user.user_level, new_level, tuple(gained), tuple(lost), tuple(blocked))
 
 
 def levels_in_use(db: Database, gates: list[Gate]) -> list[int]:
