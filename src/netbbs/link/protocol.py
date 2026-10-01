@@ -3363,7 +3363,7 @@ class LinkNode:
         if raw_objects:
             try:
                 last_sent = event_content_id(raw_objects[-1]["envelope"])
-            except Exception as exc:  # noqa: BLE001 -- unvalidated input; `ContentIdError` is a bare Exception
+            except Exception as exc:  # noqa: BLE001 -- unvalidated input
                 raise LinkProtocolError(f"malformed trust object in deposit: {exc}") from exc
         for raw in raw_objects:
             try:

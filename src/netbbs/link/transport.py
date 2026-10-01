@@ -3135,8 +3135,7 @@ def _raw_content_id(raw: object) -> str | None:
 
     Reached for an event refused before anything canonicalized it, so its
     envelope may hold what content IDs refuse (a float, an unsafe integer,
-    keys that normalize alike): `ContentIdError`, which is not a
-    `ValueError`. Raised here it would turn one refusal back into a failed
+    keys that normalize alike): `ContentIdError`. Raised here it would turn one refusal back into a failed
     request, the very thing issue #897 is about."""
     try:
         return event_content_id(raw["envelope"])
