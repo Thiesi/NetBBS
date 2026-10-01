@@ -432,10 +432,15 @@ def test_clear_starts_recovery_hold_and_release_returns_to_probation(db):
         db, subject, TrustDimension.IDENTITY_INTEGRITY
     ).state == TrustState.QUARANTINED
 
-    recompute_all_trust_states(db, now_iso=stamp(cleared_at + timedelta(hours=24)))
+    transitions = recompute_all_trust_states(db, now_iso=stamp(cleared_at + timedelta(hours=24)))
     released = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
     assert released.state == TrustState.PROBATIONARY
     assert released.reason_code == "automatic_recovery"
+    # Issue #802: the sync loop logs what a recompute changed, and only that.
+    assert [(t.dimension, t.previous_state, t.new_state, t.reason_code) for t in transitions] == [
+        ("identity_integrity", "quarantined", "probationary", "automatic_recovery"),
+    ]
+    assert recompute_all_trust_states(db, now_iso=stamp(cleared_at + timedelta(hours=25))) == []
 
 
 def test_fresh_evidence_restarts_recovery_hold(db):

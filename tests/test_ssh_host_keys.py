@@ -11,6 +11,9 @@ session" (CRYPT_ERROR_NOTAVAIL). An RSA key served as `rsa-sha2-256` and
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
+import stat
 
 import asyncssh
 import pytest
@@ -63,6 +66,83 @@ def test_production_rsa_keys_are_3072_bits(db, monkeypatch):
 
 def test_a_backup_carries_the_rsa_host_key(db):
     assert db.path.parent / f"{db.path.stem}_ssh_host_key_rsa" in _extra_artifact_paths(db.path)
+
+
+_POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="Windows mode bits do not say who can read a file")
+
+
+def test_new_host_keys_are_created_owner_only(db, monkeypatch):
+    # Issue #976: asyncssh's write_private_key took the umask's mode, so a
+    # host key was world-readable under umask 022. Recorded on every
+    # platform: the mode each key file is created with.
+    created: dict[str, int] = {}
+    real_open = os.open
+
+    def recording_open(path, flags, mode=0o777, *args, **kwargs):
+        if flags & os.O_CREAT:
+            created[os.path.basename(path)] = mode
+        return real_open(path, flags, mode, *args, **kwargs)
+
+    monkeypatch.setattr(ssh_module.os, "open", recording_open)
+    ensure_host_keys(db)
+    assert created == {
+        f"{db.path.stem}_ssh_host_key.tmp": 0o600,
+        f"{db.path.stem}_ssh_host_key_rsa.tmp": 0o600,
+    }
+    assert not list(db.path.parent.glob("*.tmp"))
+
+
+@_POSIX_ONLY
+def test_new_host_keys_are_mode_0600_under_a_permissive_umask(db):
+    previous = os.umask(0o022)
+    try:
+        paths = ensure_host_keys(db)
+    finally:
+        os.umask(previous)
+    assert [stat.S_IMODE(path.stat().st_mode) for path in paths] == [0o600, 0o600]
+
+
+def test_an_existing_readable_host_key_is_restricted_and_logged(db, monkeypatch, caplog):
+    # A key written before #976, or restored from a backup taken then.
+    monkeypatch.setattr(ssh_module, "_POSIX_MODES", True)
+    ed25519_path = db.path.parent / f"{db.path.stem}_ssh_host_key"
+    asyncssh.generate_private_key("ssh-ed25519").write_private_key(ed25519_path)
+    os.chmod(ed25519_path, 0o644)
+    before = ed25519_path.read_bytes()
+    with caplog.at_level(logging.WARNING, logger=ssh_module._logger.name):
+        ensure_host_keys(db)
+    assert ed25519_path.read_bytes() == before
+    assert any("readable by other accounts" in record.getMessage() and str(ed25519_path) in record.getMessage()
+               for record in caplog.records)
+    if os.name != "nt":
+        assert stat.S_IMODE(ed25519_path.stat().st_mode) == 0o600
+
+
+def test_a_host_key_that_cannot_be_restricted_still_starts_the_listener(db, monkeypatch, caplog):
+    # Review of #976: a key owned by another account (the service user only
+    # in its group) or on a read-only mount cannot be chmod-ed. That was a
+    # working start before this check existed, so it must stay one.
+    monkeypatch.setattr(ssh_module, "_POSIX_MODES", True)
+    paths = ensure_host_keys(db)
+    for path in paths:
+        os.chmod(path, 0o644)
+
+    def refuse(path, mode, *args, **kwargs):
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(ssh_module.os, "chmod", refuse)
+    with caplog.at_level(logging.WARNING, logger=ssh_module._logger.name):
+        assert ensure_host_keys(db) == paths
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("could not be restricted" in message for message in messages) == 2
+
+
+@_POSIX_ONLY
+def test_an_owner_only_host_key_is_left_alone(db, caplog):
+    ensure_host_keys(db)
+    with caplog.at_level(logging.WARNING, logger=ssh_module._logger.name):
+        ensure_host_keys(db)
+    assert not [record for record in caplog.records if "readable by other accounts" in record.getMessage()]
 
 
 async def _handshake(port: int, algorithms: list[str]) -> str:

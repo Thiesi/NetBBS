@@ -53,7 +53,6 @@ ALLOWED: dict[str, str] = {
     "fetch_trust_evidence": "#589",
     "record_activity": "#589",
     "clear_local_observation": "#589",
-    "recompute_all_trust_states": "#589",
 }
 
 

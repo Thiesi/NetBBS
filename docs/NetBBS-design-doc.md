@@ -391,6 +391,21 @@ any screen knowing about it:
   columns wide; its status line on the bottom row is cut to `terminal_width`,
   so it never writes the last cell.
 
+**Colour depth from the terminal type (issue #986).** A session is truecolor
+when the client says so through `COLORTERM` (`truecolor` or `24bit`, over
+Telnet NEW-ENVIRON or the SSH environment) and 256-colour otherwise. Classic
+terminals send no `COLORTERM`, so the terminal type also counts: a client
+whose first recognised name is `syncterm` gets truecolor
+(`terminal_detect.terminal_supports_truecolor`). CTerm, SyncTERM's emulator,
+handles SGR `38;2;R;G;B` and `48;2;R;G;B` -- the semicolon form NetBBS sends --
+through an internal palette large enough for every cell of a 132x60 screen
+(CTerm manual, `src/conio/cterm.adoc` at tag `syncterm-1.9`). An explicit
+`COLORTERM` still decides when a client sends one, and `ansi-bbs` and `ansi`
+stay at 256 colours because those names also cover clients with less. Doors,
+banners, presets and gradients all read the session's depth through
+`effective_truecolor`, so nothing per screen changes, and a caller's own
+**Profile** colour-depth choice still overrides it after sign-in.
+
 **SysOp art: storage and SAUCE (issue #929).** A banner or masthead is the
 `.ans` file on disk, exactly as uploaded or saved; there is no second copy in
 the database, so a SysOp editing the file over SFTP changes what callers see.
@@ -6564,7 +6579,10 @@ confirmed key compromise also requires SysOp review or verified root-key
 recovery; scoped resource/content restrictions may recover automatically.
 
 Effective state is a persisted projection recomputed transactionally on input
-changes and startup. For every restriction the SysOp can inspect the subject,
+changes, at startup, and on every Link sync pass. The last is for changes due to
+time alone (a recovery hold's release, an override's or a signal's expiry,
+probation's age requirement), which have no input change of their own; without
+it a running node applied them only at its next restart (issue #802). For every restriction the SysOp can inspect the subject,
 dimension, effects, rule/threshold, evidence, counted domains/weights, times,
 overrides, audit history, and requirements for release. Caller-facing behavior
 states that local policy restricted content/delivery without claiming a
@@ -6805,7 +6823,7 @@ with no single existing tool that treats them as one recoverable set:
 | Database | `db_path` | every domain write |
 | Content blobs | `db_path.parent / f"{db_path.stem}_files"` (git-style `xx/xxxx...` sharding; excludes its own `.incoming/` staging subdirectory, which is always crash-orphan garbage — see `purge_incoming_staging`) | `netbbs.files.storage` |
 | Node identity | `identity_dir` (`root.identity`, `signing.identity`, `transport.identity`, `transitions.json`) | `netbbs.link.node_identity` |
-| SSH host key | `db_path.parent / f"{db_path.stem}_ssh_host_key"` | `netbbs.net.ssh.ensure_host_key`, once, at first startup |
+| SSH host key | `db_path.parent / f"{db_path.stem}_ssh_host_key"` | `netbbs.net.ssh.ensure_host_key`, once, at first startup. Both host keys are created owner-only (0600); a start that finds one readable by group or others restricts it to 0600 and logs a warning (issue #976) |
 | SSH RSA host key | `db_path.parent / f"{db_path.stem}_ssh_host_key_rsa"` | `netbbs.net.ssh.ensure_rsa_host_key`, once, at the first startup that lacks it (issue #964). 3072 bits, offered as `rsa-sha2-512` and `rsa-sha2-256` only, never SHA-1 `ssh-rsa`, after Ed25519. It exists for clients without Ed25519 host keys, such as SyncTERM's Cryptlib-based builds |
 | Managed-DNS credential | `db_path.parent / f"{db_path.stem}_managed_dns_credential"` | `netbbs.managed_dns.credential`, once, at registration (§16 Decision 7, issue #201) |
 | Managed-DNS rename credentials | Previous credential plus the temporary credential-transition journal beside `db_path`; restore preserves the presence and absence of the primary, previous, and journal artifacts | `netbbs.managed_dns.credential`, during a managed-name transition |

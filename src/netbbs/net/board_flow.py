@@ -145,6 +145,7 @@ from netbbs.rendering import (
     screen_title,
 )
 from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.charset import art_glyphs_to_cp437_controls
 from netbbs.rendering.detail import Section, Styled
 from netbbs.rendering.post_body import (
     art_body_from_editor,
@@ -2307,7 +2308,8 @@ def _art_canvas(session: Session, drawing: str | None) -> tuple[int, int] | None
     if drawing:
         try:
             # The canvas holds CP437; anything else would save as "?".
-            strip_ansi(drawing).encode("cp437")
+            # Pictographs (☺ ♥ ►) are CP437 too, as their control bytes.
+            art_glyphs_to_cp437_controls(strip_ansi(drawing)).encode("cp437")
         except UnicodeEncodeError:
             announce(
                 session,

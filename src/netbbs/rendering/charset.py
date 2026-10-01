@@ -95,6 +95,12 @@ _FOLD: dict[str, str] = {
     "α": "a", "Γ": "G", "π": "p", "Σ": "E", "σ": "s", "τ": "t", "Φ": "O", "Θ": "O",
     "Ω": "O", "δ": "d", "∞": "8", "φ": "o", "ε": "e", "∩": "n", "≡": "=", "≥": ">",
     "≤": "<", "⌠": "|", "⌡": "|", "≈": "~", "∙": ".", "√": "v",
+    # The pictographs of CP437's control range (`ART_PICTOGRAPHS`), for art
+    # shown on an ASCII terminal and for the same characters in ordinary
+    # text, which never reach a terminal as control bytes.
+    "☺": "@", "☻": "@", "♥": "*", "♦": "*", "♣": "*", "♠": "*", "◘": "#", "◙": "#",
+    "♂": "o", "♀": "o", "♪": "~", "♫": "~", "☼": "*", "►": ">", "◄": "<", "↕": "|",
+    "‼": "!", "▬": "-", "↨": "|", "∟": "L", "↔": "-", "⌂": "^",
 }
 
 
@@ -261,3 +267,35 @@ def ellipsis_for(session: object, *, unicode_style: bool = True) -> str:
     if not unicode_style:
         return "..."
     return ellipsis(getattr(session, "output_charset", UTF8))
+
+
+# CP437's control range drawn as pictographs, as ANSI art uses it (issue
+# #929). Only the art path gives these bytes glyphs (design doc §3.2,
+# "SysOp art: storage and SAUCE"): BEL, BS, TAB, LF, CR, EOF and ESC keep
+# their control meaning because art needs them as controls, and everywhere
+# else the whole range stays control characters.
+ART_PICTOGRAPHS: dict[int, str] = {
+    0x01: "☺", 0x02: "☻", 0x03: "♥", 0x04: "♦", 0x05: "♣", 0x06: "♠",
+    0x0B: "♂", 0x0C: "♀", 0x0E: "♫", 0x0F: "☼", 0x10: "►", 0x11: "◄",
+    0x12: "↕", 0x13: "‼", 0x14: "¶", 0x15: "§", 0x16: "▬", 0x17: "↨",
+    0x18: "↑", 0x19: "↓", 0x1C: "∟", 0x1D: "↔", 0x1E: "▲", 0x1F: "▼",
+    0x7F: "⌂",
+}
+_ART_DECODE = {code: glyph for code, glyph in ART_PICTOGRAPHS.items()}
+_ART_ENCODE = {ord(glyph): chr(code) for code, glyph in ART_PICTOGRAPHS.items()}
+
+
+def art_pictographs_to_glyphs(text: str) -> str:
+    """CP437-decoded art with its control-range pictograph bytes turned
+    into the glyphs they draw. Only for text decoded from an art file as
+    CP437, where those bytes are pictures, not commands."""
+    return text.translate(_ART_DECODE)
+
+
+def art_glyphs_to_cp437_controls(text: str) -> str:
+    """Art bound for a CP437 terminal with its pictographs turned back into
+    the bytes that draw them there (`ART_PICTOGRAPHS`). `map_text` passes
+    control characters through, so the byte reaches the terminal as drawn.
+    Only the art path may do this; in ordinary text these characters get
+    printable substitutes instead."""
+    return text.translate(_ART_ENCODE)
