@@ -464,8 +464,10 @@ region. No token is needed: every bracketed key drawn in the art -- `[B]oards`,
 `Moder[a]tion` -- is an item, and the item is the run of text around the key,
 bounded by two or more spaces, the same rule the browser uses to turn a click
 into a key. Box-drawing and block characters also end an item, so a frame
-drawn one space from it is not part of it; a run holding two keys counts as its
-first, and the console's check says so. An item drawn inside a slot is not an
+drawn one space from it is not part of it. A run holding two keys, such as
+`[B]oards [E]-mail` with one space, is one item holding both: both count as
+drawn, it is blanked only for a caller who can use neither, and the console's
+check suggests two spaces between them. An item drawn inside a slot is not an
 item, since the slot is drawn over it. For each caller, a drawn item whose key
 is a main-menu key the caller cannot use is blanked: its cells are repainted as
 spaces in the background each cell shows, so the frame and fill around it stay

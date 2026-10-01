@@ -542,8 +542,14 @@ def plan_slot_main_menu(
     if rows_needed >= session.terminal_height:
         return SlotMenuPlan(None, f"the art needs {rows_needed + 1} rows, the terminal has {session.terminal_height}")
     usable = {menu_label_key(label) for label in labels}
-    drawn = {item.key for item in art.items}
-    hidden = [item for item in art.items if item.key in MAIN_MENU_KEYS and item.key not in usable]
+    drawn = {key for item in art.items for key in item.keys}
+    # A run holding several keys can't be blanked in part: it is blanked
+    # only when none of its menu keys is one this caller can use.
+    hidden = [
+        item for item in art.items
+        if any(key in MAIN_MENU_KEYS for key in item.keys)
+        and not any(key in usable for key in item.keys)
+    ]
     overflow = [label for label in labels if menu_label_key(label) not in drawn]
     overflow_plain = tuple(strip_ansi(label) for label in overflow)
     if art.menu is None:
@@ -564,7 +570,8 @@ def plan_slot_main_menu(
     text = render_slot_art(art, fields=fields, menu_rows=menu_rows, ellipsis=ellipsis_for(session), hidden=hidden)
     return SlotMenuPlan(
         text, "drawn as slot art", prompt_at_slot,
-        hidden_keys=tuple(dict.fromkeys(item.key for item in hidden)), overflow=overflow_plain,
+        hidden_keys=tuple(dict.fromkeys(key for item in hidden for key in item.keys if key in MAIN_MENU_KEYS)),
+        overflow=overflow_plain,
     )
 
 

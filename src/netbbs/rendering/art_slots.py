@@ -100,13 +100,20 @@ class DrawnItem:
     """A menu item the SysOp drew into the art (#929, step 5): `key` is
     its bracketed key, lowercased as the menu reads keys; `row`/`col`/
     `width` are the cells it covers on its one row, and `text` what it
-    says, for the console's check."""
+    says, for the console's check. `keys` holds every key drawn in the
+    run -- normally just `key`, but `[B]oards [E]-mail` with one space is
+    one run holding two, and each counts as drawn."""
 
     key: str
     row: int
     col: int
     width: int
     text: str
+    keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.keys:
+            object.__setattr__(self, "keys", (self.key,))
 
 
 @dataclass(frozen=True)
@@ -212,10 +219,12 @@ def _find_drawn_items(
             if keys:
                 if len(keys) > 1:
                     notes.append(
-                        f"row {row + 1}: {line[start:end].strip()!r} holds {len(keys)} keys and counts as "
-                        f"[{keys[0].group(1)}] only; put two spaces between items"
+                        f"row {row + 1}: {line[start:end].strip()!r} holds {len(keys)} keys, so it is blanked "
+                        "only for a caller who can use none of them; put two spaces between items"
                     )
-                item = _drawn_item(line, row, start, end, keys[0].start(), keys[0].group(1))
+                item = _drawn_item(
+                    line, row, start, end, keys[0].start(), keys[-1].start(), tuple(k.group(1) for k in keys)
+                )
                 if not any(_inside(item, slot) for slot in slots):
                     items.append(item)
             if gap is None:
@@ -230,18 +239,21 @@ def _is_frame(char: str) -> bool:
     return "\u2500" <= char <= "\u259f"
 
 
-def _drawn_item(line: str, row: int, start: int, end: int, at: int, key: str) -> DrawnItem:
-    left = at
+def _drawn_item(
+    line: str, row: int, start: int, end: int, first: int, last: int, keys: tuple[str, ...]
+) -> DrawnItem:
+    left = first
     while left > start and not _is_frame(line[left - 1]):
         left -= 1
-    right = at + 3
+    right = last + 3
     while right < end and not _is_frame(line[right]):
         right += 1
-    while left < at and line[left] == " ":
+    while left < first and line[left] == " ":
         left += 1
-    while right > at + 3 and line[right - 1] == " ":
+    while right > last + 3 and line[right - 1] == " ":
         right -= 1
-    return DrawnItem(key.lower(), row, left, right - left, line[left:right].replace("\0", ""))
+    lowered = tuple(dict.fromkeys(key.lower() for key in keys))
+    return DrawnItem(lowered[0], row, left, right - left, line[left:right].replace("\0", ""), lowered)
 
 
 def _inside(item: DrawnItem, slot: Slot) -> bool:

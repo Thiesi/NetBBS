@@ -55,9 +55,9 @@ def test_a_frame_one_space_away_is_not_part_of_the_item():
     assert item.col == 2
 
 
-def test_two_keys_in_one_run_count_as_the_first_and_are_noted():
+def test_two_keys_in_one_run_are_one_item_holding_both_and_are_noted():
     art = parse_slot_art("[B]oards [E]-mail\r\n{menu 10x1}")
-    assert [i.key for i in art.items] == ["b"]
+    assert [(i.key, i.keys, i.text) for i in art.items] == [("b", ("b", "e"), "[B]oards [E]-mail")]
     assert any("holds 2 keys" in note for note in art.notes)
 
 
@@ -182,6 +182,29 @@ def test_undrawn_items_go_into_the_menu_slot(tmp_path):
 def test_art_without_a_menu_slot_that_misses_an_item_falls_back(tmp_path):
     db, user = _setup(tmp_path, b"  [M]essage boards  [L]ogoff\r\n{prompt}")
     assert "Main menu" in _draw(db, user)
+    db.close()
+
+
+def test_a_second_key_in_a_run_is_not_repeated_in_the_menu_slot(tmp_path):
+    db, user = _setup(tmp_path, b"  [M]essage boards [E]-mail  [L]ogoff\r\n{menu 70x4}\r\n\r\n\r\n\r\n{prompt}")
+    screen = _screen(_draw(db, user))
+    assert "[M]essage boards [E]-mail" in screen[0]
+    region = "\n".join(screen[1:5])
+    assert "[E]-mail" not in region and "[C]hat" in region
+    db.close()
+
+
+def test_a_run_is_kept_while_the_caller_can_use_any_of_its_keys(tmp_path):
+    # [S]ysOp is a SysOp's, [L]ogoff everyone's: one run, so it stays.
+    db, user = _setup(tmp_path, b"  [S]ysOp [L]ogoff\r\n{menu 74x6}")
+    assert "[S]ysOp [L]ogoff" in _screen(_draw(db, user))[0]
+    db.close()
+
+
+def test_a_run_whose_keys_the_caller_cannot_use_is_blanked(tmp_path):
+    db, user = _setup(tmp_path, b"  [S]ysOp [V]erify  [L]ogoff\r\n{menu 74x6}")
+    row = _screen(_draw(db, user))[0]
+    assert "[S]ysOp" not in row and "[V]erify" not in row and "[L]ogoff" in row
     db.close()
 
 
