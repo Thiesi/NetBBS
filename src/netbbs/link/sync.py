@@ -1583,8 +1583,8 @@ def _parse_trust_page(
             content_id = event_content_id(envelope)
         except Exception as exc:  # noqa: BLE001 -- unvalidated peer input; see below
             # `event_content_id` canonicalizes input nothing has validated yet
-            # and raises `ContentIdError`, which is a bare `Exception`, for a
-            # float or an unsafe integer. Without a cursor for this object
+            # and raises `ContentIdError` (a `ValueError`) for a float or an
+            # unsafe integer; anything else unexpected is refused the same way. Without a cursor for this object
             # nothing after it can be settled either, so the page is refused
             # as malformed rather than allowed to escape the pull's handler.
             raise TrustWireError(f"trust response contains a malformed entry: {exc}") from exc
