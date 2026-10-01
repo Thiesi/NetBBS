@@ -1077,6 +1077,18 @@ use a second address, or a protocol demultiplexer in front of both.
 Use **Link status** for peers and relay state, **Outbox** for pending or failed
 work, and **Diagnostics / Follow log** for explanations.
 
+Some things Link cannot use or deliver are put off for an hour rather than
+retried every pass: content held back because its sender is on probation here
+or not yet known, your node's content a peer refused because its author is on
+probation there, a node no carrier could introduce, and trust objects a relay
+refused. **Link status → Waiting** lists each with when it is next tried; the
+section is absent when nothing waits. These are waits, not failures. Once you
+have fixed the cause -- established a node, asked a peer's SysOp to establish
+yours, named a reporter -- press **[R]etry now**: it ends every wait and runs a
+sync pass at once. A trust decision in **Settings → Policy trust** already
+retries what it concerns and starts a pass by itself, and a change made with
+`python -m netbbs.admin` is picked up by the running node on its next pass.
+
 Every node starts on probation with every other, in both directions. A peer
 on probation here sends nothing this node accepts, and this node sends it
 nothing of yours; your node is on probation at each peer the same way until

@@ -57,6 +57,7 @@ this same in-memory state.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -1572,6 +1573,33 @@ class DeferredEvents:
             if waiting_for == fingerprint or waiting_for is None or held_from == fingerprint:
                 del self.entries[content_id]
 
+    def release_all(self) -> int:
+        """Retry everything on the next pass (issue #700: the SysOp's
+        `[R]etry now`, or a trust change made where the running node could
+        not be told which node it concerned). Returns how many were waiting."""
+        count = len(self.entries)
+        self.entries.clear()
+        return count
+
+    def waiting(self) -> dict[tuple[str, str | None], tuple[int, float]]:
+        """For Link status (issue #700): how many events are set aside and
+        when the soonest is next tried, keyed by why -- `("held", node)` for
+        content held back by that node's trust state here, `("unknown",
+        node)` for content signed by a node this one has yet to learn of, and
+        `("waiting", None)` for content waiting on something else, usually an
+        earlier event."""
+        result: dict[tuple[str, str | None], tuple[int, float]] = {}
+        for _kind, _resource, waiting_for, retry_at, held_from, _name in self.entries.values():
+            if held_from is not None:
+                key = ("held", held_from)
+            elif waiting_for is not None:
+                key = ("unknown", waiting_for)
+            else:
+                key = ("waiting", None)
+            count, soonest = result.get(key, (0, retry_at))
+            result[key] = (count + 1, min(soonest, retry_at))
+        return result
+
     def expire(self, now: float) -> None:
         for content_id, (_kind, _resource, _waiting, retry_at, _held, _name) in list(self.entries.items()):
             if retry_at <= now:
@@ -1598,6 +1626,21 @@ class DeferredEvents:
             if name is not None and name not in names.setdefault(kind, []):
                 names[kind].append(name)
         return HeldBack(count, {kind: tuple(sorted(found, key=str.casefold)) for kind, found in names.items()})
+
+
+#: In place of a carrier's fingerprint in `LinkNode.unanswered_identities`: the
+#: hourly refresh of a reporter known only by introduction (issue #627; named
+#: here for Link status, issue #700).
+REPORTER_REFRESH = "reporter-refresh"
+
+
+@dataclass(frozen=True)
+class ReleasedWaits:
+    """What `LinkNode.release_waits` let go of, for the SysOp's result line."""
+
+    set_aside: int
+    refused_at_peers: int
+    introductions: int
 
 
 @dataclass(frozen=True)
@@ -2158,6 +2201,33 @@ class LinkNode:
     # Issue #844: per peer this node dials, what it last learned about that
     # peer taking this node's own content. Memory only; see `PeerExchange`.
     peer_exchange: dict[str, PeerExchange] = field(default_factory=dict)
+    # Issue #700: set to run a sync pass now rather than at the end of the
+    # interval -- the SysOp's `[R]etry now`, or a trust decision whose effect
+    # they are waiting to see. `run_link_sync` waits on it beside its stop
+    # event and clears it when it wakes. An `asyncio.Event` binds no loop
+    # until it is first awaited, so building one here is safe.
+    sync_wake: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+
+    def wake_sync(self) -> None:
+        """Ask the sync loop for a pass now (issue #700)."""
+        self.sync_wake.set()
+
+    def release_waits(self) -> "ReleasedWaits":
+        """Forget every hour-long Link wait held in memory (issue #700), so the
+        next pass tries again: events set aside, own events a peer refused one
+        by one, and introductions a carrier could not answer (the hourly
+        reporter refresh included). The trust-deposit backoff lives in the
+        database; see `netbbs.link.trust_carriage.release_trust_deposit_backoffs`."""
+        set_aside_at_peers = sum(len(exchange.set_aside) for exchange in self.peer_exchange.values())
+        for exchange in self.peer_exchange.values():
+            exchange.set_aside.clear()
+        introductions = len(self.unanswered_identities)
+        self.unanswered_identities.clear()
+        return ReleasedWaits(
+            set_aside=self.deferred_events.release_all(),
+            refused_at_peers=set_aside_at_peers,
+            introductions=introductions,
+        )
 
     @property
     def peers(self) -> dict[str, "PeerRecord"]:
@@ -2743,14 +2813,26 @@ class LinkNode:
                 if self._refresh_known_peer_descriptor(candidate_fingerprint, descriptor):
                     recorded.append(candidate_fingerprint)
                 continue
+            if candidate_fingerprint in self.introduced:
+                # Issue #700: the same for a node known only by introduction,
+                # whose signing key is on file just as a peer's is. Its record
+                # was otherwise refreshed at most hourly, so a reporter that
+                # had just gained a relay stayed "cannot be dialed" for up to
+                # an hour while the answer sat among the candidates. Recorded
+                # as a candidate as well, below, as before.
+                if self._refresh_known_peer_descriptor(candidate_fingerprint, descriptor, introduced=True):
+                    recorded.append(candidate_fingerprint)
             if self.peer_directory.record_candidate(
                 candidate_fingerprint, descriptor, max_candidates=_MAX_CANDIDATE_DESCRIPTORS
             ):
                 recorded.append(candidate_fingerprint)
         return recorded
 
-    def _refresh_known_peer_descriptor(self, fingerprint: str, descriptor: EndpointDescriptor) -> bool:
-        peer = self.peers[fingerprint]
+    def _refresh_known_peer_descriptor(
+        self, fingerprint: str, descriptor: EndpointDescriptor, *, introduced: bool = False
+    ) -> bool:
+        records = self.introduced if introduced else self.peers
+        peer = records[fingerprint]
         if str(descriptor.payload.get("created_at", "")) <= str(peer.descriptor.payload.get("created_at", "")):
             return False
         try:
@@ -2766,7 +2848,7 @@ class LinkNode:
         from netbbs.link.node_profiles import profile_claims_are_canonical
         if not profile_claims_are_canonical(descriptor.payload):
             return False
-        self.peers[fingerprint] = PeerRecord(
+        records[fingerprint] = PeerRecord(
             fingerprint=peer.fingerprint, root_public_key=peer.root_public_key,
             transitions=peer.transitions, descriptor=descriptor,
         )

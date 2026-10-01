@@ -5284,9 +5284,37 @@ requests as seen, so it is neither downloaded again nor allowed to crowd the
 page. It is declared under its resource whether or not this node
 carries that resource: a board whose origin is on probation here is not
 carried *because* its genesis was set aside. It is asked for again when the
-identity it waited for becomes known, when the SysOp overrides or clears an
-override for that node in the trust console, or after an hour; a change that arrives
-any other way, a vouch or a trust anchor, waits out the hour. At most 10,000
+identity it waited for becomes known, or after an hour, or when trust changes
+(issue #700):
+
+- the SysOp overrides or clears an override for that node, which also starts a
+  sync pass at once;
+- a trust anchor, domain, reporter or sole-authority exception is changed in the
+  trust console, which releases everything set aside and starts a pass;
+- the node, or a user of it, graduates or recovers on its own, found by the
+  re-evaluation every pass runs (§12);
+- any of these is done where the running node cannot be told, with
+  `python -m netbbs.admin`. The sync loop compares a generation read from the
+  trust tables those writes already leave rows in (the config and policy audits,
+  the overrides), once a pass, and releases everything set aside when it moves.
+  No marker of its own is written.
+
+**Every hour-long wait is shown and can be ended (issue #700).** Besides events
+set aside here, a node also waits an hour before offering again an own event a
+peer refused one by one (#897), asking a carrier again about an identity it
+could not introduce (and refreshing a reporter known only by introduction),
+and depositing trust objects again at a relay that refused them (#627). Each
+hour keeps an unfixable refusal from costing a download or a request every pass;
+none of them told a SysOp anything, so an operator who had just fixed the cause
+could not see whether they had. Link status lists them under **Waiting**, with
+when each is next tried, and **[R]etry now** ends them all and wakes the sync
+loop for a pass at once: `LinkNode.sync_wake`, an event the loop's sleep waits
+on beside its stop event. The deposit backoff is in the database, so retrying
+moves the refusal's time back past the backoff and keeps its text for the vouch
+screen. A newer descriptor for a node known only by introduction, arriving in a
+peer list and verifying against its signing key on file, replaces the
+introduced copy as a peer's would (issue #270), so a reporter that has just gained
+a relay is reachable without waiting for the hourly refresh. At most 10,000
 events are set aside, a third of what an inventory request can declare. Past
 that the oldest are offered again and can crowd a page, and the remedy is the
 SysOp's: establish or block the nodes concerned. Declaring it is not a claim to hold it, and costs nothing if read as

@@ -195,6 +195,7 @@ from netbbs.link.store import (
     inventory_wanted_ids,
     save_candidate_descriptor,
     save_event,
+    save_introduced_identity,
     save_peer,
     save_relay_consent,
 )
@@ -3662,14 +3663,21 @@ async def request_peer_list(
         # local friendly/DNS configuration to change. Refresh those claims
         # immediately before save_peer evaluates secondhand descriptors.
         await refresh_identity_claims(lane)
-    for candidate_fingerprint in recorded:
+    for candidate_fingerprint in dict.fromkeys(recorded):
         if candidate_fingerprint in node.peers:
             # Issue #270: a known peer's descriptor refreshed secondhand
             # (verified against its own signing key) -- persist the peer
             # record itself so the refresh survives a restart. Hearing about
             # a peer is not hearing from it: its last contact stays (#766).
             await lane.run(save_peer, node.peers[candidate_fingerprint], direct_contact=False)
-        else:
+            continue
+        if candidate_fingerprint in node.introduced:
+            # Issue #700: an introduced identity's record, refreshed the same
+            # way and verified against its own signing key.
+            await lane.run(
+                save_introduced_identity, node.introduced[candidate_fingerprint], introduced_by=peer_fingerprint
+            )
+        if candidate_fingerprint in node.candidate_descriptors:
             await lane.run(
                 save_candidate_descriptor, candidate_fingerprint, node.candidate_descriptors[candidate_fingerprint]
             )
