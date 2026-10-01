@@ -43,7 +43,7 @@ from netbbs.rendering import (
     HEADER_COLOR,
     RESET,
     colored,
-    decode_banner_bytes,
+    decode_banner_bytes_fitting,
     gradient_color,
     gradient_text,
     nearest_256,
@@ -273,7 +273,9 @@ def pre_login_unicode_style(session: object) -> bool:
     return getattr(session, "output_charset", UTF8) != ASCII
 
 
-def load_welcome_banner(db: Database, *, truecolor: bool = False, unicode_style: bool = True) -> str:
+def load_welcome_banner(
+    db: Database, *, truecolor: bool = False, unicode_style: bool = True, max_width: int | None = None
+) -> str:
     """
     Resolve the banner to show at login: the SysOp's custom file if
     enabled and usable, the default banner otherwise. Synchronous
@@ -331,4 +333,10 @@ def load_welcome_banner(db: Database, *, truecolor: bool = False, unicode_style:
 
     # decode_ansi_bytes cannot raise (see its own docstring) -- no
     # decode-failure fallback is needed here, by construction.
-    return decode_banner_bytes(data) + RESET
+    text = decode_banner_bytes_fitting(data, max_width)
+    if text is None:
+        # Its SAUCE record says it was drawn wider than this caller's
+        # terminal (issue #929): wrapping every row would turn it to noise.
+        _logger.info("welcome banner at %s is wider than %d columns -- using default", path, max_width)
+        return default()
+    return text + RESET

@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.config import get_config, set_config
-from netbbs.rendering import RESET, decode_banner_bytes
+from netbbs.rendering import RESET, decode_banner_bytes_fitting
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ def new_account_banner_before_status(db: Database) -> NewAccountBannerBeforeStat
     )
 
 
-def load_new_account_banner_before(db: Database) -> str:
+def load_new_account_banner_before(db: Database, *, max_width: int | None = None) -> str:
     """Resolves the banner to show once, before self-service registration
     begins: the SysOp's custom file if enabled and usable, or `""` (no
     banner -- today's signup flow, unchanged) otherwise. Synchronous,
@@ -120,4 +120,10 @@ def load_new_account_banner_before(db: Database) -> str:
     # the end matters here specifically, unlike a truly final screen --
     # the real "Create account" prompt follows immediately and must
     # never inherit color state left open by the banner's own art.
-    return decode_banner_bytes(data) + RESET
+    text = decode_banner_bytes_fitting(data, max_width)
+    if text is None:
+        # Its SAUCE record says it was drawn wider than this caller's
+        # terminal (issue #929): wrapping every row would turn it to noise.
+        _logger.info("new account banner before at %s is wider than %d columns -- showing nothing", path, max_width)
+        return ""
+    return text + RESET
