@@ -10488,13 +10488,31 @@ async def _link_status_sections(
     if identity_notices:
         security_count = sum(item.severity == "security" for item in identity_notices)
         tone = ALERT_COLOR if security_count else WARNING_COLOR
+        # Issue #1043: when each change was seen, so a SysOp can tell a change
+        # from this morning from one weeks old. Newest first within each
+        # severity (`list_identity_observations` puts cryptographic changes
+        # first); the time is the one stored when the change was observed.
+        display_format, display_timezone = await lane.run(resolve_display_preferences)
         sections.append(Section("Identity changes", [
             Note(
                 f"Identity changes observed: {len(identity_notices)}"
                 + (f" ({security_count} cryptographic)" if security_count else ""),
                 color=tone,
             ),
-            *(Note(_identity_notice_message(notice), color=VALUE_COLOR) for notice in identity_notices[:5]),
+            Table(
+                ("When", "Change"),
+                [
+                    [
+                        (format_for_display(
+                            notice.observed_at, override_format=display_format,
+                            override_timezone=display_timezone,
+                        ), DATE_COLOR),
+                        (_identity_notice_message(notice), VALUE_COLOR),
+                    ]
+                    for notice in identity_notices[:5]
+                ],
+                flex=1,
+            ),
         ]))
 
     peers = [
