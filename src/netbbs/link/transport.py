@@ -72,6 +72,7 @@ from netbbs.link.channels import (
     materialize_carried_channel,
     materialize_carried_channel_message,
 )
+from netbbs.boards.content_id import ContentIdError
 from netbbs.link.events import (
     event_content_id,
     BOARD_CLOSURE_OBJECT_TYPE,
@@ -3003,10 +3004,16 @@ async def _read_bounded(response, limit: int, *, label: str = "response body") -
 
 
 def _raw_content_id(raw: object) -> str | None:
-    """A pushed event's content ID, or None for one too malformed to have one."""
+    """A pushed event's content ID, or None for one too malformed to have one.
+
+    Reached for an event refused before anything canonicalized it, so its
+    envelope may hold what content IDs refuse (a float, an unsafe integer,
+    keys that normalize alike): `ContentIdError`, which is not a
+    `ValueError`. Raised here it would turn one refusal back into a failed
+    request, the very thing issue #897 is about."""
     try:
         return event_content_id(raw["envelope"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, ContentIdError):
         return None
 
 

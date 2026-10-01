@@ -693,9 +693,13 @@ async def _push_own_events(
             start = 0
         selected = resource_events[start:]
     else:
-        # What the peer no longer asks for, it took or no longer carries.
+        # What the peer no longer asks for, it took or no longer carries. Only
+        # an event this request declared says so: past the declaration budget
+        # the inventory is paged, and an event on another page is simply not
+        # in this `wanted` (the same guard as `holds` below).
         wanted_ids = set(wanted)
-        for content_id in [cid for cid in exchange.set_aside if cid not in wanted_ids]:
+        for content_id in [cid for cid in exchange.set_aside
+                           if cid not in wanted_ids and cid in declared]:
             del exchange.set_aside[content_id]
         by_content_id = {event.content_id: event for event in resource_events}
         selected = [by_content_id[cid] for cid in wanted if cid in by_content_id]

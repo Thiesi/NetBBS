@@ -944,6 +944,23 @@ def test_one_refused_event_does_not_refuse_the_rest_of_a_push(tmp_path):
                 assert bob.db.connection.execute(
                     "SELECT 1 FROM link_events WHERE content_id = ?", (genesis.content_id,)
                 ).fetchone() is not None
+                # A refused event too malformed to have a content ID (a
+                # float, which content IDs refuse) is refused, not a 500 that
+                # loses the rest of the request (review of #998).
+                bad_chat = chat.to_dict()
+                bad_chat["envelope"] = {**bad_chat["envelope"],
+                                        "payload": {**bad_chat["envelope"]["payload"], "weight": 1.5}}
+                second = build_board_genesis(
+                    signing_identity=alice_identity.signing_key,
+                    origin_fingerprint=alice_identity.fingerprint,
+                    board_id="partial-board-2", name="Partial 2", created_at="2026-08-14T12:02:00+00:00",
+                )
+                url = f"{base_url}{LINK_PATH_PREFIX}/events/{alice_identity.fingerprint}"
+                async with session.post(url, json=[bad_chat, second.to_dict()]) as response:
+                    assert response.status == 200, await response.text()
+                    body = await response.json()
+                assert body["accepted"] == [second.content_id]
+                assert "refused" not in body, "an event with no content ID cannot be named"
                 # A request with nothing acceptable left is still refused
                 # outright -- a pushed letter keeps its 403 -- and names it.
                 with pytest.raises(LinkPolicyRefused) as refusal:

@@ -1673,10 +1673,10 @@ def test_events_a_peer_refused_one_by_one_are_set_aside_then_offered_again(tmp_p
 
     monkeypatch.setattr(sync_module, "push_events_partial", fake_push)
 
-    def push(wanted):
+    def push(wanted, declared=frozenset({"chat-1", "post-2", "post-3"})):
         asyncio.run(sync_module._push_own_events(
             node, None, "http://peer", node_db.lane, wanted=wanted,
-            peer_fingerprint="peer", fallback_offsets={},
+            peer_fingerprint="peer", fallback_offsets={}, declared=declared,
         ))
 
     def warnings():
@@ -1705,7 +1705,12 @@ def test_events_a_peer_refused_one_by_one_are_set_aside_then_offered_again(tmp_p
             assert exchange.set_aside["chat-1"][1] > clock["now"]
             assert len(warnings()) == 1
 
-            # Once the peer no longer asks for it, it is forgotten.
+            # A paged inventory that did not declare it this pass says
+            # nothing about it: it stays set aside.
+            push([], declared=frozenset({"post-2"}))
+            assert set(exchange.set_aside) == {"chat-1"}
+
+            # Once the peer, asked about it, no longer wants it, it is forgotten.
             push([])
             assert exchange.set_aside == {}
     finally:
