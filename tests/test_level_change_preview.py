@@ -129,6 +129,37 @@ def test_what_was_kept_out_anyway_is_not_a_loss(db, sysop):
     assert account_level_change(db, minor, 0).changes_nothing
 
 
+def test_a_demoted_sysop_loses_the_boards_above_the_new_level(db, sysop):
+    """A SysOp passes every grant check through has_permission's SysOp
+    bypass. The preview asks it of the account at the new level, or a
+    demotion would seem to keep every board (review of PR #1017)."""
+    create_board(db, "staff room", min_read_level=100, creator=sysop)
+    second = create_user(db, "second", password="hunter2", user_level=SYSOP_LEVEL)
+
+    lost = _names(account_level_change(db, second, 10).lost)
+
+    assert {("board_read", "staff room"), ("board_write", "staff room"), ("sysop", "SysOp console")} <= lost
+
+
+def test_the_guest_account_promoted_to_sysop_gains_mail(db, sysop):
+    """The guest login stops treating an account as the guest at 255, so
+    mail opens for it there (review of PR #1017)."""
+    from netbbs.config import set_mail_min_level
+    from netbbs.guest import set_guest_user
+
+    guest = create_user(db, "guest", password="hunter2")
+    set_guest_user(db, guest)
+    set_mail_min_level(db, 10)
+
+    change = account_level_change(db, guest, SYSOP_LEVEL)
+
+    assert ("mail", "Mail") in _names(change.gained)
+    assert all(gate.name != "Mail" for gate, _ in change.blocked)
+    assert [fails for gate, fails in account_level_change(db, guest, 10).blocked if gate.name == "Mail"] == [
+        ("the guest account",)
+    ]
+
+
 def test_promotion_to_sysop_gains_the_console(db, sysop):
     alice = create_user(db, "alice", password="hunter2")
 
