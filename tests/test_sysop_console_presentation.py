@@ -106,6 +106,49 @@ def test_a_paged_panel_still_fits_a_narrow_terminal(node, name):
     assert all(display_width(row) <= 40 for row in rows), "\n".join(rows)
 
 
+_BANNER_SCREENS = sorted(name for name in _PANELS if "banner" in name or "masthead" in name)
+
+
+@pytest.mark.parametrize("width", [40, 64, 71])
+@pytest.mark.parametrize("name", _BANNER_SCREENS)
+def test_a_banner_screen_fits_a_terminal_narrower_than_72_columns(node, name, width):
+    """Issue #662: below 72 columns `menu_grid` gives each entry two rows, and
+    these screens budgeted their described menu against the whole terminal,
+    so the welcome banner (31 rows at 64x24) and the main-menu masthead (34)
+    lost their title before Choice: appeared. They fit their menu under what
+    is on screen now. The other screens still taller than 24 rows there are a
+    known limit (design doc 3.4)."""
+    rows, _styled = _screen(node, _PANELS[name], width=width, height=24)
+    assert len(rows) <= 24, f"{name} at {width}x24: {len(rows)} rows\n" + "\n".join(rows)
+    assert all(display_width(row) <= width for row in rows), "\n".join(rows)
+
+
+def test_a_banner_screen_keeps_its_described_menu_where_it_fits(node):
+    """Fitting the menu must not cost the descriptions where they fit: the
+    welcome banner keeps its two-column described menu at 80x24."""
+    rows, _styled = _screen(node, _PANELS["settings > welcome banner"])
+    assert "Show the banner as callers see it" in "\n".join(rows), "\n".join(rows)
+
+
+def test_a_line_break_a_clear_erases_is_not_counted_as_a_row():
+    """`_write_counted` (issue #662) counts what is left on screen: the break
+    in front of a redraw-in-place clear is erased with the old screen, and
+    counting it made a screen that fits to the row drop its described menu."""
+    from netbbs.net.admin_flow import _write_counted
+    from netbbs.rendering.ansi import clear_screen
+
+    session = ScriptedSession([], width=80, height=24)
+    assert asyncio.run(_write_counted(session, "\r\n" + clear_screen() + "Title\r\n-----")) == 2
+    assert asyncio.run(_write_counted(session, "\r\nTitle\r\n-----")) == 3
+
+
+def test_a_banners_speed_is_shown_in_its_panel(node):
+    """With a fitted menu the [S]peed entry's description can be packed away,
+    so the speed it sets is a fact in the status panel (issue #662)."""
+    rows, _styled = _screen(node, _PANELS["settings > board list masthead"], width=64)
+    assert any(row.strip().startswith("Speed:") for row in rows), "\n".join(rows)
+
+
 def test_no_menu_description_is_long_enough_to_be_cut_mid_word():
     """`menu_grid` cuts a description at its column -- 34 characters in two
     columns at 80 -- rather than wrapping it (`_entry_block_lines`). Forty-nine

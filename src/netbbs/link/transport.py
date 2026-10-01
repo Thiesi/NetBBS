@@ -183,7 +183,7 @@ from netbbs.link.protocol import (
 from netbbs.link.carry import KIND_LABELS, accept_genesis, genesis_kind
 from netbbs.link.store import event_is_stored, forget_opaque_event, opaque_events_to_rejudge, store_opaque_event
 from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
-from netbbs.link.attestation_delivery import receive_attestation_bundle
+from netbbs.link.attestation_delivery import record_attestation_pull, receive_attestation_bundle_safely
 from netbbs.link.attestation_bundles import (
     SEALED_ATTESTATION_BUNDLE_OBJECT_TYPE,
     MalformedBundle,
@@ -198,6 +198,7 @@ from netbbs.link.relay_mailbox import (
     pickup_relay_mailbox_envelopes,
 )
 from netbbs.link.store import (
+    record_stale_copy_changes,
     board_event_diff,
     build_inventory_request,
     channel_event_diff,
@@ -706,6 +707,26 @@ async def persist_accepted_events(
         elif object_type == BOARD_POSTING_OBJECT_TYPE:
             # Design doc §9.3, issue #993: who may post here now.
             await lane.run(materialize_carried_board_posting, BoardPosting.from_dict(envelope))
+    await persist_stale_copy_changes(lane, node)
+
+
+async def persist_stale_copy_changes(lane: DatabaseLane, node: LinkNode) -> None:
+    """Record the copies `node` found stale and the fresh copies it took in
+    their place (issue #672). After every batch either path persists, and once
+    a sync pass: a compromise learned from a hello has no batch of its own."""
+    if not node.stale_marks_pending and not node.refreshed_pending:
+        return
+    marked, refreshed = dict(node.stale_marks_pending), dict(node.refreshed_pending)
+    node.stale_marks_pending.clear()
+    node.refreshed_pending.clear()
+    await lane.run(record_stale_copy_changes, marked=marked, refreshed=refreshed)
+    if marked:
+        _logger.info(
+            "Link: %d stored event(s) were signed by a key their signer has marked compromised; "
+            "asking peers for the re-signed copies", len(marked),
+        )
+    if refreshed:
+        _logger.info("Link: replaced %d stale copies with their re-signed versions", len(refreshed))
 
 
 class PullCursorUnknown(Exception):
@@ -2299,7 +2320,16 @@ class LinkServer:
         # requester that knows a signer only by introduction learns of a
         # compromise on this pull. Left out when there is no news, so an
         # ordinary response is unchanged; an older requester ignores it.
-        key_chains = self._node.build_carried_key_chains(events, requester_fingerprint=fingerprint)
+        key_chains = self._node.build_carried_key_chains(
+            events, requester_fingerprint=fingerprint,
+            # Issue #672: and of whoever signed what the requester holds, if
+            # that signer has since marked a key compromised.
+            declared_ids=(
+                content_id
+                for declared in (inventory_request.boards, inventory_request.channels, inventory_request.file_areas)
+                for ids in declared.values() for content_id in ids
+            ),
+        )
         if key_chains:
             body["key_chains"] = key_chains
         return web.json_response(body)
@@ -2453,6 +2483,9 @@ class LinkServer:
             return web.json_response({"error": f"malformed attestation pull: {exc}"}, status=400)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=403)
+        # Issue #632: the legacy path, recorded per recipient so the issuer's
+        # screens can say what it holds (review of #1045).
+        await self._lane.run(record_attestation_pull, fingerprint, objects)
         return web.json_response({"objects": objects, "more_available": more})
 
     async def _handle_file_chunk_request(self, request: web.Request) -> web.Response:
@@ -2740,7 +2773,7 @@ class LinkServer:
             return web.json_response({"error": f"malformed attestation bundle: {exc}"}, status=400)
         if bundle.recipient_fingerprint != self._node.identity.fingerprint:
             return web.json_response({"error": "bundle is addressed to another node"}, status=400)
-        result = await receive_attestation_bundle(
+        result = await receive_attestation_bundle_safely(
             self._node, self._lane, bundle, enforce_trust_policy=self._enforce_trust_policy,
         )
         return web.json_response({"applied": result.applied, "reason": result.reason})
@@ -2768,7 +2801,7 @@ class LinkServer:
             issuer_hello = HelloMessage.from_dict(body["issuer_hello"])
         except MalformedBundle as exc:
             return web.json_response({"error": f"malformed attestation bundle: {exc}"}, status=400)
-        except (KeyError, ValueError, TypeError) as exc:
+        except (KeyError, ValueError, TypeError, ContentIdError) as exc:
             return web.json_response({"error": f"malformed issuer identity bundle: {exc}"}, status=400)
         if bundle.recipient_fingerprint != recipient_fingerprint:
             return web.json_response({"error": "bundle is addressed to a different recipient"}, status=400)
@@ -2781,7 +2814,7 @@ class LinkServer:
             return self._policy_rejection(recipient_decision)
         try:
             issuer_key = self._node.authenticated_signing_key(issuer_hello, bundle.issuer_fingerprint)
-        except (LinkProtocolError, NodeIdentityError, ValueError) as exc:
+        except (LinkProtocolError, NodeIdentityError, ValueError, ContentIdError) as exc:
             return web.json_response({"error": f"issuer could not be authenticated: {exc}"}, status=403)
         if not bundle.verifies([issuer_key]):
             return web.json_response(

@@ -3292,7 +3292,14 @@ def test_a_compromise_reaches_a_node_that_knows_the_signer_only_by_introduction(
         assert net.subjects_on("B") == ["before", "new key"]
         messages = [record.getMessage() for record in caplog.records]
         assert any("carried newer key history" in m and net.ids["A"].fingerprint in m for m in messages)
-        assert any("marked compromised" in m for m in messages)
+        # Since issue #672 R, which heard A's revoke, holds its old-key copy
+        # as stale and does not hand it on, so B is never offered it to skip.
+        # Both posts A signed before the rotation are stale there; A has not
+        # re-signed them in this test.
+        stale = net.dbs["R"].db.connection.execute(
+            "SELECT COUNT(*) FROM link_events WHERE stale_signer = ?", (net.ids["A"].fingerprint,)
+        ).fetchone()[0]
+        assert stale == 2
         # Persisted, so a restart does not bring the compromised key back.
         stored = net.dbs["B"].db.connection.execute(
             "SELECT transitions_json FROM link_introduced_identities WHERE fingerprint = ?",
@@ -3301,6 +3308,123 @@ def test_a_compromise_reaches_a_node_that_knows_the_signer_only_by_introduction(
         assert '"compromised": true' in stored
     finally:
         net.close()
+
+
+def test_after_a_compromise_carriers_replace_their_stale_copies_with_the_re_signed_ones(tmp_path, caplog):
+    """Issue #672. R carries A's post and B pulled it from R before A rotated
+    its signing key as compromised and re-signed its content. Inventory diffs
+    by content ID, and the re-signed copy has the same one, so both kept
+    serving the old-signed copy and nothing ever asked for the fresh one.
+    Now each, on learning the compromise -- R from A's own revoke, B from the
+    chain R carries (#914) -- holds its copy as stale: not declared, not
+    served, and so asked for again, and replaced in place by the re-signed
+    copy. The post itself stays visible throughout and is never doubled."""
+    import base64
+
+    import nacl.signing
+
+    from netbbs.identity.keys import verify_signature
+    from netbbs.link.events import canonical_bytes
+    from netbbs.link.key_rotation import resign_own_content
+    from netbbs.link.node_identity import resolve_current_operational_key, rotate_operational_key
+    from netbbs.link.store import board_event_diff
+
+    net = _ThreeNodes(tmp_path, enforce=False)
+    a = net.ids["A"].fingerprint
+    board_id = net.dbs["R"].db.connection.execute(
+        "SELECT board_id FROM boards WHERE name = 'general'"
+    ).fetchone()[0]
+
+    def stored(name, content_id):
+        return net.dbs[name].db.connection.execute(
+            "SELECT envelope_json, stale_signer FROM link_events WHERE content_id = ?", (content_id,)
+        ).fetchone()
+
+    def signed_by_current_key(raw):
+        identity = net.ids["A"]
+        key = resolve_current_operational_key(
+            identity.transitions, root_verify_key=identity.root.verify_key,
+            subject_fingerprint=a, purpose="signing",
+        )
+        return verify_signature(
+            nacl.signing.VerifyKey(base64.b64decode(key)), canonical_bytes(raw["envelope"]),
+            base64.b64decode(raw["signature"]),
+        )
+
+    observed = {}
+
+    async def scenario():
+        server = await net.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                for name in ("A", "B"):
+                    await net.dial(name, session)
+                net.post("A", "before")
+                await net.dial("A", session)
+                await net.dial("B", session)  # B now holds R's copy too
+                [post_id] = [row[0] for row in net.dbs["R"].db.connection.execute(
+                    "SELECT content_id FROM link_events WHERE object_type = 'board_post'"
+                )]
+                observed["post"] = post_id
+
+                rotated = rotate_operational_key(net.ids["A"], purpose="signing", compromised=True)
+                net.ids["A"] = rotated
+                net.nodes["A"].identity = rotated
+                assert resign_own_content(net.dbs["A"].db, rotated) >= 1
+
+                await net.dial("A", session)  # R hears A's revoke: its copy is stale now
+                observed["r_stale"] = stored("R", post_id)[1]
+                observed["r_serves"] = [
+                    event for event in board_event_diff(net.dbs["R"].db, {board_id: []}, limit=50)[0]
+                    if event["envelope"]["object_type"] == "board_post"
+                ]
+                with caplog.at_level(logging.INFO, logger="netbbs.link"):
+                    await net.dial("A", session)  # R wants it again; A pushes the re-signed copy
+                    await net.dial("B", session)  # R carries A's chain: B's copy is stale
+                    observed["b_stale"] = stored("B", post_id)[1]
+                    await net.dial("B", session)  # B asks again and R serves the fresh copy
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        post_id = observed["post"]
+        assert observed["r_stale"] == a
+        assert observed["r_serves"] == [], "a stale copy is not handed on"
+        assert observed["b_stale"] == a
+        for name in ("R", "B"):
+            envelope_json, stale_signer = stored(name, post_id)
+            assert stale_signer is None, name
+            assert signed_by_current_key(json.loads(envelope_json)), name
+            assert post_id in net.nodes[name].known_event_ids
+            assert post_id not in net.nodes[name].stale_copies
+            assert net.subjects_on(name) == ["before"], name
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("replaced 1 stale copies" in m for m in messages)
+    finally:
+        net.close()
+
+
+def test_a_stale_copy_survives_a_restart_as_stale(tmp_path):
+    """Issue #672: what was found stale stays out of inventory after a
+    restart, until a fresh copy replaces it."""
+    from netbbs.link.store import load_link_node, record_stale_copy_changes
+
+    node_db = _NodeDb(tmp_path, "restart")
+    identity = bootstrap_node_identity("restart")
+    try:
+        node_db.db.connection.execute(
+            "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at) "
+            "VALUES ('cid', 'peer', 'board_post', ?, '2026-01-01T00:00:00Z')",
+            (json.dumps({"envelope": {"object_type": "board_post", "payload": {}}, "signature": ""}),),
+        )
+        node_db.db.connection.commit()
+        record_stale_copy_changes(node_db.db, marked={"cid": "signer"}, refreshed={})
+        node = load_link_node(node_db.db, identity)
+        assert "cid" not in node.known_event_ids
+        assert node.stale_copies == {"cid": "signer"}
+    finally:
+        node_db.close()
 
 
 def test_two_nodes_that_never_met_see_each_others_posts_through_their_common_seed(tmp_path):

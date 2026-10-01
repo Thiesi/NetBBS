@@ -189,9 +189,10 @@ from netbbs.link.attestation_bundles import BundleTooLarge, SealedAttestationBun
 from netbbs.link.attestation_delivery import (
     has_attestation_snapshot_from,
     plan_attestation_deliveries,
-    receive_attestation_bundle,
+    receive_attestation_bundle_safely,
     record_attestation_delivery,
     record_attestation_delivery_failure,
+    record_legacy_attestation_recipient,
     retry_pending_attestations,
 )
 from netbbs.link.enforcement import (
@@ -264,6 +265,7 @@ from netbbs.link.transport import (
     deposit_trust_objects,
     dial_hello,
     persist_accepted_events,
+    persist_stale_copy_changes,
     RelayPickup,
     pickup_from_relay_mailbox_all,
     send_attestation_bundle,
@@ -554,6 +556,10 @@ async def run_link_sync(
         await retry_pending_attestations(node, lane)
         await _forget_retired_attestations(lane)
         await _reevaluate_trust_over_time(node, lane)
+        # Issue #672: a compromise learned from a hello this pass (a direct
+        # peer's chain) has no batch of its own to sweep after.
+        node.sweep_compromised_copies()
+        await persist_stale_copy_changes(lane, node)
         # Issue #891: mail held here as a relay that its recipient never
         # came back for. Every pass, whatever this node's own mode: a node
         # that stopped serving relays still holds what it took before.
@@ -1847,10 +1853,8 @@ async def _deliver_attestation_bundles(
             )
             continue
         if not descriptor_has_capability(descriptor, SEALED_ATTESTATIONS_CAPABILITY):
-            await lane.run(
-                record_attestation_delivery_failure, recipient,
-                "the recipient's NetBBS does not take sealed snapshots yet; it can still pull",
-            )
+            # It still pulls this release; not a failure (review of #1045).
+            await lane.run(record_legacy_attestation_recipient, recipient)
             continue
         try:
             recipient_key = node.resolve_known_signing_key(recipient, "attestation recipient")
@@ -1894,6 +1898,7 @@ async def _deliver_attestation_bundles(
             continue
         await lane.run(
             record_attestation_delivery, recipient, digest=plan.digest, route=route, final=plan.final,
+            content_ids=plan.content_ids,
         )
         _logger.info(
             "Link attestations: sent %s snapshot %d to %s via %s",
@@ -2676,7 +2681,7 @@ async def _pickup_relay_mail(
         for bundle in pickup.bundles:
             # Issue #632. Checked and applied exactly as a directly delivered
             # one; the relay is only where it waited.
-            result = await receive_attestation_bundle(
+            result = await receive_attestation_bundle_safely(
                 node, lane, bundle, enforce_trust_policy=enforce_trust_policy, via="relay",
             )
             if not result.applied and result.reason not in {"stale_sequence"}:

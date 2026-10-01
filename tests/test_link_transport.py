@@ -3151,6 +3151,10 @@ def test_attestation_pull_uses_real_transport_and_refuses_a_third_party_issuer(t
                     subscriber_node, session, base_url, pull
                 )
                 assert len(raw) == 1
+                # Issue #632: the issuer records what this recipient fetched.
+                from netbbs.link.attestation_delivery import list_attestation_delivery_status
+                [status] = list_attestation_delivery_status(issuer.db)
+                assert status.route == "pull" and len(status.delivered_ids) == 1
                 with pytest.raises(LinkTransportError, match="recent nonce"):
                     await request_remote_attestations(
                         subscriber_node, session, base_url, pull

@@ -207,10 +207,15 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             node.events[row["content_id"]] = json.loads(row["envelope_json"])
 
     for row in db.connection.execute(
-        "SELECT content_id, object_type, envelope_json FROM link_events ORDER BY received_at ASC"
+        "SELECT content_id, object_type, envelope_json, stale_signer FROM link_events ORDER BY received_at ASC"
     ):
         envelope = json.loads(row["envelope_json"])
-        node.known_event_ids.add(row["content_id"])
+        if row["stale_signer"] is None:
+            node.known_event_ids.add(row["content_id"])
+        else:
+            # Issue #672: a stale copy is held but not known, so the next
+            # inventory exchange asks for it again.
+            node.stale_copies[row["content_id"]] = row["stale_signer"]
         node.events[row["content_id"]] = envelope
         if row["object_type"] == BOARD_GENESIS_OBJECT_TYPE:
             genesis = BoardGenesis.from_dict(envelope)
@@ -1124,16 +1129,21 @@ def build_inventory_request(
     is the best an older responder allows; the whole declaration was refused
     with 413 and moved nothing in either direction.
     """
+    # Issue #672: a stale copy is not declared, so a peer offers a fresh one.
+    stale = stale_content_ids(db) if include_inventory else set()
     boards = (
-        {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
+        {board_id: tuple(i for i in _all_board_events(db, board_id) if i not in stale)
+         for board_id in carried_board_ids(db)}
         if include_inventory else {}
     )
     channels = (
-        {channel_id: tuple(_all_channel_events(db, channel_id)) for channel_id in carried_channel_ids(db)}
+        {channel_id: tuple(i for i in _all_channel_events(db, channel_id) if i not in stale)
+         for channel_id in carried_channel_ids(db)}
         if include_inventory else {}
     )
     file_areas = (
-        {area_id: tuple(_all_file_area_events(db, area_id)) for area_id in carried_file_area_ids(db)}
+        {area_id: tuple(i for i in _all_file_area_events(db, area_id) if i not in stale)
+         for area_id in carried_file_area_ids(db)}
         if include_inventory else {}
     )
     # Issue #630: events this node was offered and could not use yet, declared
@@ -1225,6 +1235,48 @@ def inventory_page_count(
     return min(MAX_INVENTORY_PAGES, max(1, -(-size // budget)))
 
 
+def stale_content_ids(db: Database) -> set[str]:
+    """Stored copies that verify only under a compromised key (issue #672):
+    neither declared nor served, so that a fresh copy is asked for."""
+    return {
+        row["content_id"]
+        for row in db.connection.execute("SELECT content_id FROM link_events WHERE stale_signer IS NOT NULL")
+    }
+
+
+def record_stale_copy_changes(db: Database, *, marked: dict[str, str], refreshed: dict[str, dict]) -> None:
+    """Record what `LinkNode.sweep_compromised_copies` found stale and the
+    fresh copies `LinkNode._take_fresh_copy` took in their place (issue #672).
+
+    A fresh copy has the same envelope, and so the same content ID, as the
+    stale one: only the signature changes. It replaces the stored copy, and
+    for a carried genesis also the copy kept on the board, channel or file
+    area row, which inventory serves from there. Nothing else is rewritten:
+    the projection was built from the same envelope."""
+    for content_id, signer in marked.items():
+        db.connection.execute(
+            "UPDATE link_events SET stale_signer = ? WHERE content_id = ? AND stale_signer IS NULL",
+            (signer, content_id),
+        )
+    for content_id, raw in refreshed.items():
+        db.connection.execute(
+            "UPDATE link_events SET envelope_json = ?, stale_signer = NULL WHERE content_id = ?",
+            (json.dumps(raw), content_id),
+        )
+        envelope = raw["envelope"]
+        for object_type, table, key in (
+            (BOARD_GENESIS_OBJECT_TYPE, "boards", "board_id"),
+            (CHANNEL_GENESIS_OBJECT_TYPE, "channels", "channel_id"),
+            (FILE_AREA_GENESIS_OBJECT_TYPE, "file_areas", "area_id"),
+        ):
+            if envelope.get("object_type") == object_type:
+                db.connection.execute(
+                    f"UPDATE {table} SET link_genesis_json = ? WHERE {key} = ? AND link_genesis_json IS NOT NULL",
+                    (json.dumps(raw), envelope["payload"][key]),
+                )
+    db.connection.commit()
+
+
 def _resource_event_diff(
     requested: dict[str, list[str]],
     carried: list[str],
@@ -1234,6 +1286,7 @@ def _resource_event_diff(
     not_carried: tuple[str, ...],
     page: tuple[int, int] | None,
     page_salt: str,
+    withheld: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[list[dict], bool]:
     """The walk `board_event_diff` and its two siblings share; see there.
 
@@ -1255,7 +1308,8 @@ def _resource_event_diff(
             continue
         known_ids = set(requested.get(resource_id, ()))
         for content_id, envelope in all_events(resource_id).items():
-            if content_id in known_ids:
+            if content_id in known_ids or content_id in withheld:
+                # Issue #672: a stale copy is not handed on.
                 continue
             if page is not None and declared and inventory_page(content_id, page[1], page_salt) != page[0]:
                 continue
@@ -1407,6 +1461,7 @@ def board_event_diff(
     return _resource_event_diff(
         requested_boards, carried_board_ids(db), lambda resource_id: _all_board_events(db, resource_id),
         limit=limit, not_carried=not_carried, page=page, page_salt=page_salt,
+        withheld=stale_content_ids(db),
     )
 
 
@@ -1480,6 +1535,7 @@ def channel_event_diff(
     return _resource_event_diff(
         requested_channels, carried_channel_ids(db), lambda resource_id: _all_channel_events(db, resource_id),
         limit=limit, not_carried=not_carried, page=page, page_salt=page_salt,
+        withheld=stale_content_ids(db),
     )
 
 
@@ -1558,6 +1614,7 @@ def file_area_event_diff(
     return _resource_event_diff(
         requested_file_areas, carried_file_area_ids(db), lambda resource_id: _all_file_area_events(db, resource_id),
         limit=limit, not_carried=not_carried, page=page, page_salt=page_salt,
+        withheld=stale_content_ids(db),
     )
 
 
@@ -1655,6 +1712,9 @@ def inventory_wanted_ids(
     """
     wanted: list[str] = []
     seen: set[str] = set()
+    # Issue #672: held, but only as a stale copy -- wanted again, so the
+    # requester, when it is the signer, pushes its re-signed copy.
+    stale = stale_content_ids(db)
     for requested, all_events, scope_column in (
         (requested_boards, _all_board_events, "board_id"),
         (requested_channels, _all_channel_events, "channel_id"),
@@ -1666,7 +1726,7 @@ def inventory_wanted_ids(
             if accepted and not materialized:
                 # Seen and declined -- see this function's own docstring.
                 continue
-            held = materialized | accepted
+            held = (materialized | accepted) - stale
             for content_id in requested[resource_id]:
                 if content_id in held or content_id in seen:
                     continue

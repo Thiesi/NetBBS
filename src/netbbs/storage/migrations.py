@@ -3965,6 +3965,20 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #672: `link_events.stale_signer` -- set on a stored copy that verifies only under "
+            "a key its signer has since marked compromised, naming that signer. Such a copy is not "
+            "declared in inventory and not served, so it is asked for again and replaced in place "
+            "by the signer's re-signed copy, which clears the column. The projection (post, line, "
+            "file) is untouched throughout. NULL for every existing row: the running node marks "
+            "what it finds stale at its next sync pass."
+        ),
+        sql="""
+        ALTER TABLE link_events ADD COLUMN stale_signer TEXT;
+        CREATE INDEX idx_link_events_stale ON link_events(stale_signer) WHERE stale_signer IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #632 (design doc §16): sealed attestation bundles a relay holds for a recipient "
             "it relays for. One slot per (issuer, recipient): a newer bundle from the same issuer "
             "replaces the older one, since a bundle is a complete snapshot. Kept apart from "
@@ -3988,9 +4002,10 @@ MIGRATIONS = [
         description=(
             "Issue #632: both ends of sealed attestation snapshots. "
             "`link_attestation_bundle_ledger` is the issuer's record per recipient -- the last "
-            "sequence used, what was last delivered (digest, time, route), why the last attempt "
-            "failed, and for a removed recipient when it was removed, since it is owed one final, "
-            "empty snapshot. `link_attestation_bundles_received` is the recipient's per issuer: "
+            "sequence used, what was last delivered (digest, time, route, and the content ids "
+            "of the objects it holds, so a caller can be told whether their own value got there), "
+            "why the last attempt failed, and for a removed recipient when it was removed, since "
+            "it is owed one final, empty snapshot. `link_attestation_bundles_received` is the recipient's per issuer: "
             "the last applied sequence, which replaces the pull cursor, and objects waiting for a "
             "subject this node has not met yet. Both empty on upgrade."
         ),
@@ -4003,7 +4018,8 @@ MIGRATIONS = [
             route                 TEXT,
             last_attempt_at       TEXT,
             last_error            TEXT,
-            removed_at            TEXT
+            removed_at            TEXT,
+            delivered_ids_json    TEXT NOT NULL DEFAULT '[]'
         );
         CREATE TABLE link_attestation_bundles_received (
             issuer_fingerprint TEXT PRIMARY KEY,

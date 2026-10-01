@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import nacl.signing
 
+from netbbs.boards.content_id import ContentIdError
 from netbbs.identity.encryption import EncryptionError
 from netbbs.link.attestation_bundles import (
     MalformedBundle,
@@ -92,7 +93,13 @@ def _object_content_id(raw: dict[str, Any]) -> str:
     envelope = raw.get("envelope")
     if not isinstance(envelope, dict):
         raise ValueError("attestation object has no envelope")
-    return hashlib.sha256(canonical_bytes(envelope)).hexdigest()
+    try:
+        return hashlib.sha256(canonical_bytes(envelope)).hexdigest()
+    except ContentIdError as exc:
+        # Not a ValueError on every version: an object carrying a value
+        # canonical JSON refuses (a float, an unsafe integer) is unusable,
+        # and must not escape as anything else (review of #1042).
+        raise ValueError(f"attestation object cannot be canonicalized: {exc}") from exc
 
 
 # -- issuer ---------------------------------------------------------------
@@ -129,6 +136,10 @@ class PlannedDelivery:
     final: bool  # a removed recipient's empty snapshot
     sequence: int
 
+    @property
+    def content_ids(self) -> list[str]:
+        return sorted(_object_content_id(item) for item in self.objects)
+
 
 def plan_attestation_deliveries(db: Database, *, now: datetime | None = None) -> list[PlannedDelivery]:
     """The bundles this pass should send, at most `MAX_DELIVERIES_PER_PASS`.
@@ -156,7 +167,7 @@ def plan_attestation_deliveries(db: Database, *, now: datetime | None = None) ->
             )
         ledger = db.connection.execute(
             """SELECT recipient_fingerprint, sequence, sent_digest, sent_at, last_attempt_at,
-                      last_error, removed_at
+                      last_error, removed_at, route
                FROM link_attestation_bundle_ledger
                ORDER BY COALESCE(last_attempt_at, ''), recipient_fingerprint"""
         ).fetchall()
@@ -177,8 +188,8 @@ def plan_attestation_deliveries(db: Database, *, now: datetime | None = None) ->
             )
             if not due:
                 continue
-            if row["last_error"] is not None and row["last_attempt_at"] is not None \
-                    and row["last_attempt_at"] > retry_before:
+            if (row["last_error"] is not None or row["route"] == "pull") \
+                    and row["last_attempt_at"] is not None and row["last_attempt_at"] > retry_before:
                 continue
             sequence = max(int(row["sequence"]) + 1, now_ms)
             db.connection.execute(
@@ -196,9 +207,13 @@ def plan_attestation_deliveries(db: Database, *, now: datetime | None = None) ->
 
 def record_attestation_delivery(
     db: Database, recipient_fingerprint: str, *, digest: str, route: str, final: bool,
-    now: datetime | None = None,
+    content_ids: list[str] | None = None, now: datetime | None = None,
 ) -> None:
-    """A route took the bundle. A removed recipient's final one closes its ledger row."""
+    """A route took the bundle. A removed recipient's final one closes its ledger row.
+
+    `content_ids` are the objects the snapshot held: a snapshot is
+    authoritative, so they replace whatever the recipient was recorded as
+    holding."""
     now_value, _ = _now(now)
     with db.connection:
         if final:
@@ -210,9 +225,55 @@ def record_attestation_delivery(
             return
         db.connection.execute(
             """UPDATE link_attestation_bundle_ledger
-               SET sent_digest = ?, sent_at = ?, route = ?, last_error = NULL
+               SET sent_digest = ?, sent_at = ?, route = ?, last_error = NULL, delivered_ids_json = ?
                WHERE recipient_fingerprint = ?""",
-            (digest, now_value, route, recipient_fingerprint),
+            (digest, now_value, route, json.dumps(sorted(content_ids or [])), recipient_fingerprint),
+        )
+
+
+def record_legacy_attestation_recipient(db: Database, recipient_fingerprint: str, *, now: datetime | None = None) -> None:
+    """A recipient whose NetBBS does not take sealed snapshots yet: for this
+    release it fetches by pull instead, so it is not a failure (review of
+    #1045). Its route reads "pull" and what it fetched is recorded as it is
+    served (`record_attestation_pull`)."""
+    now_value, _ = _now(now)
+    with db.connection:
+        db.connection.execute(
+            "UPDATE link_attestation_bundle_ledger SET route = 'pull', last_error = NULL, last_attempt_at = ? "
+            "WHERE recipient_fingerprint = ? AND removed_at IS NULL",
+            (now_value, recipient_fingerprint),
+        )
+
+
+def record_attestation_pull(
+    db: Database, recipient_fingerprint: str, objects: list[dict[str, Any]], *, now: datetime | None = None,
+) -> None:
+    """A recipient pulled `objects` (the legacy path). Added to what it is
+    recorded as holding: a pull is incremental, unlike a snapshot."""
+    if not objects:
+        return
+    now_value, _ = _now(now)
+    served = set()
+    for item in objects:
+        try:
+            served.add(_object_content_id(item))
+        except ValueError:
+            continue
+    with db.connection:
+        db.connection.execute(
+            "INSERT OR IGNORE INTO link_attestation_bundle_ledger (recipient_fingerprint) VALUES (?)",
+            (recipient_fingerprint,),
+        )
+        row = db.connection.execute(
+            "SELECT delivered_ids_json, route FROM link_attestation_bundle_ledger WHERE recipient_fingerprint = ?",
+            (recipient_fingerprint,),
+        ).fetchone()
+        held = set(json.loads(row["delivered_ids_json"])) | served
+        db.connection.execute(
+            """UPDATE link_attestation_bundle_ledger
+               SET delivered_ids_json = ?, sent_at = ?, route = COALESCE(route, 'pull')
+               WHERE recipient_fingerprint = ?""",
+            (json.dumps(sorted(held)), now_value, recipient_fingerprint),
         )
 
 
@@ -238,14 +299,14 @@ class AttestationDeliveryStatus:
     current: bool  # the last bundle sent is the current snapshot
     last_error: str | None
     removed: bool  # owed a final, empty snapshot
+    delivered_ids: frozenset[str] = frozenset()  # the objects it was given
 
 
 def list_attestation_delivery_status(db: Database, *, now: datetime | None = None) -> list[AttestationDeliveryStatus]:
     """Per recipient: how this node last reached it, whether that delivered
     the current snapshot, and why the last attempt failed. For the Published
     identity screen and the Profile toggle's counts."""
-    objects = snapshot_objects(db, now=now)
-    digest = snapshot_digest(objects)
+    snapshot_ids = {_object_content_id(item) for item in snapshot_objects(db, now=now)}
     current = {row[0] for row in db.connection.execute("SELECT fingerprint FROM link_attestation_recipients")}
     rows = {row["recipient_fingerprint"]: row for row in db.connection.execute(
         "SELECT * FROM link_attestation_bundle_ledger"
@@ -260,7 +321,9 @@ def list_attestation_delivery_status(db: Database, *, now: datetime | None = Non
             recipient_fingerprint=fingerprint,
             route=row["route"] if row is not None else None,
             sent_at=row["sent_at"] if row is not None else None,
-            current=row is not None and row["sent_digest"] == digest and row["sent_at"] is not None,
+            current=row is not None and row["sent_at"] is not None
+            and snapshot_ids <= set(json.loads(row["delivered_ids_json"])),
+            delivered_ids=frozenset(json.loads(row["delivered_ids_json"])) if row is not None else frozenset(),
             last_error=row["last_error"] if row is not None else None,
             removed=removed,
         ))
@@ -309,7 +372,7 @@ def _verify_key_for(raw: dict[str, Any], verify_keys: list[nacl.signing.VerifyKe
         try:
             _verify_wire(raw, key)
             return key
-        except ValueError:
+        except (ValueError, ContentIdError):
             continue
     return None
 
@@ -338,7 +401,7 @@ def _ingest_objects(
         except UnknownAttestationSubject:
             if len(pending) < MAX_PENDING_OBJECTS_PER_ISSUER:
                 pending.append(raw)
-        except ValueError as exc:
+        except (ValueError, ContentIdError) as exc:
             _logger.info("Link attestation snapshot: skipped an object from %s: %s", issuer, exc)
             skipped += 1
     return ingested, pending, skipped
@@ -437,16 +500,38 @@ def retry_pending_attestation_objects(
 
 
 def _issuer_verify_keys(node: "LinkNode", issuer: str) -> list[nacl.signing.VerifyKey]:
+    """The issuer's current signing key only, as the pull verifies (review of
+    #1042). A snapshot is signed fresh, and the issuer re-signs what it still
+    asserts after a rotation (#623), so a superseded key's signature -- on the
+    bundle or on an object inside it -- is skipped for good, never accepted."""
     from netbbs.link.node_identity import NodeIdentityError
     from netbbs.link.protocol import LinkProtocolError
 
     try:
-        return [
-            node.resolve_known_signing_key(issuer, "attestation bundle"),
-            *node.resolve_known_superseded_signing_keys(issuer),
-        ]
+        return [node.resolve_known_signing_key(issuer, "attestation bundle")]
     except (LinkProtocolError, NodeIdentityError, ValueError):
         return []
+
+
+async def receive_attestation_bundle_safely(
+    node: "LinkNode", lane: "DatabaseLane", bundle: SealedAttestationBundle,
+    *, enforce_trust_policy: bool = False, via: str = "direct",
+) -> AppliedSnapshot:
+    """`receive_attestation_bundle`, whose failure costs that bundle and
+    nothing else (review of #1042). Both callers -- the sync pass's relay
+    pickup and the direct-delivery route -- handle bundles a peer chose; one
+    that raises past every check must not end the sync task or answer 500."""
+    import sqlite3
+
+    try:
+        return await receive_attestation_bundle(
+            node, lane, bundle, enforce_trust_policy=enforce_trust_policy, via=via,
+        )
+    except (ValueError, TypeError, KeyError, ContentIdError, sqlite3.Error) as exc:
+        _logger.warning(
+            "Link attestations: skipped a snapshot from %s (%s): %s", bundle.issuer_fingerprint, via, exc,
+        )
+        return AppliedSnapshot(False, "unusable")
 
 
 async def receive_attestation_bundle(

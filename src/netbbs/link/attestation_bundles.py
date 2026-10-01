@@ -34,6 +34,7 @@ from typing import Any, Iterable
 import nacl.exceptions
 import nacl.signing
 
+from netbbs.boards.content_id import ContentIdError
 from netbbs.identity.encryption import decrypt_with_any, encrypt_for
 from netbbs.identity.keys import Identity
 from netbbs.link.events import canonical_bytes, strict_json_loads
@@ -57,6 +58,12 @@ MAX_BUNDLE_WIRE_BYTES = 1_100_000
 #: How many signed objects one snapshot may carry. Generous next to the
 #: issuer's own 1,000 active attestations plus their revocations.
 MAX_BUNDLE_OBJECTS = 4000
+
+#: The largest sequence a bundle may carry: the canonical-JSON safe-integer
+#: limit (2**53 - 1), past which its bytes cannot be canonicalized at all. The
+#: issuer's sequence is a millisecond timestamp, about 1.7e12 today, so this
+#: leaves room for some 280,000 years.
+MAX_BUNDLE_SEQUENCE = 2**53 - 1
 
 _PAYLOAD_FIELDS = frozenset({
     "issuer_fingerprint", "recipient_fingerprint", "sequence", "created_at", "ciphertext",
@@ -145,13 +152,22 @@ class SealedAttestationBundle:
             value = payload[key]
             if not isinstance(value, str) or not value or len(value) > _MAX_FINGERPRINT_LENGTH:
                 raise MalformedBundle(f"sealed attestation bundle {key} is invalid")
-        if type(payload["sequence"]) is not int or payload["sequence"] < 1:
-            raise MalformedBundle("sealed attestation bundle sequence must be a positive integer")
+        if type(payload["sequence"]) is not int or not 1 <= payload["sequence"] <= MAX_BUNDLE_SEQUENCE:
+            raise MalformedBundle(
+                f"sealed attestation bundle sequence must be an integer from 1 to {MAX_BUNDLE_SEQUENCE}"
+            )
         if not isinstance(payload["created_at"], str) or len(payload["created_at"]) > 64:
             raise MalformedBundle("sealed attestation bundle created_at is invalid")
         if not isinstance(payload["ciphertext"], str):
             raise MalformedBundle("sealed attestation bundle ciphertext must be base64 text")
-        if len(canonical_bytes(envelope)) > MAX_BUNDLE_WIRE_BYTES:
+        try:
+            encoded = canonical_bytes(envelope)
+        except (ContentIdError, ValueError, TypeError) as exc:
+            # Not a ValueError on every version (review of #1040): caught by
+            # name, so a value canonical JSON refuses is a malformed bundle,
+            # never a 500 on the open deposit route or a lost pickup.
+            raise MalformedBundle(f"sealed attestation bundle cannot be canonicalized: {exc}") from exc
+        if len(encoded) > MAX_BUNDLE_WIRE_BYTES:
             raise MalformedBundle("sealed attestation bundle exceeds the wire-size limit")
         try:
             signature = base64.b64decode(str(data["signature"]), validate=True)
@@ -188,6 +204,8 @@ def build_sealed_attestation_bundle(
     the recipient and sign the result. Raises `BundleTooLarge` past the cap."""
     if len(objects) > MAX_BUNDLE_OBJECTS:
         raise BundleTooLarge(f"attestation snapshot has {len(objects)} objects, more than {MAX_BUNDLE_OBJECTS}")
+    if not 1 <= sequence <= MAX_BUNDLE_SEQUENCE:
+        raise ValueError(f"bundle sequence must be from 1 to {MAX_BUNDLE_SEQUENCE}")
     ciphertext = encrypt_for(recipient_verify_key, _plaintext(objects))
     envelope = {
         "netbbs_protocol": 1,
