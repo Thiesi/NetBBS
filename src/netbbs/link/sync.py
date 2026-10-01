@@ -267,6 +267,7 @@ from netbbs.link.transport import (
     RelayPickup,
     pickup_from_relay_mailbox_all,
     send_attestation_bundle,
+    deposit_attestation_bundle,
     RefusedEvent,
     push_events,
     push_events_partial,
@@ -546,7 +547,7 @@ async def run_link_sync(
         # in what a subscriber reads this pass rather than next.
         await _reconcile_own_attestations(node, lane)
         # Issue #632: and then sent, sealed, to each recipient that takes it.
-        await _deliver_attestation_bundles(node, session, lane)
+        await _deliver_attestation_bundles(node, session, lane, own_hello_provider)
         await _pull_attestation_authorities(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
@@ -1812,7 +1813,20 @@ async def _send_bundle_one(session: ClientSession, base_url: str, bundle: Sealed
         return False
 
 
-async def _deliver_attestation_bundles(node: LinkNode, session: ClientSession, lane: DatabaseLane) -> None:
+async def _deposit_bundle_one(
+    session: ClientSession, base_url: str, recipient: str, bundle: SealedAttestationBundle, hello: HelloMessage,
+) -> bool:
+    try:
+        await deposit_attestation_bundle(session, base_url, recipient, bundle, hello)
+        return True
+    except LinkTransportError:
+        return False
+
+
+async def _deliver_attestation_bundles(
+    node: LinkNode, session: ClientSession, lane: DatabaseLane,
+    own_hello_provider: Callable[[], HelloMessage],
+) -> None:
     """Send each due recipient its sealed snapshot (issue #632).
 
     Directly when the recipient can be dialed, otherwise at one of the relays
@@ -1866,7 +1880,9 @@ async def _deliver_attestation_bundles(node: LinkNode, session: ClientSession, l
         else:
             relays = _bundle_relay_urls(node, descriptor)
             if relays and await _try_addresses_via(
-                relays, lambda url: _deposit_one(session, url, recipient, bundle)
+                # With this node's own hello bundle, which is how the relay
+                # knows the deposit really comes from the issuer.
+                relays, lambda url: _deposit_bundle_one(session, url, recipient, bundle, own_hello_provider())
             ):
                 route = "relay"
         if route is None:

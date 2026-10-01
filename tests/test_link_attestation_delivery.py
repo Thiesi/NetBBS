@@ -297,7 +297,10 @@ class _Net:
         return self.rr.build_hello(addresses=self._rr_addresses(), outgoing_only=False, created_at="2026-01-01T00:00:00+00:00")
 
     async def deliver(self, session):
-        await _deliver_attestation_bundles(self.i, session, self.i_db.lane)
+        await _deliver_attestation_bundles(
+            self.i, session, self.i_db.lane,
+            lambda: self.i.build_hello(addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00"),
+        )
 
     async def pickup(self, session):
         return await _pickup_relay_mail(
@@ -482,7 +485,10 @@ def test_a_dialable_recipient_is_reached_directly(tmp_path):
             i.handle_introduction(r_hello())
             r.handle_introduction(i.build_hello(addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00"))
             async with aiohttp.ClientSession() as session:
-                await _deliver_attestation_bundles(i, session, i_db.lane)
+                await _deliver_attestation_bundles(
+                    i, session, i_db.lane,
+                    lambda: i.build_hello(addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00"),
+                )
         finally:
             await holder["server"].stop()
 
