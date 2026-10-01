@@ -49,7 +49,6 @@ import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Sequence
-from urllib.parse import urljoin, urlparse
 
 import nacl.bindings
 import nacl.exceptions
@@ -126,8 +125,9 @@ from netbbs.link.enforcement import (
     LinkPolicyDecision,
     decide_event_authorship,
     decide_node_action,
-    ensure_event_author_subject,
     ensure_node_subject,
+    record_author_activity,
+    record_direct_activity,
     node_transport_state,
 )
 from netbbs.link.trust import TrustState
@@ -231,12 +231,10 @@ from netbbs.link.trust_carriage import (
     store_deposited_trust_objects,
 )
 from netbbs.link.trust_wire import (
-    MAX_EMBEDDED_EVIDENCE_BYTES,
     UNKNOWN_PULL_CURSOR_REASON_CODE,
     TrustPullRequest,
     TrustWireError,
     UnknownTrustPullCursor,
-    verify_evidence_bytes,
 )
 from netbbs.net.throttle import LinkRequestThrottle
 from netbbs.storage.execution import DatabaseLane
@@ -528,7 +526,9 @@ async def persist_accepted_events(
                 await lane.run(bounce_link_message, envelope, "blocked_sender", node_identity=node.identity)
             continue
         if enforce_trust_policy:
-            await lane.run(ensure_event_author_subject, envelope)
+            # Registers the author, and counts the day for a remote user
+            # (design doc §12.4, issue #1035).
+            await lane.run(record_author_activity, envelope)
         # Design doc §9.3/issue #73: board_post/board_post_edit skip
         # the generic save_event dispatch below entirely --
         # materialize_carried_post/_edit each persist the underlying
@@ -2120,7 +2120,8 @@ class LinkServer:
             self._node.peers.pop(peer.fingerprint, None)
             return self._policy_rejection(decision)
         if self._enforce_trust_policy:
-            await self._lane.run(ensure_node_subject, peer.fingerprint)
+            # Issue #1035: a completed hello is a day of direct interaction.
+            await self._lane.run(record_direct_activity, peer.fingerprint)
         await self._refresh_own_claims_before_peer_persistence()
         await self._lane.run(save_peer, peer)
         return web.json_response(self._own_hello_provider().to_dict())
@@ -2194,6 +2195,9 @@ class LinkServer:
             # sender.transitions grew -- one updated write, not one per
             # accepted event.
             await self._lane.run(save_peer, self._node.peers[fingerprint])
+            if self._enforce_trust_policy:
+                # Issue #1035: an accepted push is direct interaction too.
+                await self._lane.run(record_direct_activity, fingerprint)
 
         if refused:
             return web.json_response({"accepted": accepted, "refused": refused})
@@ -3228,8 +3232,7 @@ def _raw_content_id(raw: object) -> str | None:
 
     Reached for an event refused before anything canonicalized it, so its
     envelope may hold what content IDs refuse (a float, an unsafe integer,
-    keys that normalize alike): `ContentIdError`, which is not a
-    `ValueError`. Raised here it would turn one refusal back into a failed
+    keys that normalize alike): `ContentIdError`. Raised here it would turn one refusal back into a failed
     request, the very thing issue #897 is about."""
     try:
         return event_content_id(raw["envelope"])
@@ -3332,47 +3335,6 @@ async def request_remote_attestations(
             f"{MAX_ATTESTATION_OBJECTS_PER_RESPONSE} objects"
         )
     return objects, more_available
-
-
-async def fetch_trust_evidence(
-    session: ClientSession,
-    reporter_base_url: str,
-    evidence: dict,
-    *,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[bytes, object]:
-    """Fetch one signed digest locator without granting it arbitrary network access."""
-    locator = evidence.get("locator")
-    if not isinstance(locator, str):
-        raise LinkTransportError("trust evidence locator is missing")
-    base = urlparse(reporter_base_url)
-    url = urljoin(reporter_base_url.rstrip("/") + "/", locator)
-    target = urlparse(url)
-    if (
-        base.scheme not in {"http", "https"}
-        or (target.scheme, target.hostname, target.port) != (base.scheme, base.hostname, base.port)
-        or target.username is not None
-        or target.password is not None
-        or target.fragment
-    ):
-        raise LinkTransportError("trust evidence locator must stay on the reporter origin")
-    try:
-        async with session.get(url, timeout=ClientTimeout(total=timeout)) as response:
-            if response.status != 200:
-                raise LinkTransportError(
-                    f"trust evidence fetch from {url} failed: HTTP {response.status}"
-                )
-            if response.content_length is not None and response.content_length > MAX_EMBEDDED_EVIDENCE_BYTES:
-                raise LinkTransportError("trust evidence body exceeds the 256 KiB limit")
-            content = await response.content.read(MAX_EMBEDDED_EVIDENCE_BYTES + 1)
-    except (ClientError, TimeoutError) as exc:
-        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
-    if len(content) > MAX_EMBEDDED_EVIDENCE_BYTES:
-        raise LinkTransportError("trust evidence body exceeds the 256 KiB limit")
-    try:
-        return content, verify_evidence_bytes(evidence, content)
-    except TrustWireError as exc:
-        raise LinkTransportError(f"invalid trust evidence from {url}: {exc}") from exc
 
 
 def _parse_withdrawal_body(text: str, url: str) -> FileWithdrawal:

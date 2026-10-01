@@ -201,6 +201,7 @@ from netbbs.link.enforcement import (
     decide_event_authorship,
     decide_node_action,
     ensure_node_subject,
+    record_direct_activity,
     event_author,
     node_transport_state,
     LinkPolicyAction,
@@ -254,7 +255,11 @@ from netbbs.link.introduction import (
     MAX_IDENTITIES_PER_REQUEST, build_identity_request, referenced_identities,
 )
 from netbbs.link.node_identity import NodeIdentityError
-from netbbs.link.trust_issuance import reconcile_issued_vouches
+from netbbs.link.trust_issuance import (
+    reconcile_issued_signals,
+    reconcile_issued_vouches,
+    record_observed_equivocation,
+)
 from netbbs.link.transport import (
     request_identities,
     AttestationRecipientRefused,
@@ -302,7 +307,15 @@ from netbbs.link.trust_wire import (
     load_trust_pull_cursor,
     save_trust_pull_cursor,
 )
-from netbbs.link.trust import TrustState, recompute_all_trust_states, trust_policy_generation
+from netbbs.link.equivocation import SubjectKeys, reproduce_equivocation, subject_keys_from_record
+from netbbs.link.trust import (
+    TrustState,
+    mark_signal_evidence_verified,
+    mark_signal_reverify_attempted,
+    recompute_all_trust_states,
+    trust_policy_generation,
+    unverified_equivocation_signals,
+)
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_ACK,
     KIND_LINK_MAIL_DELIVERY,
@@ -540,6 +553,8 @@ async def run_link_sync(
         # recorded or withdrawn since the last pass is already what a
         # subscriber reads this pass.
         await _reconcile_own_vouches(node, lane)
+        await _record_observed_equivocations(node, lane)
+        await _reconcile_own_signals(node, lane)
         await _pull_trust_subscriptions(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
@@ -555,6 +570,7 @@ async def run_link_sync(
         )
         await retry_pending_attestations(node, lane)
         await _forget_retired_attestations(lane)
+        await _reverify_signal_evidence(node, lane)
         await _reevaluate_trust_over_time(node, lane)
         # Issue #672: a compromise learned from a hello this pass (a direct
         # peer's chain) has no batch of its own to sweep after.
@@ -937,6 +953,9 @@ async def _sync_one_seed(
             seed_peer.fingerprint, peer_state.value,
         )
         return True
+    if enforce_trust_policy:
+        # Issue #1035: a completed hello is a day of direct interaction.
+        await lane.run(record_direct_activity, seed_peer.fingerprint)
 
     # Design doc §8.8, issue #85 (§9.6, issue #87 for channels; §11,
     # issue #93 for file-area catalogues): pull-based catch-up, asked of
@@ -1563,6 +1582,51 @@ async def _reconcile_own_vouches(node: LinkNode, lane: DatabaseLane) -> None:
         )
 
 
+async def _record_observed_equivocations(node: LinkNode, lane: DatabaseLane) -> None:
+    """Record the equivocation `handle_events` saw since the last pass (issue
+    #589): each one quarantines its subject's identity integrity here, and is
+    published by `_reconcile_own_signals` unless the SysOp turned that off."""
+    pending, node.observed_equivocations[:] = list(node.observed_equivocations), []
+    for subject_fingerprint, evidence in pending:
+        try:
+            if await lane.run(record_observed_equivocation, subject_fingerprint, evidence):
+                _logger.warning(
+                    "Link trust: node %s signed two different objects into the same chain slot. "
+                    "Its identity integrity is quarantined here until a SysOp clears the evidence "
+                    "on its trust screen (Settings -> Policy trust -> Subjects).",
+                    subject_fingerprint,
+                )
+        except (ValueError, sqlite3.Error) as exc:
+            _logger.warning("Link trust: could not record equivocation by %s: %s", subject_fingerprint, exc)
+
+
+async def _reconcile_own_signals(node: LinkNode, lane: DatabaseLane) -> None:
+    """Sign, re-sign and revoke this node's automatic equivocation signals
+    (issue #589). Every pass, like the vouches: revocation follows a SysOp
+    clearing evidence or turning automatic signals off."""
+    try:
+        changes = await lane.run(
+            reconcile_issued_signals,
+            node.identity.signing_key,
+            home_node_fingerprint=node.identity.fingerprint,
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        _logger.warning("Link trust: could not reconcile this node's own signals: %s", exc)
+        return
+    for change in changes:
+        if change.action == "deferred":
+            _log_once(
+                node, f"signal-deferred:{change.subject_fingerprint}",
+                "Link trust: an automatic signal about %s waits: this node already signed the "
+                "most it signs in a day.", change.subject_fingerprint,
+            )
+            continue
+        _logger.warning(
+            "Link trust: %s an automatic equivocation signal about node %s (%s)",
+            change.action, change.subject_fingerprint, change.reason,
+        )
+
+
 def _parse_trust_page(
     raw_objects: list, verify_key, superseded_keys: list, issuer: str
 ) -> tuple[list[SignedTrustObject], str | None, bool]:
@@ -1602,8 +1666,8 @@ def _parse_trust_page(
             content_id = event_content_id(envelope)
         except Exception as exc:  # noqa: BLE001 -- unvalidated peer input; see below
             # `event_content_id` canonicalizes input nothing has validated yet
-            # and raises `ContentIdError`, which is a bare `Exception`, for a
-            # float or an unsafe integer. Without a cursor for this object
+            # and raises `ContentIdError` (a `ValueError`) for a float or an
+            # unsafe integer; anything else unexpected is refused the same way. Without a cursor for this object
             # nothing after it can be settled either, so the page is refused
             # as malformed rather than allowed to escape the pull's handler.
             raise TrustWireError(f"trust response contains a malformed entry: {exc}") from exc
@@ -1703,7 +1767,9 @@ async def _pull_one_trust_reporter(
                     raw_objects, verify_key, superseded_keys, issuer
                 )
                 if parsed:
-                    result = await lane.run(ingest_trust_objects, parsed)
+                    result = await lane.run(
+                        ingest_trust_objects, parsed, subject_keys=_signal_subject_keys(node, parsed),
+                    )
                     for skipped in result.skipped:
                         _logger.info(
                             "Link trust pull: skipped an object from %s that this node has no "
@@ -1945,6 +2011,57 @@ async def _forget_retired_attestations(lane: DatabaseLane) -> None:
         await lane.run(forget_retired_remote_attestations)
     except (ValueError, sqlite3.Error) as exc:
         _logger.warning("Link attestations: could not forget retired values: %s", exc)
+
+
+def _known_subject_keys(node: LinkNode, fingerprint: str) -> SubjectKeys | None:
+    record = node.known_identity(fingerprint)
+    return subject_keys_from_record(record) if record is not None else None
+
+
+def _signal_subject_keys(node: LinkNode, objects: list) -> dict[str, SubjectKeys]:
+    """What this node knows of the keys of the nodes `objects`' signals are
+    about (issue #1036), for `ingest_trust_objects` to reproduce their
+    evidence against. Built here, on the loop, because the keys live on the
+    running node, not in the database."""
+    keys: dict[str, SubjectKeys] = {}
+    for obj in objects:
+        subject = obj.payload.get("subject") if isinstance(obj.payload, dict) else None
+        fingerprint = subject.get("node_fingerprint") if isinstance(subject, dict) else None
+        if not isinstance(fingerprint, str) or fingerprint in keys:
+            continue
+        found = _known_subject_keys(node, fingerprint)
+        if found is not None:
+            keys[fingerprint] = found
+    return keys
+
+
+async def _reverify_signal_evidence(node: LinkNode, lane: DatabaseLane) -> None:
+    """Re-check equivocation evidence this node could not reproduce when it
+    arrived (issue #1036): typically the subject was not known yet, and has
+    been introduced or has said hello since. Bounded per pass."""
+    try:
+        pending = await lane.run(unverified_equivocation_signals)
+    except sqlite3.Error as exc:
+        _logger.warning("Link trust: could not list unverified signals: %s", exc)
+        return
+    failed: list[str] = []
+    for content_id, fingerprint, data in pending:
+        keys = _known_subject_keys(node, fingerprint)
+        if keys is None or not reproduce_equivocation(data, subject_fingerprint=fingerprint, keys=keys):
+            failed.append(content_id)
+            continue
+        try:
+            if await lane.run(mark_signal_evidence_verified, content_id):
+                _logger.info(
+                    "Link trust: reproduced the equivocation evidence in signal %s about node %s; "
+                    "it now counts", content_id, fingerprint,
+                )
+        except (ValueError, sqlite3.Error) as exc:
+            _logger.warning("Link trust: could not record verified evidence for %s: %s", content_id, exc)
+    try:
+        await lane.run(mark_signal_reverify_attempted, failed)
+    except sqlite3.Error as exc:
+        _logger.warning("Link trust: could not record re-check attempts: %s", exc)
 
 
 async def _reevaluate_trust_over_time(node: LinkNode, lane: DatabaseLane) -> None:

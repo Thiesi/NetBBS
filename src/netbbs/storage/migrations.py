@@ -3979,6 +3979,33 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #1036: `link_trust_signals.evidence_verified_at` -- when this node itself "
+            "reproduced a self-verifying signal's embedded evidence (design doc §12.6). Only a "
+            "verified self-verifying signal counts toward automatic policy; one this node could "
+            "not reproduce is kept for diagnostics and shown as unverified. NULL for every existing "
+            "row: nothing before this checked the evidence, so a signal that counted only on its "
+            "label stops counting until its evidence reproduces here. "
+            "`reverify_attempted_at` is when the per-pass re-check last tried and failed, so that "
+            "check rotates through unverified signals instead of retrying the same oldest ones."
+        ),
+        sql="""
+        ALTER TABLE link_trust_signals ADD COLUMN evidence_verified_at TEXT;
+        ALTER TABLE link_trust_signals ADD COLUMN reverify_attempted_at TEXT;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #589: `link_trust_local_observations.publication_withdrawn_at` -- when the "
+            "SysOp withdrew the automatic trust signal this node published about an observed "
+            "equivocation, while keeping the observation itself. NULL for every existing row: "
+            "no node published signals before this."
+        ),
+        sql="""
+        ALTER TABLE link_trust_local_observations ADD COLUMN publication_withdrawn_at TEXT;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #632 (design doc §16): sealed attestation bundles a relay holds for a recipient "
             "it relays for. One slot per (issuer, recipient): a newer bundle from the same issuer "
             "replaces the older one, since a bundle is a complete snapshot. Kept apart from "

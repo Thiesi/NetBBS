@@ -8307,6 +8307,50 @@ def test_link_status_screen_prioritizes_a_cryptographic_identity_warning(
     assert "could indicate impersonation" in text
 
 
+def test_link_status_identity_changes_say_when_each_was_seen(db, lane, sysop):
+    """Issue #1043: without a time a SysOp could not tell a change seen this
+    morning from one weeks old. Each change shows when it was observed, in
+    the node's display format, newest first."""
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.timeutil import format_for_display, resolve_display_preferences
+
+    link_context = _link_context()
+    node = LinkNode(identity=bootstrap_node_identity("renamed-node"))
+    for minute, name in ((0, "Old Name"), (1, "Middle Name"), (2, "New Name")):
+        record = node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at=f"2026-09-03T13:{minute:02d}:00+00:00", friendly_name=name,
+        ))
+        save_peer(db, record)
+    link_context.link_node.peers[record.fingerprint] = record
+    rows = db.connection.execute(
+        "SELECT id FROM link_node_identity_observations WHERE kind <> 'first_seen' ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 2
+    stamps = ["2026-08-01T09:15:00.000000Z", "2026-09-30T21:40:00.000000Z"]
+    for row, stamp in zip(rows, stamps):
+        db.connection.execute(
+            "UPDATE link_node_identity_observations SET observed_at = ? WHERE id = ?", (stamp, row["id"])
+        )
+    db.connection.commit()
+    display_format, display_timezone = resolve_display_preferences(db)
+    older, newer = (
+        format_for_display(stamp, override_format=display_format, override_timezone=display_timezone)
+        for stamp in stamps
+    )
+
+    session = FakeSession(["s", "l", "PAGE_DOWN", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _normalized_visible(_written_text(session))
+    section = text[text.index("IDENTITY CHANGES"):]
+    assert "When" in section and "Change" in section
+    assert newer in section and older in section
+    assert section.index(newer) < section.index(older), "newest first"
+
+
 def test_repair_carried_posts_screen_reports_nothing_to_do_when_caught_up(db, lane, sysop):
     link_context = _link_context()
 
@@ -10568,6 +10612,8 @@ def test_the_subject_screen_says_how_far_remote_reports_are_from_quarantine(db, 
         evidence_class=EvidenceClass.SELF_VERIFYING,
         observed_at=stamp(now - timedelta(hours=2)), issued_at=stamp(now - timedelta(hours=1)),
         expires_at=stamp(now + timedelta(days=30)), now_iso=stamp(now),
+        # Issue #1036: only a signal whose evidence reproduced here counts.
+        evidence_verified_at=stamp(now),
     )
     session = FakeSession(["s", "p", "s", "0", "1", "b", "b", "b", "b"])
 
@@ -11163,3 +11209,46 @@ def test_a_trust_decision_about_a_node_starts_a_pass_at_once(db, lane, sysop):
     ])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     assert link_context.link_node.sync_wake.is_set()
+
+
+# -- automatic equivocation signals (issue #589) -------------------------------
+
+
+def test_the_signals_screen_turns_automatic_signals_off(db, lane, sysop):
+    from netbbs.link.trust_issuance import automatic_signals_enabled
+
+    assert automatic_signals_enabled(db)
+    session = FakeSession(["s", "p", "g", "t", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    assert not automatic_signals_enabled(db)
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "Automatic signals" in text
+    assert "Automatic signals are off. Published ones are revoked on the next Link sync pass." in text
+
+
+def test_a_sysop_clears_observed_equivocation_from_the_subject_screen(db, lane, sysop):
+    """§12.9: equivocation recovers only once a SysOp has looked, and this is
+    where they clear it."""
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.trust import list_local_observations
+    from netbbs.link.trust_issuance import record_observed_equivocation
+    from tests.test_link_equivocation_signals import forked_edits
+
+    author = LinkNode(identity=bootstrap_node_identity("forker"))
+    observer = LinkNode(identity=bootstrap_node_identity("observer"))
+    forked_edits(author, observer)
+    [(subject_fingerprint, evidence)] = observer.observed_equivocations
+    record_observed_equivocation(db, subject_fingerprint, evidence)
+    subject = TrustSubject.node(subject_fingerprint)
+    assert len(list_local_observations(db, subject)) == 1
+
+    # [N]ext page: the subject screen pages, and what was observed is on page 2.
+    session = FakeSession(["s", "p", "s", "0", "1", "n", "l", "y", "b", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    assert list_local_observations(db, subject) == []
+    text = " ".join(_visible(_written_text(session)).split())
+    assert "OBSERVED HERE" in text.upper()
+    assert "Evidence cleared." in text

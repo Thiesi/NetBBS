@@ -149,6 +149,12 @@ from netbbs.link.node_identity import (
     operational_key_history,
 )
 from netbbs.link.introduction import IdentityRequest, referenced_identities
+from netbbs.link.equivocation import (
+    build_equivocation_evidence,
+    equivocation_slot,
+    reproduce_equivocation,
+    subject_keys_from_record,
+)
 from netbbs.link.remote_attestation import AttestationPullRequest
 from netbbs.link.trust_wire import TrustPullRequest
 from netbbs.timeutil import utc_now_iso
@@ -2055,6 +2061,14 @@ class FileAreaEventState:
         self.areas[genesis.payload["area_id"]] = genesis
 
 
+#: Issue #589: how far back a refused chain extension is compared for a fork,
+#: how many observed equivocations wait for the sync pass, and how many
+#: pairs are remembered so the same fork offered again is not noted twice.
+_MAX_FORK_SCAN = 64
+_MAX_OBSERVED_EQUIVOCATIONS = 32
+_MAX_EQUIVOCATION_PAIRS_REMEMBERED = 1024
+
+
 @dataclass
 class BoardLifecycleState:
     """Board lifecycle/origin state (issue #78, issue #53): board-origin
@@ -2258,6 +2272,14 @@ class LinkNode:
     # Issue #844: per peer this node dials, what it last learned about that
     # peer taking this node's own content. Memory only; see `PeerExchange`.
     peer_exchange: dict[str, PeerExchange] = field(default_factory=dict)
+    # Issue #589: equivocation this node has seen with its own eyes -- two
+    # different objects one node signed into one chain slot -- as (subject
+    # fingerprint, embedded evidence), waiting for the sync pass to record
+    # them (`netbbs.link.trust_issuance.record_observed_equivocation`).
+    # Memory only and bounded: a full queue drops the newest, which the same
+    # fork offered again on a later pass refills.
+    observed_equivocations: list[tuple[str, dict]] = field(default_factory=list, repr=False, compare=False)
+    _equivocation_pairs_seen: set[frozenset[str]] = field(default_factory=set, repr=False, compare=False)
     # Issue #860: told about each carried `channel_message` once it is
     # materialized -- (content_id, verified payload, stored line) -- so
     # callers already in the channel see it without rejoining. Set by `netbbs.__main__` to the live-channel bridge; None in
@@ -3396,7 +3418,7 @@ class LinkNode:
         if raw_objects:
             try:
                 last_sent = event_content_id(raw_objects[-1]["envelope"])
-            except Exception as exc:  # noqa: BLE001 -- unvalidated input; `ContentIdError` is a bare Exception
+            except Exception as exc:  # noqa: BLE001 -- unvalidated input
                 raise LinkProtocolError(f"malformed trust object in deposit: {exc}") from exc
         for raw in raw_objects:
             try:
@@ -3814,6 +3836,72 @@ class LinkNode:
             board_id, self.board_events.boards[board_id].payload["origin_fingerprint"]
         )
 
+    def _lifecycle_chain(self, board_id: str) -> list[dict]:
+        """The lifecycle events on file for `board_id`, newest first: walked
+        back from the head through `previous_event_id`, at most
+        `_MAX_FORK_SCAN` steps, stopping at the genesis."""
+        chain: list[dict] = []
+        genesis = self.board_events.genesis_for(board_id)
+        cursor = self.board_lifecycle.board_lifecycle_head.get(board_id)
+        while cursor is not None and len(chain) < _MAX_FORK_SCAN:
+            if genesis is not None and cursor == genesis.content_id:
+                break
+            raw = self.events.get(cursor)
+            if not isinstance(raw, dict):
+                break
+            chain.append(raw)
+            cursor = raw.get("envelope", {}).get("payload", {}).get("previous_event_id")
+        return chain
+
+    def _note_chain_fork(self, raw: dict, candidates: list[dict]) -> None:
+        """Keep `raw` and an object on file as evidence when one node signed
+        both into the same chain slot (issue #589, design doc §12.5).
+
+        Called where a chain refuses an extension that does not follow its
+        head. Most such refusals are reordering -- an extension of a head this
+        node has not seen yet, which occupies no slot already taken -- and
+        note nothing. A different object already in the same slot is a fork;
+        it is equivocation only if both verify under one node's keys as this
+        node knows them (`reproduce_equivocation`, the same check a receiver
+        of the resulting signal makes). Never raises.
+        """
+        try:
+            slot = equivocation_slot(raw)
+            if slot is None:
+                return
+            incoming_id = event_content_id(raw["envelope"])
+            # The newest `_MAX_FORK_SCAN`: post and key chains come oldest first,
+            # and a fork at a recent slot -- a node restored from a backup -- is
+            # the one that matters (review of #1048). The lifecycle chain comes
+            # newest first but is already cut to that length.
+            for existing in candidates[-_MAX_FORK_SCAN:]:
+                if equivocation_slot(existing) != slot or event_content_id(existing["envelope"]) == incoming_id:
+                    continue
+                self._note_equivocation(existing, raw)
+                return
+        except Exception:  # noqa: BLE001 -- evidence gathering must never change how the batch is judged
+            return
+
+    def _note_equivocation(self, first: dict, second: dict) -> None:
+        pair = frozenset({event_content_id(first["envelope"]), event_content_id(second["envelope"])})
+        if pair in self._equivocation_pairs_seen or len(self.observed_equivocations) >= _MAX_OBSERVED_EQUIVOCATIONS:
+            return
+        evidence = build_equivocation_evidence(first, second)
+        subject = first["envelope"]["payload"].get("subject_fingerprint")  # a key transition's own node
+        candidates = [*([subject] if isinstance(subject, str) else []),
+                      *self._signers_of(first), *self._signers_of(second)]
+        for signer in dict.fromkeys(candidates):
+            if signer == self.identity.fingerprint:
+                continue
+            record = self.known_identity(signer)
+            keys = subject_keys_from_record(record) if record is not None else None
+            if keys is not None and reproduce_equivocation(evidence["data"], subject_fingerprint=signer, keys=keys):
+                if len(self._equivocation_pairs_seen) >= _MAX_EQUIVOCATION_PAIRS_REMEMBERED:
+                    self._equivocation_pairs_seen.clear()
+                self._equivocation_pairs_seen.add(pair)
+                self.observed_equivocations.append((signer, evidence))
+                return
+
     def current_board_lifecycle_head(self, board_id: str) -> str:
         """The content_id a *new* lifecycle event for `board_id` (an
         offer or an acceptance) must reference as its own `previous_
@@ -3949,6 +4037,7 @@ class LinkNode:
                         f"({transition.payload.get('subject_fingerprint')!r}) -- refusing"
                     )
 
+                self._note_chain_fork(raw, [existing.to_dict() for existing in sender.transitions])
                 candidate_transitions = sender.transitions + (transition,)
                 try:
                     resolve_current_operational_key(
@@ -4107,6 +4196,7 @@ class LinkNode:
 
                 current_head = existing_chain[-1].content_id if existing_chain else root_post_id
                 if edit.payload.get("previous_event_id") != current_head:
+                    self._note_chain_fork(raw, [existing.to_dict() for existing in existing_chain])
                     raise LinkProtocolError(
                         f"board_post_edit for root post {root_post_id!r} does not extend the "
                         f"current head ({current_head!r}) -- refusing (reordering "
@@ -4166,6 +4256,7 @@ class LinkNode:
 
                 current_head = existing_chain[-1].content_id if existing_chain else root_post_id
                 if mod_edit.payload.get("previous_event_id") != current_head:
+                    self._note_chain_fork(raw, [existing.to_dict() for existing in existing_chain])
                     raise LinkProtocolError(
                         f"board_post_moderator_edit for root post {root_post_id!r} does not "
                         f"extend the current head ({current_head!r})"
@@ -4234,6 +4325,7 @@ class LinkNode:
 
                 current_head = existing_chain[-1].content_id if existing_chain else root_post_id
                 if tombstone.payload.get("previous_event_id") != current_head:
+                    self._note_chain_fork(raw, [existing.to_dict() for existing in existing_chain])
                     raise LinkProtocolError(
                         f"board_post_tombstone for root post {root_post_id!r} does not extend "
                         f"the current head ({current_head!r})"
@@ -4512,6 +4604,7 @@ class LinkNode:
 
                 current_head = self.current_board_lifecycle_head(board_id)
                 if offer.payload.get("previous_event_id") != current_head:
+                    self._note_chain_fork(raw, self._lifecycle_chain(board_id))
                     raise LinkProtocolError(
                         f"board_origin_transfer_offer for board_id {board_id!r} does not "
                         f"extend the current lifecycle head ({current_head!r})"
@@ -4631,6 +4724,7 @@ class LinkNode:
                         self.known_event_ids.add(closure.content_id)
                         self.events.setdefault(closure.content_id, raw)
                         continue
+                    self._note_chain_fork(raw, self._lifecycle_chain(board_id))
                     raise LinkProtocolError(
                         f"board_id {board_id!r} is already closed -- refusing a second, "
                         "different board_closure"
@@ -4648,6 +4742,7 @@ class LinkNode:
 
                 current_head = self.current_board_lifecycle_head(board_id)
                 if closure.payload.get("previous_event_id") != current_head:
+                    self._note_chain_fork(raw, self._lifecycle_chain(board_id))
                     raise LinkProtocolError(
                         f"board_closure for board_id {board_id!r} does not extend the current "
                         f"lifecycle head ({current_head!r})"

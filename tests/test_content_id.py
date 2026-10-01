@@ -162,3 +162,12 @@ def test_canonical_json_bytes_matches_what_compute_content_id_hashes():
         canonical_json_bytes(fields), digest_size=32, encoder=nacl.encoding.RawEncoder
     ).hex()
     assert compute_content_id(fields) == expected
+
+
+def test_a_content_id_refusal_is_a_value_error():
+    """Every guard written for malformed peer input catches `ValueError`;
+    a bare `Exception` here slipped past them four times (#998, #1027,
+    #1040, #1042)."""
+    assert issubclass(ContentIdError, ValueError)
+    with pytest.raises(ValueError):
+        canonical_json_bytes({"weight": 1.5})

@@ -9,16 +9,16 @@ bounds; :mod:`netbbs.link.trust` remains the synchronous policy engine.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable, Mapping
 
 import nacl.signing
 
 from netbbs.identity.keys import Identity, verify_signature
+from netbbs.link.equivocation import SIGNED_EQUIVOCATION, SubjectKeys, reproduce_equivocation
 from netbbs.link.events import (
     NETBBS_PROTOCOL_VERSION,
     build_envelope,
@@ -29,7 +29,6 @@ from netbbs.link.trust import (
     EvidenceClass,
     TrustDimension,
     TrustSubject,
-    record_reproduced_signal_observation,
     record_trust_signal,
     record_vouch,
     register_subject,
@@ -342,7 +341,7 @@ class SignedTrustObject:
             raise TrustWireError("invalid trust signature encoding") from exc
         try:
             signed_bytes = canonical_bytes(envelope)
-        except Exception as exc:  # noqa: BLE001 -- `ContentIdError` is a bare `Exception`
+        except Exception as exc:  # noqa: BLE001 -- unvalidated input
             raise TrustWireError(f"trust envelope cannot be canonicalized: {exc}") from exc
         if not verify_signature(issuer_verify_key, signed_bytes, signature):
             raise TrustSignatureError("trust signature does not verify")
@@ -517,8 +516,37 @@ def store_issued_trust_object(db: Database, obj: SignedTrustObject, *, issued_at
     _store_wire_object(db, obj, issued_at)
 
 
+def evidence_reproduces(
+    payload: dict[str, Any], subject: TrustSubject, subject_keys: Mapping[str, SubjectKeys] | None,
+) -> bool:
+    """Whether this node itself reproduces a signal's embedded evidence (issue
+    #1036, design doc §12.6).
+
+    Only `signed_equivocation` about a node can carry proof a receiver checks
+    on its own: two conflicting objects, both signed under keys this node
+    attributes to the subject. The other integrity categories assert something
+    a third party cannot reconstruct -- a revoked key's signature proves
+    nothing about who made it, nor does an invalid signature, and authority
+    depends on the observer's view of the chain -- so from a remote issuer
+    they never verify. Neither does a subject whose keys this node does not
+    know yet; such a signal is re-checked once it does.
+    """
+    if payload["evidence_class"] != EvidenceClass.SELF_VERIFYING.value:
+        return False
+    if payload["category"] != SIGNED_EQUIVOCATION or subject.kind != "node":
+        return False
+    evidence = payload["evidence"]
+    if evidence.get("mode") != "embedded":
+        return False
+    keys = (subject_keys or {}).get(subject.node_fingerprint)
+    if keys is None:
+        return False
+    return reproduce_equivocation(evidence.get("data"), subject_fingerprint=subject.node_fingerprint, keys=keys)
+
+
 def ingest_trust_objects(
-    db: Database, objects: Iterable[SignedTrustObject], *, now_iso: str | None = None
+    db: Database, objects: Iterable[SignedTrustObject], *, now_iso: str | None = None,
+    subject_keys: Mapping[str, SubjectKeys] | None = None,
 ) -> TrustIngestResult:
     """Admit verified objects from configured issuers; return accepted/replayed IDs.
 
@@ -527,6 +555,11 @@ def ingest_trust_objects(
     `TrustObjectOutOfScope`. A skipped object is not stored, so widening the
     reporter's grant later has to be able to reach it again, which is why
     `configure_trusted_reporter` resets that issuer's pull cursor.
+
+    `subject_keys` is what this node knows of the keys of the nodes the batch's
+    signals are about, by fingerprint. A self-verifying signal counts only if
+    its evidence reproduces against them (issue #1036); otherwise it is kept,
+    shown as unverified, and does not count.
     """
     now = now_iso or utc_now_iso()
     accepted: list[str] = []
@@ -587,12 +620,14 @@ def ingest_trust_objects(
                     evidence = payload["evidence"]
                     if evidence["mode"] == "embedded":
                         register_subject(db, subject, first_accepted_at=now, now_iso=now)
+                        verified = evidence_reproduces(payload, subject, subject_keys)
                         record_trust_signal(
                             db, content_id=obj.content_id, issuer_fingerprint=issuer, subject=subject,
                             dimension=payload["dimension"], category=payload["category"],
                             evidence_class=payload["evidence_class"], observed_at=payload["observed_at"],
                             issued_at=payload["issued_at"], expires_at=payload["expires_at"],
                             evidence=evidence, explanation=payload["explanation"], now_iso=now,
+                            evidence_verified_at=now if verified else None,
                         )
                 elif obj.object_type == TRUST_VOUCH_OBJECT_TYPE:
                     subject = _subject_from_dict(payload["subject"])
@@ -751,68 +786,3 @@ def save_trust_pull_cursor(
                    updated_at = excluded.updated_at""",
             (responder_fingerprint, issuer_fingerprint, after_content_id, now_iso or utc_now_iso()),
         )
-
-
-def verify_evidence_bytes(evidence: dict[str, Any], content: bytes) -> Any:
-    """Size/hash/parse a digest-only evidence body; this does not reproduce its claim."""
-    checked = _validate_evidence(evidence)
-    if checked["mode"] != "digest":
-        raise TrustWireError("evidence is not digest-referenced")
-    if len(content) != checked["size"] or len(content) > MAX_EMBEDDED_EVIDENCE_BYTES:
-        raise TrustWireError("evidence body size does not match the signed claim")
-    if hashlib.sha256(content).hexdigest() != checked["sha256"]:
-        raise TrustWireError("evidence body hash does not match the signed claim")
-    try:
-        return json.loads(content)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise TrustWireError("evidence body is not valid UTF-8 JSON") from exc
-
-
-def activate_reproduced_digest_signal(
-    db: Database,
-    content_id: str,
-    evidence_content: bytes,
-    *,
-    observation_id: str,
-    reproduce: Callable[[Any], bool],
-    now_iso: str | None = None,
-) -> bool:
-    """Activate digest evidence only after bounded verification and reproduction.
-
-    ``reproduce`` owns the category-specific semantic check.  Merely fetching,
-    hashing, and parsing reporter-provided JSON can never make it local policy
-    evidence.  A successful callback records both the remote signal and an
-    independent local observation.
-    """
-    row = db.connection.execute(
-        """SELECT envelope_json, revoked_at FROM link_trust_wire_objects
-           WHERE content_id = ? AND object_type = 'trust_signal'""",
-        (content_id,),
-    ).fetchone()
-    if row is None:
-        raise TrustWireError("unknown digest trust signal")
-    if row[1] is not None:
-        raise TrustWireError("digest trust signal has been revoked")
-    payload = json.loads(row[0])["payload"]
-    evidence = payload["evidence"]
-    if payload["evidence_class"] != EvidenceClass.SELF_VERIFYING.value:
-        raise TrustWireError("only self-verifying digest evidence can be reproduced locally")
-    parsed = verify_evidence_bytes(evidence, evidence_content)
-    if not reproduce(parsed):
-        raise TrustWireError("evidence claim could not be independently reproduced")
-    now = now_iso or utc_now_iso()
-    subject = _subject_from_dict(payload["subject"])
-    with db.connection:
-        register_subject(db, subject, first_accepted_at=now, now_iso=now)
-        inserted = record_trust_signal(
-            db, content_id=content_id, issuer_fingerprint=payload["issuer_fingerprint"],
-            subject=subject, dimension=payload["dimension"], category=payload["category"],
-            evidence_class=payload["evidence_class"], observed_at=payload["observed_at"],
-            issued_at=payload["issued_at"], expires_at=payload["expires_at"],
-            evidence=evidence, explanation=payload["explanation"], now_iso=now,
-        )
-        if inserted:
-            record_reproduced_signal_observation(
-                db, content_id, observation_id=observation_id, now_iso=now
-            )
-        return inserted

@@ -27,7 +27,6 @@ from netbbs.link.trust import (
     maintain_trust_state,
     record_activity,
     record_local_observation,
-    record_reproduced_signal_observation,
     record_trust_signal,
     record_vouch,
     recompute_all_trust_states,
@@ -92,7 +91,9 @@ def add_vouch(db, subject, reporter, number):
     )
 
 
-def add_signal(db, subject, reporter, number, *, now=NOW):
+def add_signal(db, subject, reporter, number, *, now=NOW, verified=True):
+    """A self-verifying signal as it arrives once its evidence reproduced here
+    (issue #1036); `verified=False` is one whose evidence did not."""
     return record_trust_signal(
         db,
         content_id=f"signal-{number}",
@@ -105,7 +106,36 @@ def add_signal(db, subject, reporter, number, *, now=NOW):
         issued_at=stamp(now - timedelta(hours=1)),
         expires_at=stamp(now + timedelta(days=180)),
         now_iso=stamp(now),
+        evidence_verified_at=stamp(now) if verified else None,
     )
+
+
+def test_an_unverified_self_verifying_signal_does_not_quarantine(db):
+    """Issue #1036: two domains' self-verifying signals quarantined a subject
+    on their label alone. An unverified one no longer counts toward the
+    two-domain threshold; it is kept, and like any claim it still holds back
+    graduation."""
+    subject = register_old_node(db)
+    configure_reporter(db, "reporter-a", "domain-a")
+    configure_reporter(db, "reporter-b", "domain-b")
+    add_signal(db, subject, "reporter-a", 1)
+    add_signal(db, subject, "reporter-b", 2, verified=False)
+
+    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert state.state == TrustState.PROBATIONARY
+    assert state.explanation["active_trigger_count"] == 2
+    assert db.connection.execute(
+        "SELECT evidence_verified_at FROM link_trust_signals WHERE content_id = 'signal-2'"
+    ).fetchone()[0] is None
+
+    # Verified, the same signal completes the threshold.
+    from netbbs.link.trust import mark_signal_evidence_verified
+
+    assert mark_signal_evidence_verified(db, "signal-2", now_iso=stamp(NOW))
+    quarantined = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert quarantined.state == TrustState.QUARANTINED
+    assert {item["content_id"]: item["evidence_verified"]
+            for item in quarantined.explanation["active_remote_evidence"]} == {"signal-1": True, "signal-2": True}
 
 
 def test_node_and_user_subjects_are_independent_and_start_probationary(db):
@@ -764,24 +794,6 @@ def test_revocation_removes_remote_support_without_deleting_history(db):
         "SELECT revoked_by_content_id FROM link_trust_signals WHERE content_id = 'signal-2'"
     ).fetchone()
     assert row[0] == "revoke-2"
-
-
-def test_reproduced_signal_becomes_local_evidence_independent_of_revocation(db):
-    subject = register_old_node(db)
-    configure_reporter(db, "reporter", "domain")
-    add_signal(db, subject, "reporter", 1)
-    assert record_reproduced_signal_observation(
-        db, "signal-1", observation_id="reproduced-1", now_iso=stamp(NOW)
-    )
-    revoke_trust_signal(
-        db, "signal-1", revocation_content_id="revoke-1",
-        now_iso=stamp(NOW + timedelta(minutes=1)),
-    )
-
-    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
-    assert state.state == TrustState.QUARANTINED
-    assert state.reason_code == "local_self_verifying_evidence"
-    assert state.explanation["active_local_evidence"][0]["observation_id"] == "reproduced-1"
 
 
 def test_startup_recompute_reconstructs_projection_from_persisted_inputs(db):
