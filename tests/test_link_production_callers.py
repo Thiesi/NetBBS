@@ -44,9 +44,8 @@ LINK = SRC / "netbbs" / "link"
 # subsystem shipped with no production caller, which is the thing the check
 # exists to stop.
 ALLOWED: dict[str, str] = {
-    # Issue #632, part 2 of 3: the per-recipient delivery status lands before
-    # the Published identity screen that shows it (part 3), which takes it off.
-    "list_attestation_delivery_status": "#632",
+    # Empty since issues #589 (automatic equivocation signals, digest evidence
+    # deleted) and #1035 (activity days) wired the last names.
 }
 
 

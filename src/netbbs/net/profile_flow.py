@@ -54,7 +54,7 @@ from netbbs.directory import (
 )
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
 from netbbs.link.boards import LinkContext
-from netbbs.link.onboarding import link_is_outgoing_only
+from netbbs.link.attestation_delivery import attestation_delivery_counts
 from netbbs.link.remote_attestation import count_attestation_recipients
 from netbbs.mail import list_mail_blocks, set_shares_read_receipts, shares_read_receipts
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
@@ -1770,7 +1770,9 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         # Issue #596: how many nodes a shared attestation can reach right now.
         # The caller is told how many; which ones is the SysOp's screen.
         "recipient_count": await lane.run(count_attestation_recipients),
-        "undialable": await lane.run(link_is_outgoing_only),
+        # Issue #632: how many of them hold what this node last sent.
+        "delivered_age": (await lane.run(attestation_delivery_counts, user.id, "age"))[0],
+        "delivered_name": (await lane.run(attestation_delivery_counts, user.id, "name"))[0],
     }
 
     async def _display_name_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
@@ -1860,6 +1862,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             # Re-read with the toggle, so the number beside "on" is the one
             # that was true when the caller switched it on.
             draft["recipient_count"] = await lane.run(count_attestation_recipients)
+            draft[f"delivered_{attribute}"] = (await lane.run(attestation_delivery_counts, user.id, attribute))[0]
             if toggled:
                 return
             if attestation is None:
@@ -1897,11 +1900,16 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             count = d.get("recipient_count", 0)
             if count == 0:
                 return "on (your SysOp shares with no node yet)"
-            if d.get("undialable"):
-                # Issue #627: an attestation is fetched from this node, which
-                # nobody can dial. "Reaches" would be a promise nothing keeps.
-                return "on (not delivered: node is unreachable)"
-            return f"on (reaches {count} node{'s' if count != 1 else ''})"
+            # Issue #632: what was actually sent, not who could ask. A change
+            # the caller just made reads as not delivered until the next sync
+            # pass sends it, which is the truth.
+            delivered = d.get(f"delivered_{attribute}", 0)
+            plural = "s" if count != 1 else ""
+            if delivered == 0:
+                return "on (not delivered yet)"
+            if delivered >= count:
+                return f"on (sent to {count} node{plural})"
+            return f"on (sent to {delivered} of {count} node{plural})"
 
         return render
 
