@@ -283,7 +283,7 @@ from netbbs.link.trust_wire import (
     load_trust_pull_cursor,
     save_trust_pull_cursor,
 )
-from netbbs.link.trust import TrustState
+from netbbs.link.trust import TrustState, recompute_all_trust_states
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_ACK,
     KIND_LINK_MAIL_DELIVERY,
@@ -521,6 +521,7 @@ async def run_link_sync(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
         await _forget_retired_attestations(lane)
+        await _reevaluate_trust_over_time(lane)
         # Issue #891: mail held here as a relay that its recipient never
         # came back for. Every pass, whatever this node's own mode: a node
         # that stopped serving relays still holds what it took before.
@@ -1690,6 +1691,26 @@ async def _forget_retired_attestations(lane: DatabaseLane) -> None:
         await lane.run(forget_retired_remote_attestations)
     except (ValueError, sqlite3.Error) as exc:
         _logger.warning("Link attestations: could not forget retired values: %s", exc)
+
+
+async def _reevaluate_trust_over_time(lane: DatabaseLane) -> None:
+    """Apply the trust changes that are due to time alone (issue #802).
+
+    A recovery hold's release, an override's or a signal's expiry and
+    probation's age requirement have no event of their own, and the
+    recompute is otherwise event-driven: before this, a quiet subject only
+    moved at the next restart. Every pass, after the trust pulls."""
+    try:
+        transitions = await lane.run(recompute_all_trust_states)
+    except (ValueError, sqlite3.Error) as exc:
+        _logger.warning("Link trust: could not re-evaluate trust states: %s", exc)
+        return
+    for change in transitions:
+        _logger.info(
+            "Link trust: %s %s went from %s to %s (%s)",
+            change.subject_id, change.dimension, change.previous_state or "(none)",
+            change.new_state, change.reason_code,
+        )
 
 
 async def _pull_attestation_authorities(
