@@ -44,8 +44,13 @@ LINK = SRC / "netbbs" / "link"
 # subsystem shipped with no production caller, which is the thing the check
 # exists to stop.
 ALLOWED: dict[str, str] = {
-    # Empty since issues #589 (automatic equivocation signals, digest evidence
-    # deleted) and #1035 (activity days) wired the last names.
+    # Issue #632, part 1 of 3: the sealed-bundle wire format lands before the
+    # sync pass that sends and opens bundles (part 2), which takes these off.
+    "build_sealed_attestation_bundle": "#632",
+    "open_sealed_attestation_bundle": "#632",
+    "snapshot_digest": "#632",
+    "prune_expired_relay_attestation_bundles": "#632",
+    "deposit_attestation_bundle": "#632",
 }
 
 

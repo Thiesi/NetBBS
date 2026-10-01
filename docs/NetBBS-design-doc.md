@@ -1994,9 +1994,15 @@ newest unexpired record, so the handover needs no revocation, and revoking
 would tell a subscriber to stop trusting a value being re-asserted in the same
 breath.
 
-Propagation is an explicit subscription pull, like trust objects (§12.7), and
-uses its own separately signed `remote_attestation_pull_request` object type so
-a request signed for one subscription cannot be re-aimed at the other. The
+Propagation is a sealed, signed snapshot per recipient (issue #632, §16): the
+issuer pushes each recipient node everything it should currently hold, sealed
+to that node's key, directly or through the recipient's relays (§8.5), and a
+snapshot is authoritative -- what it leaves out the recipient forgets. For one
+release a recipient whose descriptor does not advertise `sealed_attestations`
+can still pull instead. The pull is an explicit subscription, like trust
+objects (§12.7), and uses its own separately signed
+`remote_attestation_pull_request` object type so a request signed for one
+subscription cannot be re-aimed at the other. The
 subscription set is the receiver's configured attestation authorities, never
 its trust reporters. A node serves only the objects it signed itself: unlike a
 trust signal, which any carrier may re-serve unchanged, an attestation is a
@@ -2013,8 +2019,7 @@ after it has authenticated and passed trust policy. It is not served the
 value-free part of the stream instead, because any page advances the
 requester's cursor and a cursor that has moved past attestations it was not
 shown would deliver none of them after a later grant. A node removed from the
-list therefore receives no further revocations; what it holds lapses at its
-own expiry.
+list is sent an empty snapshot and forgets what it held (issue #632).
 
 The served stream is every revocation, plus the attestations that are live
 when the page is read. A subscriber returning after an absence still receives
@@ -4444,6 +4449,17 @@ arrived" into "certainly did not". The SysOp's **Link status** relay section
 lists each recipient held for, with its count and the age of its oldest
 deposit, oldest first.
 
+A relay also holds sealed attestation bundles (issue #632) for the nodes it
+relays for, in a table of their own: one slot per (issuer, recipient), a newer
+bundle replacing an older one, bundles from at most 32 issuers per recipient,
+each kept at most 90 days. They never take one of a recipient's mail slots.
+Pickup hands them over beside the mail, in a `bundles` key an older recipient
+ignores; an issuer deposits one only at a relay whose descriptor advertises
+`sealed_attestations`. A bundle is deposited with its issuer's hello bundle;
+the relay accepts it only if its outer signature verifies under the issuer's
+current key as that hello (merged with any chain on file) establishes it, so
+only the issuer can fill or replace its slot.
+
 Reliability scoring is direct-observation operational data, not Phase-4 social
 reputation.
 
@@ -6868,10 +6884,9 @@ what §12.4 requires of a reporter: it has to be established here before it
 is pulled, which for a node never met means by override.
 
 Remote attestations (§5.5) are not carried this way. They hold a caller's
-birthdate or real name, their recipient list is enforced by the issuer when it
-is pulled, and a carrier would either read them or enforce the list on the
-issuer's behalf. Until that is decided (issue #632), the screens of an
-outgoing-only node say that an attestation it publishes is not delivered.
+birthdate or real name, and a carrier would either read them or enforce the
+recipient list on the issuer's behalf. They travel instead as a snapshot sealed
+to each recipient, through the recipient's relays (issue #632).
 
 Distinct fingerprints do not prove independence. Automatic policy counts
 locally assigned trust domains:
@@ -13288,11 +13303,9 @@ visible rather than silent because what it discloses is a relationship between
 two nodes that the other SysOp has to act on, by asking to be added. §12.8's
 silence protects a per-user gate decision; this is not one.
 
-The cost, accepted: a node removed from the list stops receiving revocations
-too. What it already holds lapses at its own expiry, at most 90 days out,
-which is the window §5.5 already accepts for an issuer that goes dark.
-Removing a recipient is a statement about the future. Nothing makes a node
-that has a value forget it.
+A node removed from the list stops receiving revocations too. That cost was
+accepted here and is reversed by issue #632 Decision 2: removal now sends the
+node an empty snapshot, which makes it forget what it held.
 
 **Decision 4 — the caller is told how many, the SysOp sees which.** The
 consent text says the value reaches only the nodes the SysOp has named, that
@@ -13694,12 +13707,8 @@ wire peer does not.** `resolve_known_signing_key` is for checking something a
 third party delivered. Every route that authenticates its caller keeps
 `resolve_peer_signing_key`.
 
-**Decision 6 — attestations wait for their own decision (issue #632).** The likely shape is
-sealing each attestation to its recipient node's key and delivering it through
-the relay mailbox, which already carries sealed envelopes. Until then the
-Published identity screen and the Profile toggle of an outgoing-only node say
-that nothing is delivered, and the vouch screen says how a vouch travels, or
-that it does not yet.
+**Decision 6 — attestations take their own path.** Decided in issue #632's
+entry: a sealed snapshot per recipient, through the recipient's relays.
 
 **Not done, deliberately.** A node that drops a relay tells nobody, it only
 stops naming it, so a relay does not forget what it carried for it; expiry and
@@ -14768,6 +14777,84 @@ earlier transfer out of reach of a peer that missed it.
 **Decision 4 — no capability gating.** Every node is updated before origins
 set this (the maintainer's call); an older node would refuse the unknown
 event type (#1022).
+
+### Issue #632 — delivering attestations from a node nobody can dial — decided
+
+A remote identity attestation used to travel only by being pulled from its
+issuer, with a cursor, and the issuer enforced its recipient list when it was
+pulled. A node nobody can dial cannot serve a pull, and most real nodes are
+outgoing-only, so nothing such a node published about its callers reached
+anyone. Trust objects solved the same problem by depositing at the issuer's
+relays (#627); that does not carry over, because an attestation carries a
+caller's verified birthdate or real name and must reach only its recipients.
+
+**Decision 1 — a sealed, signed snapshot per recipient** (the maintainer's
+choice). The issuer sends each recipient node one `sealed_attestation_bundle`:
+every signed attestation and revocation that recipient should currently hold
+from it, unchanged, sealed to the recipient's key (§10's `encrypt_for`) and
+signed by the issuer. Its outer envelope names only the issuer, the recipient
+node, a `sequence` and a time. The issuer pushes it directly when the
+recipient can be dialed and otherwise deposits it at the *recipient's* relays,
+named in the recipient's descriptor. A relay keeps one slot per (issuer,
+recipient), in its own table so it never takes a mail slot; a newer bundle
+replaces an older one. What replaces the cursor is the recipient's last
+applied `sequence` per issuer: an older or equal one is refused, so a relay
+cannot replay a stale snapshot. A recipient that was away needs only the
+newest bundle, which is what its slot holds. Rejected: a sealed *pull*, which
+still needs a dialable issuer; and a push of individual changes, which brings
+the cursor back as a per-recipient ledger and needs acknowledgements to notice
+a relay losing one.
+
+**Decision 2 — a snapshot is authoritative, so removing a recipient retracts.**
+Whatever a recipient holds from an issuer and the latest snapshot leaves out is
+forgotten, audited as "withdrawn for this recipient". Removing a recipient
+sends it a final, empty snapshot, retried until a route takes it and given up
+after 90 days. This reverses the cost #596 Decision 3 accepted, that a removed
+recipient kept what it held until expiry. A revocation is not used for this,
+because a revocation is a universal signed statement: sent to a removed node,
+it could be passed to another and retract a value still valid there, whereas an
+empty snapshot is sealed to and names one recipient. The cost: a relay that
+withholds a newer bundle delays a retraction by up to the attestation's 90-day
+lifetime, the window §5.5 already accepts for an issuer that goes dark.
+
+**Decision 3 — a relay learns that A sent B something, roughly how much, and
+when.** The plaintext is padded to a power of two from 4 KiB, so the size says
+little, and no user identifier is outside the seal. The relay is the
+recipient's chosen agent, under its signed consent, and already sees more of
+a letter (sender and recipient user IDs). Because a bundle can displace
+another in its slot, a relay never takes one on an unverifiable claim, unlike
+a letter: the deposit carries the issuer's own hello bundle, which
+authenticates itself against its root key (whose hash is the issuer's
+fingerprint), is merged with any chain the relay already holds so a stale one
+cannot revive a compromised key, and names the key the snapshot's outer
+signature must verify under. Only the issuer can fill or replace its slot; a
+deposit in another issuer's name is refused, whatever sequence it claims. The
+recipient still checks everything itself.
+
+**Decision 4 — the recipient's relays, learned from its descriptor.** Sealing
+needs the recipient's key and verifying needs the issuer's, and two
+outgoing-only nodes never complete a hello, so both sides accept a node known
+by introduction (`resolve_known_signing_key`, #627 Decision 5). A recipient
+with no route — no relay published, or none the issuer has met — is a visible
+per-recipient status on the issuer's Published identity screen, never a silent
+drop.
+
+**Decision 5 — one path.** Everything moves to the sealed push. A bundle is
+sent only to a recipient, and deposited only at a relay, whose descriptor
+advertises `sealed_attestations`; for one release the pull stays for
+recipients that do not, and a recipient stops pulling an issuer once it has a
+snapshot from it, so the two never disagree. The pull, its cursor tables and
+the pull request type are then removed. Rejected: keeping the pull for
+dialable issuers, which would give receivers two sets of semantics and leave
+removed recipients unreachable.
+
+**Bounds.** Snapshot plaintext at most 768 KiB (sealed and encoded it stays
+under the 2 MiB request limit), refused visibly beyond that; at most 4,000
+objects. A relay holds bundles from at most 32 issuers per recipient and drops
+one after 90 days. An issuer sends to at most 20 recipients per sync pass,
+re-sends when a recipient's snapshot changes and at least every 7 days, and
+uses a time-based `sequence` so a restore from backup does not move it
+backwards.
 
 ### Issue #1036 — self-verifying evidence is verified — decided
 

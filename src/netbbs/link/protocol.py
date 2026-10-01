@@ -2554,6 +2554,39 @@ class LinkNode:
             descriptor=message.descriptor,
         )
 
+    def authenticated_signing_key(self, message: HelloMessage, fingerprint: str) -> nacl.signing.VerifyKey:
+        """The current signing key of `fingerprint`, authenticated by a hello
+        bundle the caller carried rather than by this node having met it
+        (issue #632: a relay authenticating the issuer of a bundle deposit).
+
+        The bundle verifies against nothing but its own root key, whose hash
+        must be `fingerprint`. What this node already holds for the identity
+        is merged in first, append-only (`merge_key_chain`), so a stale bundle
+        from before a compromise cannot make the stolen key current again.
+        Nothing is admitted or stored. Raises `LinkProtocolError` when the
+        bundle does not verify, names another identity, or leaves no current
+        key."""
+        record = self._verify_hello_bundle(message, what="authentication")
+        if record.fingerprint != fingerprint:
+            raise LinkProtocolError(f"identity bundle is for {record.fingerprint}, not {fingerprint}")
+        known = self.known_identity(fingerprint)
+        transitions = record.transitions
+        if known is not None:
+            merged = merge_key_chain(known, record.transitions)
+            if merged is None:
+                raise LinkProtocolError(f"identity bundle for {fingerprint} conflicts with the chain on file")
+            transitions = merged
+        try:
+            current = resolve_current_operational_key(
+                transitions, root_verify_key=record.root_verify_key,
+                subject_fingerprint=fingerprint, purpose="signing",
+            )
+        except NodeIdentityError as exc:
+            raise LinkProtocolError(f"identity bundle for {fingerprint} does not verify: {exc}") from exc
+        if current is None:
+            raise LinkProtocolError(f"{fingerprint} has no currently-authorized signing key")
+        return nacl.signing.VerifyKey(base64.b64decode(current))
+
     def handle_introduction(self, message: HelloMessage) -> PeerRecord | None:
         """Learn a third node's identity from a carrier (issue #630, design doc §10.6).
 

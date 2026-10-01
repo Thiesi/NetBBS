@@ -52,7 +52,7 @@ import nacl.signing
 import netbbs.mail as mail_module
 from netbbs.auth.users import AuthError, User, get_user_by_username
 from netbbs.identity.addressing import AddressError, is_valid_user_part, parse_address
-from netbbs.identity.encryption import EncryptionError, decrypt_with, encrypt_for
+from netbbs.identity.encryption import EncryptionError, decrypt_with_any, encrypt_for
 from netbbs.link.events import (
     KeyTransition,
     LinkMessage,
@@ -273,12 +273,9 @@ def _open_sealed(node_identity: NodeIdentity, ciphertext: bytes) -> bytes:
     it heard of a rotation arrives sealed to the key that rotation retired
     (issue #624). Newest first, since that is the likely one.
     """
-    for key in (node_identity.signing_key, *reversed(node_identity.retired_signing_keys)):
-        try:
-            return decrypt_with(key, ciphertext)
-        except EncryptionError:
-            continue
-    raise EncryptionError("sealed to none of this node's signing keys")
+    return decrypt_with_any(
+        (node_identity.signing_key, *reversed(node_identity.retired_signing_keys)), ciphertext
+    )
 
 
 # How far ahead of this node's clock a letter's signed `created_at` may be
