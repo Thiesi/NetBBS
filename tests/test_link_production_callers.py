@@ -44,10 +44,8 @@ LINK = SRC / "netbbs" / "link"
 # subsystem shipped with no production caller, which is the thing the check
 # exists to stop.
 ALLOWED: dict[str, str] = {
-    # Issue #589 is decided and built: a node issues vouches and, automatically,
-    # equivocation signals; the digest-evidence path was deleted.  What is left
-    # is owned by issue #1035.
-    "record_activity": "#1035",
+    # Empty since issues #589 (automatic equivocation signals, digest evidence
+    # deleted) and #1035 (activity days) wired the last names.
 }
 
 

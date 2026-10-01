@@ -189,6 +189,7 @@ from netbbs.link.enforcement import (
     decide_event_authorship,
     decide_node_action,
     ensure_node_subject,
+    record_direct_activity,
     event_author,
     node_transport_state,
     LinkPolicyAction,
@@ -933,6 +934,9 @@ async def _sync_one_seed(
             seed_peer.fingerprint, peer_state.value,
         )
         return True
+    if enforce_trust_policy:
+        # Issue #1035: a completed hello is a day of direct interaction.
+        await lane.run(record_direct_activity, seed_peer.fingerprint)
 
     # Design doc §8.8, issue #85 (§9.6, issue #87 for channels; §11,
     # issue #93 for file-area catalogues): pull-based catch-up, asked of
@@ -1643,8 +1647,8 @@ def _parse_trust_page(
             content_id = event_content_id(envelope)
         except Exception as exc:  # noqa: BLE001 -- unvalidated peer input; see below
             # `event_content_id` canonicalizes input nothing has validated yet
-            # and raises `ContentIdError`, which is a bare `Exception`, for a
-            # float or an unsafe integer. Without a cursor for this object
+            # and raises `ContentIdError` (a `ValueError`) for a float or an
+            # unsafe integer; anything else unexpected is refused the same way. Without a cursor for this object
             # nothing after it can be settled either, so the page is refused
             # as malformed rather than allowed to escape the pull's handler.
             raise TrustWireError(f"trust response contains a malformed entry: {exc}") from exc

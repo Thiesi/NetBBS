@@ -341,7 +341,7 @@ class SignedTrustObject:
             raise TrustWireError("invalid trust signature encoding") from exc
         try:
             signed_bytes = canonical_bytes(envelope)
-        except Exception as exc:  # noqa: BLE001 -- `ContentIdError` is a bare `Exception`
+        except Exception as exc:  # noqa: BLE001 -- unvalidated input
             raise TrustWireError(f"trust envelope cannot be canonicalized: {exc}") from exc
         if not verify_signature(issuer_verify_key, signed_bytes, signature):
             raise TrustSignatureError("trust signature does not verify")
