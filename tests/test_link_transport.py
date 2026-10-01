@@ -3460,3 +3460,41 @@ def test_the_trust_deposit_endpoint_takes_a_relayed_nodes_own_objects_and_nobody
     finally:
         relay.close()
         issuer.close()
+
+
+def test_a_hello_with_an_overlong_key_chain_is_refused_before_any_check(tmp_path):
+    """Issue #1039: walking a key chain costs a signature check per
+    transition on every hello, introduction and compromise sweep, so a peer
+    must not choose its length. A hello past the cap is refused when it is
+    parsed, before anything verifies it, and leaves no peer behind."""
+    from netbbs.link.protocol import MAX_HELLO_CHAIN_TRANSITIONS
+
+    seed_node = LinkNode(identity=bootstrap_node_identity("cap-seed"))
+    dialer_node = LinkNode(identity=bootstrap_node_identity("cap-dialer"))
+    seed = _NodeDb(tmp_path, "cap-seed")
+    hello = _hello_for(dialer_node).to_dict()
+    padded = dict(hello, transitions=hello["transitions"] * (MAX_HELLO_CHAIN_TRANSITIONS + 1))
+    at_cap = dict(hello, transitions=(hello["transitions"] * MAX_HELLO_CHAIN_TRANSITIONS)[:MAX_HELLO_CHAIN_TRANSITIONS])
+
+    # The parser alone: one over is refused, exactly the cap still parses.
+    with pytest.raises(ValueError, match="more than the"):
+        HelloMessage.from_dict(padded)
+    assert len(HelloMessage.from_dict(at_cap).transitions) == MAX_HELLO_CHAIN_TRANSITIONS
+
+    async def scenario():
+        server = await _run_server(seed_node, lambda: _hello_for(seed_node), seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"http://127.0.0.1:{server.port}{LINK_PATH_PREFIX}/hello"
+                async with session.post(url, json=padded) as response:
+                    return response.status, await response.text()
+        finally:
+            await server.stop()
+
+    try:
+        status, text = asyncio.run(scenario())
+        assert status == 400, text
+        assert "key transitions" in text
+        assert dialer_node.identity.fingerprint not in seed_node.peers
+    finally:
+        seed.close()

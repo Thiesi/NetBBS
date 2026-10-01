@@ -1222,6 +1222,14 @@ def descriptor_verifies_under_chain(
     )
 
 
+#: Issue #1039: the longest key-transition chain a hello or introduction
+#: bundle may carry. Walking a chain costs one signature check per transition
+#: and happens on every hello, introduction and compromise sweep, so a peer must
+#: not choose its length. Each rotation adds two transitions; 256 is over a
+#: hundred rotations, far past any real history.
+MAX_HELLO_CHAIN_TRANSITIONS = 256
+
+
 @dataclass(frozen=True)
 class HelloMessage:
     """
@@ -1253,9 +1261,17 @@ class HelloMessage:
 
     @classmethod
     def from_dict(cls, data: dict) -> "HelloMessage":
+        transitions = data["transitions"]
+        if not isinstance(transitions, list):
+            raise ValueError("hello transitions must be a list")
+        if len(transitions) > MAX_HELLO_CHAIN_TRANSITIONS:
+            raise ValueError(
+                f"hello carries {len(transitions)} key transitions, more than the "
+                f"{MAX_HELLO_CHAIN_TRANSITIONS} accepted"
+            )
         return cls(
             root_public_key=base64.b64decode(data["root_public_key"]),
-            transitions=tuple(KeyTransition.from_dict(t) for t in data["transitions"]),
+            transitions=tuple(KeyTransition.from_dict(t) for t in transitions),
             descriptor=EndpointDescriptor.from_dict(data["descriptor"]),
         )
 

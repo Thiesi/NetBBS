@@ -5333,6 +5333,13 @@ impostor across the network by naming a node after it and posting once on a
 shared board. Mail addressing resolves names among met nodes only, for the
 same reason.
 
+**Chain length.** A hello or introduction bundle carries at most 256 key
+transitions (issue #1039). A chain is walked, one signature check per
+transition, on every hello, introduction and compromise sweep, so its length
+must not be the sender's choice. One past the cap is refused when the bundle is
+parsed, before anything verifies it. Each rotation adds two transitions, so the
+cap is over a hundred rotations.
+
 **Stale bundles.** A third node's key transitions are not gossiped as events;
 a `key_transition` event is accepted only from its own subject. They do travel
 as part of a chain, though. A carrier's inventory response names, under
