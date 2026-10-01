@@ -403,7 +403,7 @@ Everything below happens each time the file is read:
   picture. A file without SAUCE is read as before: UTF-8 if it decodes as
   UTF-8, CP437 otherwise. A SAUCE record marks the file as classic ANSI art,
   so it is always read as CP437.
-- CP437 art uses the pictographs of the control range (☺ ♥ ♪ ► ⌂ and the
+- CP437 art uses the pictographs of the control range (☺ ♥ ♫ ► ⌂ and the
   rest). On the art path only, bytes 0x01–0x1F other than BEL, BS, TAB, LF,
   CR, EOF and ESC, and 0x7F, are those glyphs, not control characters. A CP437
   session gets the original byte back, a UTF-8 session the Unicode glyph, and
