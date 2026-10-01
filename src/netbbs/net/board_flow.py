@@ -84,7 +84,8 @@ from netbbs.moderation import BoardPermission, has_permission
 from netbbs.mail import MAX_MAIL_SUBJECT_BYTES
 from netbbs.file_refs import FileRef, body_with_link_text, open_ref, refs_some_readers_cannot_open
 from netbbs.net.board_list_banner import load_board_list_banner, load_board_list_slot_art
-from netbbs.net.list_art import list_slot_fields
+from netbbs.net.art_pacing import art_speed
+from netbbs.net.list_art import BOARD_LIST, list_slot_fields
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import NAME_GATE_NOTE
 from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
@@ -300,6 +301,8 @@ async def _browse_boards_in_category(
     # The SysOp's art as the list itself (issue #929), or None.
     board_slot_art = load_board_list_slot_art(db)
     board_slot_fields = list_slot_fields(session, db, user) if board_slot_art is not None else None
+    # The list's art plays at its speed on the first visit (issue #929).
+    board_art_speed = art_speed(db, BOARD_LIST)
 
     def _load(order_by: str) -> tuple[list[Board], list[Category]]:
         all_boards = [
@@ -459,6 +462,8 @@ async def _browse_boards_in_category(
                 slot_art=board_slot_art,
                 slot_column_of=_slot_column_of,
                 slot_fields=board_slot_fields,
+                art_speed=board_art_speed,
+                art_once=BOARD_LIST,
             )
             if board is None:
                 return
@@ -509,6 +514,8 @@ async def _browse_boards_in_category(
             slot_art=board_slot_art,
             slot_column_of=_slot_column_of,
             slot_fields=board_slot_fields,
+            art_speed=board_art_speed,
+            art_once=BOARD_LIST,
         )
         if selected is None:
             return

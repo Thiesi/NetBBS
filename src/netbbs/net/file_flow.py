@@ -118,7 +118,8 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import drafts_directory, save_draft
 from netbbs.net.editor_preference import fullscreen_editor_enabled
 from netbbs.net.file_area_banner import load_file_area_banner, load_file_area_slot_art
-from netbbs.net.list_art import list_slot_fields
+from netbbs.net.art_pacing import art_speed
+from netbbs.net.list_art import FILE_AREA, list_slot_fields
 from netbbs.net.chat_flow import NAME_GATE_NOTE
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.notices import announce, announce_styled, write_notices
@@ -326,6 +327,8 @@ async def _browse_areas_in_category(
     area_masthead = await lane.run(load_file_area_banner, max_width=physical_terminal_width(session))
     # The SysOp's art as the list itself (issue #929), or None.
     area_slot_art = await lane.run(load_file_area_slot_art)
+    # The list's art plays at its speed on the first visit (issue #929).
+    area_art_speed = await lane.run(art_speed, FILE_AREA)
     area_slot_fields = (
         await lane.run(lambda db: list_slot_fields(session, db, user)) if area_slot_art is not None else None
     )
@@ -402,6 +405,8 @@ async def _browse_areas_in_category(
                 slot_art=area_slot_art,
                 slot_column_of=_slot_column_of,
                 slot_fields=area_slot_fields,
+                art_speed=area_art_speed,
+                art_once=FILE_AREA,
             )
             if area is None:
                 return
@@ -452,6 +457,8 @@ async def _browse_areas_in_category(
             slot_art=area_slot_art,
             slot_column_of=_slot_column_of,
             slot_fields=area_slot_fields,
+            art_speed=area_art_speed,
+            art_once=FILE_AREA,
         )
         if selected is None:
             return

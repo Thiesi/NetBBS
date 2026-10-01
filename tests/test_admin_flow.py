@@ -10930,6 +10930,25 @@ def test_main_menu_masthead_speed_wraps_back_to_off(db, lane, sysop):
     assert "Drawn at once" in _written_text(session)
 
 
+@pytest.mark.parametrize(("screen_key", "kind"), [
+    ("o", "board_list"),
+    ("f", "file_area"),
+    ("c", "chat_channel_picker"),
+])
+def test_each_list_masthead_has_its_own_speed(db, lane, sysop, screen_key, kind):
+    from netbbs.net.art_pacing import MAIN_MENU_ART, art_speed
+
+    session = FakeSession(["s", "m", "m", screen_key, "s", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert art_speed(db, kind) == 9600
+    assert art_speed(db, MAIN_MENU_ART) == 0
+    assert "Plays at 9600 bps" in _written_text(session)
+    rows = db.connection.execute(
+        "SELECT detail FROM moderation_log WHERE action = 'set_art_speed' ORDER BY id"
+    ).fetchall()
+    assert [r["detail"] for r in rows] == [f"{kind}=2400", f"{kind}=9600"]
+
+
 def test_who_posts_steps_through_the_modes_on_an_originated_board(db, lane, sysop):
     """Issue #993: [W]ho posts on a Linked board this node originated signs a
     board_posting and steps anyone -> origin starts threads -> origin only."""

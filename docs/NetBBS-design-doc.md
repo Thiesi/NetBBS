@@ -454,9 +454,9 @@ node logs it once; the console's check warns when a level-255 SysOp's menu
 would not fit. ASCII callers, a terminal smaller than the art, and art that
 fails the check get the generated menu too. Art narrower than the screen is
 drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
-token places it. The main menu, welcome and logoff banners use slots today;
-the three lists and hand-drawn items below are being built. Pacing works for
-the welcome banner and the main menu's art.
+token places it. The main menu, the welcome and logoff banners and the three
+lists below use slots, and the main menu also takes hand-drawn items. Pacing
+works for the welcome banner, the main menu's art and the three lists' art.
 
 *List screens.* The Boards, file areas and Chat channels lists take a `{list
 WxH}` region. The current page fills it, one row per entry: the number to
@@ -505,8 +505,11 @@ and writes the rest at once, and it is consumed with anything typed behind it,
 so Enter cannot submit an empty prompt that follows. One draw is paced for at
 most 5 seconds; past that the rest goes out at once. Each piece of art plays
 once per connection: the welcome banner when a caller connects, the main
-menu's art on the first main menu, and a list's art on the first visit once
-list slots land. It never plays on a redraw, after a notice, on the screen
+menu's art on the first main menu, and a list's art (slot art or the
+masthead above the generated list) on the first visit to that list in a
+session, each list with its own speed (`pick_item`'s `art_speed` and
+`art_once`). It never plays on a page change, a cursor move, a search, a
+redraw, after a notice, on the screen
 restored after a break-in, or in a door. Plain banners play in the order they
 were drawn, so cursor-moving ANSI animations work, and art that moves the
 cursor back over rows it drew is exempt from the row-end trimming of still art
