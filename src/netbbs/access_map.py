@@ -224,7 +224,7 @@ def _node_gates(db: Database) -> list[Gate]:
         ),
         Gate(
             GateKind.MAIL, None, "Mail", mail_level, LevelSource.SETTING, mail_level,
-            note="never the guest account",
+            note="not the guest account",
         ),
         Gate(
             GateKind.MRC_OPEN_ROOM, None, "Open MRC rooms", rooms.min_level, LevelSource.SETTING, rooms.min_level,
@@ -364,8 +364,36 @@ def account_level_change(db: Database, user: User, new_level: int) -> AccountCha
     return AccountChange(user.user_level, new_level, tuple(gained), tuple(lost), tuple(blocked))
 
 
+@dataclass(frozen=True)
+class LadderStep:
+    """One row of the Levels screen (issue #1007): a level that matters, how
+    many usable accounts hold exactly it, and the gates that first open
+    there."""
+
+    level: int
+    users: int
+    opens: tuple[Gate, ...]
+
+
+def level_ladder(db: Database) -> list[LadderStep]:
+    """Every level in use, lowest first, with what each one adds over the
+    levels below it. Disabled and pending accounts are not counted."""
+    gates = list_gates(db)
+    held: dict[int, int] = dict(db.connection.execute(
+        "SELECT user_level, COUNT(*) FROM users WHERE disabled_at IS NULL AND pending_approval = 0 "
+        "GROUP BY user_level"
+    ).fetchall())
+    return [
+        LadderStep(level, held.get(level, 0), tuple(g for g in gates if g.off is None and g.opens_at == level))
+        for level in levels_in_use(db, gates)
+    ]
+
+
 def levels_in_use(db: Database, gates: list[Gate]) -> list[int]:
     """The levels that matter on this node, ascending: every level a gate
-    opens at, every level an account holds, and 0."""
-    held = {row[0] for row in db.connection.execute("SELECT DISTINCT user_level FROM users")}
-    return sorted({0} | held | {gate.opens_at for gate in gates})
+    opens at (switched-off gates aside), every level a usable account holds,
+    and 0."""
+    held = {row[0] for row in db.connection.execute(
+        "SELECT DISTINCT user_level FROM users WHERE disabled_at IS NULL AND pending_approval = 0"
+    )}
+    return sorted({0} | held | {gate.opens_at for gate in gates if gate.off is None})

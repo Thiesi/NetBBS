@@ -2076,6 +2076,15 @@ two.
   carried in from other nodes are not held to it (issue #993). The map says
   so on that gate.
 
+**The Levels screen** (issue #1007). `Users ▸ Le[v]els` lists the levels that
+matter: 0, every level a gate opens at (switched-off gates aside), and every
+level an enabled, approved account holds. Each row shows how many such
+accounts hold exactly that level and what it first opens. A level's own
+screen lists its gates with their level and its source, in four views: new
+at this level, everything open, still closed, and open with another gate
+still applying. Picking a board, file area, channel or door opens the screen
+the Content menu opens for it. Any level, in use or not, can be looked at.
+
 **A level change is previewed for the account** (issue #1006). Changing an
 account's level from its detail screen shows what the change gains, loses and
 leaves blocked for that account before anything is written. Unlike the map

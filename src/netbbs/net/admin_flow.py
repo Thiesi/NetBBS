@@ -68,7 +68,16 @@ from zoneinfo import available_timezones
 
 import nacl.signing
 
-from netbbs.access_map import AccountChange, Gate, GateKind, account_level_change
+from netbbs.access_map import (
+    AccountChange,
+    Gate,
+    GateKind,
+    LadderStep,
+    LevelSource,
+    account_level_change,
+    level_ladder,
+    list_gates,
+)
 from netbbs.attestation import AttestationError, withdraw_link_visibility
 from netbbs.auth.users import (
     CO_SYSOP_PRESET,
@@ -229,6 +238,7 @@ from netbbs.config import (
     set_node_display_name,
     set_registration_mode,
 )
+from netbbs.digits import is_ascii_number
 from netbbs.doors import (
     Door,
     DoorError,
@@ -1582,7 +1592,7 @@ async def admin_menu(
             )
         elif choice == "u":
             await session.write_line("")
-            await _users_menu(session, lane, user, node_controls=node_controls)
+            await _users_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
             )
@@ -2329,7 +2339,8 @@ def _compact_dashboard_panel(
 
 
 async def _users_menu(
-    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """Every user-account action, grouped together (design doc): create,
     list/detail, registration policy, promote/demote, enable/disable,
@@ -2399,6 +2410,11 @@ async def _users_menu(
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Delete which user?")
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
+        elif choice == "v":
+            await session.write_line("")
+            await _levels_screen(session, lane, actor, node_controls=node_controls, link_context=link_context)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "t":
             await session.write_line("")
             await _retired_usernames_screen(session, lane, actor)
@@ -2406,6 +2422,227 @@ async def _users_menu(
             await _draw_users_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_SOURCE_WORDS = {
+    LevelSource.RESOURCE: "set here",
+    LevelSource.DEFAULT: "default",
+    LevelSource.SETTING: "Settings",
+    LevelSource.FIXED: "fixed",
+}
+
+
+def _gate_source(gate: Gate) -> str:
+    """Where a gate's level comes from, in a few words."""
+    if gate.source is LevelSource.COMMUNITY:
+        return f"Community {gate.community_name}"
+    return _SOURCE_WORDS[gate.source]
+
+
+def _ladder_summary(step: LadderStep) -> str:
+    """What a level first opens, counted by kind: `2 read · 1 post · Mail`."""
+    counts: dict[str, int] = {}
+    named: list[str] = []
+    for gate in step.opens:
+        action, what = _GATE_WORDS[gate.kind]
+        if what == "node-wide":
+            named.append(gate.name)
+        else:
+            label = {"channel": "channel", "door": "door"}.get(what, action)
+            counts[label] = counts.get(label, 0) + 1
+    order = ("read", "post", "download", "upload", "channel", "door")
+    parts = [f"{counts[label]} {label}" for label in order if label in counts]
+    if step.level >= SYSOP_LEVEL:
+        return "everything"
+    return " · ".join(parts + named) or "nothing new"
+
+
+_LADDER_COLUMNS = [
+    ListColumn("users", 5, VALUE_COLOR, align_right=True),
+    ListColumn("opens here", 52, VALUE_COLOR),
+]
+
+_LEVEL_VIEWS = {
+    "new": "New at this level",
+    "open": "Everything open",
+    "closed": "Still closed",
+    "conditions": "Open, with other gates",
+}
+_LEVEL_VIEW_ORDER = tuple(_LEVEL_VIEWS)
+
+# The access word says the kind on its own (read/post a board, download/
+# upload a file area, join a channel, play a door), which keeps the table
+# inside 80 columns with a name still worth reading.
+_GATE_COLUMNS = [
+    ListColumn("access", 8, VALUE_COLOR),
+    ListColumn("level", 5, VALUE_COLOR, align_right=True),
+    ListColumn("from", 16, MUTED_COLOR),
+    ListColumn("also", 24, MUTED_COLOR),
+]
+
+
+def _gate_stable_id(gate: Gate) -> int:
+    return list(GateKind).index(gate.kind) * 10_000_000 + (gate.object_id or 0)
+
+
+def _gate_columns(gate: Gate) -> list[str]:
+    action, _what = _GATE_WORDS[gate.kind]
+    also = [f"off: {gate.off}"] if gate.off else []
+    also += list(gate.conditions)
+    if gate.note:
+        also.append(gate.note)
+    return [action, str(gate.opens_at), _gate_source(gate), ", ".join(also)]
+
+
+def _gates_in_view(gates: list[Gate], level: int, view: str) -> list[Gate]:
+    if view == "new":
+        return [g for g in gates if g.off is None and g.opens_at == level]
+    if view == "open":
+        return [g for g in gates if g.opens_for(level)]
+    if view == "closed":
+        return [g for g in gates if not g.opens_for(level)]
+    return [g for g in gates if g.opens_for(level) and g.conditions]
+
+
+async def _open_gate_resource(
+    session: Session, lane: DatabaseLane, actor: User, gate: Gate, *,
+    node_controls: NodeControls | None, link_context: LinkContext | None,
+) -> None:
+    """The board's, file area's, channel's or door's own detail screen, the
+    one the Content menu opens, so its levels can be changed from here."""
+    from netbbs.doors.registry import list_doors
+
+    what = _GATE_WORDS[gate.kind][1]
+    listing = {"board": list_boards, "file area": list_file_areas, "channel": list_channels, "door": list_doors}[what]
+    resource = next((r for r in await lane.run(listing) if r.id == gate.object_id), None)
+    if resource is None:
+        _announce_line(session, colored("That no longer exists.", fg_color=MUTED_COLOR))
+        return
+    if what == "board":
+        await _board_detail_screen(session, lane, actor, resource, link_context=link_context)
+    elif what == "file area":
+        await _area_detail_screen(session, lane, actor, resource, link_context=link_context)
+    elif what == "channel":
+        mrc_bridge = node_controls.mrc_bridge if node_controls is not None else None
+        await _channel_detail_screen(session, lane, actor, resource, link_context=link_context, mrc_bridge=mrc_bridge)
+    else:
+        await _door_detail_screen(session, lane, actor, resource)
+
+
+async def _level_detail_screen(
+    session: Session, lane: DatabaseLane, actor: User, level: int, *,
+    node_controls: NodeControls | None, link_context: LinkContext | None,
+) -> None:
+    """Design doc §5.7, issue #1007: what one level opens, gate by gate, with
+    where each level comes from. `[V]iew` steps through what is new at this
+    level, everything open, what stays closed, and what opens with another
+    gate still in the way; picking a board, file area, channel or door opens
+    its own screen."""
+    view = "new"
+    start: int | None = None
+
+    async def _load() -> list[Gate]:
+        return _gates_in_view(await lane.run(list_gates), level, view)
+
+    async def _next_view() -> list[Gate]:
+        nonlocal view
+        view = _LEVEL_VIEW_ORDER[(_LEVEL_VIEW_ORDER.index(view) + 1) % len(_LEVEL_VIEW_ORDER)]
+        return await _load()
+
+    chrome = await _load_chrome(lane, actor)
+    users = await lane.run(
+        lambda db: db.connection.execute(
+            "SELECT COUNT(*) FROM users WHERE user_level = ? AND disabled_at IS NULL AND pending_approval = 0",
+            (level,),
+        ).fetchone()[0]
+    )
+    while True:
+        picked = await _pick_item(
+            session, await _load(),
+            name_of=lambda gate: gate.name + (" (hidden)" if gate.hidden else ""),
+            stable_id_of=_gate_stable_id,
+            columns=_GATE_COLUMNS,
+            column_values_of=_gate_columns,
+            title=f"Level {level}",
+            empty_message=f"Nothing in this view of level {level}.",
+            refresh=_load,
+            live_keys={"v": _next_view},
+            live_nav=[MenuEntry(label=menu_key("V", "iew"), brief="New, open, closed, other gates")],
+            live_label=lambda: f"Showing: {_LEVEL_VIEWS[view]}, {users} account{'s' if users != 1 else ''} at {level}",
+            selectable_of=lambda gate: gate.object_id is not None,
+            start_stable_id=start,
+            description_level=await lane.run(menu_description_level, actor),
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if picked is None:
+            return
+        start = _gate_stable_id(picked)
+        await _open_gate_resource(
+            session, lane, actor, picked, node_controls=node_controls, link_context=link_context
+        )
+
+
+async def _levels_screen(
+    session: Session, lane: DatabaseLane, actor: User, *,
+    node_controls: NodeControls | None, link_context: LinkContext | None,
+) -> None:
+    """Design doc §5.7, issue #1007: the level ladder -- every level that
+    matters on this node, how many accounts hold it, and what it first
+    opens. Picking a level shows what it opens in full; `[G]o to level`
+    asks for any level, in use or not."""
+    start: int | None = None
+
+    async def _load() -> list[LadderStep]:
+        return await lane.run(level_ladder)
+
+    async def _other_level() -> None:
+        await write_field_prompt(
+            session, colored(f"Which level? (0-{SYSOP_LEVEL})", fg_color=MUTED_COLOR), hint=_EDIT_HINT
+        )
+        try:
+            raw = (await _read_seeded_line(session, initial="")).strip()
+        except InputCancelled:
+            return None
+        if not is_ascii_number(raw) or not 0 <= int(raw) <= SYSOP_LEVEL:
+            await session.write("\a")
+            return None
+        await _level_detail_screen(
+            session, lane, actor, int(raw), node_controls=node_controls, link_context=link_context
+        )
+        return None
+
+    chrome = await _load_chrome(lane, actor)
+    while True:
+        picked = await _pick_item(
+            session, await _load(),
+            name_of=lambda step: f"Level {step.level}",
+            stable_id_of=lambda step: step.level,
+            columns=_LADDER_COLUMNS,
+            column_values_of=lambda step: [str(step.users), _ladder_summary(step)],
+            title="Levels",
+            empty_message="No levels in use.",
+            refresh=_load,
+            live_keys={"g": _other_level},
+            live_nav=[MenuEntry(label=menu_key("G", "o to level"), brief="What any level opens")],
+            live_label=lambda: "Each row: what that level adds to the ones below it",
+            start_stable_id=start,
+            description_level=await lane.run(menu_description_level, actor),
+            redraw_in_place=chrome.redraw_in_place,
+            unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed,
+            accent_color=chrome.accent_color,
+            header_color=chrome.header_color,
+        )
+        if picked is None:
+            return
+        start = picked.level
+        await _level_detail_screen(
+            session, lane, actor, picked.level, node_controls=node_controls, link_context=link_context
+        )
 
 
 async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
@@ -2509,6 +2746,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
         MenuEntry(label=menu_key("L", "ist users"), brief="Browse and edit accounts"),
         MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
         MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
+        MenuEntry(label=menu_key("v", "els", prefix="Le"), brief="What each level opens"),
         MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
         MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
         MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Names held for deleted accounts"),
