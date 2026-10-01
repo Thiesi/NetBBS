@@ -454,9 +454,47 @@ node logs it once; the console's check warns when a level-255 SysOp's menu
 would not fit. ASCII callers, a terminal smaller than the art, and art that
 fails the check get the generated menu too. Art narrower than the screen is
 drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
-token places it. The main menu comes first, then the welcome and logoff
-fields; the Boards, Chat and Files lists need a list region with paging and
-get their own design.
+token places it. The main menu, welcome and logoff banners use slots today;
+the three lists, hand-drawn items and pacing below are being built.
+
+*List screens.* The Boards, file areas and Chat channels lists take a `{list
+WxH}` region. The current page fills it, one row per entry: the page number,
+the name, and one compact column the screen chooses (unread posts for boards,
+files for areas, people for channels). Descriptions and full tables appear
+only on the generated list. A page holds as many entries as the region has
+rows; numbering, one-digit selection, browser clicks, search and the paging
+keys work as on the generated list, and the navigation block and prompt go
+below the art unless `{prompt}` places it. The cursor row is drawn reversed in
+the token's colour, and moving it repaints only the two rows involved. Three
+more fields serve lists: `{title N}`, `{page N}` ("2/5") and `{count N}`. A
+region under 3 rows, or one that leaves the name under 12 columns, falls back
+to the generated list, as does every case that makes the main menu fall back.
+
+*Hand-drawn items.* A SysOp may draw the menu's items into the art instead of
+leaving them to a `{menu}` region. Every bracketed key drawn in the art,
+`[K]`, marks one item; the item spans the run of text around it, bounded by
+two or more spaces, which is also how the browser terminal finds what a click
+means. An item the caller cannot use is blanked: its cells are repainted as
+spaces in their own background colour, so frames and fills stay whole and the
+caller sees only what the generated menu would show. Items the caller can use
+that the art does not draw go into the art's `{menu}` region; art with no
+`{menu}` region and an undrawn item falls back to the generated menu, so
+nothing is ever hidden. A drawn `[X]` that matches no item is left as drawn,
+and the console's check lists it. Buttons drawn over several rows are not
+supported.
+
+*Pacing.* Art can be played at an emulated line speed so that it draws itself
+the way it did over a modem. NetBBS paces the bytes itself, in small chunks,
+and checks for a waiting key between them; any key ends the effect, writes the
+rest at once, and is consumed, so Enter cannot submit an empty prompt that
+follows. Each banner's speed is off, 2400, 9600 or 38400 bps, off by default,
+and one draw never takes longer than 5 seconds. Pacing applies to the welcome
+banner and to the first arrival at a screen with art in a session; never to a
+redraw, a notice, the screen restored after a break-in, or a door. Plain
+banners play in the order they were drawn, so cursor-moving ANSI animations
+work; slot art is rebuilt cell by cell and is revealed top to bottom. Callers
+can turn animations off in Profile ("Animations", on by default), and ASCII
+callers never get them.
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section
@@ -14091,8 +14129,9 @@ and animation pacing are later steps of #929 and build on this layer.
 
 ### Issue #929 — SysOp art: SAUCE and live slots — decided
 
-Steps 3 and 4 of #929. Normative description: §3.2, "SysOp art: storage and
-SAUCE" and "Art with live slots".
+Steps 3 to 6 of #929. Normative description: §3.2, "SysOp art: storage and
+SAUCE" and "Art with live slots", including its list screens, hand-drawn items
+and pacing.
 
 **Decision 1 — the `.ans` file is the only source.** SAUCE, pictographs and
 iCE colours are handled when the file is read. Rejected: a normalised copy in
@@ -14121,6 +14160,29 @@ which editors strip and nobody sees.
 **Decision 6 — items that do not fit fall back to the generated menu.**
 Rejected: filling the region and moving the rest behind a "more" entry, which
 silently moves items a caller can use out of sight.
+
+**Decision 7 — lists in art show a compact row.** A list region shows the
+number, the name and one column per screen; descriptions and tables stay on
+the generated list. Rejected: drawing the generated list inside the region,
+whose tables and descriptions do not fit a drawn box and whose page arithmetic
+assumes the full screen; and hiding NetBBS's own list under the art, which
+shows stale rows.
+
+**Decision 8 — hand-drawn items are found, not declared.** A drawn `[K]` is
+the item, with no extra token. Rejected: a sidecar map or SAUCE comments
+holding coordinates, which editors strip and SysOps cannot see.
+
+**Decision 9 — items a caller cannot use are blanked.** Chosen over dimming
+them after a mockup: blanking matches the generated menu, which hides them,
+and does not advertise SysOp keys. Dimming keeps the art's full shape but
+shows keys that do nothing, and relies on a colour some terminals render
+faintly.
+
+**Decision 10 — pacing on the server, not CTerm's speed sequence.** SyncTERM
+can emulate a line speed itself (`CSI Ps1 ; Ps2 * r`), but bytes already sent
+cannot be skipped, it works only in SyncTERM, and turning it off again queues
+behind the art. Server-side pacing works on every terminal and stops at once
+on a key.
 
 ### SFTP over the SSH transport — declined
 
