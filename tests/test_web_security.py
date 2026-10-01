@@ -190,6 +190,10 @@ def _networks(*values):
         ("::1", ["2001:db8::7"], ("::1",), "2001:db8::7"),
         # An IPv4 proxy reached over an IPv6 socket.
         ("::ffff:127.0.0.1", ["203.0.113.9"], ("127.0.0.1",), "203.0.113.9"),
+        # A trusted hop, or the caller, written in that form inside the header
+        # (review of #1001): the hop is still trusted, the caller named as IPv4.
+        ("127.0.0.1", ["203.0.113.9, ::ffff:10.0.0.2"], ("127.0.0.1", "10.0.0.0/8"), "203.0.113.9"),
+        ("127.0.0.1", ["::ffff:203.0.113.9"], ("127.0.0.1",), "203.0.113.9"),
         # Missing, empty or malformed where it matters: the proxy's address.
         ("127.0.0.1", [], ("127.0.0.1",), "127.0.0.1"),
         ("127.0.0.1", [""], ("127.0.0.1",), "127.0.0.1"),

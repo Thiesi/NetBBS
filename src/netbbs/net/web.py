@@ -1151,28 +1151,35 @@ def caller_address(
     trusts, and anything to its left was written by the caller and proves
     nothing. A header that is missing, empty or malformed there leaves the
     proxy's own address, as before this setting existed."""
-    if not trusted_proxies or peer is None or not _is_trusted(peer, trusted_proxies):
+    if not trusted_proxies or peer is None:
+        return peer
+    peer_address = _parse_address(peer)
+    if peer_address is None or not _is_trusted(peer_address, trusted_proxies):
         return peer
     entries = [entry.strip() for header in forwarded_for for entry in header.split(",")]
     for entry in reversed(entries):
-        try:
-            address = ipaddress.ip_address(entry)
-        except ValueError:
+        address = _parse_address(entry)
+        if address is None:
             return peer
-        if not any(address in network for network in trusted_proxies):
+        if not _is_trusted(address, trusted_proxies):
             return str(address)
     return peer
 
 
-def _is_trusted(peer: str, trusted_proxies) -> bool:
+def _parse_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """An address, with an IPv4 one written in IPv6-mapped form
+    (`::ffff:a.b.c.d`, what a dual-stack socket reports) given as plain IPv4,
+    so the TCP peer and each forwarded hop are compared, and a caller is
+    named, the same way whichever form they arrived in."""
     try:
-        address = ipaddress.ip_address(peer)
+        address = ipaddress.ip_address(value)
     except ValueError:
-        return False
-    # An IPv4 client reached over an IPv6 socket shows as ::ffff:a.b.c.d.
-    mapped = getattr(address, "ipv4_mapped", None)
-    return any(candidate in network for network in trusted_proxies for candidate in (address, mapped)
-               if candidate is not None and candidate.version == network.version)
+        return None
+    return getattr(address, "ipv4_mapped", None) or address
+
+
+def _is_trusted(address, trusted_proxies) -> bool:
+    return any(address in network for network in trusted_proxies)
 
 
 class WebServer:
