@@ -41,9 +41,11 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 from netbbs.rendering.ansi import CSI, RESET, colored
+from netbbs.rendering.ansi_art import decode_cp437_art
 from netbbs.rendering.gradient import nearest_256
 from netbbs.rendering.pipe_codes import BACKGROUND_CODES, FOREGROUND_CODES, cga_to_xterm
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.sauce import split_sauce
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.theme import MUTED_COLOR
 from netbbs.rendering.width import char_width
@@ -468,8 +470,9 @@ def art_body_from_editor(data: bytes) -> str:
     # The editor always writes CP437 (`encode_ansi_bytes`); guessing UTF-8
     # first, as for an uploaded file, would read two glyphs whose bytes
     # happen to form a UTF-8 sequence as one other character (Codex
-    # review on #753).
-    for line in data.decode("cp437").replace("\r\n", "\n").split("\n"):
+    # review on #753). Its control-range pictographs are glyphs (issue
+    # #929), and a SAUCE record is not part of the drawing.
+    for line in decode_cp437_art(split_sauce(data)[0]).replace("\r\n", "\n").split("\n"):
         styles = _SGR_RE.findall(line)
         # Trailing spaces are blank only in the default style; under a
         # colored background they are part of the picture.

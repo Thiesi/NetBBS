@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from netbbs.rendering.charset import CP437, UTF8, Charset, map_text
+from netbbs.rendering.charset import CP437, UTF8, Charset, art_glyphs_to_cp437_controls, map_text
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.reflow import fills_last_column, wrap_terminal_text
 from netbbs.rendering.ansi import strip_ansi
@@ -859,8 +859,15 @@ async def write_preformatted_line(session: Session, text: str) -> None:
     bounded fallback, so trusted art cannot hide content beyond a narrow
     terminal's right edge.  Ordinary human-readable text must use ``write_line``
     or ``write_prompt``.
+
+    Art keeps the pictographs of CP437's control range (☺ ♥ ♫ ►, issue #929):
+    a CP437 terminal gets the byte that draws each one, where ordinary text
+    would get a printable substitute.
     """
-    await session.write(preformatted_rows(session, text))
+    rows = preformatted_rows(session, text)
+    if getattr(session, "output_charset", UTF8) == CP437:
+        rows = art_glyphs_to_cp437_controls(rows)
+    await session.write(rows)
 
 
 async def write_laid_out_row(session: Session, row: str) -> None:

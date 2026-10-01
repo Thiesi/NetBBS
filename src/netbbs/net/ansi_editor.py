@@ -57,6 +57,7 @@ from netbbs.rendering import (
     clear_screen,
     colored,
     decode_ansi_bytes,
+    decode_cp437_art,
     diff_ansi,
     encode_ansi_bytes,
     full_render_ansi,
@@ -65,6 +66,7 @@ from netbbs.rendering import (
     parse_ansi_into_buffer,
     truncate,
 )
+from netbbs.rendering.charset import art_glyphs_to_cp437_controls
 
 _logger = logging.getLogger(__name__)
 
@@ -179,7 +181,7 @@ async def edit_ansi_art(
         # external file for `decode_ansi_bytes` to guess about. Guessing on
         # a draft read two glyphs whose bytes form UTF-8 as one other
         # character (Codex review on #753).
-        text = loaded_bytes.decode("cp437") if from_draft else decode_ansi_bytes(loaded_bytes)
+        text = decode_cp437_art(loaded_bytes) if from_draft else decode_ansi_bytes(loaded_bytes)
         parse_ansi_into_buffer(text, buffer)
 
     state = _EditorState(buffer=buffer)
@@ -401,7 +403,7 @@ def _savable(char: str) -> bool:
     that does not would be painted, then saved as "?" (Codex review on
     #753), so it is not painted at all."""
     try:
-        char.encode("cp437")
+        art_glyphs_to_cp437_controls(char).encode("cp437")
     except UnicodeEncodeError:
         return False
     return True
