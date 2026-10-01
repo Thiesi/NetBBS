@@ -68,6 +68,7 @@ from zoneinfo import available_timezones
 
 import nacl.signing
 
+from netbbs.access_map import AccountChange, Gate, GateKind, account_level_change
 from netbbs.attestation import AttestationError, withdraw_link_visibility
 from netbbs.auth.users import (
     CO_SYSOP_PRESET,
@@ -93,6 +94,7 @@ from netbbs.auth.users import (
     list_users,
     release_retired_username,
     describe_staff_permissions,
+    check_user_level_change,
     is_usable_sysop,
     set_can_verify_identity,
     set_staff_permissions,
@@ -6666,6 +6668,94 @@ async def _show_user_detail_help(
     await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
 
 
+_GATE_WORDS: dict[GateKind, tuple[str, str]] = {
+    GateKind.BOARD_READ: ("read", "board"),
+    GateKind.BOARD_WRITE: ("post", "board"),
+    GateKind.AREA_READ: ("download", "file area"),
+    GateKind.AREA_WRITE: ("upload", "file area"),
+    GateKind.CHANNEL: ("join", "channel"),
+    GateKind.DOOR: ("play", "door"),
+    GateKind.NODE_MAP: ("open", "node-wide"),
+    GateKind.MAIL: ("use", "node-wide"),
+    GateKind.MRC_OPEN_ROOM: ("open", "node-wide"),
+    GateKind.SYSOP: ("use", "node-wide"),
+}
+
+
+def _gate_row(gate: Gate, extra: str | None = None) -> tuple[str, str, str]:
+    """`(action, name, what)` cells for one gate in a level-change preview."""
+    action, what = _GATE_WORDS[gate.kind]
+    name = gate.name + (" (hidden)" if gate.hidden else "")
+    remarks = [text for text in (extra, gate.note) if text]
+    return action, name, "; ".join([what, *remarks])
+
+
+def _level_change_sections(change: AccountChange) -> list[Section]:
+    sections = []
+    for title, gates in (("Gains", change.gained), ("Loses", change.lost)):
+        rows = [_gate_row(gate) for gate in gates]
+        sections.append(Section(title, [Table(("", "Name", "What"), rows, flex=1)] if rows else [Note("Nothing.")]))
+    if change.blocked:
+        rows = [_gate_row(gate, "needs " + ", ".join(fails)) for gate, fails in change.blocked]
+        sections.append(Section("Still blocked", [
+            Note("The new level opens these, but another gate keeps this account out."),
+            Table(("", "Name", "What"), rows, flex=1),
+        ]))
+    return sections
+
+
+async def _preview_level_change(
+    session: Session, lane: DatabaseLane, actor: User, target: User, change: AccountChange
+) -> bool:
+    """Design doc §5.7, issue #1006: what a level change opens and closes for
+    this account, shown before it is made. Returns whether the SysOp applied
+    it; `[B]ack` leaves the level as it was."""
+    chrome = await _load_chrome(lane, actor)
+    choice, _page = await show_detail(
+        session,
+        title=_detail_title(
+            session, chrome, f"Level {change.old_level} → {change.new_level}",
+            breadcrumb=("SysOp", "Users", target.username),
+            subtitle=f"What changes for {target.username} by level. Grants and other gates are counted.",
+        ),
+        sections=_level_change_sections(change),
+        actions=[("a", menu_key("A", "pply")), _BACK_ACTION],
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+    )
+    return choice == "a"
+
+
+async def _change_user_level(
+    session: Session, lane: DatabaseLane, actor: User, target: User, new_level: int,
+    node_controls: NodeControls | None,
+) -> User:
+    """Preview, then apply, a level change from the user detail screen.
+    A change that opens and closes nothing for the account is applied
+    without the preview; the outcome line says so. Returns the account as
+    it now stands."""
+    try:
+        # Refused before it is previewed, not after the SysOp read the preview.
+        await lane.run(check_user_level_change, target, new_level, changed_by=actor)
+    except UserManagementError as exc:
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+        return target
+    change = await lane.run(account_level_change, target, new_level)
+    if not change.changes_nothing and not await _preview_level_change(session, lane, actor, target, change):
+        _announce_line(session, colored(f"{target.username!r} stays at level {target.user_level}.", fg_color=MUTED_COLOR))
+        return target
+    try:
+        updated = await lane.run(set_user_level, target, new_level, changed_by=actor)
+    except UserManagementError as exc:
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+        return target
+    outcome = f"{updated.username!r} is now level {updated.user_level}."
+    if change.changes_nothing:
+        outcome += " That opens and closes nothing for them."
+    _announce_line(session, outcome)
+    _request_live_access_recheck(node_controls, updated)
+    return updated
+
+
 async def _user_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, target: User, node_controls: NodeControls | None
 ) -> None:
@@ -6797,13 +6887,7 @@ async def _user_detail_screen(
                 except ValueError:
                     _announce_line(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
                 else:
-                    try:
-                        target = await lane.run(set_user_level, target, new_level, changed_by=actor)
-                    except UserManagementError as exc:
-                        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
-                    else:
-                        _announce_line(session, f"{target.username!r} is now level {target.user_level}.")
-                        _request_live_access_recheck(node_controls, target)
+                    target = await _change_user_level(session, lane, actor, target, new_level, node_controls)
             blocked = await _redraw()
         elif choice == "t":
             await session.write_line("")

@@ -2076,6 +2076,20 @@ two.
   carried in from other nodes are not held to it (issue #993). The map says
   so on that gate.
 
+**A level change is previewed for the account** (issue #1006). Changing an
+account's level from its detail screen shows what the change gains, loses and
+leaves blocked for that account before anything is written. Unlike the map
+itself, the preview is about one account: it counts that account's read and
+write grants, so a grant that keeps a board open is no loss, and it moves
+whatever another gate still keeps the account out of (age, verified name, a
+members-only channel it is not in, mail for the guest account) into its own
+"still blocked" list instead of the gains. Something the account was kept out
+of anyway is not shown as a loss. The screen's `[A]pply` makes the change and
+`[B]ack` leaves the level as it was. A change that would be refused (the last
+SysOp, a level outside 0-255, a staff member raising someone to 255) is
+refused before the preview, and a change that opens and closes nothing is
+applied at once, its outcome line saying so.
+
 **It agrees with the checks.** The map is built from the same effective-level
 functions the checks use, and the test suite holds each gate's answer to the
 real check for accounts at every threshold. Every level check in the code is
@@ -14191,6 +14205,18 @@ to.
 **Decision 3 — a write gate opens at the higher of its read and write
 levels.** That is what a caller experiences. The gate still shows its own
 write level and where it comes from.
+
+**Decision 4 — the change preview is a screen, not a question** (#1006). It
+shows its content with `[A]pply` and `[B]ack` in the action bar, as §3.5 asks
+of every screen. Rejected: a yes/no prompt after the list, which §3.5 keeps
+for irreversible or network-touching actions, and a level change can be
+undone. A change that opens and closes nothing skips the screen, since
+there is nothing to check. Refusals are checked first, so a SysOp never reads
+a preview for a change that would then be refused.
+
+**Decision 5 — levels run from 0 to 255.** Nothing enforced the range before:
+an account could be created at, or changed to, a negative level or one above
+255. Both are refused now.
 
 ### SFTP over the SSH transport — declined
 

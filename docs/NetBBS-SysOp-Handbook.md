@@ -439,7 +439,22 @@ you set a minimum, and every minimum starts at 0:
 
 A channel's and a door's level are always set on the channel or door itself,
 never inherited from a Community. Raise an account's level from its detail
-screen under **Users**.
+screen under **Users**: press `L`, type the new level (0 to 255), and NetBBS
+shows what the change opens and closes for that account before it is made:
+
+- **Gains:** each board to read or post on, file area to download from or
+  upload to, channel, door and node-wide feature (node map, mail, opening MRC
+  rooms, the SysOp console) the new level lets them into.
+- **Loses:** what the new level takes away.
+- **Still blocked:** what the new level opens, but another gate still keeps
+  this account out of, such as an age or verified-name requirement or a
+  members-only channel.
+
+The preview counts the account's own read and write grants, so a helper who
+can post on a board through a grant does not "lose" it in a demotion. Press
+`A` to apply the change, or `B` to leave the level as it was. A change that
+opens and closes nothing is applied straight away, and the line under the
+screen says so.
 
 A small club rarely needs more than this:
 
