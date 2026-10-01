@@ -291,8 +291,9 @@ def list_boards(db: Database, *, order_by: str = "sysop") -> list[Board]:
     state -- this function has no sweep of its own to run (a listing
     function silently mutating rows as a side effect would be a
     surprising, easy-to-miss write path), so effective expiry is instead
-    computed inline: `julianday(post.created_at) >= julianday(now) -
-    max_post_age_days` is the same "not yet past its age limit" test the
+    computed inline: `<the later of the revision's and its post's original
+    created_at, as a julianday> >= julianday(now) - max_post_age_days`
+    (issue #793) is the same "not yet past its age limit" test the
     sweep itself applies, just expressed as a read-only predicate rather
     than a write. Deliberately excludes the grace period
     (`netbbs.config.get_expiry_grace_period_days`) -- that only governs
@@ -340,7 +341,7 @@ def list_boards(db: Database, *, order_by: str = "sysop") -> list[Board]:
                           AND (
                                 v.exempt_from_expiry = 1
                                 OR b.max_post_age_days IS NULL
-                                OR julianday(v.created_at) >= julianday(?) - b.max_post_age_days
+                                OR MAX(julianday(v.created_at), julianday(COALESCE((SELECT origin.created_at FROM posts origin WHERE origin.post_id = v.root_post_id), v.created_at))) >= julianday(?) - b.max_post_age_days
                           )
                 )
             GROUP BY b.id
@@ -359,7 +360,7 @@ def list_boards(db: Database, *, order_by: str = "sysop") -> list[Board]:
                 AND (
                       p.exempt_from_expiry = 1
                       OR b.max_post_age_days IS NULL
-                      OR julianday(p.created_at) >= julianday(?) - b.max_post_age_days
+                      OR MAX(julianday(p.created_at), julianday(COALESCE((SELECT origin.created_at FROM posts origin WHERE origin.post_id = p.root_post_id), p.created_at))) >= julianday(?) - b.max_post_age_days
                 )
             GROUP BY b.id
             ORDER BY b.pinned DESC, last_activity DESC
