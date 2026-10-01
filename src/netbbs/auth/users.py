@@ -150,6 +150,11 @@ class User:
     # `StaffPermission` bits (design doc §5.6, issue #836): day-to-day node
     # work a SysOp hands to an account below 255. 0 for everyone else.
     staff_permissions: int = 0
+    # Issue #992: logins counted for the promotion rules, which session
+    # history cannot do (it keeps a few rows per account), and whether a
+    # person has set this account's level, which takes it out of them.
+    login_count: int = 0
+    level_set_by_hand: bool = False
 
     def has_staff(self, permission: "StaffPermission") -> bool:
         return bool(self.staff_permissions & int(permission))
@@ -530,6 +535,10 @@ def self_service_username_problem(db: Database, username: str) -> str | None:
     return None
 
 
+def _users_has_column(db: Database, column: str) -> bool:
+    return any(row["name"] == column for row in db.connection.execute("PRAGMA table_info(users)"))
+
+
 def _create_user_with_password_hash(
     db: Database,
     username: str,
@@ -566,6 +575,12 @@ def _create_user_with_password_hash(
             """,
             (username, password_hash, public_key_b64, fingerprint, user_level, created_at, int(pending_approval)),
         )
+        # Issue #992: a starting level other than 0 is a person's choice, and
+        # keeps the promotion rules away like any level set by hand.
+        if user_level != 0 and _users_has_column(db, "level_set_by_hand"):
+            db.connection.execute(
+                "UPDATE users SET level_set_by_hand = 1 WHERE username = ? COLLATE NOCASE", (username,)
+            )
         if verify_key is not None:
             new_id = db.connection.execute(
                 "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)
@@ -971,6 +986,8 @@ def _row_to_user(row: sqlite3.Row) -> User:
         # Absent only while an upgrade test builds its fixture on an older
         # schema; every running node has the column (issue #836).
         staff_permissions=row["staff_permissions"] if "staff_permissions" in row.keys() else 0,
+        login_count=row["login_count"] if "login_count" in row.keys() else 0,
+        level_set_by_hand=bool(row["level_set_by_hand"]) if "level_set_by_hand" in row.keys() else False,
     )
 
 
@@ -1139,7 +1156,11 @@ def set_user_level(db: Database, target: User, new_level: int, *, changed_by: Us
             db.connection.rollback()
             return current
         _check_level_change(db, current, new_level, changed_by)
-        db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (new_level, current.id))
+        # A level a person sets takes the account out of the promotion
+        # rules (issue #992): a demotion must not be undone at the next login.
+        db.connection.execute(
+            "UPDATE users SET user_level = ?, level_set_by_hand = 1 WHERE id = ?", (new_level, current.id)
+        )
         record_action_without_commit(
             db, actor=changed_by,
             action="promote" if new_level > current.user_level else "demote",
@@ -1151,6 +1172,57 @@ def set_user_level(db: Database, target: User, new_level: int, *, changed_by: Us
         raise
     else:
         db.connection.commit()
+    return _get_user_by_id(db, target.id)
+
+
+def promote_automatically(db: Database, target: User, from_level: int, to_level: int, *, reason: str) -> User | None:
+    """Raise `target` from `from_level` to `to_level` under a promotion rule
+    (design doc §4.3, issue #992), or return `None` when the account no
+    longer qualifies as read now: its level moved, a person set it, or it
+    is pending, disabled, staff or a SysOp. No account authorizes it: the
+    rule is the SysOp's, and the moderation log records it with no actor,
+    which the log shows as "(system)". Never reaches 255."""
+    from netbbs.moderation.log import record_action_without_commit
+
+    if not 0 <= from_level < to_level < SYSOP_LEVEL:
+        raise UserManagementError(f"a promotion rule runs from 0 to {SYSOP_LEVEL - 1}, upward")
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        if (
+            current.user_level != from_level
+            or current.level_set_by_hand
+            or current.pending_approval
+            or current.disabled_at is not None
+            or current.staff_permissions
+        ):
+            db.connection.rollback()
+            return None
+        db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (to_level, current.id))
+        record_action_without_commit(
+            db, actor=None, action="promote", target_user_id=current.id,
+            detail=f"user_level {from_level} -> {to_level} ({reason})",
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return _get_user_by_id(db, target.id)
+
+
+def set_automatic_promotion(db: Database, target: User, enabled: bool, *, changed_by: User) -> User:
+    """Let the promotion rules reach `target` again, or keep them away
+    (issue #992). Setting a level by hand turns them off; this is how a
+    SysOp or an account manager turns them back on."""
+    from netbbs.moderation.log import record_action
+
+    _require_account_authority(db, changed_by, _get_user_by_id(db, target.id), StaffPermission.MANAGE_ACCOUNTS)
+    db.connection.execute("UPDATE users SET level_set_by_hand = ? WHERE id = ?", (int(not enabled), target.id))
+    record_action(
+        db, actor=changed_by, action="automatic_promotion", target_user_id=target.id,
+        detail="promotion rules on" if enabled else "promotion rules off",
+    )
     return _get_user_by_id(db, target.id)
 
 

@@ -1291,6 +1291,33 @@ is what stops a demoted operator in the standalone CLI. Moderator grants
 (§5.2) need no watcher: they are read from the database at each check, so a
 grant or a revocation governs the holder's next action in every session.
 
+**Automatic promotion** (issue #992). A SysOp can set promotion rules
+(`Users ▸ Promotion rules`). Each rule raises an account from one level to a
+higher one once the account is old enough, has logged in often enough and,
+optionally, has posted enough.
+
+- **When.** Rules are checked at login, after the login is counted and before
+  the session takes its level. The session starts at the new level and the
+  caller is told once, on the first main menu. An account that qualifies
+  while away is promoted at its next login, the first time the level
+  matters. Nothing runs on a timer.
+- **Shape.** One rule per starting level, so which rule applies is never a
+  guess. A rule never demotes and never reaches 255. One rule applies per
+  login, so an account climbs a ladder of rules one step per call.
+- **Who is left alone.** The guest account (whether guest login is on or
+  not), pending and disabled accounts, staff and SysOps, and every account
+  whose level a person has set. A level set by hand takes the account out of
+  the rules, so a demotion is not undone at the next login; a starting level
+  other than 0 counts as set by hand. The account screen shows whether the
+  rules apply and turns them back on.
+- **Counting.** Logins are counted on the account itself, since session
+  history keeps only a few rows per account. Posts are the account's
+  approved posts on this node, each counted once however often edited.
+- **Audit.** An automatic promotion is recorded in the moderation log with
+  no acting account, shown as "(system)", and names the rule.
+
+Rules are node configuration and travel in backups.
+
 Hard deletion preserves content provenance through denormalized display labels
 or nullable author/uploader references. Personal access rows and private state
 which cannot meaningfully outlive the account are deleted according to explicit
@@ -5486,7 +5513,46 @@ can rename it like any carried resource, and peers keep seeing the genesis
 name. Only with every candidate taken is it refused, as the cap refuses.
 
 Origin recommendations never override the carrying node’s local access,
-moderation, retention, or legal policy.
+moderation, retention, or legal policy. Two origin settings are not
+recommendations but authority, binding on every carrying node: closure
+(§9.5) and who may post.
+
+**Who may post** (issue #993). The board's current origin signs a
+`board_posting` event naming one of three modes:
+
+- `anyone`, the default: any node's callers post, each node's own write
+  level holding its own callers;
+- `origin_threads`: only the origin node's own callers start threads;
+  anyone may reply;
+- `origin_only`: only the origin node's own callers post, replies included.
+
+A carried `board_post` whose author's home node (the signed
+`author.home_node_fingerprint`, not the node that relayed it) is not the
+board's current origin is kept as a signed event but not shown when the mode
+forbids it. A reply counts as one only when its parent is on this board: one
+naming a parent this node does not have would be shown as a new thread, so
+under `origin_threads` it waits as a kept event until a rebuild finds its
+parent. A node that is not the origin does not offer its callers `[P]ost` or
+`[R]eply` where the mode forbids them, and says why; it asks again just
+before a post is written, in case the mode changed meanwhile, and a door's
+post there is refused before it is written. The rule follows an origin
+transfer: a post the old origin wrote before the transfer and that arrives
+after it is refused, since `created_at` is not authoritative (§7.4).
+
+`board_posting` is not part of the board's lifecycle chain (§9.4). An origin
+keeps only its latest lifecycle event, so a setting chained in would hide an
+earlier transfer from a peer that missed it. Instead each node verifies the
+event against the board's origin at the time it arrives, and the setting with
+the latest `created_at` is in force; an origin transfer leaves the old
+origin's setting in force until the new origin sets one. A setting signed by
+a node that is not the board's current origin (a former origin's, still
+relayed) is skipped on receipt, not refused, so it cannot fail the batch it
+came in; a former origin drops its own setting when the origin moves, and
+stops pushing it. A node with Link turned off still knows whether it is a
+board's origin from the fingerprint it records at every start. The origin
+keeps its own latest setting (`boards.link_posting_json`) and re-pushes and
+serves it like its lifecycle event; carrying nodes keep every one in
+`link_events`.
 
 ### 9.4 Origin succession
 
@@ -5530,8 +5596,10 @@ board — closure is terminal, not reversible in this slice. Closure stops new
 posts (`board_post`) to the board; it does not restrict moderator edits or
 tombstones of existing content, since an archived board may still need
 cleanup. Materializes locally as a `boards.link_closed_at` timestamp,
-enforced by `netbbs.boards.posts.create_post` the same way any other
-board-level gate already is.
+enforced by `netbbs.boards.posts.create_post` for this node's own callers and
+by `materialize_carried_post` for posts carried in from other nodes (issue
+#1021: before, a carried post still landed on a closed board). A post that
+arrives after the closure is known is not shown, whenever it was written.
 
 **`board_post_moderator_edit`.** Structurally identical to `board_post_edit`
 (§9.2) — extends the same per-post `previous_event_id` chain — but signed by
@@ -14390,6 +14458,58 @@ it is a handful of short strings read together.
 screen and the Levels screen, not in the resource editors.** Those are where
 a SysOp thinks in names (promote alice to Member). A resource editor's level
 fields keep taking numbers, and show the name beside the value.
+
+### Issue #992 — automatic level promotion — decided
+
+A public node either checked new accounts by hand every day or opened
+everything to brand-new accounts; ReLink ran its own cron script. Normative
+description: §4.3.
+
+**Decision 1 — checked at login, not on a timer.** A level matters only
+while the account is logged in, so the login is the moment to decide, and
+the caller can be told. Rejected: a periodic sweep, which promotes accounts
+nobody is using and needs a task of its own.
+
+**Decision 2 — a level set by hand takes the account out of the rules**
+(the maintainer's decision). Otherwise a rule undoes a SysOp's demotion at
+the next login. The account screen turns the rules back on. At upgrade only
+accounts the moderation log shows demoted start marked; earlier promotions
+cannot be told from ReLink's scripted ones, and are left free to climb.
+
+**Decision 3 — logins counted on the account.** Session history keeps at
+most a few rows per account and prunes them as others log in, so a quiet
+newcomer's count could fall. `users.login_count` starts from the rows still
+there.
+
+**Decision 4 — the node acts, and the log says so.** An automatic promotion
+is logged with no acting account ("(system)"), not in a SysOp's name: no
+person made that change at that moment. Rejected: naming the SysOp who set
+the rule, which is what ReLink's script did.
+
+### Issue #993 — who may post on a Linked board — decided
+
+ReLink Linked an announcements board, and any caller of any node carrying it
+could post there: a carried post was held to nothing but the board's identity
+policy. Normative description: §9.3.
+
+**Decision 1 — origin authority, not a recommendation.** The origin chooses
+who posts, and every carrying node enforces it, like closure. Rejected: a
+local "accept carried posts" switch on each node, which cleans one node's
+copy and leaves every other node's to its SysOp.
+
+**Decision 2 — three modes, the origin chooses** (the maintainer's
+decision): anyone, origin starts threads, origin only. "Announcements" and
+"announcements with discussion" are both common.
+
+**Decision 3 — its own event, latest wins, outside the lifecycle chain.**
+Rejected: a field in `board_genesis`, which cannot change and so would only
+reach boards Linked afterwards; and a chained lifecycle event, since an
+origin keeps only its latest lifecycle event and a setting would push an
+earlier transfer out of reach of a peer that missed it.
+
+**Decision 4 — no capability gating.** Every node is updated before origins
+set this (the maintainer's call); an older node would refuse the unknown
+event type (#1022).
 
 ### SFTP over the SSH transport — declined
 

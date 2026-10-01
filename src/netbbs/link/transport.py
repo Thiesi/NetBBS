@@ -61,6 +61,7 @@ from netbbs.link.boards import (
     BoardCarryLimitError,
     materialize_carried_board,
     materialize_carried_board_closure,
+    materialize_carried_board_posting,
     materialize_carried_board_post_moderator_edit,
     materialize_carried_board_post_tombstone,
     materialize_carried_post,
@@ -77,6 +78,7 @@ from netbbs.link.events import (
     event_content_id,
     BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
+    BOARD_POSTING_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
     BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
@@ -90,6 +92,7 @@ from netbbs.link.events import (
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
     BoardClosure,
+    BoardPosting,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
@@ -619,6 +622,9 @@ async def persist_accepted_events(
             # needs -- the closing origin's own case is handled directly
             # by close_board_if_linked itself.
             await lane.run(materialize_carried_board_closure, BoardClosure.from_dict(envelope))
+        elif object_type == BOARD_POSTING_OBJECT_TYPE:
+            # Design doc §9.3, issue #993: who may post here now.
+            await lane.run(materialize_carried_board_posting, BoardPosting.from_dict(envelope))
 
 
 class PullCursorUnknown(Exception):

@@ -45,7 +45,7 @@ class ModerationLogEntry:
 def record_action(
     db: Database,
     *,
-    actor: User,
+    actor: User | None,
     action: str,
     object_type: str | None = None,
     object_id: int | None = None,
@@ -71,7 +71,7 @@ def record_action(
 def record_action_without_commit(
     db: Database,
     *,
-    actor: User,
+    actor: User | None,
     action: str,
     object_type: str | None = None,
     object_id: int | None = None,
@@ -96,7 +96,10 @@ def record_action_without_commit(
             (actor_user_id, action, object_type, object_id, target_user_id, detail, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (actor.id, action, object_type, object_id, target_user_id, detail, created_at),
+        # `None` is the node itself acting on a SysOp's standing rule (an
+        # automatic promotion, issue #992): the log shows it as "(system)".
+        (actor.id if actor is not None else None, action, object_type, object_id, target_user_id, detail,
+         created_at),
     )
     row = db.connection.execute(
         "SELECT * FROM moderation_log WHERE id = ?", (cursor.lastrowid,)

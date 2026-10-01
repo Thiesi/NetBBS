@@ -61,7 +61,7 @@ from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.node_theme import effective_accent_color, effective_header_color_256, effective_node_name_gradient
 from netbbs.net.nodeconfig import ThrottleConfig
-from netbbs.net.notices import announce_styled
+from netbbs.net.notices import announce, announce_styled
 from netbbs.net.redraw_preference import start_new_account_redrawing_in_place
 from netbbs.net.session import (
     Session,
@@ -119,6 +119,8 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.session_history import record_session_end, record_session_start
+from netbbs.level_names import get_level_names, level_label
+from netbbs.promotion import promote_at_login
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -794,6 +796,13 @@ async def run_authenticated_session(
     if not already_online and link_context is not None and link_context.realtime_bridge is not None:
         await link_context.realtime_bridge.broadcast_node_presence_live(change="join", username=user.username)
     history_id = record_session_start(db, user)
+    # Issue #992: the SysOp's promotion rules, with this login counted and
+    # before the session takes its level, so the caller starts at the new
+    # one. Told once, under the Welcome line.
+    promoted = promote_at_login(db, user)
+    if promoted is not None:
+        user = promoted
+        announce(session, f"You're now level {level_label(user.user_level, get_level_names(db))}.")
     completed_history_entry = None
     intentional_logoff = False
     watcher_task: asyncio.Task | None = None

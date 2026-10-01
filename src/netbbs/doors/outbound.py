@@ -1241,6 +1241,18 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
         answer({"status": "rejected", "reason": reason})
         return reason
 
+    # Issue #993: a Linked board whose origin keeps new threads, or all
+    # posting, to its own callers. Refused before the post exists, so none
+    # is left here unsent. A door's post is always a new thread.
+    from netbbs.link.boards import posting_refusal
+
+    refusal = posting_refusal(
+        db, board, own_fingerprint=node_identity.fingerprint if node_identity is not None else None, is_reply=False,
+    )
+    if refusal is not None:
+        answer({"status": "rejected", "reason": refusal})
+        return "post refused"
+
     # One transaction for the post, the rate debit and the audit entry. The
     # same shape `netbbs.auth.users` uses for a key removal and its audit
     # insert, and for the same reason: a post that exists with no entry saying

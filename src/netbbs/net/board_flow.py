@@ -73,6 +73,8 @@ from netbbs.link.boards import (
     board_origin_fingerprint,
     is_board_closed,
     is_board_linked,
+    posting_here,
+    posting_refusal,
     queue_board_post_edit_if_linked,
     queue_board_post_if_linked,
     queue_board_post_moderator_edit_if_linked,
@@ -951,12 +953,19 @@ async def _show_board(
     # doc §9.5), so [P]ost is not offered on one: the caller would write a
     # whole post before learning that (issue #677).
     closed = is_board_closed(db, board)
-    can_post = (
+    may_write = (
         not closed
         and meets_write_gate(db, user, board)
         and meets_age(db, user, get_effective_min_age(db, board))
         and meets_name_requirement(db, user, get_effective_name_requirement(db, board))
     )
+    # Issue #993: the board's origin may have kept new threads, or all
+    # posting, to its own callers. [P]ost (a new thread) and [R]eply follow
+    # it here instead of a post being refused after it was written.
+    own_fingerprint = link_context.node_identity.fingerprint if link_context is not None else None
+    posting = posting_here(db, board, own_fingerprint=own_fingerprint)
+    can_post = may_write and posting == "all"
+    may_reply = may_write and posting != "none"
     description_level = menu_description_level(db, user)
     redraw_in_place = redraw_in_place_enabled(db, user)
     unicode_style = unicode_style_enabled(db, user)
@@ -969,7 +978,12 @@ async def _show_board(
     # shows color (issue #711).
     can_draw = can_post and board.allow_color
     name_requirement = get_effective_name_requirement(db, board)
-    read_only_reason = None if can_post else _read_only_reason(db, user, board, closed=closed)
+    if can_post:
+        read_only_reason = None
+    elif may_write:
+        read_only_reason = posting_refusal(db, board, own_fingerprint=own_fingerprint, is_reply=False)
+    else:
+        read_only_reason = _read_only_reason(db, user, board, closed=closed)
     linked_note = _linked_note(db, board, link_context)
     # A first visit counts what is already here as read; from then on a
     # post is read once it is opened, and only then (issue #710).
@@ -1251,7 +1265,7 @@ async def _show_board(
             actions = []
             # Anyone who may post here may answer a post that is still there
             # (issue #675).
-            can_reply = can_post and post.tombstoned_at is None and not held
+            can_reply = may_reply and post.tombstoned_at is None and not held
             if can_reply:
                 actions.append(("r", menu_key("R", "eply")))
             # A private reply to the author (issue #821), to anyone who may
@@ -1574,6 +1588,14 @@ async def _show_board(
         subject: str, body: str, *, layout: str = "prose", parent_post_id: str | None = None,
         files: list[FileRef] | None = None,
     ) -> bool:
+        # Asked again here, not only when the board was drawn: the origin may
+        # have changed who posts while this was being written, and a post made
+        # anyway would show on this node alone (review of PR #1024). The
+        # draft is kept, as for any refused post.
+        refusal = posting_refusal(db, board, own_fingerprint=own_fingerprint, is_reply=parent_post_id is not None)
+        if refusal is not None:
+            announce(session, f"Could not create post: {refusal}", tone="muted")
+            return False
         try:
             post = create_post(
                 db, board, user, subject, body, layout=layout, parent_post_id=parent_post_id, files=files,

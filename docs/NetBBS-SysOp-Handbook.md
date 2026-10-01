@@ -487,6 +487,25 @@ can post on a board through a grant does not "lose" it in a demotion. Press
 opens and closes nothing is applied straight away, and the line under the
 screen says so.
 
+New callers can also move up on their own. Under **Users ▸ Pr[o]motion
+rules**, `C` creates a rule: accounts at one level are raised to a higher
+one once they are old enough (hours since signup), have logged in often
+enough, and optionally have posted enough here. A common first rule is
+`0 → 10` after 24 hours and 2 logins. Each row shows what an account needs,
+how many accounts would be promoted at their next login (**ready**), and
+what the step opens. Rules are checked when a caller logs in; the caller
+starts that session at the new level and is told so. One rule applies per
+login, and only one rule can start from each level. A rule never raises
+anyone to 255.
+
+The rules never touch the guest account, staff, SysOps, or pending and
+disabled accounts. They also leave alone any account whose level you set by
+hand, so a caller you demote stays demoted. The account screen shows
+**Auto promotion: on**, **off (level set by hand)**, or **on, but skipped**
+with the reason (a pending account, for example); `U` turns it on or off.
+Each automatic promotion appears in the moderation log as **(system)**,
+naming the rule.
+
 To see what every level opens in one place, open **Users ▸ Le[v]els**. Each
 row is a level that matters on your node: one some board, file area,
 channel, door or setting is gated at, or one an account holds. The row shows
@@ -872,6 +891,24 @@ back exactly as it was (what arrived meanwhile follows with the next sync), and
 other. Deleting a board, channel or file area this node originated is still a
 real delete. Link status shows `carried/cap` for all three kinds and how many are
 offered and excluded.
+
+On a Linked board this node originated, the board's screen has **[W]ho posts**,
+which steps through three settings that every node carrying the board
+follows:
+
+- **anyone** (the default): every node's callers post, each node's own write
+  level holding its own callers;
+- **the origin's callers start threads; anyone replies**: for announcements
+  people can answer;
+- **the origin's callers only**: for announcements nobody else writes in.
+
+A post from another node that the setting does not allow is not shown
+anywhere, and callers on other nodes are not offered **[P]ost** (or
+**[R]eply**) where it would be refused; the board tells them why. The setting
+reaches other nodes with the next sync pass. Every board's screen shows it as
+**Who posts**. Your own write level still holds your own callers: an
+announcements board is write level 255 here and "origin's callers only"
+everywhere. A closed board takes no new post from any node.
 
 There is nothing to subscribe to: what an established peer shares arrives on
 its own, within the caps. A node's screen under **Link status → Peers** lists
