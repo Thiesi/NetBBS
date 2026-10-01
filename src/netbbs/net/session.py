@@ -830,6 +830,25 @@ class Session(ABC):
         `netbbs.net.char_input.WORD_GUARD_SECONDS`). Interactive transports
         override it; the no-op default suits every other adapter."""
 
+    #: Whether this session has a live terminal that SysOp art can be
+    #: paced for (issue #929, `netbbs.net.art_pacing`). Only the real
+    #: transports set it; a test double or a session with no caller
+    #: attached gets art at once.
+    paces_art: bool = False
+
+    #: The caller's "Animations" choice (issue #929): off, paced art is
+    #: drawn at once. On until the caller's own preference is known.
+    animations_enabled: bool = True
+
+    async def take_waiting_key(self, timeout: float) -> bool:
+        """Wait up to `timeout` seconds for a keystroke and swallow it,
+        with anything typed behind it (issue #929): paced art checks this
+        between chunks, so a key ends the animation without acting at the
+        prompt that follows. Returns whether a key came. Interactive
+        transports override it; this default only waits."""
+        await asyncio.sleep(timeout)
+        return False
+
     async def discard_buffered_input(self) -> None:
         """Discard *every* byte/keystroke currently buffered ahead of the
         next real read -- a wider-scoped sibling of
@@ -923,9 +942,23 @@ async def write_art_text(session: Session, text: str) -> None:
     explicit, CTerm's bright backgrounds switched on around them for a CP437
     terminal, and pictographs as the bytes that draw them there
     (`Session.write_art`)."""
+    await send_art_text(session, prepare_art_text(session, text))
+
+
+def prepare_art_text(session: Session, text: str) -> str:
+    """What `write_art_text` sends for laid-out art, before `send_art_text`:
+    iCE colours made explicit, and CTerm's bright backgrounds switched on
+    around them for a CP437 terminal. Paced art (issue #929) prepares the
+    whole art once, then sends it in chunks."""
     text = ice_to_bright_background(text)
     if getattr(session, "output_charset", UTF8) == CP437 and _BRIGHT_BACKGROUND.search(text):
         text = f"{_CTERM_BRIGHT_BACKGROUNDS_ON}{text}{_CTERM_BRIGHT_BACKGROUNDS_OFF}"
+    return text
+
+
+async def send_art_text(session: Session, text: str) -> None:
+    """Send prepared art (`prepare_art_text`) through `Session.write_art`,
+    which keeps CP437's control-range pictographs for a CP437 terminal."""
     write_art = getattr(session, "write_art", None)
     if write_art is None:
         # A stand-in session that is not a `Session` (tests): it gets what

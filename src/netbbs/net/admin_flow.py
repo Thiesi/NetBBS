@@ -415,7 +415,9 @@ from netbbs.link.trust import (
     configure_trust_anchor,
     configure_trust_domain,
     configure_trusted_reporter,
+    ALL_CATEGORIES,
     get_effective_trust_state,
+    known_categories,
     node_probation,
     is_registered_subject,
     list_sole_authorities,
@@ -642,6 +644,7 @@ from netbbs.update_apply import (
     PIP_TIMEOUT_SECONDS,
 )
 from netbbs.net.ansi_editor import edit_ansi_art
+from netbbs.net.art_pacing import ART_SPEEDS, MAIN_MENU_ART, WELCOME_ART, art_speed, set_art_speed
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
@@ -4882,8 +4885,8 @@ def _parse_reporter_scopes(value: str) -> list[tuple[TrustDimension, str]]:
         dimension, separator, category = item.strip().partition(":")
         if not separator or not category:
             raise ValueError("scopes must use dimension:category, separated by commas")
-        normalized = TrustDimension(dimension)
-        result.append((normalized, category))
+        normalized = TrustDimension(dimension.strip())
+        result.append((normalized, category.strip()))
     if not result:
         raise ValueError("at least one reporter scope is required")
     return result
@@ -5003,7 +5006,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 brief="dimension:category, by commas",
                 help=(
                     "Which evidence this reporter may speak to, as dimension:category pairs separated by "
-                    "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam."
+                    "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam. "
+                    "dimension:* grants every category of that dimension, listed by name once saved."
                 ),
             ),
             FieldSpec(
@@ -5034,7 +5038,20 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 can_vouch_nodes=draft["can_vouch_nodes"], can_vouch_users=draft["can_vouch_users"],
                 actor_user_id=actor.id,
             )
-            listing.say("Trusted reporter changed and audited.")
+            # Issue #745: a scope that matches nothing used to look like any
+            # other grant. A category this version does not know is still kept
+            # (a later version may define it), but the SysOp hears about it.
+            unknown = [
+                f"{dimension.value}:{category}" for dimension, category in scopes
+                if category != ALL_CATEGORIES and category not in known_categories(dimension)
+            ]
+            if unknown:
+                listing.say(
+                    "Trusted reporter changed and audited. Not a category this version knows, so "
+                    f"it has no effect yet: {', '.join(unknown)}."
+                )
+            else:
+                listing.say("Trusted reporter changed and audited.")
             return True
 
         await _trust_editor(
@@ -12984,6 +13001,10 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
             await session.write_line("")
             await _preview_welcome_banner_screen(session, lane, actor)
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "s":
+            await session.write_line("")
+            await _cycle_art_speed(lane, actor, WELCOME_ART)
+            await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "e":
             await session.write_line("")
             await _enable_welcome_banner_screen(session, lane, actor)
@@ -13026,6 +13047,24 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
             await session.write(reject_unhandled_key(choice))
 
 
+def _art_speed_brief(speed: int) -> str:
+    """The `[S]peed` entry's description (issue #929): the speed now set."""
+    return f"Plays at {speed} bps" if speed else "Drawn at once"
+
+
+async def _cycle_art_speed(lane: DatabaseLane, actor: User, kind: str) -> None:
+    """`[S]peed` (issue #929): the next of `ART_SPEEDS` for this art -- off,
+    2400, 9600, 38400 bps, then off again. The menu shows the new speed."""
+    current = await lane.run(art_speed, kind)
+    following = ART_SPEEDS[(ART_SPEEDS.index(current) + 1) % len(ART_SPEEDS)]
+
+    def apply(db: Database) -> None:
+        set_art_speed(db, kind, following)
+        record_action(db, actor=actor, action="set_art_speed", detail=f"{kind}={following}")
+
+    await lane.run(apply)
+
+
 async def _draw_welcome_banner_menu(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool,
@@ -13048,6 +13087,7 @@ async def _draw_welcome_banner_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
+                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, WELCOME_ART))),
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
@@ -13650,6 +13690,10 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
             await session.write_line("")
             await _preview_main_menu_banner_screen(session, lane, actor)
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "s":
+            await session.write_line("")
+            await _cycle_art_speed(lane, actor, MAIN_MENU_ART)
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "e":
             await session.write_line("")
             await _enable_main_menu_banner_screen(session, lane, actor)
@@ -13709,15 +13753,16 @@ async def _draw_main_menu_banner_menu(
     await session.write_line("")
     await _write_wrapped_subtitle(
         session,
-        "Mode: above the menu. The art is shown above the main menu, which stays live underneath it."
+        # One row each, so the screen with its [S]peed entry fits 80x24.
+        "Mode: above the menu. The art is shown above the live main menu."
         if mode == MASTHEAD_MODE else
-        "Mode: the menu itself. The art is the main menu, with each caller's items and live values "
-        "drawn into its {menu}, {user} and other slots.",
+        "Mode: the menu itself. Callers' items and live values fill its slots.",
     )
     await session.write_line(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
+                MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(await lane.run(art_speed, MAIN_MENU_ART))),
                 MenuEntry(
                     label=menu_key("M", "ode"),
                     brief="Make the art the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
