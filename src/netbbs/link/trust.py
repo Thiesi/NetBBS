@@ -767,11 +767,14 @@ def _recompute_dimension(
     else:
         state, reason_code, explanation = _ordinary_state(db, subject, now_value, now, dimension)
 
-    if remote and "counted_domains" not in explanation:
+    if remote_domains and "counted_domains" not in explanation:
         # Issue #752: how far the remote reports have got toward quarantine,
         # whatever decided the state. Before, only the quarantine branch said
         # so, and a SysOp looking at one report against a caller could not
-        # tell whether one more domain would restrict them.
+        # tell whether one more domain would restrict them. Only reports that
+        # count toward the two-domain threshold -- self-verifying identity
+        # evidence -- are counted; other dimensions do not quarantine that way,
+        # and "0 of 2 domains" beside their own evidence would mislead.
         explanation.update({
             "counted_domains": remote_domains,
             "counted_weight": remote_weight,

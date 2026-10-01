@@ -223,6 +223,34 @@ def test_below_the_threshold_the_explanation_counts_domains_and_weight(db):
     assert "counted_domains" not in resource.explanation
 
 
+def test_a_report_that_cannot_count_toward_the_threshold_shows_no_distance(db):
+    """Review of #1030: a content report is evidence, but the two-domain
+    threshold counts only self-verifying identity reports. Its dimension must
+    not claim "0 of 2 domains" toward a quarantine it cannot reach that way."""
+    subject = TrustSubject.user("home", "opaque-7")
+    register_subject(db, subject, first_accepted_at=stamp(NOW), now_iso=stamp(NOW))
+    configure_reporter(db, "reporter-a", "domain-a", category="spam")
+    configure_trusted_reporter(
+        db, "reporter-a", domain_id="domain-a",
+        scopes=[(TrustDimension.CONTENT_CONDUCT, "spam")], now_iso=stamp(NOW),
+    )
+    record_trust_signal(
+        db, content_id="spam-1", issuer_fingerprint="reporter-a", subject=subject,
+        dimension=TrustDimension.CONTENT_CONDUCT, category="spam",
+        evidence_class=EvidenceClass.SUBJECTIVE,
+        observed_at=stamp(NOW - timedelta(hours=2)), issued_at=stamp(NOW - timedelta(hours=1)),
+        expires_at=stamp(NOW + timedelta(days=30)), now_iso=stamp(NOW),
+    )
+    content = get_effective_trust_state(db, subject, TrustDimension.CONTENT_CONDUCT)
+    assert content.explanation["dimension_trigger_count"] == 1
+    assert "counted_domains" not in content.explanation
+    assert "counted_weight" not in content.explanation
+
+    from netbbs.net.admin_flow import _quarantine_distance_text
+
+    assert _quarantine_distance_text(content.explanation) == ""
+
+
 def test_an_override_still_explains_the_remote_reports_it_sets_aside(db):
     subject = register_old_node(db)
     configure_reporter(db, "reporter-a", "domain-a")
