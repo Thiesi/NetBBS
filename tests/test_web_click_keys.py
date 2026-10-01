@@ -36,4 +36,11 @@ def test_menu_entries_and_list_rows_give_their_keys():
 
 def test_a_row_drawn_inside_art_gives_its_number():
     row = "| 03. Nibs                      12 new |"
-    assert _key_at([(row, 8), (row, 4)]) == ["03", "03"]
+    # The number, the name and the value column all pick the row.
+    assert _key_at([(row, 8), (row, 4), (row, 33), (row, 36)]) == ["03", "03", "03", "03"]
+    framed = "║ 01. General  caught up  ║"
+    assert _key_at([(framed, 20)]) == ["01"]
+
+
+def test_a_drawn_menu_item_is_not_mistaken_for_a_numbered_row():
+    assert _key_at([("| [B]oards   [F]iles 2024. |", 4)]) == ["b"]
