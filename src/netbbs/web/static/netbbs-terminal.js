@@ -110,7 +110,7 @@
     return end;
   }
 
-  term.onData(function (data) {
+  function sendData(data) {
     if (ws.readyState === WebSocket.OPEN) {
       // Bound pasted chunks and browser-side queued writes as well as server queues.
       var chars = Array.from(data);
@@ -122,7 +122,131 @@
         i = end;
       }
     }
+  }
+
+  term.onData(function (data) {
+    if (composer && composer.swallows(data)) return;
+    sendData(data);
   });
+
+  // -- Android keyboards (issue #1066) --------------------------------------
+  //
+  // An Android keyboard with prediction composes every letter, and xterm.js
+  // sends a composition only when it ends -- on Enter, space or punctuation.
+  // A letter hotkey therefore waited for Enter while `?` acted at once. On
+  // Android the composition is mirrored to the server as it is typed: each
+  // change to the composed word goes out at once, as the letters added and a
+  // DEL for each letter taken away, and xterm's own send of the word when the
+  // composition ends is suppressed, so nothing arrives twice.
+  //
+  // Only on Android: a desktop input method (Japanese, Chinese) composes
+  // romaji or pinyin that is then converted, and mirroring would send the
+  // keys of the spelling rather than the text chosen. Desktop typing does not
+  // touch any of this, and its bytes are unchanged.
+  //
+  // What the word becomes *as* it ends is not sent: the letters are already
+  // out, so a keyboard that still autocorrects "teh" into "the" at the space
+  // leaves "teh" on the line. Sending the correction too would turn a hotkey
+  // pressed once into two answers. The prediction attributes below ask the
+  // keyboard not to correct at all; some keyboards ignore them, which is why
+  // the mirroring is needed as well.
+
+  // The keys that turn `sent` (what the server already has of the word) into
+  // `now` (what the keyboard shows): a DEL for each code point after their
+  // common start, then the rest of `now`.
+  function compositionEdit(sent, now) {
+    var before = Array.from(sent), after = Array.from(now);
+    var same = 0;
+    while (same < before.length && same < after.length && before[same] === after[same]) same++;
+    return "\x7f".repeat(before.length - same) + after.slice(same).join("");
+  }
+
+  var composer = null;
+  var textarea = term.textarea;
+  if (textarea) {
+    // Prediction, correction and capitals off: with them the keyboard
+    // composes every word (and capitalises the first letter of an empty
+    // field, which the textarea is after each key). `inputmode` and
+    // `enterkeyhint` stay unset: the default text keyboard is the right one
+    // for letters, digits and punctuation, and a hint only relabels Enter.
+    textarea.setAttribute("autocomplete", "off");
+    textarea.setAttribute("autocorrect", "off");
+    textarea.setAttribute("autocapitalize", "off");
+    textarea.setAttribute("spellcheck", "false");
+  }
+  var android = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent || "");
+  if (textarea && android && term.element) {
+    composer = (function () {
+      var composing = false;
+      var sent = "";      // what the server has of the word being composed
+      var ended = null;   // the finished word, until xterm's own send of it has passed
+
+      function mirror(now) {
+        if (typeof now !== "string") return;
+        var edit = compositionEdit(sent, now);
+        sent = now;
+        if (edit) sendData(edit);
+      }
+
+      // Emptying the textarea is what keeps xterm from sending the word a
+      // second time: it sends what the textarea holds past where the
+      // composition began. It also means the next key starts a new word
+      // rather than extending one the keyboard remembers. Listeners in the
+      // capture phase on xterm's own element run before xterm's handlers
+      // on the textarea.
+      function finish() {
+        if (!composing) return;
+        composing = false;
+        ended = sent;
+        sent = "";
+        textarea.value = "";
+        // Two turns: after xterm's own timer that sends the composition and
+        // whatever followed it (the space or comma that ended the word).
+        // Then the textarea is emptied again, so the next composition starts
+        // at its beginning and xterm measures it from there.
+        setTimeout(function () {
+          setTimeout(function () {
+            ended = null;
+            if (!composing) textarea.value = "";
+          }, 0);
+        }, 0);
+      }
+
+      var root = term.element;
+      root.classList.add("netbbs-mirrored-composition");
+      root.addEventListener("compositionstart", function () {
+        composing = true;
+        sent = "";
+        ended = null;
+      }, true);
+      root.addEventListener("compositionupdate", function (event) {
+        if (composing) mirror(event.data);
+      }, true);
+      root.addEventListener("input", function (event) {
+        if (composing && event.inputType === "insertCompositionText") mirror(event.data);
+      }, true);
+      root.addEventListener("compositionend", finish, true);
+      // A key other than the keyboard's own (229) or a modifier ends the
+      // composition in xterm, which then sends the word straight away.
+      root.addEventListener("keydown", function (event) {
+        var code = event.keyCode;
+        if (composing && code !== 229 && code !== 16 && code !== 17 && code !== 18 && code !== 20) {
+          finish();
+        }
+      }, true);
+
+      return {
+        // Whether xterm's `onData` must not be sent: nothing (the emptied
+        // textarea's word), or the finished word itself should a browser
+        // send it from elsewhere than the textarea.
+        swallows: function (data) {
+          if (data === "") return true;
+          if (ended !== null && data === ended) { ended = null; return true; }
+          return false;
+        },
+      };
+    })();
+  }
 
 
   // -- clicking a key (issue #840) ----------------------------------------

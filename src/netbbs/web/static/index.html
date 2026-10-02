@@ -22,6 +22,9 @@
     .transfer-drop.is-over { border-color: #f6ad55; color: #f6ad55; }
     .transfer-status { color: #a0aec0; font-size: .9rem; }
     .transfer-card button { font: inherit; padding: .3rem .9rem; }
+    /* Issue #1066: on Android the word being composed is already on the
+       server, which echoes it; xterm's overlay of it would show it twice. */
+    .netbbs-mirrored-composition .composition-view { display: none !important; }
   </style>
 </head>
 <body>
