@@ -42,7 +42,7 @@ release fixes it. The manual check under the SysOp console was never affected.
   as typed, so callers read `{node}`, `{user}` and the rest literally. Field
   tokens are now filled and the rest are left blank.
 - **Preview shows the banner as callers get it.** Both banner Previews now
-  fill the tokens the way login does, at the width callers get, including the
+  fill the tokens the way login and log-off do, at the width callers get, including the
   `{online}` count. A `Note:` line under the art says what happens to each
   token callers won't see as written: left blank, cut off at the art's width,
   its row count ignored, or drawn over by another.
@@ -50,17 +50,18 @@ release fixes it. The manual check under the SysOp console was never affected.
   or list, or the menu or list itself.
 - **The quick-banner help is honest** (#1055). Profile → `[Q]uick or animated
   banners` now says the welcome banner always plays at the SysOp's speed,
-  because it comes before sign-in, and that any key skips it.
+  because it comes before sign-in, and that any key still draws the rest at once.
 
 ## Also
 
 - A test that checked a sealed attestation bundle for a plaintext name also
-  scanned the random ciphertext and signature, and failed when they spelled
-  the name by chance. It now checks only what it means to (#1062).
+  scanned the random ciphertext and signature, either of which can spell
+  the name by chance; the ciphertext did. It now checks only what it means to (#1062).
 
 ## Verification boundaries
 
-- **Gate:** GATE_RESULTS
+- **Gate:** **13,733 passed, 138 skipped** in the full suite (`pytest -n 10`) and
+  5 of 5 `timing_sensitive` tests, on Windows, on the exact release tree.
 - The lock measurements in #1061 come from synthetic databases of up to 3,000
   trust subjects, not from the node that reported #1059. The fix will be
   confirmed there after upgrading.
