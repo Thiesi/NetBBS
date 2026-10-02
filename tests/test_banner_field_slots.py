@@ -104,3 +104,16 @@ def test_count_callers_online_counts_signed_in_sessions():
 
     assert count_callers_online(Registry()) == 2
     assert count_callers_online(None) is None
+
+
+def test_a_field_overlapping_a_later_region_slot_is_not_called_drawn_over():
+    """Review of #1060: with the field first and the region slot second the
+    overlap message starts with the field, and the note said the field was
+    drawn over. A banner never draws the region slot, so only the region
+    slot's own "blank" note is right."""
+    from netbbs.rendering.art_slots import banner_slot_notes
+
+    for art in ("{user 20}\n{menu 5x2}", "{user 20}{menu 5x2}"):
+        notes = banner_slot_notes(art, width=80)
+        assert not any("drawn over" in note for note in notes), (art, notes)
+        assert any("menu" in note and "blank" in note for note in notes), (art, notes)

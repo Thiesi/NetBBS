@@ -474,11 +474,21 @@ def banner_slot_notes(text: str, *, width: int = 80) -> list[str]:
         f"{_describe(slot)} is not used in a banner; callers see it blank"
         for slot in art.tokens if slot.name in _REGION_NAMES
     ]
+    region_starts = tuple("{" + name for name in _REGION_NAMES)
     for problem in art.problems:
-        if problem.startswith(tuple("{" + name for name in _REGION_NAMES)) and (
-            "takes no size" in problem or "runs past" in problem or "overlaps" in problem
+        if problem.startswith(region_starts) and (
+            "takes no size" in problem or "runs past" in problem
         ):
             continue  # a region slot, already noted as blank
+        if "overlaps" in problem and (
+            problem.startswith(region_starts)
+            or any(f" overlaps {start}" in problem for start in region_starts)
+        ):
+            # Either side may be the region slot ("{first} overlaps
+            # {second}", in reading order). A banner never draws it, so the
+            # field it overlaps shows as written; the region slot is already
+            # noted as blank.
+            continue
         if "slots; use one" in problem:
             continue  # every one of them is a region slot, noted above
         if "needs a size" in problem or "has an empty size" in problem:
