@@ -2120,8 +2120,13 @@ how the bundled xterm.js finishes a composition: it sends what its textarea
 holds past the offset recorded at `compositionstart`, on a timer after
 `compositionend`, or at once from `keydown` when another key ends the
 composition. The shim empties the textarea in capture-phase listeners on
-`term.element`, which run before xterm's own handlers on the textarea, and
-again two timer turns later so the next composition starts at offset 0. An
+`term.element`, which run before xterm's own handlers on the textarea. It
+empties it again two timer turns after a composition ends and after any key
+typed outside one (xterm leaves a key it did not compose in the textarea), so
+the next composition starts at offset 0; otherwise the space or comma ending
+the next word lands before the recorded offset and is never sent. It cannot
+empty it at `compositionstart`: setting the value while a composition is open
+ends that composition. An
 xterm.js upgrade must re-check `CompositionHelper` (`_finalizeComposition`,
 `keydown`) against this; `tests/fixtures/composition_web_shim.cjs` doubles
 that helper and must change with it. The behaviour on a real device is not

@@ -53,16 +53,21 @@ class Terminal {
 }
 
 function installXtermDouble(textarea, fire) {
-  let composing = false, sending = false, start = 0, end = 0;
+  // CompositionHelper: `start` is the textarea's length when a composition
+  // begins, and a finished one is sent from there, past `alreadySent`.
+  let composing = false, sending = false, start = 0, end = 0, alreadySent = '';
+  let keyDownSeen = false;
   function finalize(wait) {
     composing = false;
     if (wait) {
-      const from = start;
+      const position = {start, end};
       sending = true;
       setTimeout(() => {
         if (!sending) return;
         sending = false;
-        const text = composing ? textarea.value.substring(from, start) : textarea.value.substring(from);
+        position.start += alreadySent.length;
+        const text = composing ? textarea.value.substring(position.start, start)
+          : textarea.value.substring(position.start);
         if (text.length > 0) fire(text);
       }, 0);
     } else {
@@ -70,16 +75,42 @@ function installXtermDouble(textarea, fire) {
       fire(textarea.value.substring(start, end));
     }
   }
-  textarea.addEventListener('compositionstart', () => { composing = true; start = textarea.value.length; });
+  // A key the keyboard did not compose (keyCode 229): what it adds to the
+  // textarea is sent on a timer, and stays in the textarea.
+  function anyTextareaChanges() {
+    const before = textarea.value;
+    setTimeout(() => {
+      if (composing) return;
+      const after = textarea.value, added = after.replace(before, '');
+      alreadySent = added;
+      if (after.length > before.length) fire(added);
+      else if (after.length < before.length) fire('\x7f');
+      else if (after !== before) fire(after);
+    }, 0);
+  }
+  textarea.addEventListener('compositionstart', () => {
+    composing = true; start = textarea.value.length; alreadySent = '';
+  });
   textarea.addEventListener('compositionupdate', () => { setTimeout(() => { end = textarea.value.length; }, 0); });
   textarea.addEventListener('compositionend', () => finalize(true));
   textarea.addEventListener('keydown', event => {
+    keyDownSeen = true;
     if (composing || sending) {
       if (event.keyCode === 229 || event.keyCode === 20) return;
       if ([16, 17, 18].includes(event.keyCode)) return;
       finalize(false);
     }
+    if (event.keyCode === 229) { anyTextareaChanges(); return; }
     if (event.keyCode === 13) { textarea.value = ''; fire('\r'); }
+  });
+  textarea.addEventListener('keyup', () => { keyDownSeen = false; });
+  // Terminal._inputEvent: text inserted with no keydown seen is sent and
+  // kept out of the textarea; otherwise the browser inserts it.
+  textarea.addEventListener('input', event => {
+    if (event.data && event.inputType === 'insertText' && !keyDownSeen) {
+      fire(event.data);
+      event.cancelled = true;
+    }
   });
 }
 
@@ -112,10 +143,14 @@ const clear = () => { socket.sent.length = 0; };
 // whatever was there when the composition began.
 let base = '';
 const ime = {
-  start() {
+  // The first key of a word. Like every key, it is its own task: xterm's
+  // timers for it run before the next key, while the word is composed.
+  async start(first) {
     dispatch(textarea, 'keydown', {keyCode: 229});
     base = textarea.value;
     dispatch(textarea, 'compositionstart', {data: ''});
+    this.update(first);
+    await settle();
   },
   update(word) {
     textarea.value = base + word;
@@ -123,6 +158,25 @@ const ime = {
     dispatch(textarea, 'input', {inputType: 'insertCompositionText', data: word, isComposing: true});
   },
   type(word) { dispatch(textarea, 'keydown', {keyCode: 229}); this.update(word); },
+  // A key the keyboard does not compose (a digit, a comma), with or
+  // without the keydown a browser may or may not dispatch first.
+  plain(char, keydown = true) {
+    if (keydown) dispatch(textarea, 'keydown', {keyCode: 229});
+    const event = {inputType: 'insertText', data: char};
+    dispatch(textarea, 'input', event);
+    if (!event.cancelled) textarea.value += char;
+    if (keydown) dispatch(textarea, 'keyup', {keyCode: 229});
+  },
+  // The keyboard's space or comma that ends a word: its keydown comes while
+  // the word is still composed, the character after the composition ends.
+  delimit(word, char) {
+    dispatch(textarea, 'keydown', {keyCode: 229});
+    this.end(word);
+    const event = {inputType: 'insertText', data: char};
+    dispatch(textarea, 'input', event);
+    if (!event.cancelled) textarea.value += char;
+    dispatch(textarea, 'keyup', {keyCode: 229});
+  },
   // `word` null: the composition ends without the keyboard writing it again.
   end(word) {
     if (word !== null) textarea.value = base + word;
@@ -141,7 +195,7 @@ const ime = {
     // A desktop input method is left to xterm: nothing goes out while the
     // word is composed, and the converted text goes out once, as before.
     assert.equal(term.element.classes.size, 0);
-    ime.start(); ime.type('ni'); ime.type('nih');
+    await ime.start('n'); ime.type('ni'); ime.type('nih');
     assert.deepEqual(sent(), []);
     ime.end('日本');
     await settle();
@@ -157,7 +211,7 @@ const ime = {
 
   // 1. A letter hotkey goes out on the keystroke, with no Enter; a second
   //    key in the same word goes out alone; nothing is sent twice.
-  ime.start(); ime.update('m');
+  await ime.start('m');
   assert.deepEqual(sent(), ['m']);
   ime.type('mb');
   assert.deepEqual(sent(), ['m', 'b']);
@@ -174,7 +228,7 @@ const ime = {
   // 3. A line typed and ended with Enter while still composed: the letters
   //    went out as typed, Enter goes out once, the word is not repeated.
   clear();
-  ime.start(); ime.update('h'); ime.type('hi');
+  await ime.start('h'); ime.type('hi');
   dispatch(textarea, 'keydown', {keyCode: 13});
   ime.end('hi');
   await settle();
@@ -184,7 +238,7 @@ const ime = {
   // 4. A word the keyboard corrects as it ends keeps what was typed: the
   //    letters are already out, and a hotkey must not answer twice.
   clear();
-  ime.start(); ime.update('t'); ime.type('te'); ime.type('teh');
+  await ime.start('t'); ime.type('te'); ime.type('teh');
   ime.end('the');
   await settle();
   assert.deepEqual(sent(), ['t', 'e', 'h']);
@@ -192,20 +246,37 @@ const ime = {
   // 5. The space that ends a word goes out after it, once, and the next
   //    word starts from an empty textarea and is not swallowed.
   clear();
-  ime.start(); ime.update('a');
-  ime.end('a');
-  textarea.value += ' ';     // the keyboard's space, inserted after the word
+  await ime.start('a');
+  ime.delimit('a', ' ');
   await settle();
   assert.deepEqual(sent(), ['a', ' ']);
   assert.equal(textarea.value, '');
-  ime.start(); ime.update('a');
+  await ime.start('a');
   ime.end('a');
   await settle();
   assert.deepEqual(sent(), ['a', ' ', 'a']);
 
+  // 5b. A key the keyboard does not compose stays in xterm's textarea; a
+  //     word after it, and the space ending that word, still go out once
+  //     each -- and so does a key after a word.
+  for (const keydown of [true, false]) {
+    clear();
+    ime.plain('5', keydown);
+    await settle();
+    await ime.start('h'); ime.type('he'); ime.type('hel'); ime.type('hell'); ime.type('hello');
+    ime.delimit('hello', ' ');
+    await settle();
+    ime.plain(',', keydown);
+    await settle();
+    await ime.start('o'); ime.type('ok');
+    ime.delimit('ok', '.');
+    await settle();
+    assert.deepEqual(sent(), ['5', 'h', 'e', 'l', 'l', 'o', ' ', ',', 'o', 'k', '.'], `keydown ${keydown}`);
+  }
+
   // 6. Characters beyond the BMP count as one each when deleted.
   clear();
-  ime.start(); ime.update('x😀');
+  await ime.start('x😀');
   ime.type('x');
   ime.end('x');
   await settle();
@@ -214,7 +285,7 @@ const ime = {
   // 7. Should a browser deliver the finished word some other way, it is
   //    still not sent twice -- but the same word typed afterwards is.
   clear();
-  ime.start(); ime.update('q');
+  await ime.start('q');
   ime.end('q');
   term.input('q');
   await settle();
@@ -224,7 +295,7 @@ const ime = {
   // 8. In a door the mirrored keys are door keys on the door's stream.
   clear();
   socket.onmessage({data: JSON.stringify({type: 'door_mode', active: true, stream: 7})});
-  ime.start(); ime.update('n');
+  await ime.start('n');
   ime.end('n');
   await settle();
   assert.deepEqual(socket.sent, [{type: 'door_key', stream: 7, data: 'n'}]);

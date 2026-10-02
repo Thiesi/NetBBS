@@ -188,28 +188,39 @@
         if (edit) sendData(edit);
       }
 
-      // Emptying the textarea is what keeps xterm from sending the word a
-      // second time: it sends what the textarea holds past where the
-      // composition began. It also means the next key starts a new word
-      // rather than extending one the keyboard remembers. Listeners in the
-      // capture phase on xterm's own element run before xterm's handlers
-      // on the textarea.
-      function finish() {
-        if (!composing) return;
-        composing = false;
-        ended = sent;
-        sent = "";
-        textarea.value = "";
-        // Two turns: after xterm's own timer that sends the composition and
-        // whatever followed it (the space or comma that ended the word).
-        // Then the textarea is emptied again, so the next composition starts
-        // at its beginning and xterm measures it from there.
+      // xterm sends a finished composition as what its textarea holds past
+      // the length the textarea had when the composition began. So the
+      // textarea must be empty whenever a composition can begin: anything
+      // left in it -- a digit or comma the keyboard did not compose, which
+      // xterm sends from the textarea and leaves there -- moves that offset
+      // past the start, and once `finish` has emptied the textarea the
+      // space or comma ending the next word falls before the offset and is
+      // never sent (review of #1067). Two turns after a key, xterm's own
+      // timers for it have sent it; the textarea is emptied then, unless a
+      // composition has begun. Not at `compositionstart`: setting a field's
+      // value while a composition is open ends the composition.
+      function emptySoon() {
         setTimeout(function () {
           setTimeout(function () {
             ended = null;
             if (!composing) textarea.value = "";
           }, 0);
         }, 0);
+      }
+
+      // Emptying the textarea is also what keeps xterm from sending the word
+      // a second time, and means the next key starts a new word rather than
+      // extending one the keyboard remembers. Listeners in the capture phase
+      // on xterm's own element run before xterm's handlers on the textarea.
+      function finish() {
+        if (!composing) return;
+        composing = false;
+        ended = sent;
+        sent = "";
+        textarea.value = "";
+        // Again once xterm has sent whatever ended the word (a space, a
+        // comma), which it reads from the textarea.
+        emptySoon();
       }
 
       var root = term.element;
@@ -224,6 +235,7 @@
       }, true);
       root.addEventListener("input", function (event) {
         if (composing && event.inputType === "insertCompositionText") mirror(event.data);
+        else if (!composing) emptySoon();
       }, true);
       root.addEventListener("compositionend", finish, true);
       // A key other than the keyboard's own (229) or a modifier ends the
