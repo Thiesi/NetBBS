@@ -428,28 +428,6 @@ def test_another_callers_change_does_not_undeliver_this_callers_value(db, lane, 
     assert "Share verified name over Link: on (sent to 1 node)" in squeezed(_visible(session))
 
 
-def test_a_recipient_that_pulled_the_value_counts(db, lane, alice):
-    """Review of #1045: a recipient running an older NetBBS fetches by pull
-    this release; once it has, the value counts as sent to it."""
-    from netbbs.link.attestation_delivery import record_attestation_pull, snapshot_objects
-    from netbbs.link.remote_attestation import configure_attestation_recipient
-
-    verifier = create_user(db, "sysop", password="hunter2", user_level=255)
-    attest_name(db, alice, "Alice Wonderland", verifier=verifier)
-    from netbbs.attestation import set_attestation_link_visible as _share
-    _share(db, alice, "name", True)
-    configure_attestation_recipient(db, "a" * 32, reason="older node")
-    _publish(db)
-    session = FakeSession(["b"])
-    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
-    assert "on (not delivered yet)" in squeezed(_visible(session))
-
-    record_attestation_pull(db, "a" * 32, snapshot_objects(db))
-    session = FakeSession(["b"])
-    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
-    assert "Share verified name over Link: on (sent to 1 node)" in squeezed(_visible(session))
-
-
 def test_remote_sharing_says_not_delivered_until_a_snapshot_is_sent(db, lane, alice):
     """Issue #632: whether the node can be dialed no longer decides this; what
     was sent does. Named recipients that nothing was sent to yet read as not
@@ -468,3 +446,25 @@ def test_remote_sharing_says_not_delivered_until_a_snapshot_is_sent(db, lane, al
     text = squeezed(_visible(session))
     assert "Share verified name over Link: on (not delivered yet)" in text
     assert "sent to" not in text
+
+
+
+def test_a_recipient_on_an_older_netbbs_is_not_counted(db, lane, alice):
+    """Issue #1046: with the pull gone, a recipient that cannot take sealed
+    snapshots receives nothing, and the caller is not told otherwise."""
+    from netbbs.attestation import set_attestation_link_visible
+    from netbbs.link.attestation_delivery import plan_attestation_deliveries, record_attestation_delivery_failure
+    from netbbs.link.remote_attestation import configure_attestation_recipient
+
+    verifier = create_user(db, "sysop", password="hunter2", user_level=255)
+    attest_name(db, alice, "Alice Wonderland", verifier=verifier)
+    set_attestation_link_visible(db, alice, "name", True)
+    configure_attestation_recipient(db, "a" * 32, reason="current node")
+    configure_attestation_recipient(db, "b" * 32, reason="older node")
+    _deliver_to(db, "a" * 32)
+    plan_attestation_deliveries(db)
+    record_attestation_delivery_failure(db, "b" * 32, "needs a newer NetBBS to receive this")
+
+    session = FakeSession(["b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    assert "Share verified name over Link: on (sent to 1 of 2 nodes)" in squeezed(_visible(session))

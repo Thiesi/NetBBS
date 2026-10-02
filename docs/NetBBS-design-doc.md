@@ -1997,38 +1997,20 @@ breath.
 Propagation is a sealed, signed snapshot per recipient (issue #632, §16): the
 issuer pushes each recipient node everything it should currently hold, sealed
 to that node's key, directly or through the recipient's relays (§8.5), and a
-snapshot is authoritative -- what it leaves out the recipient forgets. For one
-release a recipient whose descriptor does not advertise `sealed_attestations`
-can still pull instead. The pull is an explicit subscription, like trust
-objects (§12.7), and uses its own separately signed
-`remote_attestation_pull_request` object type so a request signed for one
-subscription cannot be re-aimed at the other. The
-subscription set is the receiver's configured attestation authorities, never
-its trust reporters. A node serves only the objects it signed itself: unlike a
-trust signal, which any carrier may re-serve unchanged, an attestation is a
-statement about the issuer's own users, so a pull naming a third-party issuer
-is refused rather than answered.
+snapshot is authoritative -- what it leaves out the recipient forgets. A
+snapshot holds every live attestation and every revocation whose target could
+still be held; once the target has expired, absence says the same. A recipient
+uses a snapshot only from an issuer it names as an attestation authority,
+never from a trust reporter alone, and only objects that issuer signed about
+its own users. There is no pull (issue #1046): a recipient whose descriptor
+does not advertise `sealed_attestations` receives nothing until it upgrades.
 
-Who may pull is the issuer's decision, and separate from every decision the
-receiver makes. A node serves its attestations only to the nodes its SysOp has
-named as recipients, a list that starts empty, is seeded from nothing, and is
-per node rather than per attribute: the caller's two toggles already decide
-which attributes leave at all. A requester that is not a recipient is refused
-outright, with HTTP 403 and `reason_code` `not_an_attestation_recipient`,
-after it has authenticated and passed trust policy. It is not served the
-value-free part of the stream instead, because any page advances the
-requester's cursor and a cursor that has moved past attestations it was not
-shown would deliver none of them after a later grant. A node removed from the
-list is sent an empty snapshot and forgets what it held (issue #632).
-
-The served stream is every revocation, plus the attestations that are live
-when the page is read. A subscriber returning after an absence still receives
-the revocation that retired an object it holds, and that is all it needs from
-history. The stream stays resumable although it omits retired attestations,
-because a cursor names a position and a retired row keeps its position; only
-its value is gone. There is no `revocations_only` containment mode: an
-attestation only ever loosens a local gate, so a quarantined authority is
-simply not pulled.
+What reaches whom is the issuer's decision, and separate from every decision
+the receiver makes. A node sends its attestations only to the nodes its SysOp
+has named as recipients, a list that starts empty, is seeded from nothing, and
+is per node rather than per attribute: the caller's two toggles already decide
+which attributes leave at all. A node removed from the list is sent an empty
+snapshot and forgets what it held (issue #632).
 
 A receiver forgets what it is told is withdrawn. Ingesting a revocation blanks
 the stored value and envelope of the attestation it names, and each sync pass
@@ -2048,8 +2030,7 @@ the recipient list and says so plainly when that list is empty, since
 published objects beside no recipients publish nothing, and it lists each
 recipient with how it was last reached, when, and whether that delivered the
 current snapshot, or why the last attempt failed (issue #632). A caller sees
-how many recipients hold their own value, by snapshot or by pull, beside their
-own sharing toggle --
+how many recipients hold their own value beside their own sharing toggle --
 "sent to 2 nodes", "sent to 1 of 2 nodes", "not delivered yet" -- never which. The listing
 names the subject, the attribute, and the expiry, but never the attested
 value: it is a screen about what leaves the node, not a place a verified real
@@ -4459,7 +4440,9 @@ bundle replacing an older one, bundles from at most 32 issuers per recipient,
 each kept at most 90 days. They never take one of a recipient's mail slots.
 Pickup hands them over beside the mail, in a `bundles` key an older recipient
 ignores; an issuer deposits one only at a relay whose descriptor advertises
-`sealed_attestations`. A bundle is deposited with its issuer's hello bundle;
+`sealed_attestations`. An issuer that is itself one of the recipient's relays
+-- the usual shape, an outgoing-only node relayed by the reachable node it
+dials -- puts the bundle straight into its own slot (issue #1046). A bundle is deposited with its issuer's hello bundle;
 the relay accepts it only if its outer signature verifies under the issuer's
 current key as that hello (merged with any chain on file) establishes it, so
 only the issuer can fill or replace its slot.
@@ -6946,7 +6929,7 @@ responder restored from an older backup, or recreated, will never again hold
 the object a subscriber's cursor names. It answers HTTP 400 with `reason_code`
 `unknown_pull_cursor`, and the subscriber forgets the cursor and re-reads that
 issuer from the start, where everything it holds is a replay and the page
-budget bounds the cost. The attestation pull of §5.5 does the same. This also
+budget bounds the cost. This also
 means a cursor saved from something a responder never stored cannot wedge a
 subscription for longer than one pass. The subscriber's cursor in any case
 moves only past objects it could authenticate: one signed by the issuer's
@@ -14850,14 +14833,18 @@ with no route — no relay published, or none the issuer has met — is a visibl
 per-recipient status on the issuer's Published identity screen, never a silent
 drop.
 
-**Decision 5 — one path.** Everything moves to the sealed push. A bundle is
-sent only to a recipient, and deposited only at a relay, whose descriptor
-advertises `sealed_attestations`; for one release the pull stays for
-recipients that do not, and a recipient stops pulling an issuer once it has a
-snapshot from it, so the two never disagree. The pull, its cursor tables and
-the pull request type are then removed. Rejected: keeping the pull for
-dialable issuers, which would give receivers two sets of semantics and leave
-removed recipients unreachable.
+**Decision 5 — one path, and no overlap.** Everything moves to the sealed
+push. A bundle is sent only to a recipient, and deposited only at a relay,
+whose descriptor advertises `sealed_attestations`. The plan was to keep the
+pull for one release for recipients that do not; the maintainer decided on
+2026-10-02 to remove it in the same release instead (issue #1046), with its
+route, its signed request type and its cursor table (migration 116). The
+consequence, accepted: a node on v7.14.0 or earlier stops receiving
+attestations from an upgraded issuer until it upgrades; the issuer's
+Published identity says so per recipient ("needs a newer NetBBS to receive
+this"), and the caller's count does not include it. Rejected: keeping the
+pull for dialable issuers, which would give receivers two sets of semantics
+and leave removed recipients unreachable.
 
 **Bounds.** Snapshot plaintext at most 768 KiB (sealed and encoded it stays
 under the 2 MiB request limit), refused visibly beyond that; at most 4,000

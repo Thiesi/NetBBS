@@ -32,16 +32,11 @@ from netbbs.attestation import (
 )
 from netbbs.auth.users import SYSOP_LEVEL, create_user, delete_user
 from netbbs.link.remote_attestation import (
-    ATTESTATION_PULL_REQUEST_OBJECT_TYPE,
-    AttestationPullRequest,
     MAX_ACTIVE_ATTESTATIONS_PER_ISSUER,
-    MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
-    NotAnAttestationRecipient,
     REMOTE_ATTESTATION_OBJECT_TYPE,
     REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE,
     UnknownAttestationSubject,
     build_remote_attestation,
-    build_attestation_pull_request,
     configure_attestation_authority,
     configure_attestation_recipient,
     count_attestation_recipients,
@@ -52,14 +47,12 @@ from netbbs.link.remote_attestation import (
     list_attestation_recipients,
     list_issued_attestations,
     list_remote_attestation_audit,
-    load_attestation_pull_cursor,
-    load_issued_attestation_page,
     reconcile_issued_attestations,
     remote_meets_age,
     remove_attestation_recipient,
-    save_attestation_pull_cursor,
 )
 from netbbs.identity.keys import Identity, IdentityKind
+from netbbs.link.attestation_delivery import snapshot_objects
 from netbbs.link.events import canonical_bytes
 from netbbs.link.trust import TrustSubject, register_subject
 from netbbs.storage.database import Database
@@ -86,19 +79,6 @@ def db(tmp_path):
     )
     yield database
     database.close()
-
-
-def page(db, *, at=None, requester=RECIPIENT, **kwargs):
-    """One served page, read as `requester` at a pinned instant.
-
-    Pinned because the page filters on liveness when it is read: left to the
-    wall clock, every assertion here would start failing ninety days after
-    `NOW`.
-    """
-    return load_issued_attestation_page(
-        db, requester_fingerprint=requester,
-        now_iso=stamp(at if at is not None else NOW + timedelta(hours=2)), **kwargs,
-    )
 
 
 @pytest.fixture
@@ -132,9 +112,11 @@ def reconcile(db, node_identity, *, at=NOW):
 
 
 def served(db, *, at=None):
-    objects, more = page(db, at=at)
-    assert not more
-    return objects
+    """What a recipient's snapshot holds, read at a pinned instant (issue
+    #1046: the snapshot replaced the served pull page). Pinned because a
+    snapshot filters on liveness: left to the wall clock, every assertion here
+    would start failing ninety days after `NOW`."""
+    return snapshot_objects(db, now=at if at is not None else NOW + timedelta(hours=2))
 
 
 def object_types(objects):
@@ -273,45 +255,21 @@ def test_an_object_is_renewed_before_it_expires(db, node_identity, alice):
 # -- the served page ----------------------------------------------------------
 
 
-def test_a_retired_attestation_is_not_served_but_its_revocation_always_is(db, node_identity, alice):
-    """A subscriber that has been away needs the revocation that retired an
-    object it still holds. It does not need the retired object, and must not
-    be handed the value inside it (issue #596, Decision 5)."""
+def test_a_retired_attestation_is_not_served_but_its_revocation_is_while_it_matters(db, node_identity, alice):
+    """A recipient that has been away needs the revocation that retired an
+    object it may still hold. It does not need the retired object, and must
+    not be handed the value inside it (issue #596, Decision 5). Once the
+    object has expired anyway, a snapshot leaves the revocation out too:
+    absence from an authoritative snapshot says the same (issue #632)."""
     set_attestation_link_visible(db, alice, "name", True)
     reconcile(db, node_identity)
     set_attestation_link_visible(db, alice, "name", False)
     reconcile(db, node_identity, at=NOW + timedelta(hours=1))
 
-    for when in (NOW + timedelta(hours=2), NOW + timedelta(days=4000)):
-        objects = served(db, at=when)
-        assert object_types(objects) == [REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE]
-        assert "Alice Example" not in json.dumps(objects)
-
-
-def test_the_cursor_resumes_rather_than_restarts(db, node_identity, alice):
-    set_attestation_link_visible(db, alice, "name", True)
-    reconcile(db, node_identity)
-    set_attestation_link_visible(db, alice, "age", True)
-    reconcile(db, node_identity, at=NOW + timedelta(hours=1))
-
-    first, more = page(db, limit=1)
-    assert more
-    rest, more = page(db, after_content_id=_content_id(first[0]), limit=1)
-    assert not more
-    assert _content_id(rest[0]) != _content_id(first[0])
-
-
-def test_an_unknown_cursor_is_refused(db, node_identity):
-    with pytest.raises(ValueError, match="unknown attestation pull cursor"):
-        page(db, after_content_id="f" * 64)
-
-
-def test_the_pull_cursor_round_trips(db):
-    assert load_attestation_pull_cursor(db, "responder", "issuer") is None
-    save_attestation_pull_cursor(db, "responder", "issuer", "a" * 64, now_iso=stamp(NOW))
-    assert load_attestation_pull_cursor(db, "responder", "issuer") == "a" * 64
-    save_attestation_pull_cursor(db, "responder", "issuer", "b" * 64, now_iso=stamp(NOW))
-    assert load_attestation_pull_cursor(db, "responder", "issuer") == "b" * 64
+    objects = served(db, at=NOW + timedelta(hours=2))
+    assert object_types(objects) == [REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE]
+    assert "Alice Example" not in json.dumps(objects)
+    assert served(db, at=NOW + timedelta(days=4000)) == []
 
 
 # -- the subscription set -----------------------------------------------------
@@ -329,50 +287,6 @@ def test_the_subscription_set_is_the_attestation_authorities(db):
 
 
 # -- the pull request ---------------------------------------------------------
-
-
-def test_the_pull_request_is_its_own_signed_object_type(db, node_identity):
-    request = build_attestation_pull_request(
-        signing_identity=node_identity,
-        requester_fingerprint="me", responder_fingerprint="them",
-        issuer_fingerprint="them", created_at=stamp(NOW),
-    )
-    assert request.verifies(node_identity.verify_key)
-    assert "revocations_only" not in request.payload
-    assert ATTESTATION_PULL_REQUEST_OBJECT_TYPE == "remote_attestation_pull_request"
-
-
-def test_a_trust_pull_signature_cannot_be_re_aimed_at_the_attestation_endpoint(db, node_identity):
-    """The object type is inside the signature, so the two subscriptions
-    cannot borrow each other's signed requests."""
-    from netbbs.link.trust_wire import build_trust_pull_request
-
-    trust_pull = build_trust_pull_request(
-        signing_identity=node_identity,
-        requester_fingerprint="me", responder_fingerprint="them",
-        issuer_fingerprint="them", created_at=stamp(NOW),
-    )
-    borrowed = {k: v for k, v in trust_pull.to_dict().items() if k != "revocations_only"}
-
-    assert not AttestationPullRequest.from_dict(borrowed).verifies(node_identity.verify_key)
-
-
-def test_the_pull_request_rejects_a_malformed_wire(db, node_identity):
-    good = build_attestation_pull_request(
-        signing_identity=node_identity,
-        requester_fingerprint="me", responder_fingerprint="them",
-        issuer_fingerprint="them", created_at=stamp(NOW),
-    ).to_dict()
-    with pytest.raises(ValueError, match="invalid attestation pull request fields"):
-        AttestationPullRequest.from_dict({**good, "unexpected": 1})
-    with pytest.raises(ValueError, match="nonce"):
-        AttestationPullRequest.from_dict({**good, "nonce": "not-hex" + "0" * 25})
-    with pytest.raises(ValueError, match="limit"):
-        AttestationPullRequest.from_dict(
-            {**good, "limit": MAX_ATTESTATION_OBJECTS_PER_RESPONSE + 1}
-        )
-    with pytest.raises(ValueError, match="cursor"):
-        AttestationPullRequest.from_dict({**good, "after_content_id": "short"})
 
 
 # -- the round trip -----------------------------------------------------------
@@ -719,7 +633,7 @@ def test_rotating_the_signing_key_reissues_a_live_attestation(db, node_identity,
     silently broken for months."""
     set_attestation_link_visible(db, alice, "name", True)
     reconcile(db, node_identity)
-    first = page(db)[0]
+    first = served(db)
 
     rotated = Identity(
         kind=IdentityKind.NODE, label="issuer",
@@ -730,10 +644,10 @@ def test_rotating_the_signing_key_reissues_a_live_attestation(db, node_identity,
     )
 
     assert [(c.action, c.reason) for c in changes] == [("renewed", "signing_key_rotated")]
-    served = page(db)[0]
-    assert len(served) == 2
+    objects = served(db)
+    assert len(objects) == 2
     # The replacement verifies against the key a subscriber would now resolve.
-    newest = served[-1]
+    newest = objects[-1]
     rotated.verify_key.verify(
         canonical_bytes(newest["envelope"]),
         base64.b64decode(newest["signature"]),
@@ -786,26 +700,7 @@ def test_a_value_that_can_never_be_exported_is_reported_not_swallowed(db, node_i
 
     assert [(c.action, c.attribute) for c in changes] == [("refused", "name")]
     assert "not_exportable" in changes[0].reason
-    assert page(db)[0] == []
-
-
-def test_the_served_stream_survives_the_issuers_clock_going_backwards(db, node_identity, alice):
-    """A cursor into a wall-clock-ordered stream skips every object signed
-    while the clock was behind it, permanently -- including a revocation, so a
-    subscriber would keep trusting withdrawn identity data."""
-    set_attestation_link_visible(db, alice, "name", True)
-    reconcile(db, node_identity)
-    cursor = _content_id(page(db)[0][0])
-
-    # The clock steps back an hour, and consent is withdrawn in that window.
-    set_attestation_link_visible(db, alice, "name", False)
-    reconcile(db, node_identity, at=NOW - timedelta(hours=1))
-
-    objects, _ = page(db, after_content_id=cursor)
-
-    assert [item["envelope"]["object_type"] for item in objects] == [
-        REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE
-    ]
+    assert served(db) == []
 
 
 # -- who may read the page, and what opting out retracts (issue #596) ---------
@@ -815,17 +710,6 @@ def _issued_rows(db):
     return [dict(row) for row in db.connection.execute(
         "SELECT * FROM link_issued_remote_attestations ORDER BY rowid"
     ).fetchall()]
-
-
-def test_a_node_the_sysop_has_not_named_is_refused(db, node_identity, alice):
-    """The defect itself: the page took no requester, so every peer the trust
-    policy admitted read every value this node had ever signed."""
-    set_attestation_link_visible(db, alice, "age", True)
-    reconcile(db, node_identity)
-
-    with pytest.raises(NotAnAttestationRecipient):
-        page(db, requester=STRANGER)
-    assert object_types(served(db)) == [REMOTE_ATTESTATION_OBJECT_TYPE]
 
 
 def test_the_recipient_list_starts_empty(tmp_path, node_identity):
@@ -839,22 +723,8 @@ def test_the_recipient_list_starts_empty(tmp_path, node_identity):
         )
         assert list_attestation_recipients(database) == []
         assert count_attestation_recipients(database) == 0
-        with pytest.raises(NotAnAttestationRecipient):
-            page(database)
     finally:
         database.close()
-
-
-def test_a_refused_node_cannot_probe_for_content_ids(db, node_identity, alice):
-    """The recipient check comes before the cursor lookup, or "unknown cursor"
-    versus a refusal would tell a stranger which objects exist here."""
-    set_attestation_link_visible(db, alice, "age", True)
-    reconcile(db, node_identity)
-    real = _content_id(served(db)[0])
-
-    for cursor in (real, "f" * 64):
-        with pytest.raises(NotAnAttestationRecipient):
-            page(db, requester=STRANGER, after_content_id=cursor)
 
 
 def test_naming_and_removing_a_recipient_is_audited(db):
@@ -883,24 +753,6 @@ def test_a_recipient_needs_a_reason(db):
         configure_attestation_recipient(db, STRANGER, reason="   ")
 
 
-def test_a_removed_recipient_resumes_where_it_stopped_when_named_again(db, node_identity, alice):
-    """Why a refusal and not a revocations-only stream: a refused node's
-    cursor never moves, so a later grant delivers what it missed."""
-    set_attestation_link_visible(db, alice, "age", True)
-    reconcile(db, node_identity)
-    cursor = _content_id(served(db)[0])
-
-    remove_attestation_recipient(db, RECIPIENT, now_iso=stamp(NOW))
-    set_attestation_link_visible(db, alice, "name", True)
-    reconcile(db, node_identity, at=NOW + timedelta(hours=1))
-    with pytest.raises(NotAnAttestationRecipient):
-        page(db, after_content_id=cursor)
-
-    configure_attestation_recipient(db, RECIPIENT, reason="back", now_iso=stamp(NOW))
-    objects, _ = page(db, after_content_id=cursor)
-    assert [item["envelope"]["payload"]["attribute"] for item in objects] == ["name"]
-
-
 def test_revoking_blanks_the_value_and_keeps_the_row(db, node_identity, alice):
     set_attestation_link_visible(db, alice, "age", True)
     reconcile(db, node_identity)
@@ -921,23 +773,6 @@ def test_revoking_blanks_the_value_and_keeps_the_row(db, node_identity, alice):
     assert revocation["envelope_json"] and revocation["redacted_at"] is None
 
 
-def test_a_cursor_naming_a_redacted_object_still_resumes(db, node_identity, alice):
-    """The stated reason for serving history whole was resumability. It
-    survives: the tombstone keeps its position, and the revocation a
-    returning subscriber needs is after it."""
-    set_attestation_link_visible(db, alice, "age", True)
-    reconcile(db, node_identity)
-    cursor = _content_id(served(db)[0])
-
-    set_attestation_link_visible(db, alice, "age", False)
-    reconcile(db, node_identity, at=NOW + timedelta(hours=1))
-
-    objects, more = page(db, after_content_id=cursor)
-    assert not more
-    assert object_types(objects) == [REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE]
-    assert objects[0]["envelope"]["payload"]["revoked_content_id"] == cursor
-
-
 def test_an_expired_object_is_not_served_even_before_the_sweep_runs(db, node_identity, alice):
     """Liveness is a read-time filter, so what is served never depends on when
     a sync pass last ran -- a node whose Link was down for a year does not
@@ -955,18 +790,6 @@ def test_an_expired_object_is_not_served_even_before_the_sweep_runs(db, node_ide
     reconcile(db, node_identity, at=after_expiry)
     assert "1990-04-01" not in json.dumps(_issued_rows(db))
     assert served(db, at=after_expiry) == []
-
-
-def test_a_page_of_retired_objects_does_not_claim_more_and_return_nothing(db, node_identity, alice):
-    """The subscriber treats "more, but no objects" as a protocol error, so
-    the filter has to be in the query that sizes the page, not after it."""
-    set_attestation_link_visible(db, alice, "age", True)
-    set_attestation_link_visible(db, alice, "name", True)
-    reconcile(db, node_identity)
-    after_expiry = NOW + timedelta(days=91)
-
-    objects, more = page(db, at=after_expiry, limit=1)
-    assert objects == [] and not more
 
 
 def test_a_subscriber_forgets_a_value_it_is_told_is_withdrawn(db, node_identity, alice, subscriber):

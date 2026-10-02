@@ -2434,7 +2434,12 @@ async def _one_pass(node, session, seeds, hello_provider, lane, **sync_options):
 
 
 class _AttestationPair:
-    """An issuer with one Link-visible attestation and a subscriber to it."""
+    """An issuer with one Link-visible attestation and a subscriber to it.
+
+    The ordinary topology since the pull went (issue #1046): the subscriber is
+    outgoing-only and the issuer, which it dials, is also its relay. The
+    issuer holds the sealed snapshot in its own relay slot; the subscriber
+    picks it up on its pass."""
 
     def __init__(self, tmp_path, label: str, *, named: bool = True) -> None:
         self.issuer_identity = bootstrap_node_identity(f"{label}-issuer")
@@ -2467,6 +2472,11 @@ class _AttestationPair:
         # the subscriber anything is the issuer's.
         if named:
             self.name_the_subscriber()
+        self.issuer_node.relaying_for[self.subscriber_identity.fingerprint] = "2026-09-15T12:00:00+00:00"
+        self.subscriber_node.relay_state.relays_serving_me[self.issuer_identity.fingerprint] = (
+            "2026-09-15T12:00:00+00:00"
+        )
+        self.issuer_node.handle_introduction(_hello_for(self.subscriber_node))
 
     def name_the_subscriber(self) -> None:
         configure_attestation_recipient(
@@ -2474,9 +2484,9 @@ class _AttestationPair:
         )
 
     def issuer_hello(self):
-        # The issuer has to be dialable for a subscriber to pull from it, so it
-        # advertises a real address rather than the outgoing-only hello the
-        # rest of this module's nodes use.
+        # The issuer is dialable -- the subscriber dials it and picks up from
+        # it as its relay -- so it advertises a real address rather than the
+        # outgoing-only hello the rest of this module's nodes use.
         return self.issuer_node.build_hello(
             addresses=[{"protocol": "http", "address": "127.0.0.1", "port": self.port}],
             outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
@@ -2504,52 +2514,6 @@ class _AttestationPair:
     def close(self):
         self.issuer.close()
         self.subscriber.close()
-
-
-def test_one_sync_pass_signs_serves_pulls_and_accepts_an_attestation(tmp_path):
-    """The loop-level half of design doc §5.5's issuing path.
-
-    `tests/test_link_attestation_issuance.py` proves the domain functions and
-    `tests/test_link_transport.py` proves the endpoint; both would stay green
-    if `run_link_sync` never called either, which is exactly the failure issue
-    #584 catalogued. This drives real passes of the loop and asserts on the
-    *subscriber's* tables, so the wiring itself is what is under test.
-    """
-    pair = _AttestationPair(tmp_path, "attesting")
-
-    async def scenario():
-        server = await pair.start()
-        try:
-            async with aiohttp.ClientSession() as session:
-                # One pass on the issuer: this is what signs the object.
-                await pair.issuer_pass(session)
-                # One pass on the subscriber, with the issuer as its seed: the
-                # dial completes the hello, and the attestation pull later in
-                # that same pass brings the object across.
-                await pair.subscriber_pass(session)
-        finally:
-            await server.stop()
-
-    try:
-        asyncio.run(scenario())
-        assert pair.issuer.db.connection.execute(
-            """SELECT COUNT(*) FROM link_issued_remote_attestations
-               WHERE object_type = 'remote_identity_attestation'"""
-        ).fetchone()[0] == 1
-        assert pair.subscriber.db.connection.execute(
-            "SELECT attested_value FROM link_remote_attestations WHERE subject_id = ?",
-            (pair.subject.subject_id,),
-        ).fetchone()[0] == "1990-04-01"
-        assert remote_meets_age(pair.subscriber.db, pair.subject, 18)
-        # Restart-safe: the cursor is on disk, so the next pass resumes rather
-        # than re-reading the whole stream.
-        assert pair.subscriber.db.connection.execute(
-            """SELECT after_content_id FROM link_attestation_pull_cursors
-               WHERE issuer_fingerprint = ?""",
-            (pair.issuer_identity.fingerprint,),
-        ).fetchone() is not None
-    finally:
-        pair.close()
 
 
 def test_a_withdrawn_opt_in_reaches_the_subscriber_over_the_loop(tmp_path):
@@ -2585,46 +2549,6 @@ def test_a_withdrawn_opt_in_reaches_the_subscriber_over_the_loop(tmp_path):
         ):
             rows = [tuple(row) for row in database.connection.execute(f"SELECT * FROM {table}")]
             assert rows and "1990-04-01" not in repr(rows), table
-    finally:
-        pair.close()
-
-
-def test_a_subscriber_the_issuer_has_not_named_gets_nothing_and_is_told_why(tmp_path, caplog):
-    """Issue #596 over the loop. Configuring an authority is one SysOp's
-    decision and being told anything is the other's, so a subscriber the
-    issuer never named pulls nothing -- and its cursor must not move, or
-    being named later would deliver nothing either."""
-    pair = _AttestationPair(tmp_path, "unnamed", named=False)
-
-    def held():
-        return pair.subscriber.db.connection.execute(
-            "SELECT COUNT(*) FROM link_remote_attestations"
-        ).fetchone()[0]
-
-    async def scenario():
-        server = await pair.start()
-        try:
-            async with aiohttp.ClientSession() as session:
-                await pair.issuer_pass(session)
-                with caplog.at_level(logging.WARNING, logger="netbbs.link.sync"):
-                    await pair.subscriber_pass(session)
-                assert held() == 0
-                assert pair.subscriber.db.connection.execute(
-                    "SELECT COUNT(*) FROM link_attestation_pull_cursors"
-                ).fetchone()[0] == 0
-
-                pair.name_the_subscriber()
-                await pair.subscriber_pass(session)
-        finally:
-            await server.stop()
-
-    try:
-        asyncio.run(scenario())
-        refusals = [r.getMessage() for r in caplog.records if "attestation recipient" in r.getMessage()]
-        assert len(refusals) == 1
-        assert pair.issuer_identity.fingerprint in refusals[0]
-        assert held() == 1
-        assert remote_meets_age(pair.subscriber.db, pair.subject, 18)
     finally:
         pair.close()
 
@@ -3006,33 +2930,6 @@ def test_a_trust_subscription_recovers_when_the_reporter_no_longer_knows_its_cur
         pair.close()
 
 
-def test_an_attestation_subscription_recovers_when_the_authority_no_longer_knows_its_cursor(tmp_path):
-    """The same defect on the other pull, where nothing at all could recover it
-    short of editing the cursor table by hand."""
-    from netbbs.link.remote_attestation import save_attestation_pull_cursor
-
-    pair = _AttestationPair(tmp_path, "restored-authority")
-    fingerprint = pair.issuer_identity.fingerprint
-    save_attestation_pull_cursor(pair.subscriber.db, fingerprint, fingerprint, "f" * 64)
-
-    async def scenario():
-        server = await pair.start()
-        try:
-            async with aiohttp.ClientSession() as session:
-                await pair.issuer_pass(session)
-                await pair.subscriber_pass(session)
-                assert not remote_meets_age(pair.subscriber.db, pair.subject, 18)
-                await pair.subscriber_pass(session)
-        finally:
-            await server.stop()
-
-    try:
-        asyncio.run(scenario())
-        assert remote_meets_age(pair.subscriber.db, pair.subject, 18)
-    finally:
-        pair.close()
-
-
 def test_a_subscriber_holding_a_stale_key_keeps_what_it_can_verify_and_waits_for_the_rest(tmp_path):
     """The stall, through the real pull and a real server. The issuer rotated
     and re-signed; this subscriber has not completed a hello since. It must
@@ -3115,8 +3012,8 @@ def test_a_historical_chain_entry_that_is_not_a_key_is_ignored_rather_than_fatal
     assert len(node.resolve_peer_superseded_signing_keys(identity.fingerprint)) == 1
 
 
-def test_a_reporter_or_authority_without_a_usable_key_costs_its_own_pull_not_the_sync_task(tmp_path):
-    """Both pulls resolve the issuer's key before their per-address handler. A
+def test_a_reporter_without_a_usable_key_costs_its_own_pull_not_the_sync_task(tmp_path):
+    """The trust pull resolves the issuer's key before its per-address handler. A
     chain that ends in a bare revoke, or no longer verifies, raised from there
     straight out of `run_link_sync`, and outbound Link did not resume until the
     node was restarted."""
@@ -3132,11 +3029,10 @@ def test_a_reporter_or_authority_without_a_usable_key_costs_its_own_pull_not_the
 
     async def scenario():
         async with aiohttp.ClientSession() as session:
-            for pull in (sync_module._pull_one_trust_reporter, sync_module._pull_one_attestation_authority):
-                await pull(
-                    pair.subscriber_node, session, pair.subscriber.lane,
-                    pair.issuer_identity.fingerprint, ["http://127.0.0.1:9"],
-                )
+            await sync_module._pull_one_trust_reporter(
+                pair.subscriber_node, session, pair.subscriber.lane,
+                pair.issuer_identity.fingerprint, ["http://127.0.0.1:9"],
+            )
 
     try:
         asyncio.run(scenario())  # returns; does not raise

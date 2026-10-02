@@ -183,7 +183,7 @@ from netbbs.link.protocol import (
 from netbbs.link.carry import KIND_LABELS, accept_genesis, genesis_kind
 from netbbs.link.store import event_is_stored, forget_opaque_event, opaque_events_to_rejudge, store_opaque_event
 from netbbs.link.realtime_proxy import open_realtime_connection, record_handshake_outcome
-from netbbs.link.attestation_delivery import record_attestation_pull, receive_attestation_bundle_safely
+from netbbs.link.attestation_delivery import receive_attestation_bundle_safely
 from netbbs.link.attestation_bundles import (
     SEALED_ATTESTATION_BUNDLE_OBJECT_TYPE,
     MalformedBundle,
@@ -214,15 +214,6 @@ from netbbs.link.introduction import (
     MAX_IDENTITY_RESPONSE_BYTES,
     IdentityRequest,
     IdentityRequestError,
-)
-from netbbs.link.remote_attestation import (
-    MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
-    MAX_ATTESTATION_RESPONSE_BYTES,
-    NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE,
-    AttestationPullRequest,
-    NotAnAttestationRecipient,
-    UnknownAttestationPullCursor,
-    load_issued_attestation_page,
 )
 from netbbs.link.trust_carriage import (
     TrustCarriageFull,
@@ -735,16 +726,6 @@ class PullCursorUnknown(Exception):
     Its own type rather than a `LinkTransportError`: nothing failed in transit,
     another address would answer the same, and the right response is not to
     retry but to forget the cursor.
-    """
-
-
-class AttestationRecipientRefused(Exception):
-    """An attestation authority answered that this node is not one of its recipients.
-
-    Its own type rather than a `LinkTransportError`, because nothing about the
-    transport failed and trying the authority's next address would only ask
-    the same question again. `netbbs.link.sync` turns it into the one log line
-    that tells the SysOp what to do about it.
     """
 
 
@@ -2025,9 +2006,6 @@ class LinkServer:
             f"{LINK_PATH_PREFIX}/trust-deposit/{{fingerprint}}", self._handle_trust_deposit
         )
         app.router.add_post(
-            f"{LINK_PATH_PREFIX}/attestation-pull/{{fingerprint}}", self._handle_attestation_pull
-        )
-        app.router.add_post(
             f"{LINK_PATH_PREFIX}/identities/{{fingerprint}}", self._handle_identity_request
         )
         app.router.add_post(f"{LINK_PATH_PREFIX}/file-chunk/{{fingerprint}}", self._handle_file_chunk_request)
@@ -2440,57 +2418,6 @@ class LinkServer:
         return web.json_response(
             {"identities": self._node.build_identity_response(identity_request.subjects)}
         )
-
-    async def _handle_attestation_pull(self, request: web.Request) -> web.Response:
-        """Serve one authenticated page of this node's own signed attestations.
-
-        The issuing half of design doc §5.5 (issue #584).  Shares the trust
-        pull's shape -- signed request, completed peer, five-minute freshness,
-        bounded nonce cache, `LinkPolicyAction.TRUST` gate -- because the two
-        expose the same class of thing: bounded, already-signed objects a
-        subscriber has explicitly configured this node to supply.
-
-        And one gate the trust pull does not have (issue #596): the requester
-        must be on this node's own recipient list. Trust objects are meant to
-        travel; an attestation carries a caller's birthdate or real name, and
-        the subscriber configuring this node as an authority is a decision made
-        on the *other* node, which this one never sees. The check runs last, so
-        only an authenticated, policy-admitted peer learns the answer, and
-        inside the same lane call as the read, so the two cannot disagree.
-        """
-        fingerprint = request.match_info["fingerprint"]
-        try:
-            body = await request.json(loads=strict_json_loads)
-            pull = AttestationPullRequest.from_dict(body)
-            self._node.handle_attestation_pull_request(fingerprint, pull)
-            decision = await self._decide(fingerprint, LinkPolicyAction.TRUST)
-            if decision is not None and not decision.allowed:
-                return self._policy_rejection(decision)
-            objects, more = await self._lane.run(
-                load_issued_attestation_page,
-                requester_fingerprint=fingerprint,
-                after_content_id=pull.after_content_id,
-                limit=pull.limit,
-            )
-        except UnknownAttestationPullCursor as exc:
-            return self._unknown_cursor(exc)
-        except NotAnAttestationRecipient as exc:
-            # Visible, in the shape a policy rejection already has: what it
-            # discloses is a relationship between two nodes that the other
-            # SysOp has to act on, not a per-user gate (design doc §16,
-            # issue #596, Decision 3).
-            return web.json_response(
-                {"error": str(exc), "reason_code": NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE},
-                status=403,
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            return web.json_response({"error": f"malformed attestation pull: {exc}"}, status=400)
-        except LinkProtocolError as exc:
-            return web.json_response({"error": str(exc)}, status=403)
-        # Issue #632: the legacy path, recorded per recipient so the issuer's
-        # screens can say what it holds (review of #1045).
-        await self._lane.run(record_attestation_pull, fingerprint, objects)
-        return web.json_response({"objects": objects, "more_available": more})
 
     async def _handle_file_chunk_request(self, request: web.Request) -> web.Response:
         """
@@ -3273,68 +3200,6 @@ def _refusal_reason_code(text: str | bytes) -> str | None:
         return None
     code = body.get("reason_code") if isinstance(body, dict) else None
     return code if isinstance(code, str) else None
-
-
-def _is_recipient_refusal(text: str | bytes) -> bool:
-    """Whether a 403 body is the issuer-side recipient refusal (issue #596)."""
-    return _refusal_reason_code(text) == NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE
-
-
-async def request_remote_attestations(
-    node: LinkNode,
-    session: ClientSession,
-    base_url: str,
-    pull_request: AttestationPullRequest,
-    *,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[list[dict], bool]:
-    """Pull one bounded page of an issuer's own signed identity attestations."""
-    url = f"{base_url}{LINK_PATH_PREFIX}/attestation-pull/{node.identity.fingerprint}"
-    try:
-        async with session.post(
-            url, json=pull_request.to_dict(), timeout=ClientTimeout(total=timeout)
-        ) as response:
-            if response.status != 200:
-                text = await _read_bounded(response, _MAX_ERROR_BODY_BYTES)
-                if response.status == 403 and _is_recipient_refusal(text):
-                    raise AttestationRecipientRefused(url)
-                if _refusal_reason_code(text) == UNKNOWN_PULL_CURSOR_REASON_CODE:
-                    raise PullCursorUnknown(url)
-                raise LinkTransportError(
-                    f"attestation pull from {url} failed: HTTP {response.status}: {text}"
-                )
-            # Ingress bounds on the *bytes*, before anything decodes them
-            # (design doc §12.7: "over-limit input is rejected or deferred
-            # visibly, never converted into evidence"). `response.json()`
-            # downloads and parses the whole body first, so a hostile
-            # configured authority could exhaust this process's memory long
-            # before a length check on the decoded value ever ran.
-            raw = await _read_bounded(
-                response, MAX_ATTESTATION_RESPONSE_BYTES, label="attestation pull response"
-            )
-            body = strict_json_loads(raw)
-    except (ClientError, TimeoutError, ValueError) as exc:
-        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
-    try:
-        objects = body["objects"]
-        if not isinstance(objects, list):
-            raise TypeError("objects is not a list")
-        # Read inside the guarded block, like `request_trust_objects`: a
-        # response that omits it otherwise raises `KeyError` out of this
-        # function, which `_pull_one_attestation_authority` does not catch, so
-        # one malformed peer would end all outbound sync rather than its own
-        # pull.
-        more_available = bool(body["more_available"])
-    except (KeyError, TypeError) as exc:
-        raise LinkTransportError(
-            f"malformed attestation pull response from {url}: {exc}"
-        ) from exc
-    if len(objects) > MAX_ATTESTATION_OBJECTS_PER_RESPONSE:
-        raise LinkTransportError(
-            f"attestation pull response from {url} exceeds "
-            f"{MAX_ATTESTATION_OBJECTS_PER_RESPONSE} objects"
-        )
-    return objects, more_available
 
 
 def _parse_withdrawal_body(text: str, url: str) -> FileWithdrawal:

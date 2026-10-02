@@ -4056,4 +4056,19 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1046: the attestation pull is removed (the maintainer's decision of "
+            "2026-10-02, in the same release as sealed snapshots, #632). Drops "
+            "`link_attestation_pull_cursors`, which only the pull read and wrote. A recipient that "
+            "an unreleased build recorded as reached by pull is reset to not reached, since "
+            "nothing reaches it that way any more."
+        ),
+        sql="""
+        DROP TABLE IF EXISTS link_attestation_pull_cursors;
+        UPDATE link_attestation_bundle_ledger
+           SET route = NULL, sent_at = NULL, sent_digest = NULL, delivered_ids_json = '[]'
+         WHERE route = 'pull';
+        """,
+    ),
 ]

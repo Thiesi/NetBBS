@@ -12,8 +12,8 @@ Both halves of `netbbs.link.attestation_bundles`' wire format in use:
   attempt failed, for the Published identity screen.
 - **Recipient.** A bundle, however it arrived, is checked (addressed here,
   signed by an issuer this node subscribes to, newer than the last one from
-  it), opened, and applied as a whole: every object is ingested as a pulled
-  one would be, and whatever this node holds from that issuer which the
+  it), opened, and applied as a whole: every object is ingested, and
+  whatever this node holds from that issuer which the
   snapshot leaves out is forgotten, "withdrawn for this recipient".
 
 The database functions here are plain, synchronous and `db`-first, dispatched
@@ -112,7 +112,7 @@ def snapshot_objects(db: Database, *, now: datetime | None = None) -> list[dict[
     The same for every recipient, because a recipient is a node and the caller
     already chose which attributes leave at all (issue #596, Decision 2). A
     revocation is included as long as its target could still be held, so a
-    recipient that took the object from an older snapshot or the pull is told
+    recipient that took the object from an older snapshot is told
     explicitly; past that, absence says the same."""
     now_value, _ = _now(now)
     rows = db.connection.execute(
@@ -188,7 +188,7 @@ def plan_attestation_deliveries(db: Database, *, now: datetime | None = None) ->
             )
             if not due:
                 continue
-            if (row["last_error"] is not None or row["route"] == "pull") \
+            if row["last_error"] is not None \
                     and row["last_attempt_at"] is not None and row["last_attempt_at"] > retry_before:
                 continue
             sequence = max(int(row["sequence"]) + 1, now_ms)
@@ -231,52 +231,6 @@ def record_attestation_delivery(
         )
 
 
-def record_legacy_attestation_recipient(db: Database, recipient_fingerprint: str, *, now: datetime | None = None) -> None:
-    """A recipient whose NetBBS does not take sealed snapshots yet: for this
-    release it fetches by pull instead, so it is not a failure (review of
-    #1045). Its route reads "pull" and what it fetched is recorded as it is
-    served (`record_attestation_pull`)."""
-    now_value, _ = _now(now)
-    with db.connection:
-        db.connection.execute(
-            "UPDATE link_attestation_bundle_ledger SET route = 'pull', last_error = NULL, last_attempt_at = ? "
-            "WHERE recipient_fingerprint = ? AND removed_at IS NULL",
-            (now_value, recipient_fingerprint),
-        )
-
-
-def record_attestation_pull(
-    db: Database, recipient_fingerprint: str, objects: list[dict[str, Any]], *, now: datetime | None = None,
-) -> None:
-    """A recipient pulled `objects` (the legacy path). Added to what it is
-    recorded as holding: a pull is incremental, unlike a snapshot."""
-    if not objects:
-        return
-    now_value, _ = _now(now)
-    served = set()
-    for item in objects:
-        try:
-            served.add(_object_content_id(item))
-        except ValueError:
-            continue
-    with db.connection:
-        db.connection.execute(
-            "INSERT OR IGNORE INTO link_attestation_bundle_ledger (recipient_fingerprint) VALUES (?)",
-            (recipient_fingerprint,),
-        )
-        row = db.connection.execute(
-            "SELECT delivered_ids_json, route FROM link_attestation_bundle_ledger WHERE recipient_fingerprint = ?",
-            (recipient_fingerprint,),
-        ).fetchone()
-        held = set(json.loads(row["delivered_ids_json"])) | served
-        db.connection.execute(
-            """UPDATE link_attestation_bundle_ledger
-               SET delivered_ids_json = ?, sent_at = ?, route = COALESCE(route, 'pull')
-               WHERE recipient_fingerprint = ?""",
-            (json.dumps(sorted(held)), now_value, recipient_fingerprint),
-        )
-
-
 def record_attestation_delivery_failure(
     db: Database, recipient_fingerprint: str, error: str, *, now: datetime | None = None,
 ) -> None:
@@ -305,15 +259,10 @@ class AttestationDeliveryStatus:
 def _holds_current(row, snapshot_ids: set[str]) -> bool:
     """Whether a recipient holds exactly what it should now (review of #1042).
 
-    A snapshot replaces what the recipient holds, so a pushed one is current
-    only if it held exactly the live set: when an object drops out (expiry, a
-    retracted value), the recipient still holds it until the resend withdraws
-    it. A pull only ever adds, and is withdrawn by revocations it fetches, so
-    for the pull route holding everything live is what counts."""
-    delivered = set(json.loads(row["delivered_ids_json"]))
-    if row["route"] == "pull":
-        return snapshot_ids <= delivered
-    return snapshot_ids == delivered
+    A snapshot replaces what the recipient holds, so it is current only if it
+    held exactly the live set: when an object drops out (expiry, a retracted
+    value), the recipient still holds it until the resend withdraws it."""
+    return snapshot_ids == set(json.loads(row["delivered_ids_json"]))
 
 
 def list_attestation_delivery_status(db: Database, *, now: datetime | None = None) -> list[AttestationDeliveryStatus]:
@@ -349,7 +298,7 @@ def attestation_delivery_counts(
 ) -> tuple[int, int]:
     """(delivered, named) for one caller's value: how many of the currently
     named recipients hold this caller's current signed object for
-    `attribute`, by snapshot or by pull, and how many are named. What the
+    `attribute`, and how many are named. What the
     Profile toggle shows the caller -- counts only, never which nodes (#596
     Decision 4).
 
@@ -385,14 +334,6 @@ class AppliedSnapshot:
     skipped: int = 0
 
 
-def has_attestation_snapshot_from(db: Database, issuer_fingerprint: str) -> bool:
-    """Whether this node has applied a snapshot from `issuer_fingerprint`;
-    from then on it stops pulling that issuer (one path, Decision 5)."""
-    return db.connection.execute(
-        "SELECT 1 FROM link_attestation_bundles_received WHERE issuer_fingerprint = ?", (issuer_fingerprint,)
-    ).fetchone() is not None
-
-
 def last_applied_sequence(db: Database, issuer_fingerprint: str) -> int:
     row = db.connection.execute(
         "SELECT sequence FROM link_attestation_bundles_received WHERE issuer_fingerprint = ?",
@@ -415,7 +356,7 @@ def _ingest_objects(
     db: Database, issuer: str, objects: list[dict[str, Any]], verify_keys: list[nacl.signing.VerifyKey],
     now_value: str,
 ) -> tuple[int, list[dict[str, Any]], int]:
-    """Ingest each object as a pulled one would be. Returns (ingested,
+    """Ingest each object. Returns (ingested,
     pending, skipped): pending objects wait for a subject this node has not
     met yet; skipped ones are not this issuer's, or do not verify."""
     ingested, skipped = 0, 0
@@ -453,7 +394,7 @@ def apply_attestation_snapshot(
     """Apply one opened snapshot from `issuer_fingerprint` as a whole.
 
     Refused unless the issuer is one of this node's attestation authorities
-    (the same subscription set the pull uses) and `sequence` is newer than the
+    (the configured subscription set) and `sequence` is newer than the
     last applied from it. Then every object is ingested, and whatever this
     node holds from that issuer which the snapshot does not contain -- live,
     and not already revoked -- is withdrawn: marked revoked with no revoking
@@ -534,7 +475,7 @@ def retry_pending_attestation_objects(
 
 
 def _issuer_verify_keys(node: "LinkNode", issuer: str) -> list[nacl.signing.VerifyKey]:
-    """The issuer's current signing key only, as the pull verifies (review of
+    """The issuer's current signing key only (review of
     #1042). A snapshot is signed fresh, and the issuer re-signs what it still
     asserts after a rotation (#623), so a superseded key's signature -- on the
     bundle or on an object inside it -- is skipped for good, never accepted."""
@@ -576,7 +517,7 @@ async def receive_attestation_bundle(
 
     The issuer must be one this node can verify (a peer or a node known by
     introduction, #627 Decision 5) and, under trust enforcement, established
-    here, as the pull requires."""
+    here."""
     issuer = bundle.issuer_fingerprint
     if bundle.recipient_fingerprint != node.identity.fingerprint:
         return AppliedSnapshot(False, "not_addressed_here")

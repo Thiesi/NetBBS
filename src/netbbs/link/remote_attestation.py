@@ -12,7 +12,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import secrets
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
@@ -42,24 +41,6 @@ class UnknownAttestationSubject(ValueError):
     unchanged -- but nameable, because it is the one rejection that a later
     event can turn into an acceptance. A puller that advanced its cursor past
     one of these would never see the object again.
-    """
-
-
-class UnknownAttestationPullCursor(ValueError):
-    """The requester's cursor names an object this node does not hold (issue #621).
-
-    A `ValueError` so that every existing caller that treats an unknown cursor
-    as a malformed request still does; its own type so the pull endpoint can
-    say which, and a subscriber can recover.
-    """
-
-
-class NotAnAttestationRecipient(Exception):
-    """The requester is not on this node's attestation recipient list.
-
-    Deliberately not a `ValueError`: the pull handler answers a malformed
-    request with HTTP 400, and this is a well-formed request from a node the
-    SysOp has not chosen to tell (design doc §16, issue #596, Decision 3).
     """
 
 
@@ -880,15 +861,6 @@ def _audit(
 # or the attested value changes, and serves both to the subscribers that have
 # configured it as an attestation authority.
 
-ATTESTATION_PULL_REQUEST_OBJECT_TYPE = "remote_attestation_pull_request"
-
-# What the pull endpoint answers a node that is not on the recipient list, in
-# the `reason_code` field a policy rejection already carries. Wire-visible: a
-# subscriber matches on it to tell its SysOp what to ask for.
-NOT_AN_ATTESTATION_RECIPIENT_REASON_CODE = "not_an_attestation_recipient"
-
-MAX_ATTESTATION_OBJECTS_PER_RESPONSE = 100
-MAX_ATTESTATION_RESPONSE_BYTES = 1024 * 1024
 
 # Mirrors §12.7's per-issuer active-signal bound for the attestation family.
 # Deliberately generous next to any real node's user count: this is a stop
@@ -1020,12 +992,6 @@ def count_attestation_recipients(db: Database) -> int:
     return int(
         db.connection.execute("SELECT COUNT(*) FROM link_attestation_recipients").fetchone()[0]
     )
-
-
-def is_attestation_recipient(db: Database, fingerprint: str) -> bool:
-    return db.connection.execute(
-        "SELECT 1 FROM link_attestation_recipients WHERE fingerprint = ?", (fingerprint,)
-    ).fetchone() is not None
 
 
 def list_attestation_authority_fingerprints(db: Database) -> list[str]:
@@ -1395,246 +1361,3 @@ def list_issued_attestations(
         if include_inactive or record.is_live:
             result.append(record)
     return result
-
-
-def load_issued_attestation_page(
-    db: Database,
-    *,
-    requester_fingerprint: str,
-    after_content_id: str | None = None,
-    limit: int = MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
-    now_iso: str | None = None,
-) -> tuple[list[dict[str, object]], bool]:
-    """Return one byte-bounded page of what `requester_fingerprint` may read.
-
-    `requester_fingerprint` is required, not defaulted: issue #596 was this
-    function taking no requester at all, so every peer the ordinary trust
-    policy admitted read every value this node had ever signed. A requester
-    that is not a recipient raises `NotAnAttestationRecipient` -- refused
-    outright rather than served the value-free part of the stream, because
-    any page advances the requester's cursor, and a cursor that has moved past
-    attestations it was not shown would never deliver them after a later grant.
-    Checked before the cursor is looked up, so a node that is not a recipient
-    cannot use "unknown cursor" to ask which content IDs exist here.
-
-    Ordered by insertion. Serves every revocation, and only those attestations
-    that are live as of this read: a retired one has had its value blanked
-    (`_redact_retired_issued`), and filtering on liveness here as well means
-    what is served never depends on when that sweep last ran. The stream stays
-    resumable because a cursor names a position and a redacted row keeps its
-    position: a returning subscriber needs the revocation of anything it
-    holds, and that revocation is always later in the stream than the object
-    it retires.
-    """
-    if not is_attestation_recipient(db, requester_fingerprint):
-        raise NotAnAttestationRecipient(
-            "this node has not named the requester as an attestation recipient"
-        )
-    now_value, _ = _now(now_iso)
-    limit = max(1, min(limit, MAX_ATTESTATION_OBJECTS_PER_RESPONSE))
-    after_rowid = 0
-    if after_content_id:
-        row = db.connection.execute(
-            "SELECT rowid FROM link_issued_remote_attestations WHERE content_id = ?",
-            (after_content_id,),
-        ).fetchone()
-        if row is None:
-            raise UnknownAttestationPullCursor("unknown attestation pull cursor")
-        after_rowid = row[0]
-    rows = db.connection.execute(
-        """SELECT content_id, envelope_json, signature_b64
-           FROM link_issued_remote_attestations
-           WHERE rowid > ?
-             AND (object_type = ?
-                  OR (redacted_at IS NULL AND revoked_at IS NULL AND expires_at > ?))
-           ORDER BY rowid LIMIT ?""",
-        (after_rowid, REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE, now_value, limit + 1),
-    ).fetchall()
-    more = len(rows) > limit
-    result: list[dict[str, object]] = []
-    total = 2
-    for _, envelope_json, signature_b64 in rows[:limit]:
-        item = {"envelope": json.loads(envelope_json), "signature": signature_b64}
-        item_size = len(json.dumps(item, separators=(",", ":")).encode("utf-8")) + 1
-        if result and total + item_size > MAX_ATTESTATION_RESPONSE_BYTES:
-            more = True
-            break
-        if item_size > MAX_ATTESTATION_RESPONSE_BYTES:
-            raise ValueError("stored attestation object exceeds the response byte limit")
-        result.append(item)
-        total += item_size
-    return result, more
-
-
-def load_attestation_pull_cursor(
-    db: Database, responder_fingerprint: str, issuer_fingerprint: str
-) -> str | None:
-    row = db.connection.execute(
-        """SELECT after_content_id FROM link_attestation_pull_cursors
-           WHERE responder_fingerprint = ? AND issuer_fingerprint = ?""",
-        (responder_fingerprint, issuer_fingerprint),
-    ).fetchone()
-    return row[0] if row is not None else None
-
-
-def clear_attestation_pull_cursor(
-    db: Database, responder_fingerprint: str, issuer_fingerprint: str
-) -> None:
-    """Forget where this node was in one authority's stream (issue #621)."""
-    with db.connection:
-        db.connection.execute(
-            """DELETE FROM link_attestation_pull_cursors
-               WHERE responder_fingerprint = ? AND issuer_fingerprint = ?""",
-            (responder_fingerprint, issuer_fingerprint),
-        )
-
-
-def save_attestation_pull_cursor(
-    db: Database,
-    responder_fingerprint: str,
-    issuer_fingerprint: str,
-    after_content_id: str,
-    *,
-    now_iso: str | None = None,
-) -> None:
-    now_value, _ = _now(now_iso)
-    with db.connection:
-        db.connection.execute(
-            """INSERT INTO link_attestation_pull_cursors
-               (responder_fingerprint, issuer_fingerprint, after_content_id, updated_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(responder_fingerprint, issuer_fingerprint) DO UPDATE SET
-                 after_content_id = excluded.after_content_id,
-                 updated_at = excluded.updated_at""",
-            (responder_fingerprint, issuer_fingerprint, after_content_id, now_value),
-        )
-
-
-@dataclass(frozen=True)
-class AttestationPullRequest:
-    """One authenticated request for a page of an issuer's own attestations.
-
-    Deliberately its own signed object type rather than a reuse of
-    `trust_wire.TrustPullRequest`.  The two carry the same fields, but the
-    object type is inside the signature, so a request a peer signed for one
-    subscription cannot be re-aimed at the other: without that, a carrier
-    holding a signed trust pull could spend its one-shot nonce against the
-    attestation endpoint and make the trust pull fail as a replay.
-
-    `issuer_fingerprint` must be the responder itself.  A node serves only
-    objects it signed: unlike a trust signal, which any carrier may re-serve
-    unchanged (design doc §12.7), an attestation is a statement about the
-    issuer's *own* users, so there is no third party whose copy is worth
-    asking for.
-    """
-
-    requester_fingerprint: str
-    responder_fingerprint: str
-    issuer_fingerprint: str
-    after_content_id: str | None
-    limit: int
-    created_at: str
-    nonce: str
-    signature: bytes
-
-    @property
-    def payload(self) -> dict[str, object]:
-        return {
-            "requester_fingerprint": self.requester_fingerprint,
-            "responder_fingerprint": self.responder_fingerprint,
-            "issuer_fingerprint": self.issuer_fingerprint,
-            "after_content_id": self.after_content_id,
-            "limit": self.limit,
-            "created_at": self.created_at,
-            "nonce": self.nonce,
-        }
-
-    def to_dict(self) -> dict[str, object]:
-        return {**self.payload, "signature": base64.b64encode(self.signature).decode("ascii")}
-
-    @classmethod
-    def from_dict(cls, data: object) -> "AttestationPullRequest":
-        keys = {
-            "requester_fingerprint", "responder_fingerprint", "issuer_fingerprint",
-            "after_content_id", "limit", "created_at", "nonce", "signature",
-        }
-        if not isinstance(data, dict) or set(data) != keys:
-            raise ValueError("invalid attestation pull request fields")
-        try:
-            signature = base64.b64decode(str(data["signature"]), validate=True)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("invalid attestation pull signature encoding") from exc
-        request = cls(signature=signature, **{key: data[key] for key in keys - {"signature"}})
-        if any(not isinstance(value, str) or not value for value in (
-            request.requester_fingerprint, request.responder_fingerprint,
-            request.issuer_fingerprint, request.created_at, request.nonce,
-        )):
-            raise ValueError(
-                "attestation pull fingerprints, timestamp, and nonce must be non-empty strings"
-            )
-        if request.after_content_id is not None and (
-            not isinstance(request.after_content_id, str) or len(request.after_content_id) != 64
-        ):
-            raise ValueError("invalid attestation pull cursor")
-        if (
-            not isinstance(request.limit, int)
-            or isinstance(request.limit, bool)
-            or not 1 <= request.limit <= MAX_ATTESTATION_OBJECTS_PER_RESPONSE
-        ):
-            raise ValueError("attestation pull limit must be between 1 and 100")
-        _parse_time(request.created_at, "created_at")
-        if len(request.nonce) != 32:
-            raise ValueError("attestation pull nonce must contain 128 bits of hexadecimal data")
-        try:
-            bytes.fromhex(request.nonce)
-        except ValueError as exc:
-            raise ValueError("attestation pull nonce is not hexadecimal") from exc
-        return request
-
-    def verifies(self, verify_key: nacl.signing.VerifyKey) -> bool:
-        envelope = {
-            "netbbs_protocol": 1,
-            "object_type": ATTESTATION_PULL_REQUEST_OBJECT_TYPE,
-            "payload": self.payload,
-        }
-        try:
-            verify_key.verify(canonical_bytes(envelope), self.signature)
-        except (nacl.exceptions.BadSignatureError, ValueError):
-            return False
-        return True
-
-
-def build_attestation_pull_request(
-    *,
-    signing_identity: Identity,
-    requester_fingerprint: str,
-    responder_fingerprint: str,
-    issuer_fingerprint: str,
-    after_content_id: str | None = None,
-    limit: int = MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
-    created_at: str | None = None,
-    nonce: str | None = None,
-) -> AttestationPullRequest:
-    unsigned = AttestationPullRequest(
-        requester_fingerprint=requester_fingerprint,
-        responder_fingerprint=responder_fingerprint,
-        issuer_fingerprint=issuer_fingerprint,
-        after_content_id=after_content_id,
-        limit=limit,
-        created_at=created_at or utc_now_iso(),
-        nonce=nonce or secrets.token_hex(16),
-        signature=b"",
-    )
-    # Run the receiving side's own structural validation before signing, so a
-    # malformed request is this node's error rather than the responder's.
-    AttestationPullRequest.from_dict(
-        {**unsigned.to_dict(), "signature": base64.b64encode(b"x").decode()}
-    )
-    envelope = {
-        "netbbs_protocol": 1,
-        "object_type": ATTESTATION_PULL_REQUEST_OBJECT_TYPE,
-        "payload": unsigned.payload,
-    }
-    return AttestationPullRequest(
-        **unsigned.payload, signature=signing_identity.sign(canonical_bytes(envelope))
-    )

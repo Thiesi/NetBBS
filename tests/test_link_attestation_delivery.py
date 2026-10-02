@@ -25,7 +25,7 @@ from netbbs.link.attestation_delivery import (
     REMOVED_RECIPIENT_RETRY_WINDOW,
     WITHDRAWN_FOR_RECIPIENT,
     apply_attestation_snapshot,
-    has_attestation_snapshot_from,
+    last_applied_sequence,
     list_attestation_delivery_status,
     plan_attestation_deliveries,
     receive_attestation_bundle,
@@ -178,7 +178,7 @@ def test_a_snapshot_is_applied_and_what_it_leaves_out_is_withdrawn(issuer_db, re
     result = apply_attestation_snapshot(recipient_db, issuer.fingerprint, 10, objects, keys, now=NOW)
     assert (result.applied, result.ingested, result.withdrawn) == (True, 1, 0)
     assert remote_meets_age(recipient_db, _alice(issuer), 18, now_iso=stamp(NOW))
-    assert has_attestation_snapshot_from(recipient_db, issuer.fingerprint)
+    assert last_applied_sequence(recipient_db, issuer.fingerprint) == 10
 
     # Replays and reorderings are refused.
     assert apply_attestation_snapshot(recipient_db, issuer.fingerprint, 10, [], keys, now=NOW).reason == "stale_sequence"
@@ -502,7 +502,6 @@ def test_a_dialable_recipient_is_reached_directly(tmp_path):
         r_db.close()
 
 
-
 # -- review of #1042: what a peer put inside a bundle cannot stop the pass ----
 
 
@@ -616,8 +615,7 @@ def test_an_object_signed_by_a_rotated_out_key_is_not_ingested(net):
 
     asyncio.run(scenario())
     assert not remote_meets_age(net.r_db.db, net.subject, 18, now_iso=_now())
-    assert has_attestation_snapshot_from(net.r_db.db, net.i.identity.fingerprint)  # the bundle itself applied
-
+    assert last_applied_sequence(net.r_db.db, net.i.identity.fingerprint) > 0  # the bundle itself applied
 
 
 # -- review of #1045: what each recipient holds, by snapshot or by pull ------
@@ -635,37 +633,12 @@ def test_a_snapshot_records_exactly_what_it_held(issuer_db):
     assert status.current and status.delivered_ids == frozenset(plan.content_ids)
 
 
-def test_a_recipient_that_only_pulls_is_not_a_failure_and_its_pulls_count(issuer_db):
-    """A recipient whose NetBBS does not take snapshots yet still gets the
-    value by pull this release. Its route reads "pull", with no error, and
-    what it fetched is what it is recorded as holding."""
-    from netbbs.link.attestation_delivery import (
-        list_attestation_delivery_status,
-        record_attestation_pull,
-        record_legacy_attestation_recipient,
-    )
-
-    plan_attestation_deliveries(issuer_db, now=NOW)
-    record_legacy_attestation_recipient(issuer_db, "recipient-a", now=NOW)
-    [status] = list_attestation_delivery_status(issuer_db, now=NOW)
-    assert (status.route, status.last_error, status.current) == ("pull", None, False)
-    # Rechecked hourly, in case it upgraded, not every pass.
-    assert plan_attestation_deliveries(issuer_db, now=NOW + timedelta(minutes=5)) == []
-    assert plan_attestation_deliveries(issuer_db, now=NOW + FAILED_DELIVERY_BACKOFF + timedelta(minutes=1))
-
-    record_attestation_pull(issuer_db, "recipient-a", snapshot_objects(issuer_db, now=NOW), now=NOW)
-    [status] = list_attestation_delivery_status(issuer_db, now=NOW)
-    assert status.route == "pull" and status.current
-
-
-
 def test_a_pushed_snapshot_is_not_current_once_an_object_drops_out(issuer_db):
     """Review of #1042: a recipient sent a snapshot holds exactly what it
     held. When an object leaves the live set -- here it expires -- the
     recipient still holds it until the resend withdraws it, so it is not
-    current, although everything live is a subset of what it holds. A
-    pull-route recipient keeps the superset rule."""
-    from netbbs.link.attestation_delivery import list_attestation_delivery_status, record_attestation_pull
+    current, although everything live is a subset of what it holds."""
+    from netbbs.link.attestation_delivery import list_attestation_delivery_status
 
     [plan] = plan_attestation_deliveries(issuer_db, now=NOW)
     record_attestation_delivery(
@@ -679,9 +652,132 @@ def test_a_pushed_snapshot_is_not_current_once_an_object_drops_out(issuer_db):
     [status] = list_attestation_delivery_status(issuer_db, now=after_expiry)
     assert not status.current
 
-    # The same recipient on the pull route: holding more than is live is fine.
-    issuer_db.connection.execute("UPDATE link_attestation_bundle_ledger SET route = 'pull'")
-    issuer_db.connection.commit()
-    record_attestation_pull(issuer_db, "recipient-a", snapshot_objects(issuer_db, now=NOW), now=NOW)
-    [status] = list_attestation_delivery_status(issuer_db, now=after_expiry)
-    assert status.current
+
+
+def test_a_recipient_on_an_older_netbbs_receives_nothing_and_says_so(net):
+    """Issue #1046: there is no pull any more. A recipient whose descriptor
+    does not advertise sealed snapshots is sent nothing; Published identity
+    says it needs a newer NetBBS, with no route, and the caller's value does
+    not count as sent to it."""
+    from netbbs.link.attestation_delivery import attestation_delivery_counts
+
+    async def scenario():
+        await net.start()
+        old_descriptor = build_endpoint_descriptor(
+            signing_identity=net.r.identity.signing_key, subject_fingerprint=net.r.identity.fingerprint,
+            addresses=None, outgoing_only=True, created_at="2026-02-01T00:00:00+00:00",
+            relays=[net.rr.identity.fingerprint], capabilities=(),
+        )
+        old_hello = dataclasses.replace(
+            net.r.build_hello(addresses=None, outgoing_only=True, created_at="2026-02-01T00:00:00+00:00"),
+            descriptor=old_descriptor,
+        )
+        net.i.introduced.pop(net.r.identity.fingerprint, None)
+        net.i.handle_introduction(old_hello)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await net.deliver(session)
+                await net.pickup(session)
+        finally:
+            await net.stop()
+
+    asyncio.run(scenario())
+    assert not remote_meets_age(net.r_db.db, net.subject, 18, now_iso=_now())
+    [status] = list_attestation_delivery_status(net.i_db.db)
+    assert (status.route, status.current) == (None, False)
+    assert status.last_error == "needs a newer NetBBS to receive this"
+    assert attestation_delivery_counts(net.i_db.db, net.alice.id, "age") == (0, 1)
+    assert net.rr_db.db.connection.execute("SELECT COUNT(*) FROM link_relay_attestation_bundles").fetchone()[0] == 0
+
+
+def test_an_issuer_that_relays_for_its_recipient_holds_the_snapshot_itself(tmp_path):
+    """Issue #1046: the usual shape -- an outgoing-only recipient whose relay
+    is the issuer it dials. The issuer does not dial itself; it puts the
+    bundle straight into its own relay slot, and the recipient picks it up."""
+    from netbbs.link.attestation_delivery import attestation_delivery_counts
+
+    i = LinkNode(identity=bootstrap_node_identity("I"))
+    r = LinkNode(identity=bootstrap_node_identity("R"))
+    i_db, r_db = _NodeDb(tmp_path, "i"), _NodeDb(tmp_path, "r")
+    sysop = create_user(i_db.db, "sysop", password="password", user_level=SYSOP_LEVEL)
+    alice = create_user(i_db.db, "alice", password="password")
+    attest_age(i_db.db, alice, datetime(1990, 4, 1).date(), verifier=sysop)
+    set_attestation_link_visible(i_db.db, alice, "age", True)
+    reconcile_issued_attestations(i_db.db, i.identity.signing_key, home_node_fingerprint=i.identity.fingerprint)
+    configure_attestation_recipient(i_db.db, r.identity.fingerprint, reason="t", now_iso=stamp(NOW))
+    subject = TrustSubject.user(i.identity.fingerprint, "alice")
+    register_subject(r_db.db, subject, first_accepted_at=stamp(NOW), now_iso=stamp(NOW))
+    configure_attestation_authority(r_db.db, i.identity.fingerprint, attributes=["age"], reason="t", now_iso=stamp(NOW))
+    i.relaying_for[r.identity.fingerprint] = stamp(NOW)
+    r.relay_state.relays_serving_me[i.identity.fingerprint] = stamp(NOW)
+
+    async def scenario():
+        holder = {}
+
+        def i_hello():
+            return i.build_hello(
+                addresses=[{"protocol": "http", "address": "127.0.0.1", "port": holder["server"].port}],
+                outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+            )
+
+        def r_hello():
+            return r.build_hello(addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00")
+
+        holder["server"] = await _run_server(i, i_hello, i_db.lane)
+        try:
+            i.handle_introduction(r_hello())
+            r.handle_hello(i_hello())
+            async with aiohttp.ClientSession() as session:
+                await _deliver_attestation_bundles(i, session, i_db.lane, i_hello)
+                await _pickup_relay_mail(r, session, r_hello, r_db.lane)
+        finally:
+            await holder["server"].stop()
+
+    try:
+        asyncio.run(scenario())
+        assert remote_meets_age(r_db.db, subject, 18, now_iso=_now())
+        [status] = list_attestation_delivery_status(i_db.db)
+        assert (status.route, status.current) == ("relay", True)
+        assert attestation_delivery_counts(i_db.db, alice.id, "age") == (1, 1)
+    finally:
+        i_db.close()
+        r_db.close()
+
+
+def test_migration_drops_the_pull_cursors_and_resets_pull_routes(tmp_path, monkeypatch):
+    """Issue #1046's migration, on a database built one migration short with
+    a pull cursor stored and a recipient an unreleased build recorded as
+    reached by pull."""
+    import netbbs.storage.database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "Issue #1046" in m.description)
+    assert index == len(MIGRATIONS) - 1
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    path = tmp_path / "node.db"
+    old = Database(path)
+    old.connection.execute(
+        "INSERT INTO link_attestation_pull_cursors VALUES ('issuer', 'issuer', 'cid', '2026-09-01T00:00:00.000000Z')"
+    )
+    old.connection.execute(
+        """INSERT INTO link_attestation_bundle_ledger
+           (recipient_fingerprint, sequence, sent_digest, sent_at, route, delivered_ids_json)
+           VALUES ('pulled', 5, 'd', '2026-09-01T00:00:00.000000Z', 'pull', '["x"]'),
+                  ('pushed', 6, 'e', '2026-09-01T00:00:00.000000Z', 'relay', '["y"]')"""
+    )
+    old.connection.commit()
+    old.close()
+    monkeypatch.undo()
+
+    db = Database(path)
+    try:
+        assert db.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'link_attestation_pull_cursors'"
+        ).fetchone()[0] == 0
+        rows = {row["recipient_fingerprint"]: tuple(row) for row in db.connection.execute(
+            "SELECT recipient_fingerprint, route, sent_at, delivered_ids_json FROM link_attestation_bundle_ledger"
+        )}
+        assert rows["pulled"][1:] == (None, None, "[]")
+        assert rows["pushed"][1:] == ("relay", "2026-09-01T00:00:00.000000Z", '["y"]')
+    finally:
+        db.close()

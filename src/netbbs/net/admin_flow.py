@@ -6057,9 +6057,9 @@ async def _attestation_recipients_screen(
                 brief="Which linked node receives them",
                 help=(
                     "A stored peer, or a name/DNS name/technical identity typed in. That node "
-                    "can then pull every verified age and name a caller here has chosen to "
-                    "share over Link. It still has to name this node as an identity authority "
-                    "on its own side before it asks."
+                    "is then sent every verified age and name a caller here has chosen to "
+                    "share over Link, sealed to it. It still has to name this node as an "
+                    "identity authority on its own side before it uses any of it."
                 ),
             ),
             FieldSpec(
@@ -6119,10 +6119,6 @@ def _delivery_state(status) -> tuple[str, str]:
         return "holds everything published", SUCCESS_COLOR
     if status.last_error:
         return sanitize_text(status.last_error), WARNING_COLOR
-    if status.route == "pull":
-        # Issue #632, review of #1045: an older NetBBS still fetches by pull
-        # this release, when it next asks; not a failure.
-        return "older NetBBS: fetches the rest when it next asks", VALUE_COLOR
     return "update goes out on the next Link sync pass", VALUE_COLOR
 
 
@@ -6362,7 +6358,7 @@ async def _withdraw_published_attestation(
             color=WARNING_COLOR,
         )
         return
-    listing.say("Sharing withdrawn and the revocation signed. Subscribers pick it up on their next pull.")
+    listing.say("Sharing withdrawn and the revocation signed. Recipients get it with the next Link sync pass.")
 
 
 async def _remote_attestation_override_screen(
