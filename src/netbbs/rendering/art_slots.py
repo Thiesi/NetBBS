@@ -144,6 +144,9 @@ class SlotArt:
     #: being used -- a run of text holding two keys, for one.
     notes: tuple[str, ...] = ()
     list: Slot | None = None
+    #: Every token parsed into a slot, in reading order -- including extra
+    #: `{menu}`/`{list}`/`{prompt}` tokens the fields above don't keep.
+    tokens: tuple[Slot, ...] = ()
 
     @property
     def slots(self) -> tuple[Slot, ...]:
@@ -218,7 +221,7 @@ def parse_slot_art(
         buffer=buffer, width=width, height=max(height, 1),
         menu=menus[0] if menus else None, prompt=prompts[0] if prompts else None,
         fields=fields, problems=tuple(problems), items=items, notes=notes,
-        list=lists[0] if lists else None,
+        list=lists[0] if lists else None, tokens=tuple(found),
     )
 
 
@@ -452,19 +455,44 @@ def fill_field_slots(text: str, fields: dict[str, str], *, ellipsis: str = "..."
     return "\r\n".join(_render_row(buffer, row) for row in range(art.height)) + RESET
 
 
+_REGION_NAMES = ("menu", "list", "prompt")
+
+
 def banner_slot_notes(text: str, *, width: int = 80) -> list[str]:
-    """What a banner's Preview tells the SysOp about tokens callers see
-    blank (issue #1057): region slots, which only the main menu and list
-    art fill, and tokens with problems. Empty when there is nothing to
+    """What a banner's Preview tells the SysOp about tokens callers don't
+    see as written (issue #1057), each saying what `fill_field_slots`
+    really does with it: a region slot -- which only the main menu and
+    list art fill -- or a token too broken to be a slot is blank; a field
+    given a row count is still filled on its one row; a field past the
+    art's width is cut off there; overlapping slots are drawn in reading
+    order, the later over the earlier. Empty when there is nothing to
     say."""
     if "{" not in text:
         return []
     art = parse_slot_art(text, width=width, require_menu=False)
     notes = [
         f"{_describe(slot)} is not used in a banner; callers see it blank"
-        for slot in (art.menu, art.list, art.prompt) if slot is not None
+        for slot in art.tokens if slot.name in _REGION_NAMES
     ]
-    notes += [f"{problem}; callers see that token blank" for problem in art.problems]
+    for problem in art.problems:
+        if problem.startswith(tuple("{" + name for name in _REGION_NAMES)) and (
+            "takes no size" in problem or "runs past" in problem or "overlaps" in problem
+        ):
+            continue  # a region slot, already noted as blank
+        if "slots; use one" in problem:
+            continue  # every one of them is a region slot, noted above
+        if "needs a size" in problem or "has an empty size" in problem:
+            notes.append(f"{problem}; callers see that token blank")
+        elif "is one row; give a width only" in problem:
+            notes.append(f"{problem}; the row count is ignored and it is filled on its one row")
+        elif "runs past" in problem:
+            notes.append(f"{problem}; callers see it cut off there")
+        elif "overlaps" in problem:
+            notes.append(f"{problem}; the later one is drawn over the earlier")
+        elif "slots; use at most" in problem:
+            notes.append(f"{problem}; a banner still fills them all")
+        else:
+            notes.append(problem)
     return notes
 
 

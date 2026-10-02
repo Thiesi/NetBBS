@@ -695,7 +695,7 @@ from netbbs.update_apply import (
 )
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.art_pacing import ART_SPEEDS, MAIN_MENU_ART, WELCOME_ART, art_speed, set_art_speed
-from netbbs.net.banner_fields import banner_fields
+from netbbs.net.banner_fields import banner_fields, count_callers_online
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
@@ -3447,7 +3447,7 @@ async def _system_menu(
             return
         elif choice == "m":
             await session.write_line("")
-            await _banners_and_mastheads_menu(session, lane, actor)
+            await _banners_and_mastheads_menu(session, lane, actor, node_controls=node_controls)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "c":
@@ -13917,7 +13917,9 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
 # it moved.
 
 
-async def _banners_and_mastheads_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _banners_and_mastheads_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None = None
+) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -13932,7 +13934,7 @@ async def _banners_and_mastheads_menu(session: Session, lane: DatabaseLane, acto
             return
         elif choice == "n":
             await session.write_line("")
-            await _banners_menu(session, lane, actor)
+            await _banners_menu(session, lane, actor, node_controls=node_controls)
             await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "m":
             await session.write_line("")
@@ -13998,7 +14000,9 @@ async def _draw_banners_and_mastheads_menu(
 # initiative) ----------------------------------------------------------
 
 
-async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _welcome_banner_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None = None
+) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -14012,7 +14016,7 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
             return
         elif choice == "p":
             await session.write_line("")
-            await _preview_welcome_banner_screen(session, lane, actor)
+            await _preview_welcome_banner_screen(session, lane, actor, node_controls=node_controls)
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "s":
             await session.write_line("")
@@ -14163,7 +14167,9 @@ async def _write_banner_not_live(session: Session, status, *, callers_see: str) 
     return False
 
 
-async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _preview_welcome_banner_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None = None
+) -> None:
     """Renders the exact banner `netbbs.net.login_flow` would show at
     login right now -- the same `load_welcome_banner` call, used as a
     smoke test of the loading path itself, not a separate rendering.
@@ -14180,14 +14186,25 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
     def _load(db: Database) -> tuple:
         truecolor = effective_truecolor(session, db, actor)
         # As the connecting caller on this transport gets it (issue #841).
-        banner = load_welcome_banner(db, truecolor=truecolor, unicode_style=pre_login_unicode_style(session))
-        return welcome_banner_status(db), banner, banner_fields(db), truecolor
+        banner = load_welcome_banner(
+            db, truecolor=truecolor, unicode_style=pre_login_unicode_style(session),
+            max_width=physical_terminal_width(session),
+        )
+        fields = banner_fields(db, callers_online=count_callers_online(
+            node_controls.session_registry if node_controls is not None else None
+        ))
+        return welcome_banner_status(db), banner, fields, truecolor
 
     status, banner_text, fields, _truecolor = await lane.run(_load)
     # As a connecting caller gets it, field slots filled with what is true
     # before sign-in (issue #1057): the raw tokens were never what callers saw.
     raw_text = banner_text
-    banner_text = fill_field_slots(banner_text, fields, width=session.terminal_width)
+    # Width, ellipsis and fields exactly as `login_flow` draws it (review
+    # of #1060): a terminal that wraps at once lays screens out a column
+    # narrower than the art it is sent.
+    banner_text = fill_field_slots(
+        banner_text, fields, ellipsis=ellipsis_for(session), width=physical_terminal_width(session),
+    )
     await session.write_line(colored("\r\nPreviewing the welcome banner callers see when they connect:", fg_color=MUTED_COLOR))
     if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
         await write_preformatted_line(session, banner_text)
@@ -14211,7 +14228,7 @@ async def _write_banner_slot_notes(session: Session, banner_text: str) -> None:
     """Under a welcome or log-off banner's preview: each token callers see
     blank rather than filled (issue #1057), so a SysOp who drew a
     `{menu}` into a banner learns it here, not from a caller."""
-    for note in banner_slot_notes(banner_text, width=session.terminal_width):
+    for note in banner_slot_notes(banner_text, width=physical_terminal_width(session)):
         await session.write_line(colored(f"Note: {note}.", fg_color=WARNING_COLOR))
 
 
@@ -15182,7 +15199,9 @@ async def _main_menu_banner_filesystem_screen(
 # made misleading and visually repetitive lifecycle banners.
 
 
-async def _banners_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _banners_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None = None
+) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -15197,11 +15216,11 @@ async def _banners_menu(session: Session, lane: DatabaseLane, actor: User) -> No
             return
         elif choice == "w":
             await session.write_line("")
-            await _welcome_banner_menu(session, lane, actor)
+            await _welcome_banner_menu(session, lane, actor, node_controls=node_controls)
             await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
-            await _logoff_banner_menu(session, lane, actor)
+            await _logoff_banner_menu(session, lane, actor, node_controls=node_controls)
             await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "e":
             await session.write_line("")
@@ -15253,7 +15272,9 @@ async def _draw_banners_menu(
 # -- logoff banner --------------------------------------------------------
 
 
-async def _logoff_banner_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _logoff_banner_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None = None
+) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
@@ -15268,7 +15289,7 @@ async def _logoff_banner_menu(session: Session, lane: DatabaseLane, actor: User)
             return
         elif choice == "p":
             await session.write_line("")
-            await _preview_logoff_banner_screen(session, lane, actor)
+            await _preview_logoff_banner_screen(session, lane, actor, node_controls=node_controls)
             await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "e":
             await session.write_line("")
@@ -15340,14 +15361,21 @@ async def _draw_logoff_banner_menu(
     await _choice_prompt(session)
 
 
-async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane, actor: User | None = None) -> None:
+async def _preview_logoff_banner_screen(
+    session: Session, lane: DatabaseLane, actor: User | None = None, *, node_controls: NodeControls | None = None
+) -> None:
     status, banner_text, fields = await lane.run(lambda db: (
-        logoff_banner_status(db), load_logoff_banner(db), banner_fields(db, user=actor),
+        logoff_banner_status(db), load_logoff_banner(db, max_width=physical_terminal_width(session)),
+        banner_fields(db, user=actor, callers_online=count_callers_online(
+            node_controls.session_registry if node_controls is not None else None
+        )),
     ))
     await session.write_line(colored("\r\nPreviewing logoff banner as shown on Log off:", fg_color=MUTED_COLOR))
     if banner_text:
         # Filled as your own Log off would fill it (issue #1057).
-        await write_preformatted_line(session, fill_field_slots(banner_text, fields, width=session.terminal_width))
+        await write_preformatted_line(session, fill_field_slots(
+            banner_text, fields, ellipsis=ellipsis_for(session), width=physical_terminal_width(session),
+        ))
         await _write_banner_slot_notes(session, banner_text)
     else:
         await _write_banner_not_live(session, status, callers_see="no banner")

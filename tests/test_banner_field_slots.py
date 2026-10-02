@@ -40,11 +40,14 @@ def test_menu_list_or_prompt_tokens_are_blanked_and_fields_still_filled():
         assert "Nib" in out, text
 
 
-def test_tokens_with_problems_are_blanked_not_sent_raw():
-    text = "{user 3x2} and {node 5}"
-    out = strip_ansi(fill_field_slots(text, {"node": "Nib"}))
+def test_tokens_with_problems_are_never_sent_raw():
+    # A field given a row count is still filled on its one row (the review
+    # of #1060: the old test passed only because "user" had no value); a
+    # token with an empty size is no slot at all, so it is blank.
+    out = strip_ansi(fill_field_slots("{user 3x2} and {node 5} {time 0}", {"node": "Nib", "user": "Old", "time": "09:30"}))
     assert "{" not in out and "}" not in out
-    assert "Nib" in out
+    assert "Nib" in out and "Old" in out
+    assert "09:30" not in out
 
 
 def test_the_preview_notes_name_what_callers_see_blank():
@@ -54,7 +57,19 @@ def test_the_preview_notes_name_what_callers_see_blank():
     assert banner_slot_notes("no tokens at all") == []
     notes = banner_slot_notes("{menu 10x2} {node 5}")
     assert len(notes) == 1 and "{menu 10x2}" in notes[0] and "not used in a banner" in notes[0]
-    assert any("callers see that token blank" in note for note in banner_slot_notes("{user 3x2}"))
+    assert banner_slot_notes("{user 3x2}") == [
+        "{user} at row 1, column 1 is one row; give a width only, like {user 20}; "
+        "the row count is ignored and it is filled on its one row"
+    ]
+    assert banner_slot_notes("{time 0}") == [
+        "{time} at row 1, column 1 has an empty size; callers see that token blank"
+    ]
+    clipped = banner_slot_notes("abc{node 12}", width=12)
+    assert len(clipped) == 1 and "runs past column 12" in clipped[0] and clipped[0].endswith("cut off there")
+    overlapping = banner_slot_notes("{node 9}", width=20)
+    assert overlapping == []
+    both = banner_slot_notes("{menu 4x1}{menu 4x1}")
+    assert len(both) == 2 and all("not used in a banner" in note for note in both)
 
 
 def test_field_values_are_sanitized():

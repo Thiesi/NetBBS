@@ -4593,6 +4593,49 @@ def test_welcome_preview_notes_a_menu_slot_callers_see_blank(db, lane, sysop):
     assert "{" not in preview and "Welcome to" in preview
 
 
+def test_welcome_preview_uses_the_width_callers_get_on_a_terminal_that_wraps_at_once(db, lane, sysop):
+    # Review of #1060: a terminal that wraps immediately lays screens out a
+    # column narrower (terminal_width) than the art it is sent
+    # (physical_width); the preview cut an 80-column banner and noted a
+    # problem callers never see.
+    from netbbs.net.welcome_banner import banner_path, set_welcome_banner_enabled
+
+    banner_path(db).write_bytes(b"{node 80}")
+    set_welcome_banner_enabled(db, True)
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session.physical_width = 80
+    session.terminal_wraps_immediately = True
+    assert session.terminal_width == 79
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "runs past column" not in text
+
+
+def test_banner_previews_count_callers_online_as_callers_see_it(db, lane, sysop):
+    # Review of #1060: `{online}` was blank in a preview labelled "as
+    # callers see it", while callers saw the count.
+    from types import SimpleNamespace
+
+    from netbbs.net.logoff_banner import logoff_banner_path, set_logoff_banner_enabled
+    from netbbs.net.welcome_banner import banner_path, set_welcome_banner_enabled
+
+    banner_path(db).write_bytes(b"Now: {online 12}")
+    set_welcome_banner_enabled(db, True)
+    logoff_banner_path(db).write_bytes(b"Still here: {online 12}")
+    set_logoff_banner_enabled(db, True)
+    node_controls = _node_controls()
+    node_controls.session_registry.list_entries = lambda: [
+        SimpleNamespace(username="a"), SimpleNamespace(username=None), SimpleNamespace(username="b"),
+    ]
+    session = FakeSession([
+        "s", "m", "n", "w", "p", "x", "b", "l", "p", "x", "b", "b", "b", "b", "b",
+    ])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    text = _normalized_visible(_written_text(session))
+    assert "Now: 2 online" in text
+    assert "Still here: 2 online" in text
+
+
 def test_logoff_preview_fills_field_slots_as_your_own_log_off_would(db, lane, sysop):
     # Issue #1057: the log-off preview showed `{user 8}` as typed.
     from netbbs.net.logoff_banner import logoff_banner_path, set_logoff_banner_enabled
