@@ -90,9 +90,10 @@ def test_main_menu_art_cannot_use_a_list():
     assert any("only works on a list screen" in problem for problem in art.problems)
 
 
-def test_banner_fields_leave_list_art_alone():
-    text = "{list 20x3}\r\n{user 9}"
-    assert fill_field_slots(text, {"user": "OldNib"}) == text
+def test_banner_fields_fill_list_art_and_blank_the_list_region():
+    """Issue #1057: a `{list}` slot in a banner is blanked, not sent raw."""
+    out = strip_ansi(fill_field_slots("{list 20x3}\r\n{user 9}", {"user": "OldNib"}))
+    assert "{" not in out and "OldNib" in out
 
 
 # -- the region --------------------------------------------------------------

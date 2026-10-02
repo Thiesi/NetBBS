@@ -695,6 +695,7 @@ from netbbs.update_apply import (
 )
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.art_pacing import ART_SPEEDS, MAIN_MENU_ART, WELCOME_ART, art_speed, set_art_speed
+from netbbs.net.banner_fields import banner_fields
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
     banner_path,
@@ -739,7 +740,9 @@ from netbbs.rendering.art_slots import (
     ListSlotRow,
     SlotArt,
     describe_items,
+    banner_slot_notes,
     describe_slots,
+    fill_field_slots,
     list_name_width,
     list_slot_fits,
     parse_slot_art,
@@ -14178,13 +14181,18 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
         truecolor = effective_truecolor(session, db, actor)
         # As the connecting caller on this transport gets it (issue #841).
         banner = load_welcome_banner(db, truecolor=truecolor, unicode_style=pre_login_unicode_style(session))
-        return welcome_banner_status(db), banner, truecolor
+        return welcome_banner_status(db), banner, banner_fields(db), truecolor
 
-    status, banner_text, _truecolor = await lane.run(_load)
+    status, banner_text, fields, _truecolor = await lane.run(_load)
+    # As a connecting caller gets it, field slots filled with what is true
+    # before sign-in (issue #1057): the raw tokens were never what callers saw.
+    raw_text = banner_text
+    banner_text = fill_field_slots(banner_text, fields, width=session.terminal_width)
     await session.write_line(colored("\r\nPreviewing the welcome banner callers see when they connect:", fg_color=MUTED_COLOR))
     if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
         await write_preformatted_line(session, banner_text)
         await session.write_line(colored("(Your banner, as callers see it.)", fg_color=MUTED_COLOR))
+        await _write_banner_slot_notes(session, raw_text)
     elif not await _write_banner_not_live(session, status, callers_see="the default NetBBS banner"):
         # Nothing of the SysOp's own to show: show what callers do see.
         await write_preformatted_line(session, banner_text)
@@ -14197,6 +14205,14 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
     # already uses for the identical reason.
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
+
+
+async def _write_banner_slot_notes(session: Session, banner_text: str) -> None:
+    """Under a welcome or log-off banner's preview: each token callers see
+    blank rather than filled (issue #1057), so a SysOp who drew a
+    `{menu}` into a banner learns it here, not from a caller."""
+    for note in banner_slot_notes(banner_text, width=session.terminal_width):
+        await session.write_line(colored(f"Note: {note}.", fg_color=WARNING_COLOR))
 
 
 async def _enable_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -15252,7 +15268,7 @@ async def _logoff_banner_menu(session: Session, lane: DatabaseLane, actor: User)
             return
         elif choice == "p":
             await session.write_line("")
-            await _preview_logoff_banner_screen(session, lane)
+            await _preview_logoff_banner_screen(session, lane, actor)
             await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "e":
             await session.write_line("")
@@ -15324,11 +15340,15 @@ async def _draw_logoff_banner_menu(
     await _choice_prompt(session)
 
 
-async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) -> None:
-    status, banner_text = await lane.run(lambda db: (logoff_banner_status(db), load_logoff_banner(db)))
+async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane, actor: User | None = None) -> None:
+    status, banner_text, fields = await lane.run(lambda db: (
+        logoff_banner_status(db), load_logoff_banner(db), banner_fields(db, user=actor),
+    ))
     await session.write_line(colored("\r\nPreviewing logoff banner as shown on Log off:", fg_color=MUTED_COLOR))
     if banner_text:
-        await write_preformatted_line(session, banner_text)
+        # Filled as your own Log off would fill it (issue #1057).
+        await write_preformatted_line(session, fill_field_slots(banner_text, fields, width=session.terminal_width))
+        await _write_banner_slot_notes(session, banner_text)
     else:
         await _write_banner_not_live(session, status, callers_see="no banner")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
@@ -16115,17 +16135,18 @@ async def _draw_mastheads_menu(
             node_name_gradient=session.node_name_gradient))
     await _write_wrapped_subtitle(
         session,
-        "Optional mastheads shown above the main menu, message-board list, file-area list, and "
+        "Optional mastheads for the main menu, message-board list, file-area list, and "
         "chat channel picker -- at every level of browsing (top level, a category, a "
-        "Community) where applicable.",
+        "Community) where applicable. Each is shown above the menu or list, or, under its "
+        "[M]ode, as the menu or list itself.",
     )
     await session.write_line(
         "\r\n" + _menu_row(
             [
-                MenuEntry(label=menu_key("M", "ain menu"), brief="Custom art above the main menu"),
-                MenuEntry(label=menu_key("o", "ards", prefix="Message b"), brief="Above all message-board-list views"),
-                MenuEntry(label=menu_key("F", "ile areas"), brief="Above all file-area-list views"),
-                MenuEntry(label=menu_key("C", "hat channels"), brief="Above the channel picker"),
+                MenuEntry(label=menu_key("M", "ain menu"), brief="Above the menu, or as the menu"),
+                MenuEntry(label=menu_key("o", "ards", prefix="Message b"), brief="Above the list, or as the list"),
+                MenuEntry(label=menu_key("F", "ile areas"), brief="Above the list, or as the list"),
+                MenuEntry(label=menu_key("C", "hat channels"), brief="Above the picker, or as the list"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
             ],
             description_level,

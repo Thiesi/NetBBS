@@ -4577,6 +4577,47 @@ def test_welcome_preview_in_ascii_shows_the_ascii_default_callers_get(db, lane, 
     assert "╔" not in preview
 
 
+def test_welcome_preview_notes_a_menu_slot_callers_see_blank(db, lane, sysop):
+    # Issue #1057: a banner holding a {menu} region went out raw, braces and
+    # all. Callers now see it blank, and the preview tells the SysOp why.
+    from netbbs.net.welcome_banner import banner_path, set_welcome_banner_enabled
+
+    banner_path(db).write_bytes(b"Welcome to {node 12}\r\n{menu 20x2}")
+    set_welcome_banner_enabled(db, True)
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "Note: {menu 20x2} at row 2, column 1 is not used in a banner; callers see it blank." in text
+    # The preview is the banner as callers get it: filled, no raw tokens.
+    preview = text[text.index("Previewing the welcome banner"):text.index("(Your banner")]
+    assert "{" not in preview and "Welcome to" in preview
+
+
+def test_logoff_preview_fills_field_slots_as_your_own_log_off_would(db, lane, sysop):
+    # Issue #1057: the log-off preview showed `{user 8}` as typed.
+    from netbbs.net.logoff_banner import logoff_banner_path, set_logoff_banner_enabled
+
+    logoff_banner_path(db).write_bytes(b"Bye, {user 8}!")
+    set_logoff_banner_enabled(db, True)
+    session = FakeSession(["s", "m", "n", "l", "p", "x", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    preview = text[text.index("Previewing logoff banner"):]
+    assert f"Bye, {sysop.username[:8]}" in preview
+    assert "{user 8}" not in preview
+
+
+def test_mastheads_menu_says_each_art_can_be_the_menu_or_list_itself(db, lane, sysop):
+    # Issue #1056: since slot art, "above the main menu" was only half true.
+    session = FakeSession(["s", "m", "m", "b", "b", "b", "b"])
+    session.terminal_width = 132
+    _run(session, lane, sysop)
+    text = _normalized_visible(_written_text(session))
+    assert "Above the menu, or as the menu" in text
+    assert "Above the list, or as the list" in text
+    assert "Custom art above the main menu" not in text
+
+
 def test_preview_of_an_oversized_saved_banner_says_why_it_is_not_shown(db, lane, sysop):
     from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path
 

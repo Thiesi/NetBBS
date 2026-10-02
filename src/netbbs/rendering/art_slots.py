@@ -427,15 +427,20 @@ def _fill(buffer: ScreenBuffer, slot: Slot, rows: list[str], *, highlight_keys: 
 def fill_field_slots(text: str, fields: dict[str, str], *, ellipsis: str = "...", width: int = 80) -> str:
     """Banner art (the welcome and log-off screens) with its field slots
     filled in, returned as rows of ANSI text the art's own width, for
-    `write_preformatted_line`. Art without field tokens -- every banner
-    before issue #929 -- comes back unchanged, byte for byte, and so does
-    art whose tokens have problems or that holds a `{menu}`, `{list}` or
-    `{prompt}` slot, which only the main menu and list screens fill. Fields with no value in `fields`
-    are left blank."""
+    `write_preformatted_line`. Art without slot tokens -- every banner
+    before issue #929 -- comes back unchanged, byte for byte. Fields with
+    no value in `fields` are left blank.
+
+    Every other token is blanked, never sent as it was typed (issue
+    #1057): a `{menu}`, `{list}` or `{prompt}` slot, which only the main
+    menu and list screens fill, and a token with a problem (a bad size,
+    an overlap). Before, any of those made the whole banner go out raw,
+    so callers read `{node}` and the rest literally. `banner_slot_notes`
+    tells the SysOp what was blanked."""
     if "{" not in text:
         return text
     art = parse_slot_art(text, width=width, require_menu=False)
-    if not art.fields or art.problems or art.menu is not None or art.list is not None or art.prompt is not None:
+    if not art.slots and not art.problems:
         return text
     buffer = ScreenBuffer(art.width, art.height)
     for row in range(art.height):
@@ -445,6 +450,22 @@ def fill_field_slots(text: str, fields: dict[str, str], *, ellipsis: str = "..."
         value = truncate_to_width(sanitize_text(fields.get(slot.name, "")), slot.width, ellipsis=ellipsis)
         _fill(buffer, slot, [value], highlight_keys=False)
     return "\r\n".join(_render_row(buffer, row) for row in range(art.height)) + RESET
+
+
+def banner_slot_notes(text: str, *, width: int = 80) -> list[str]:
+    """What a banner's Preview tells the SysOp about tokens callers see
+    blank (issue #1057): region slots, which only the main menu and list
+    art fill, and tokens with problems. Empty when there is nothing to
+    say."""
+    if "{" not in text:
+        return []
+    art = parse_slot_art(text, width=width, require_menu=False)
+    notes = [
+        f"{_describe(slot)} is not used in a banner; callers see it blank"
+        for slot in (art.menu, art.list, art.prompt) if slot is not None
+    ]
+    notes += [f"{problem}; callers see that token blank" for problem in art.problems]
+    return notes
 
 
 def _render_row(buffer: ScreenBuffer, row: int) -> str:

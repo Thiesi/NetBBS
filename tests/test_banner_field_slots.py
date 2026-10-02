@@ -31,16 +31,30 @@ def test_a_field_with_no_value_is_blank():
     assert strip_ansi(fill_field_slots("[{user 6}]", {})).startswith("[      ")
 
 
-def test_menu_or_prompt_tokens_leave_a_banner_untouched():
-    text = "{menu 10x2} {node 5}"
-    assert fill_field_slots(text, {"node": "x"}) is text
-    text = "{prompt} {node 5}"
-    assert fill_field_slots(text, {"node": "x"}) is text
+def test_menu_list_or_prompt_tokens_are_blanked_and_fields_still_filled():
+    """Issue #1057: a region slot in a banner sent the whole banner raw, so
+    callers read `{node}` and the rest literally."""
+    for text in ("{menu 10x2} {node 5}", "{prompt} {node 5}", "{list 20x3}\r\n{node 5}"):
+        out = strip_ansi(fill_field_slots(text, {"node": "Nib"}))
+        assert "{" not in out and "}" not in out, text
+        assert "Nib" in out, text
 
 
-def test_tokens_with_problems_leave_a_banner_untouched():
-    text = "{node 9}{node 9}"[:9] + "{user 3x2}"
-    assert fill_field_slots(text, {"node": "x"}) is text
+def test_tokens_with_problems_are_blanked_not_sent_raw():
+    text = "{user 3x2} and {node 5}"
+    out = strip_ansi(fill_field_slots(text, {"node": "Nib"}))
+    assert "{" not in out and "}" not in out
+    assert "Nib" in out
+
+
+def test_the_preview_notes_name_what_callers_see_blank():
+    from netbbs.rendering.art_slots import banner_slot_notes
+
+    assert banner_slot_notes("Welcome to {node 12}") == []
+    assert banner_slot_notes("no tokens at all") == []
+    notes = banner_slot_notes("{menu 10x2} {node 5}")
+    assert len(notes) == 1 and "{menu 10x2}" in notes[0] and "not used in a banner" in notes[0]
+    assert any("callers see that token blank" in note for note in banner_slot_notes("{user 3x2}"))
 
 
 def test_field_values_are_sanitized():
