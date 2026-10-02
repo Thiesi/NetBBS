@@ -6893,7 +6893,9 @@ locally assigned trust domains:
 
 An operator may configure a jurisdictional/emergency key as sole authority for
 named categories. This explicit local exception is displayed as such; weight
-alone never bypasses the two-domain rule.
+alone never bypasses the two-domain rule. A sole authority speaks alone but
+does not skip proof: its self-verifying signal counts only once the evidence
+reproduces here, like any reporter's (issue #1036).
 
 Default trust-ingress bounds are 100 signals or 1 MiB per response, 1,000
 active signals per issuer, 10 active signals per issuer/subject/category, 256

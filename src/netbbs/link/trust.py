@@ -730,9 +730,17 @@ def _recompute_dimension(
             remote_domains.get(domain_id, 0.0), float(item["domain_weight"])
         )
     remote_weight = sum(remote_domains.values())
+    # A sole authority is trusted to speak alone, not to skip proof: a
+    # self-verifying signal it sent still counts only once its evidence
+    # reproduced here (issue #1036), as for every other reporter. Its subjective
+    # and observer reports count on its word, which is what the grant is for.
     sole_authority_matches = [
         item for item in remote
-        if db.connection.execute(
+        if not (
+            item["evidence_class"] == EvidenceClass.SELF_VERIFYING.value
+            and not item["evidence_verified"]
+        )
+        and db.connection.execute(
             """SELECT 1 FROM link_trust_sole_authorities
                WHERE reporter_fingerprint = ? AND dimension = ? AND category = ?""",
             (item["issuer_fingerprint"], dimension.value, item["category"]),
