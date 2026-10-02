@@ -157,7 +157,6 @@ documented boundary.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import random
 import sqlite3
@@ -180,19 +179,16 @@ from netbbs.link.events import (
     LinkMessage,
     LinkMessageBounced,
     SEALED_ATTESTATIONS_CAPABILITY,
-    canonical_bytes,
     descriptor_has_capability,
     event_content_id,
 )
 from netbbs.timeutil import utc_now_iso
 from netbbs.link.attestation_bundles import BundleTooLarge, SealedAttestationBundle, build_sealed_attestation_bundle
 from netbbs.link.attestation_delivery import (
-    has_attestation_snapshot_from,
     plan_attestation_deliveries,
     receive_attestation_bundle_safely,
     record_attestation_delivery,
     record_attestation_delivery_failure,
-    record_legacy_attestation_recipient,
     retry_pending_attestations,
 )
 from netbbs.link.enforcement import (
@@ -223,6 +219,8 @@ from netbbs.link.protocol import (
 from netbbs.link.relay_mailbox import (
     RELAY_MAILBOX_RETENTION_DAYS,
     RelayableEnvelope,
+    RelayMailboxFullError,
+    deposit_relay_attestation_bundle,
     prune_expired_relay_attestation_bundles,
     prune_expired_relay_mailbox_envelopes,
 )
@@ -238,15 +236,8 @@ from netbbs.link.store import (
     save_peer,
 )
 from netbbs.link.remote_attestation import (
-    UnknownAttestationSubject,
-    build_attestation_pull_request,
-    clear_attestation_pull_cursor,
     forget_retired_remote_attestations,
-    ingest_remote_attestation,
-    list_attestation_authority_fingerprints,
-    load_attestation_pull_cursor,
     reconcile_issued_attestations,
-    save_attestation_pull_cursor,
 )
 import nacl.signing
 
@@ -262,7 +253,6 @@ from netbbs.link.trust_issuance import (
 )
 from netbbs.link.transport import (
     request_identities,
-    AttestationRecipientRefused,
     LinkPolicyRefused,
     LinkTransportError,
     PullCursorUnknown,
@@ -281,7 +271,6 @@ from netbbs.link.transport import (
     request_inventory,
     request_peer_list,
     request_relay_consent,
-    request_remote_attestations,
     request_trust_objects,
 )
 from netbbs.link.trust_carriage import (
@@ -559,15 +548,11 @@ async def run_link_sync(
             node, session, lane, enforce_trust_policy=enforce_trust_policy
         )
         # Design doc §5.5, issue #584: this node's own signed attestations
-        # are brought in line with local consent before the subscription pull
-        # below, so a toggle flipped since the last pass is already reflected
-        # in what a subscriber reads this pass rather than next.
+        # are brought in line with local consent before they are sent, so a
+        # toggle flipped since the last pass reaches recipients this pass.
         await _reconcile_own_attestations(node, lane)
         # Issue #632: and then sent, sealed, to each recipient that takes it.
         await _deliver_attestation_bundles(node, session, lane, own_hello_provider)
-        await _pull_attestation_authorities(
-            node, session, lane, enforce_trust_policy=enforce_trust_policy
-        )
         await retry_pending_attestations(node, lane)
         await _forget_retired_attestations(lane)
         await _reverify_signal_evidence(node, lane)
@@ -1895,6 +1880,29 @@ async def _deposit_bundle_one(
         return False
 
 
+async def _deposit_bundle_here(
+    node: LinkNode, lane: DatabaseLane, recipient: str, descriptor: EndpointDescriptor,
+    bundle: SealedAttestationBundle,
+) -> bool:
+    """Hold `bundle` in this node's own relay slot when this node is one of
+    the recipient's relays (issue #1046). The usual shape: an outgoing-only
+    recipient picks a reachable node to relay for it, and that node is often
+    the issuer. With the pull gone, nothing else would reach such a recipient
+    -- this node does not dial itself. The bundle is this node's own, signed
+    with its current key, so the authentication a deposit from elsewhere
+    needs is already given."""
+    if node.identity.fingerprint not in (descriptor.payload.get("relays") or []):
+        return False
+    if recipient not in node.relaying_for:
+        return False
+    try:
+        await lane.run(deposit_relay_attestation_bundle, recipient, bundle)
+    except (RelayMailboxFullError, ValueError, sqlite3.Error) as exc:
+        _logger.warning("Link attestations: could not hold a snapshot for %s here: %s", recipient, exc)
+        return False
+    return True
+
+
 async def _deliver_attestation_bundles(
     node: LinkNode, session: ClientSession, lane: DatabaseLane,
     own_hello_provider: Callable[[], HelloMessage],
@@ -1919,8 +1927,12 @@ async def _deliver_attestation_bundles(
             )
             continue
         if not descriptor_has_capability(descriptor, SEALED_ATTESTATIONS_CAPABILITY):
-            # It still pulls this release; not a failure (review of #1045).
-            await lane.run(record_legacy_attestation_recipient, recipient)
+            # Issue #1046: there is no pull any more, so a recipient on an
+            # older NetBBS receives nothing until it upgrades. Said, not hidden.
+            await lane.run(
+                record_attestation_delivery_failure, recipient,
+                "needs a newer NetBBS to receive this",
+            )
             continue
         try:
             recipient_key = node.resolve_known_signing_key(recipient, "attestation recipient")
@@ -1947,6 +1959,8 @@ async def _deliver_attestation_bundles(
         direct = _dialable_addresses(descriptor)
         if direct and await _try_addresses_via(direct, lambda url: _send_bundle_one(session, url, bundle)):
             route = "direct"
+        elif await _deposit_bundle_here(node, lane, recipient, descriptor, bundle):
+            route = "relay"
         else:
             relays = _bundle_relay_urls(node, descriptor)
             if relays and await _try_addresses_via(
@@ -2086,179 +2100,6 @@ async def _reevaluate_trust_over_time(node: LinkNode, lane: DatabaseLane) -> Non
         # should not wait out the hour its content was set aside for.
         if change.node_fingerprint:
             node.deferred_events.release_identity(change.node_fingerprint)
-
-
-async def _pull_attestation_authorities(
-    node: LinkNode, session: ClientSession, lane: DatabaseLane,
-    *, enforce_trust_policy: bool = False,
-) -> None:
-    """Pull each configured attestation authority's own signed objects.
-
-    A separate subscription set from the trust reporters above, because
-    design doc §5.5 and §12.3 both say reporter configuration grants no
-    attestation authority. Unlike a trust pull there is no `revocations_only`
-    containment mode: an attestation authority under quarantine is simply not
-    pulled, since its objects only ever loosen a local gate and a quarantined
-    node has no claim to do that.
-    """
-    for issuer in await lane.run(list_attestation_authority_fingerprints):
-        # Issue #632, Decision 5: one path. An issuer that sends this node
-        # snapshots is not also pulled, so the two never disagree.
-        if await lane.run(has_attestation_snapshot_from, issuer):
-            continue
-        if enforce_trust_policy:
-            state = await lane.run(node_transport_state, issuer)
-            if state != TrustState.ESTABLISHED:
-                continue
-        peer = node.peers.get(issuer)
-        if peer is None:
-            _logger.warning(
-                "Link attestation pull: configured authority %s has no completed hello", issuer
-            )
-            continue
-        addresses = _dialable_addresses(peer.descriptor)
-        if not addresses:
-            _logger.warning(
-                "Link attestation pull: configured authority %s has no dialable address", issuer
-            )
-            continue
-        await _pull_one_attestation_authority(node, session, lane, issuer, addresses)
-
-
-async def _pull_one_attestation_authority(
-    node: LinkNode,
-    session: ClientSession,
-    lane: DatabaseLane,
-    issuer: str,
-    addresses: list[str],
-) -> None:
-    # Outside the per-address handler below, so it must not raise: an authority
-    # whose chain ends in a bare revoke, or no longer verifies, would otherwise
-    # end the whole background sync task rather than its own pull. The trust
-    # pull guards the same lookup for the same reason.
-    try:
-        verify_key = node.resolve_peer_signing_key(issuer, "remote attestation")
-    except (LinkProtocolError, NodeIdentityError, ValueError) as exc:
-        _logger.warning("Link attestation pull: authority %s has no usable signing key: %s", issuer, exc)
-        return
-    completed = False
-    for base_url in addresses:
-        cursor = await lane.run(load_attestation_pull_cursor, issuer, issuer)
-        try:
-            for _page_number in range(_MAX_TRUST_PULL_PAGES_PER_PASS):
-                pull = build_attestation_pull_request(
-                    signing_identity=node.identity.signing_key,
-                    requester_fingerprint=node.identity.fingerprint,
-                    responder_fingerprint=issuer,
-                    issuer_fingerprint=issuer,
-                    after_content_id=cursor,
-                )
-                raw_objects, more = await request_remote_attestations(
-                    node, session, base_url, pull
-                )
-                durable = cursor
-                for raw in raw_objects:
-                    if not isinstance(raw, dict):
-                        raise ValueError("attestation response contains a non-object entry")
-                    # The signature verifies against the key of the authority
-                    # being pulled, but the payload names its own issuer, and
-                    # it is the payload's issuer that acceptance policy is
-                    # keyed on. Without this, a compromised authority A can
-                    # sign an object claiming to be authority B and inherit
-                    # B's attribute scope and trust state. The trust path
-                    # already makes exactly this check (Codex review of #590).
-                    if _attestation_issuer(raw) != issuer:
-                        raise ValueError(
-                            "attestation response contains an object from another issuer"
-                        )
-                    # Per object, not per page. Every object carries its own
-                    # signature and its own meaning, so one this node cannot
-                    # use -- a revocation for an attestation it never received
-                    # -- must not discard the rest of the page with it.
-                    try:
-                        await lane.run(
-                            ingest_remote_attestation, raw, issuer_verify_key=verify_key
-                        )
-                    except UnknownAttestationSubject:
-                        # The one rejection a later event can undo: this node
-                        # has not met the subject *yet*. Advancing the cursor
-                        # past it would mean never being offered it again, so
-                        # the cursor stops here and the next pass re-reads
-                        # from the last object with a settled outcome. Ingest
-                        # is idempotent, so re-reading costs only bytes, and
-                        # the page budget bounds how many.
-                        break
-                    except ValueError as exc:
-                        _logger.info(
-                            "Link attestation pull: skipped an object from %s: %s", issuer, exc
-                        )
-                    durable = _attestation_content_id(raw)
-                if durable is not None and durable != cursor:
-                    cursor = durable
-                    await lane.run(save_attestation_pull_cursor, issuer, issuer, cursor)
-                if not more:
-                    completed = True
-                    break
-                if not raw_objects:
-                    raise ValueError(
-                        "attestation response claims another page but returned no objects"
-                    )
-            if not completed:
-                _logger.warning(
-                    "Link attestation pull: authority %s exceeded the %d-page budget",
-                    issuer, _MAX_TRUST_PULL_PAGES_PER_PASS,
-                )
-            break
-        except PullCursorUnknown:
-            # Issue #621: the authority was restored from an older backup or
-            # recreated, and the object this cursor names no longer exists
-            # there. Sending it again can never work. Forgotten, the next pass
-            # re-reads from the start, where ingest is idempotent.
-            _logger.warning(
-                "Link attestation pull: authority %s no longer knows this node's place in its "
-                "stream; starting over from the beginning on the next pass.", issuer,
-            )
-            await lane.run(clear_attestation_pull_cursor, issuer, issuer)
-            return
-        except AttestationRecipientRefused:
-            # Not a fault and not worth another address: the authority's SysOp
-            # has not named this node. A WARNING so it reaches the bounded
-            # diagnostic log, where the SysOp who configured the authority and
-            # is wondering why nothing arrives will look.
-            _logger.warning(
-                "Link attestation pull: authority %s has not named this node as an "
-                "attestation recipient, so nothing will arrive from it. Its SysOp adds "
-                "this node under Published identity -> Recipients.",
-                issuer,
-            )
-            return
-        except (LinkTransportError, LinkProtocolError, ValueError) as exc:
-            _logger.warning(
-                "Link attestation pull: rejected a response from authority %s: %s", issuer, exc
-            )
-
-
-def _attestation_issuer(raw: dict) -> str:
-    """The issuer the signed payload claims, which is what policy keys on."""
-    envelope = raw.get("envelope")
-    if not isinstance(envelope, dict):
-        raise ValueError("attestation object has no envelope")
-    payload = envelope.get("payload")
-    if not isinstance(payload, dict):
-        raise ValueError("attestation object has no payload")
-    return str(payload.get("issuer_fingerprint", ""))
-
-
-def _attestation_content_id(raw: dict) -> str:
-    """The cursor value for one served object: the hash of its canonical bytes.
-
-    Recomputed here rather than taken from the response, so a responder cannot
-    hand out a cursor that skips objects it would rather not serve.
-    """
-    envelope = raw.get("envelope")
-    if not isinstance(envelope, dict):
-        raise ValueError("attestation object has no envelope")
-    return hashlib.sha256(canonical_bytes(envelope)).hexdigest()
 
 
 def _dialable_addresses(descriptor: EndpointDescriptor) -> list[str]:

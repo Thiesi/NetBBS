@@ -10720,11 +10720,10 @@ def test_published_identity_says_per_recipient_what_was_delivered(db, lane, syso
     )
     record_attestation_delivery_failure(db, "b" * 32, "the recipient cannot be dialed and names no relay")
     remove_attestation_recipient(db, "c" * 32)
-    # Review of #1045: a recipient on an older NetBBS is reached by pull, not a failure.
-    from netbbs.link.attestation_delivery import record_legacy_attestation_recipient
+    # Issue #1046: a recipient on an older NetBBS receives nothing, and says so.
     configure_attestation_recipient(db, "d" * 32, reason="older node")
     plan_attestation_deliveries(db)
-    record_legacy_attestation_recipient(db, "d" * 32)
+    record_attestation_delivery_failure(db, "d" * 32, "needs a newer NetBBS to receive this")
     text = screen()
     assert "holds everything published" in text and "relay" in text
     assert "the recipient cannot be dialed and names no relay" in text
@@ -10733,8 +10732,8 @@ def test_published_identity_says_per_recipient_what_was_delivered(db, lane, syso
     from netbbs.link.attestation_delivery import list_attestation_delivery_status
     from netbbs.net.admin_flow import _delivery_state
     [older] = [s for s in list_attestation_delivery_status(db) if s.recipient_fingerprint == "d" * 32]
-    assert older.route == "pull" and older.last_error is None
-    assert _delivery_state(older)[0] == "older NetBBS: fetches the rest when it next asks"
+    assert older.route is None and not older.current
+    assert _delivery_state(older)[0] == "needs a newer NetBBS to receive this"
 
 
 def test_the_vouch_screen_says_when_a_relay_did_not_take_this_nodes_vouches(db, lane, sysop):

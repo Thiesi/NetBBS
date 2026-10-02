@@ -38,9 +38,6 @@ import netbbs.link.transport as link_transport
 from netbbs.attestation import attest_age, set_attestation_link_visible
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.link.remote_attestation import (
-    MAX_ATTESTATION_OBJECTS_PER_RESPONSE,
-    MAX_ATTESTATION_RESPONSE_BYTES,
-    build_attestation_pull_request,
     configure_attestation_recipient,
     build_remote_attestation,
     configure_attestation_authority,
@@ -65,7 +62,6 @@ from netbbs.link.protocol import (
 )
 from netbbs.link.store import build_inventory_request, load_link_node
 from netbbs.link.transport import (
-    AttestationRecipientRefused,
     LINK_PATH_PREFIX,
     LinkRealtimeConnector,
     LinkRealtimeServer,
@@ -85,7 +81,6 @@ from netbbs.link.transport import (
     request_inventory,
     request_peer_list,
     request_relay_consent,
-    request_remote_attestations,
     request_trust_objects,
     read_realtime_record,
     rotate_realtime_transport_key,
@@ -3070,263 +3065,6 @@ def test_inventory_response_without_a_wanted_list_is_refused_as_malformed(tmp_pa
         alice.close()
 
 
-def test_attestation_pull_uses_real_transport_and_refuses_a_third_party_issuer(tmp_path):
-    """The issuing half of design doc §5.5 over the wire (issue #584).
-
-    Before this, `link_remote_attestations` was empty on every node in
-    production: nothing called the builder and nothing called the ingest, so
-    a caller who switched "Share verified age over Link" on in their Profile
-    got a stored preference and no published attestation. This drives the
-    whole path a real node now runs -- opt in, reconcile, serve, pull, ingest
-    -- over an actual HTTP server.
-    """
-    subscriber_identity = bootstrap_node_identity("attestation-subscriber")
-    issuer_identity = bootstrap_node_identity("attestation-issuer")
-    subscriber_node = LinkNode(identity=subscriber_identity)
-    issuer_node = LinkNode(identity=issuer_identity)
-    subscriber = _NodeDb(tmp_path, "attestation-subscriber")
-    issuer = _NodeDb(tmp_path, "attestation-issuer")
-
-    sysop = create_user(issuer.db, "sysop", password="password", user_level=SYSOP_LEVEL)
-    alice = create_user(issuer.db, "alice", password="password")
-    attest_age(issuer.db, alice, date(1990, 4, 1), verifier=sysop)
-    set_attestation_link_visible(issuer.db, alice, "age", True)
-    reconcile_issued_attestations(
-        issuer.db, issuer_identity.signing_key,
-        home_node_fingerprint=issuer_identity.fingerprint,
-    )
-
-    subject = TrustSubject.user(issuer_identity.fingerprint, "alice")
-    register_subject(
-        subscriber.db, subject,
-        first_accepted_at="2026-09-14T12:00:00+00:00", now_iso="2026-09-15T12:00:00+00:00",
-    )
-    configure_attestation_authority(
-        subscriber.db, issuer_identity.fingerprint, attributes=["age"],
-        reason="peer operator", now_iso="2026-09-15T12:00:00+00:00",
-    )
-
-    async def scenario():
-        server = await _run_server(issuer_node, lambda: _hello_for(issuer_node), issuer.lane)
-        try:
-            async with aiohttp.ClientSession() as session:
-                base_url = f"http://127.0.0.1:{server.port}"
-                await dial_hello(
-                    subscriber_node, session, base_url,
-                    _hello_for(subscriber_node), subscriber.lane,
-                )
-                def _pull():
-                    return build_attestation_pull_request(
-                        signing_identity=subscriber_identity.signing_key,
-                        requester_fingerprint=subscriber_identity.fingerprint,
-                        responder_fingerprint=issuer_identity.fingerprint,
-                        issuer_fingerprint=issuer_identity.fingerprint,
-                    )
-
-                # Issue #596: a completed, policy-admitted peer that has named
-                # this issuer as an authority is still not someone the
-                # *issuer's* SysOp chose to tell. Refused over the wire, in a
-                # form the subscriber can tell apart from a transport fault.
-                with pytest.raises(AttestationRecipientRefused):
-                    await request_remote_attestations(
-                        subscriber_node, session, base_url, _pull()
-                    )
-                await issuer.lane.run(
-                    configure_attestation_recipient, subscriber_identity.fingerprint,
-                    reason="peer operator asked",
-                )
-                pull = _pull()
-                raw, more = await request_remote_attestations(
-                    subscriber_node, session, base_url, pull
-                )
-                assert len(raw) == 1
-                # Issue #632: the issuer records what this recipient fetched.
-                from netbbs.link.attestation_delivery import list_attestation_delivery_status
-                [status] = list_attestation_delivery_status(issuer.db)
-                assert status.route == "pull" and len(status.delivered_ids) == 1
-                with pytest.raises(LinkTransportError, match="recent nonce"):
-                    await request_remote_attestations(
-                        subscriber_node, session, base_url, pull
-                    )
-                stale = build_attestation_pull_request(
-                    signing_identity=subscriber_identity.signing_key,
-                    requester_fingerprint=subscriber_identity.fingerprint,
-                    responder_fingerprint=issuer_identity.fingerprint,
-                    issuer_fingerprint=issuer_identity.fingerprint,
-                    created_at="2026-01-01T00:00:00+00:00",
-                )
-                with pytest.raises(LinkTransportError, match="freshness"):
-                    await request_remote_attestations(
-                        subscriber_node, session, base_url, stale
-                    )
-                # A node serves only what it signed itself: unlike a trust
-                # signal, there is no third party whose copy is worth asking
-                # for, so naming another issuer is refused outright rather
-                # than answered with an empty page.
-                third_party = build_attestation_pull_request(
-                    signing_identity=subscriber_identity.signing_key,
-                    requester_fingerprint=subscriber_identity.fingerprint,
-                    responder_fingerprint=issuer_identity.fingerprint,
-                    issuer_fingerprint="some-other-node",
-                )
-                with pytest.raises(LinkTransportError, match="another issuer"):
-                    await request_remote_attestations(
-                        subscriber_node, session, base_url, third_party
-                    )
-                verify_key = subscriber_node.resolve_peer_signing_key(
-                    issuer_identity.fingerprint
-                )
-                for item in raw:
-                    await subscriber.lane.run(
-                        ingest_remote_attestation, item, issuer_verify_key=verify_key
-                    )
-                return more
-        finally:
-            await server.stop()
-
-    try:
-        assert not asyncio.run(scenario())
-        assert remote_meets_age(subscriber.db, subject, 18)
-        assert not remote_meets_age(subscriber.db, subject, 99)
-    finally:
-        subscriber.close()
-        issuer.close()
-
-
-def test_an_oversized_attestation_page_is_refused_before_anything_is_ingested(tmp_path):
-    """Design doc §12.7's ingress bounds, applied to the attestation pull.
-
-    A trust pull gets these from `ingest_trust_objects`, which bounds a whole
-    batch before admitting any of it. Attestations are ingested one object at a
-    time -- deliberately, so one unusable object cannot discard a page -- so
-    the page-level bound has to be applied on receipt or nothing applies it.
-    """
-    node = LinkNode(identity=bootstrap_node_identity("bounded-subscriber"))
-    issuer_identity = bootstrap_node_identity("unbounded-issuer")
-    signing = issuer_identity.signing_key
-
-    def one_object(index: int) -> dict:
-        return build_remote_attestation(
-            signing.signing_key,
-            issuer_fingerprint=issuer_identity.fingerprint,
-            subject=TrustSubject.user(issuer_identity.fingerprint, f"user-{index}"),
-            attribute="name",
-            attested_value=f"Name {index}",
-            subject_opt_in=True,
-            issued_at="2026-09-15T11:00:00+00:00",
-            expires_at="2026-12-01T11:00:00+00:00",
-        )
-
-    too_many = [one_object(i) for i in range(MAX_ATTESTATION_OBJECTS_PER_RESPONSE + 1)]
-
-    async def _over_limit(request: web.Request) -> web.Response:
-        return web.json_response({"objects": too_many, "more_available": False})
-
-    pull = build_attestation_pull_request(
-        signing_identity=node.identity.signing_key,
-        requester_fingerprint=node.identity.fingerprint,
-        responder_fingerprint=issuer_identity.fingerprint,
-        issuer_fingerprint=issuer_identity.fingerprint,
-    )
-
-    async def scenario():
-        app = web.Application()
-        app.router.add_post("/link/v1/attestation-pull/{fingerprint}", _over_limit)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        try:
-            async with aiohttp.ClientSession() as session:
-                await request_remote_attestations(
-                    node, session, f"http://127.0.0.1:{site.port}", pull
-                )
-        finally:
-            await runner.cleanup()
-
-    with pytest.raises(LinkTransportError, match="exceeds 100 objects"):
-        asyncio.run(scenario())
-
-
-def test_a_response_missing_its_pagination_flag_is_a_transport_error(tmp_path):
-    """`_pull_one_attestation_authority` catches `LinkTransportError`, not
-    `KeyError`. Reading `more_available` outside the guarded block meant one
-    malformed peer response escaped `run_link_sync` and permanently ended all
-    outbound synchronization, rather than rejecting that one authority."""
-    node = LinkNode(identity=bootstrap_node_identity("flagless-subscriber"))
-    issuer_identity = bootstrap_node_identity("flagless-issuer")
-
-    async def _no_flag(request: web.Request) -> web.Response:
-        return web.json_response({"objects": []})
-
-    pull = build_attestation_pull_request(
-        signing_identity=node.identity.signing_key,
-        requester_fingerprint=node.identity.fingerprint,
-        responder_fingerprint=issuer_identity.fingerprint,
-        issuer_fingerprint=issuer_identity.fingerprint,
-    )
-
-    async def scenario():
-        app = web.Application()
-        app.router.add_post("/link/v1/attestation-pull/{fingerprint}", _no_flag)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        try:
-            async with aiohttp.ClientSession() as session:
-                await request_remote_attestations(
-                    node, session, f"http://127.0.0.1:{site.port}", pull
-                )
-        finally:
-            await runner.cleanup()
-
-    with pytest.raises(LinkTransportError, match="malformed attestation pull response"):
-        asyncio.run(scenario())
-
-
-def test_an_oversized_body_is_refused_before_it_is_parsed(tmp_path):
-    """The earlier check ran on the decoded value, so `response.json()` had
-    already downloaded and parsed the whole body -- a hostile configured
-    authority could exhaust this process's memory well inside the advertised
-    1 MiB ingress limit."""
-    node = LinkNode(identity=bootstrap_node_identity("bounded-body-subscriber"))
-    issuer_identity = bootstrap_node_identity("unbounded-body-issuer")
-    parsed: list[int] = []
-
-    async def _huge(request: web.Request) -> web.Response:
-        # Deliberately not valid JSON: if the bound is applied first, nothing
-        # ever tries to parse it, which is the property under test.
-        body = b"[" + b"A" * (MAX_ATTESTATION_RESPONSE_BYTES + 4096)
-        parsed.append(len(body))
-        return web.Response(body=body, content_type="application/json")
-
-    pull = build_attestation_pull_request(
-        signing_identity=node.identity.signing_key,
-        requester_fingerprint=node.identity.fingerprint,
-        responder_fingerprint=issuer_identity.fingerprint,
-        issuer_fingerprint=issuer_identity.fingerprint,
-    )
-
-    async def scenario():
-        app = web.Application()
-        app.router.add_post("/link/v1/attestation-pull/{fingerprint}", _huge)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        try:
-            async with aiohttp.ClientSession() as session:
-                await request_remote_attestations(
-                    node, session, f"http://127.0.0.1:{site.port}", pull
-                )
-        finally:
-            await runner.cleanup()
-
-    with pytest.raises(LinkTransportError, match="exceeds"):
-        asyncio.run(scenario())
-
-
 def test_the_identity_endpoint_serves_a_peer_and_refuses_everyone_else(tmp_path):
     """Issue #630, over a real server. What it serves is public-key material a
     requester verifies for itself, but who may ask is still someone this node
@@ -3498,3 +3236,26 @@ def test_a_hello_with_an_overlong_key_chain_is_refused_before_any_check(tmp_path
         assert dialer_node.identity.fingerprint not in seed_node.peers
     finally:
         seed.close()
+
+
+
+def test_the_attestation_pull_route_is_gone(tmp_path):
+    """Issue #1046: attestations reach recipients only as sealed snapshots;
+    the pull route was removed, so a node still asking for one gets a 404."""
+    node = LinkNode(identity=bootstrap_node_identity("no-pull"))
+    node_db = _NodeDb(tmp_path, "no-pull")
+
+    async def scenario():
+        server = await _run_server(node, lambda: _hello_for(node), node_db.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"http://127.0.0.1:{server.port}{LINK_PATH_PREFIX}/attestation-pull/{'a' * 32}"
+                async with session.post(url, json={}) as response:
+                    return response.status
+        finally:
+            await server.stop()
+
+    try:
+        assert asyncio.run(scenario()) == 404
+    finally:
+        node_db.close()
