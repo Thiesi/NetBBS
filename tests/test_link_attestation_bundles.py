@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -70,8 +71,17 @@ def test_a_bundle_round_trips_sealed_signed_and_padded(cast):
     assert parsed.verifies([issuer.signing_key.verify_key])
     assert not parsed.verifies([cast["other"].signing_key.verify_key])
     assert open_sealed_attestation_bundle(parsed, [recipient.signing_key]) == [OBJECT]
-    # The value never appears outside the sealed part.
-    assert "Ada" not in str(bundle.to_dict())
+    # The value never appears outside the sealed part. The ciphertext and the
+    # signature are left out of the text search: both are random base64,
+    # which spells out a short word like "Ada" now and then (the ciphertext
+    # did, in a full-suite run). The decoded ciphertext is checked for the
+    # whole value instead, which random bytes don't produce.
+    wire = bundle.to_dict()
+    ciphertext = wire["envelope"]["payload"]["ciphertext"]
+    outside = dict(wire, signature="", envelope=dict(wire["envelope"], payload=dict(
+        wire["envelope"]["payload"], ciphertext="")))
+    assert "Ada Lovelace" not in str(outside) and "Ada" not in str(outside)
+    assert b"Ada Lovelace" not in base64.b64decode(ciphertext)
     with pytest.raises(EncryptionError):
         open_sealed_attestation_bundle(parsed, [cast["other"].signing_key])
     # A retired key still opens what was sealed to it (current key first).
