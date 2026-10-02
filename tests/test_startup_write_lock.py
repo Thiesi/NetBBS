@@ -292,8 +292,26 @@ def test_a_link_sync_pass_that_raises_does_not_end_the_loop(tmp_path, monkeypatc
     assert passes["n"] == 2
 
 
+def test_the_relay_bundle_prune_leaves_no_transaction_open(tmp_path):
+    """Issue #1059, the root cause, pinned without the lane's guard in the
+    way (review of #1064): the prune committed only when a row went, so a
+    pass with nothing expired left its DELETE's implicit transaction -- and
+    the write lock -- open on the connection."""
+    from netbbs.link.relay_mailbox import prune_expired_relay_attestation_bundles
+
+    database = Database(tmp_path / "prune.db")
+    try:
+        assert prune_expired_relay_attestation_bundles(database) == 0
+        assert not database.connection.in_transaction
+    finally:
+        database.close()
+
+
 def test_no_write_lock_is_held_while_the_first_pass_waits_on_a_relay_dial(tmp_path, monkeypatch):
-    """Issue #1059, the root cause: an outgoing-only node's first sync pass
+    """Issue #1059, end to end. The prune above is pinned directly; in
+    production the lane's guard would also commit a leaked transaction, so
+    this test shows the reporter's scenario stays free of the lock rather
+    than guarding the prune itself. An outgoing-only node's first sync pass
     pruned the relay attestation-bundle slots and committed only if a row
     went, so the DELETE's implicit transaction -- and the database's write
     lock -- stayed open on the background lane until the next job's commit.
