@@ -391,8 +391,9 @@
           <ul class="link-list">
             <li><b>Signed node identity.</b> Every peer is a cryptographic keypair, not a hostname you have to trust blindly.</li>
             <li><b>Trust that's earned, not assumed.</b> Reputation and vouching decide how much a linked node's content is worth to you — and every decision is visible and overridable by a SysOp.</li>
-            <li><b>Real-time, across nodes.</b> Live chat channels stay live over NetBBS Link, not just asynchronous mail and post sync.</li>
-            <li><b>Reachable behind NAT.</b> Automatic relay selection means even an outgoing-only node can still be found, and live traffic can tunnel through an HTTP proxy.</li>
+            <li><b>Trust that runs on its own.</b> New nodes and callers can graduate from probation without a SysOp once they have been in contact on three separate days, a node seen signing two conflicting histories is reported with a signed accusation others can check, and a key compromise reaches even nodes that know its owner only by introduction.</li>
+            <li><b>Real-time, across nodes.</b> Live chat channels stay live over NetBBS Link in both directions, not just asynchronous mail and post sync.</li>
+            <li><b>Reachable behind NAT.</b> Automatic relay selection means even an outgoing-only node can still be found, live traffic can tunnel through an HTTP proxy, and verified ages and names reach it sealed for that node alone.</li>
           </ul>
         </div>
         <div class="mesh-panel">
@@ -656,12 +657,12 @@
         <div class="feature">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 12.5L9.5 5L11.5 7L4 14.5H2V12.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 3.5L12.5 7" stroke="currentColor" stroke-width="1.3"/></svg></div>
           <h3>Make it yours</h3>
-          <p>A custom welcome banner, main-menu masthead, and node-wide branding colors.</p>
+          <p>Your own ANSI art as the welcome banner, or as the main menu and message board, file area and chat channel lists themselves, playing at a modem's speed if you like; art from scene tools shows as drawn; and node-wide branding colors.</p>
         </div>
         <div class="feature">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2.5" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 6L6.5 8L4.5 10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 10H11.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div>
           <h3>SysOp tooling</h3>
-          <p>User, message board and file area management, staff permissions for helpers who are not SysOps, scheduled backups, installing a new release, the node log, an audit log, and graceful shutdown.</p>
+          <p>User, message board and file area management, a Levels screen that shows what each access level opens, automatic promotion under rules you set, staff permissions for helpers who are not SysOps, scheduled backups, installing a new release, the node log, an audit log, and graceful shutdown.</p>
         </div>
         <div class="feature">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="4" width="12" height="9" rx="1.4" stroke="currentColor" stroke-width="1.3"/><path d="M2 4L8 1.5L14 4" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
@@ -684,7 +685,7 @@
         <span class="eyebrow">Get started</span>
         <h2>Start with a local look around.</h2>
         <p>This is a trial on your own machine: only you can connect to it. A node that callers can reach is a permanent installation with its own service account, which the <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-SysOp-Handbook.md#installing-netbbs" target="_blank" rel="noopener">SysOp handbook</a> walks through. The trial database can simply be deleted afterwards.</p>
-        <p>You need Python 3.11 or newer: <code>python3 --version</code> tells you which you have. On Debian and Ubuntu, also run <code>sudo apt install python3-venv</code> first. Download the <code>.whl</code> file (the &ldquo;wheel&rdquo;, a ready-to-install package) from <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">GitHub Releases</a> into a fresh directory. In the commands below, replace VERSION with the version number only, for example <code>7.14.0</code>.</p>
+        <p>You need Python 3.11 or newer: <code>python3 --version</code> tells you which you have. On Debian and Ubuntu, also run <code>sudo apt install python3-venv</code> first. Download the <code>.whl</code> file (the &ldquo;wheel&rdquo;, a ready-to-install package) from <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">GitHub Releases</a> into a fresh directory. In the commands below, replace VERSION with the version number only, for example <code>7.15.0</code>.</p>
       </div>
       <div class="quickstart-box">
         <div class="qs-bar">
