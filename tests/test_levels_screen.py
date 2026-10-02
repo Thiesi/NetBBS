@@ -201,3 +201,22 @@ def test_a_resource_opened_from_levels_gets_the_content_menus_services(db, lane,
     assert seen["_door_detail_screen"]["door_services"] == "doors"
     assert seen["_door_detail_screen"]["backup_identity_dir"] == "ids"
     assert seen["_area_detail_screen"]["transfers"] == "grants"
+
+
+def test_each_gate_says_what_kind_of_resource_it_is(lane, sysop, node):
+    """Dogfood: the access word alone ("read") left a SysOp guessing whether
+    a row was a board, a file area or something else."""
+    text = _screen(lane, sysop, ["u", "v", "0", "2", "v"])
+
+    rows = {line.split(". ", 1)[-1].split()[0]: line for line in text.splitlines() if ". " in line}
+    assert "TYPE" in text
+    assert "board" in rows["General"] and "door" in rows["Voidrunner"] and "channel" in rows["lobby"]
+    assert any("node" in line and "Mail" in line for line in text.splitlines())
+
+
+def test_a_narrow_terminal_names_the_type_too(lane, sysop, node):
+    session = ScriptedSession(["u", "v", "0", "2"], width=50)
+    with pytest.raises(_Exhausted):
+        asyncio.run(admin_menu(session, lane, sysop))
+
+    assert "board: read at 10, Community Market" in "\n".join(" ".join(r.split()) for r in session.on_terminal())
