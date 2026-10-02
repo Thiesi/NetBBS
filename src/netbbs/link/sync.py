@@ -454,181 +454,189 @@ async def run_link_sync(
     # here, and releases what was set aside so it is judged afresh.
     policy_generation = await _read_trust_policy_generation(lane)
     while stop_event is None or not stop_event.is_set():
-        current_generation = await _read_trust_policy_generation(lane)
-        if current_generation != policy_generation and policy_generation is not None:
-            released = node.deferred_events.release_all()
-            if released:
-                _logger.info(
-                    "Link sync: trust policy changed; retrying %d event(s) that were set aside", released
+        # Issue #1059: one pass that raises -- a database lock met through the
+        # lane, most likely -- is logged and the next pass runs as usual. It
+        # used to end outbound Link activity for the rest of the uptime.
+        try:
+            current_generation = await _read_trust_policy_generation(lane)
+            if current_generation != policy_generation and policy_generation is not None:
+                released = node.deferred_events.release_all()
+                if released:
+                    _logger.info(
+                        "Link sync: trust policy changed; retrying %d event(s) that were set aside", released
+                    )
+            policy_generation = current_generation
+            refresh = getattr(own_hello_provider, "refresh", None)
+            if refresh is not None:
+                # Mutable friendly/DNS claims are read once per pass through the
+                # database lane; the synchronous provider remains DB-free at each
+                # individual handshake call below.
+                await refresh(lane)
+            # Design doc §16 (issue #219): the reliable-nodes roster joins the
+            # dial list only once the SysOp has accepted participation --
+            # never merely because the list exists. Re-read from the lane
+            # every pass, not captured at startup, so a console answer (or a
+            # daily roster refresh) takes effect without a restart.
+            # One view of this node's own hello per pass, taken after the
+            # refresh above: both the isolation gate below and the
+            # relay-selection check further down ask it the same question
+            # (is this node outgoing-only?), and sampling twice invited them
+            # to disagree within a single pass.
+            own_hello = own_hello_provider()
+            reliable = await lane.run(_reliable_node_urls_if_accepted)
+            # De-duplicated, order-preserving: operator-configured first.
+            pass_seeds = list(dict.fromkeys(seeds + reliable))
+            reached_network = False
+            for seed_url in pass_seeds:
+                succeeded = await _sync_seed_safely(
+                    node, session, seed_url, own_hello_provider, lane,
+                    max_carried_boards=max_carried_boards, max_carried_channels=max_carried_channels,
+                    max_carried_file_areas=max_carried_file_areas,
+                    max_remote_files_per_area=max_remote_files_per_area,
+                    enforce_trust_policy=enforce_trust_policy,
+                    reliable_urls=frozenset(reliable),
+                    fallback_offsets=fallback_offsets,
                 )
-        policy_generation = current_generation
-        refresh = getattr(own_hello_provider, "refresh", None)
-        if refresh is not None:
-            # Mutable friendly/DNS claims are read once per pass through the
-            # database lane; the synchronous provider remains DB-free at each
-            # individual handshake call below.
-            await refresh(lane)
-        # Design doc §16 (issue #219): the reliable-nodes roster joins the
-        # dial list only once the SysOp has accepted participation --
-        # never merely because the list exists. Re-read from the lane
-        # every pass, not captured at startup, so a console answer (or a
-        # daily roster refresh) takes effect without a restart.
-        # One view of this node's own hello per pass, taken after the
-        # refresh above: both the isolation gate below and the
-        # relay-selection check further down ask it the same question
-        # (is this node outgoing-only?), and sampling twice invited them
-        # to disagree within a single pass.
-        own_hello = own_hello_provider()
-        reliable = await lane.run(_reliable_node_urls_if_accepted)
-        # De-duplicated, order-preserving: operator-configured first.
-        pass_seeds = list(dict.fromkeys(seeds + reliable))
-        reached_network = False
-        for seed_url in pass_seeds:
-            succeeded = await _sync_seed_safely(
-                node, session, seed_url, own_hello_provider, lane,
-                max_carried_boards=max_carried_boards, max_carried_channels=max_carried_channels,
-                max_carried_file_areas=max_carried_file_areas,
-                max_remote_files_per_area=max_remote_files_per_area,
-                enforce_trust_policy=enforce_trust_policy,
-                reliable_urls=frozenset(reliable),
-                fallback_offsets=fallback_offsets,
+                reached_network = reached_network or succeeded
+            if not reached_network:
+                # Resilience path: every configured/
+                # cached seed failed this pass (or none were configured at
+                # all) -- fall back to a discovered candidate rather than
+                # sitting isolated until the next pass tries the same seeds
+                # again. Never a first resort: an operator's explicit seed
+                # configuration and a genuinely live supplementary list
+                # always take priority when either actually works.
+                reached_network = await _try_candidate_fallback(
+                    node, session, own_hello_provider, lane,
+                    enforce_trust_policy=enforce_trust_policy,
+                    fallback_offsets=fallback_offsets,
+                )
+            # Issue #313: a node that reaches nothing at all, pass after
+            # pass, is in a meaningfully broken state -- a dead seed roster,
+            # a firewall change, its own Link participation switched off at
+            # the other end -- but every individual dial failure above is
+            # logged the same way ordinary churn is, so nothing distinguished
+            # "one seed is flaky" from "this node is cut off entirely." This
+            # is the distinguishable signal, and being a WARNING in the
+            # `netbbs.link` namespace it lands in the SysOp-visible bounded
+            # diagnostic log (design doc §13.11) without any further wiring.
+            # Having nothing to dial only excuses a node that can still be
+            # *reached*: a full peer may decline the roster, configure no
+            # seeds, and serve inbound helloes perfectly well, and this
+            # outbound loop never observes that traffic (its completed peers
+            # leave candidate_descriptors), so counting those passes would
+            # accuse a healthy node of being cut off forever.
+            #
+            # An outgoing-only node is the opposite case and must NOT be
+            # exempted: it accepts nothing inbound, so with no seed, no
+            # roster entry and no dialable candidate it genuinely cannot
+            # reach the network at all, and silence is exactly the state
+            # worth reporting.
+            #
+            # "Dialable", not merely present: a candidate whose descriptor is
+            # itself outgoing-only carries no address, so
+            # _try_candidate_fallback skips it without attempting a dial.
+            accepts_inbound = not own_hello.descriptor.payload.get("outgoing_only")
+            had_somewhere_to_reach = bool(pass_seeds) or any(
+                _dialable_addresses(descriptor)
+                for descriptor in node.candidate_descriptors.values()
             )
-            reached_network = reached_network or succeeded
-        if not reached_network:
-            # Resilience path: every configured/
-            # cached seed failed this pass (or none were configured at
-            # all) -- fall back to a discovered candidate rather than
-            # sitting isolated until the next pass tries the same seeds
-            # again. Never a first resort: an operator's explicit seed
-            # configuration and a genuinely live supplementary list
-            # always take priority when either actually works.
-            reached_network = await _try_candidate_fallback(
-                node, session, own_hello_provider, lane,
-                enforce_trust_policy=enforce_trust_policy,
-                fallback_offsets=fallback_offsets,
-            )
-        # Issue #313: a node that reaches nothing at all, pass after
-        # pass, is in a meaningfully broken state -- a dead seed roster,
-        # a firewall change, its own Link participation switched off at
-        # the other end -- but every individual dial failure above is
-        # logged the same way ordinary churn is, so nothing distinguished
-        # "one seed is flaky" from "this node is cut off entirely." This
-        # is the distinguishable signal, and being a WARNING in the
-        # `netbbs.link` namespace it lands in the SysOp-visible bounded
-        # diagnostic log (design doc §13.11) without any further wiring.
-        # Having nothing to dial only excuses a node that can still be
-        # *reached*: a full peer may decline the roster, configure no
-        # seeds, and serve inbound helloes perfectly well, and this
-        # outbound loop never observes that traffic (its completed peers
-        # leave candidate_descriptors), so counting those passes would
-        # accuse a healthy node of being cut off forever.
-        #
-        # An outgoing-only node is the opposite case and must NOT be
-        # exempted: it accepts nothing inbound, so with no seed, no
-        # roster entry and no dialable candidate it genuinely cannot
-        # reach the network at all, and silence is exactly the state
-        # worth reporting.
-        #
-        # "Dialable", not merely present: a candidate whose descriptor is
-        # itself outgoing-only carries no address, so
-        # _try_candidate_fallback skips it without attempting a dial.
-        accepts_inbound = not own_hello.descriptor.payload.get("outgoing_only")
-        had_somewhere_to_reach = bool(pass_seeds) or any(
-            _dialable_addresses(descriptor)
-            for descriptor in node.candidate_descriptors.values()
-        )
-        # Issue #589: this node's own signed vouches are brought in line with
-        # its SysOp's standing intents before anything is pulled, so an intent
-        # recorded or withdrawn since the last pass is already what a
-        # subscriber reads this pass.
-        await _reconcile_own_vouches(node, lane)
-        await _record_observed_equivocations(node, lane)
-        await _reconcile_own_signals(node, lane)
-        await _pull_trust_subscriptions(
-            node, session, lane, enforce_trust_policy=enforce_trust_policy
-        )
-        # Design doc §5.5, issue #584: this node's own signed attestations
-        # are brought in line with local consent before they are sent, so a
-        # toggle flipped since the last pass reaches recipients this pass.
-        await _reconcile_own_attestations(node, lane)
-        # Issue #632: and then sent, sealed, to each recipient that takes it.
-        await _deliver_attestation_bundles(node, session, lane, own_hello_provider)
-        await retry_pending_attestations(node, lane)
-        await _forget_retired_attestations(lane)
-        await _reverify_signal_evidence(node, lane)
-        await _reevaluate_trust_over_time(node, lane)
-        # Issue #672: a compromise learned from a hello this pass (a direct
-        # peer's chain) has no batch of its own to sweep after.
-        node.sweep_compromised_copies()
-        await persist_stale_copy_changes(lane, node)
-        # Issue #891: mail held here as a relay that its recipient never
-        # came back for. Every pass, whatever this node's own mode: a node
-        # that stopped serving relays still holds what it took before.
-        await _prune_relay_mailbox(lane)
-        # Issue #58: relay selection/pickup only makes sense
-        # for an outgoing-only node -- a full peer is directly dialable
-        # by definition, so it has nothing to gain from seeking relays
-        # (design doc §12: "an outgoing-only node selects its own
-        # relays automatically," never a full peer). Checked via this
-        # node's own current hello rather than a separate parameter --
-        # `own_hello_provider` already encodes the addresses/outgoing_
-        # only decision (this method's own docstring), so there's
-        # nothing new to thread through from node startup config.
-        if own_hello.descriptor.payload.get("outgoing_only"):
-            # Maintain the outgoing relay set and pick up anything held
-            # *before* pushing pending mail below -- so a message that
-            # only just became deliverable via a freshly-selected relay
-            # still gets its own send-via-relay attempt in the same
-            # pass, not one whole interval later.
-            await _maintain_relay_selection(
-                node, session, own_hello_provider, lane,
-                enforce_trust_policy=enforce_trust_policy,
-                declines=relay_declines,
-            )
-            # A relay that answers -- even holding nothing -- is a
-            # working path to the network that the seed loop above
-            # cannot observe, so it counts. Deliberately the *result* of
-            # contacting one rather than the presence of an entry in
-            # `relays_serving_me`: a pickup failure is logged and
-            # skipped without recording a dial outcome, so a relay that
-            # went offline can sit in that mapping indefinitely and
-            # would otherwise suppress this warning forever -- the very
-            # blind spot issue #313 is about.
-            reached_network = await _pickup_relay_mail(
-                node, session, own_hello_provider, lane,
-                enforce_trust_policy=enforce_trust_policy,
-            ) or reached_network
-            # Issue #627: what this node signs cannot be pulled from it, so it
-            # is handed to the relays just confirmed above.
-            await _deposit_own_trust_objects(
+            # Issue #589: this node's own signed vouches are brought in line with
+            # its SysOp's standing intents before anything is pulled, so an intent
+            # recorded or withdrawn since the last pass is already what a
+            # subscriber reads this pass.
+            await _reconcile_own_vouches(node, lane)
+            await _record_observed_equivocations(node, lane)
+            await _reconcile_own_signals(node, lane)
+            await _pull_trust_subscriptions(
                 node, session, lane, enforce_trust_policy=enforce_trust_policy
             )
-        await _push_pending_link_mail(
-            node, session, lane, enforce_trust_policy=enforce_trust_policy
-        )
-        # Issue #313: decided at the end of the pass, so every path that
-        # can reach the network -- seeds, the reliable roster, a fallback
-        # candidate, a relay -- has had its turn first. A node that
-        # reaches nothing at all, pass after pass, is in a meaningfully
-        # broken state, but every individual dial failure is logged the
-        # same way ordinary churn is, so nothing distinguished "one seed
-        # is flaky" from "this node is cut off entirely". This is that
-        # signal, and as a WARNING in the `netbbs.link` namespace it
-        # lands in the SysOp-visible bounded diagnostic log (§13.11)
-        # with no further wiring.
-        if reached_network or (not had_somewhere_to_reach and accepts_inbound):
-            isolated_passes = 0
-        else:
-            isolated_passes += 1
-            if isolated_passes % _ISOLATION_WARNING_PASS_INTERVAL == 0:
-                _logger.warning(
-                    "Link sync: no seed, reliable node, fallback candidate or relay has "
-                    "been reachable for %d consecutive passes -- this node is not reaching "
-                    "out to the network. Tried %d seed URL(s) this pass: %s",
-                    isolated_passes,
-                    len(pass_seeds),
-                    ", ".join(pass_seeds) or "(none configured)",
+            # Design doc §5.5, issue #584: this node's own signed attestations
+            # are brought in line with local consent before they are sent, so a
+            # toggle flipped since the last pass reaches recipients this pass.
+            await _reconcile_own_attestations(node, lane)
+            # Issue #632: and then sent, sealed, to each recipient that takes it.
+            await _deliver_attestation_bundles(node, session, lane, own_hello_provider)
+            await retry_pending_attestations(node, lane)
+            await _forget_retired_attestations(lane)
+            await _reverify_signal_evidence(node, lane)
+            await _reevaluate_trust_over_time(node, lane)
+            # Issue #672: a compromise learned from a hello this pass (a direct
+            # peer's chain) has no batch of its own to sweep after.
+            node.sweep_compromised_copies()
+            await persist_stale_copy_changes(lane, node)
+            # Issue #891: mail held here as a relay that its recipient never
+            # came back for. Every pass, whatever this node's own mode: a node
+            # that stopped serving relays still holds what it took before.
+            await _prune_relay_mailbox(lane)
+            # Issue #58: relay selection/pickup only makes sense
+            # for an outgoing-only node -- a full peer is directly dialable
+            # by definition, so it has nothing to gain from seeking relays
+            # (design doc §12: "an outgoing-only node selects its own
+            # relays automatically," never a full peer). Checked via this
+            # node's own current hello rather than a separate parameter --
+            # `own_hello_provider` already encodes the addresses/outgoing_
+            # only decision (this method's own docstring), so there's
+            # nothing new to thread through from node startup config.
+            if own_hello.descriptor.payload.get("outgoing_only"):
+                # Maintain the outgoing relay set and pick up anything held
+                # *before* pushing pending mail below -- so a message that
+                # only just became deliverable via a freshly-selected relay
+                # still gets its own send-via-relay attempt in the same
+                # pass, not one whole interval later.
+                await _maintain_relay_selection(
+                    node, session, own_hello_provider, lane,
+                    enforce_trust_policy=enforce_trust_policy,
+                    declines=relay_declines,
                 )
+                # A relay that answers -- even holding nothing -- is a
+                # working path to the network that the seed loop above
+                # cannot observe, so it counts. Deliberately the *result* of
+                # contacting one rather than the presence of an entry in
+                # `relays_serving_me`: a pickup failure is logged and
+                # skipped without recording a dial outcome, so a relay that
+                # went offline can sit in that mapping indefinitely and
+                # would otherwise suppress this warning forever -- the very
+                # blind spot issue #313 is about.
+                reached_network = await _pickup_relay_mail(
+                    node, session, own_hello_provider, lane,
+                    enforce_trust_policy=enforce_trust_policy,
+                ) or reached_network
+                # Issue #627: what this node signs cannot be pulled from it, so it
+                # is handed to the relays just confirmed above.
+                await _deposit_own_trust_objects(
+                    node, session, lane, enforce_trust_policy=enforce_trust_policy
+                )
+            await _push_pending_link_mail(
+                node, session, lane, enforce_trust_policy=enforce_trust_policy
+            )
+            # Issue #313: decided at the end of the pass, so every path that
+            # can reach the network -- seeds, the reliable roster, a fallback
+            # candidate, a relay -- has had its turn first. A node that
+            # reaches nothing at all, pass after pass, is in a meaningfully
+            # broken state, but every individual dial failure is logged the
+            # same way ordinary churn is, so nothing distinguished "one seed
+            # is flaky" from "this node is cut off entirely". This is that
+            # signal, and as a WARNING in the `netbbs.link` namespace it
+            # lands in the SysOp-visible bounded diagnostic log (§13.11)
+            # with no further wiring.
+            if reached_network or (not had_somewhere_to_reach and accepts_inbound):
+                isolated_passes = 0
+            else:
+                isolated_passes += 1
+                if isolated_passes % _ISOLATION_WARNING_PASS_INTERVAL == 0:
+                    _logger.warning(
+                        "Link sync: no seed, reliable node, fallback candidate or relay has "
+                        "been reachable for %d consecutive passes -- this node is not reaching "
+                        "out to the network. Tried %d seed URL(s) this pass: %s",
+                        isolated_passes,
+                        len(pass_seeds),
+                        ", ".join(pass_seeds) or "(none configured)",
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.exception("Link sync pass failed; the next pass runs as usual")
         # Woken early by stop_event (see this function's own docstring for
         # why an idle sleep, unlike an in-flight pass, is safe to cut short),
         # or by `node.wake_sync()` (issue #700: the SysOp asked for a pass

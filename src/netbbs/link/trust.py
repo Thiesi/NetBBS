@@ -701,7 +701,7 @@ def _recompute_dimension(
     actor_user_id: int | None,
 ) -> None:
     previous = db.connection.execute(
-        """SELECT state, reason_code, recovery_started_at
+        """SELECT state, reason_code, recovery_started_at, explanation_json
            FROM link_trust_effective_states
            WHERE subject_id = ? AND dimension = ?""",
         (subject.subject_id, dimension.value),
@@ -819,6 +819,17 @@ def _recompute_dimension(
         explanation.update(_threshold_progress(remote_domains, remote_weight))
 
     explanation_json = json.dumps(explanation, sort_keys=True, separators=(",", ":"))
+    if previous is not None and (
+        previous["state"], previous["reason_code"], previous["recovery_started_at"],
+        previous["explanation_json"],
+    ) == (state.value, reason_code, recovery_started_at, explanation_json):
+        # Issue #1059: nothing changed, so nothing is written. The periodic
+        # recompute (issue #802) visits every subject every pass; rewriting
+        # each unchanged row only to refresh `evaluated_at` took the write
+        # lock for the whole table, and other connections' writes failed at
+        # the busy timeout. Reads do not block writers, so a quiet pass now
+        # takes no write lock at all.
+        return
     db.connection.execute(
         """
         INSERT INTO link_trust_effective_states (
@@ -1165,7 +1176,18 @@ class TrustTransition:
     node_fingerprint: str | None = None
 
 
-def recompute_all_trust_states(db: Database, *, now_iso: str | None = None) -> list[TrustTransition]:
+#: Issue #1059: how many subjects one transaction of the periodic recompute
+#: covers. Every subject is recomputed and rewritten, so one transaction over
+#: all of them held the write lock for as long as the whole table took --
+#: about 0.3 ms per subject, seconds on a node that has met many callers --
+#: and every other connection's write waited, then failed at the 5 s busy
+#: timeout. A batch this size holds the lock for a few tens of milliseconds.
+RECOMPUTE_BATCH_SUBJECTS = 100
+
+
+def recompute_all_trust_states(
+    db: Database, *, now_iso: str | None = None, batch_size: int = RECOMPUTE_BATCH_SUBJECTS,
+) -> list[TrustTransition]:
     """Re-evaluate every persisted projection against the current time and
     return the state changes that made.
 
@@ -1173,28 +1195,44 @@ def recompute_all_trust_states(db: Database, *, now_iso: str | None = None) -> l
     override's or a signal's expiry, probation's age requirement. Nothing
     else touches a quiet subject, so the Link sync loop calls this every
     pass (issue #802); the startup call in `maintain_trust_state` covers the
-    time a node was down."""
+    time a node was down.
+
+    Subjects are recomputed `batch_size` at a time, each batch its own
+    transaction (issue #1059), so other connections can write between
+    batches. Each subject is still recomputed atomically, and every batch
+    sees the same `now`; a subject added while a pass runs is picked up by
+    the next pass."""
     now_value, now = _now(now_iso)
-    with db.connection:
-        before = db.connection.execute(
-            "SELECT COALESCE(MAX(audit_id), 0) FROM link_trust_decision_audit"
-        ).fetchone()[0]
-        _recompute_all(db, now_value, now, actor_user_id=None)
-        rows = db.connection.execute(
-            """SELECT a.subject_id, a.dimension, a.previous_state, a.new_state, a.reason_code,
-                      s.node_fingerprint
-               FROM link_trust_decision_audit AS a
-               LEFT JOIN link_trust_subjects AS s ON s.subject_id = a.subject_id
-               WHERE a.audit_id > ? ORDER BY a.audit_id""",
-            (before,),
-        ).fetchall()
-    return [
-        TrustTransition(
-            row["subject_id"], row["dimension"], row["previous_state"],
-            row["new_state"], row["reason_code"], row["node_fingerprint"],
+    subject_rows = db.connection.execute(
+        "SELECT subject_kind, node_fingerprint, opaque_user_id FROM link_trust_subjects ORDER BY subject_id"
+    ).fetchall()
+    transitions: list[TrustTransition] = []
+    for start in range(0, len(subject_rows), max(1, batch_size)):
+        with db.connection:
+            before = db.connection.execute(
+                "SELECT COALESCE(MAX(audit_id), 0) FROM link_trust_decision_audit"
+            ).fetchone()[0]
+            for row in subject_rows[start:start + max(1, batch_size)]:
+                subject = TrustSubject(
+                    row["subject_kind"], row["node_fingerprint"], row["opaque_user_id"]
+                )
+                _recompute_subject(db, subject, now_value, now, actor_user_id=None)
+            rows = db.connection.execute(
+                """SELECT a.subject_id, a.dimension, a.previous_state, a.new_state, a.reason_code,
+                          s.node_fingerprint
+                   FROM link_trust_decision_audit AS a
+                   LEFT JOIN link_trust_subjects AS s ON s.subject_id = a.subject_id
+                   WHERE a.audit_id > ? ORDER BY a.audit_id""",
+                (before,),
+            ).fetchall()
+        transitions.extend(
+            TrustTransition(
+                row["subject_id"], row["dimension"], row["previous_state"],
+                row["new_state"], row["reason_code"], row["node_fingerprint"],
+            )
+            for row in rows
         )
-        for row in rows
-    ]
+    return transitions
 
 
 def trust_policy_generation(db: Database) -> tuple[int, ...]:
