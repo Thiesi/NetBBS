@@ -335,9 +335,12 @@ def prune_expired_relay_attestation_bundles(db: Database, *, now: datetime | Non
     returns how many. Run every sync pass beside the mail prune."""
     moment = now or datetime.now(timezone.utc)
     cutoff = utc_iso(moment - timedelta(days=RELAY_ATTESTATION_BUNDLE_RETENTION_DAYS))
-    dropped = db.connection.execute(
-        "DELETE FROM link_relay_attestation_bundles WHERE received_at < ?", (cutoff,)
-    ).rowcount
-    if dropped:
-        db.connection.commit()
+    # Committed whether or not a row went (issue #1059): the DELETE opened a
+    # write transaction either way, and committing only when something was
+    # dropped left it -- and the database's write lock -- open on the
+    # background lane until an unrelated job's commit, every sync pass.
+    with db.connection:
+        dropped = db.connection.execute(
+            "DELETE FROM link_relay_attestation_bundles WHERE received_at < ?", (cutoff,)
+        ).rowcount
     return dropped

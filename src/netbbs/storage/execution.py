@@ -29,6 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import logging
+import os
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -36,6 +39,33 @@ from typing import Callable, TypeVar
 from netbbs.storage.database import Database
 
 T = TypeVar("T")
+
+_logger = logging.getLogger(__name__)
+
+#: Issue #1059: a lane job must return with no transaction open on the
+#: lane's connection. Python's sqlite3 opens one implicitly before the first
+#: INSERT/UPDATE/DELETE, and a function that never commits leaves it -- and
+#: with it the database's single write lock -- open until some later job on
+#: the same lane happens to commit. On a node whose next background job
+#: waited on an 11 s dial, every other connection's write failed at its 5 s
+#: busy timeout meanwhile. In strict mode (the test suite turns it on) a job
+#: that leaks raises, so every such call site fails a test; in production
+#: the leaked transaction is committed -- the function did write it, and
+#: rolling back would silently lose that -- and logged as a bug.
+STRICT_TRANSACTIONS = os.environ.get("NETBBS_STRICT_LANE_TRANSACTIONS") == "1"
+
+
+class LeakedTransactionError(AssertionError):
+    """A lane job returned with a transaction still open (strict mode)."""
+
+
+def _transaction_open(db: Database) -> bool:
+    """Whether `db`'s connection holds an open transaction; False for a
+    connection the job closed (there is nothing left to hold a lock)."""
+    try:
+        return db.connection.in_transaction
+    except sqlite3.ProgrammingError:
+        return False
 
 # Design doc: "Backpressure: a bounded semaphore per lane, not the
 # executor's default unbounded queue... Exact numeric limits... are
@@ -134,7 +164,31 @@ class DatabaseLane:
         # completion regardless, since Python cannot abort a thread
         # mid-flight; the caller just never sees the result).
         db = self._ensure_db()
-        return func(db, *args, **kwargs)
+        try:
+            result = func(db, *args, **kwargs)
+        except BaseException:
+            # A job that failed halfway must not leave its partial writes for
+            # the next job's commit to publish, nor hold the write lock.
+            if _transaction_open(db):
+                try:
+                    db.connection.rollback()
+                except sqlite3.Error:
+                    _logger.warning("could not roll back after a failed lane job", exc_info=True)
+            raise
+        if _transaction_open(db):
+            name = getattr(func, "__qualname__", repr(func))
+            if STRICT_TRANSACTIONS:
+                db.connection.rollback()
+                raise LeakedTransactionError(
+                    f"{name} returned with a transaction open on its lane's connection (issue #1059)"
+                )
+            db.connection.commit()
+            _logger.warning(
+                "%s returned with a transaction open on its database lane; committed it so the "
+                "write lock is not held (issue #1059 -- this is a bug, please report it)",
+                name,
+            )
+        return result
 
     def close(self) -> None:
         """

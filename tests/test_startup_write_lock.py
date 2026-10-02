@@ -290,3 +290,132 @@ def test_a_link_sync_pass_that_raises_does_not_end_the_loop(tmp_path, monkeypatc
         lane.close()
         database.close()
     assert passes["n"] == 2
+
+
+def test_the_relay_bundle_prune_leaves_no_transaction_open(tmp_path):
+    """Issue #1059, the root cause, pinned without the lane's guard in the
+    way (review of #1064): the prune committed only when a row went, so a
+    pass with nothing expired left its DELETE's implicit transaction -- and
+    the write lock -- open on the connection."""
+    from netbbs.link.relay_mailbox import prune_expired_relay_attestation_bundles
+
+    database = Database(tmp_path / "prune.db")
+    try:
+        assert prune_expired_relay_attestation_bundles(database) == 0
+        assert not database.connection.in_transaction
+    finally:
+        database.close()
+
+
+def test_no_write_lock_is_held_while_the_first_pass_waits_on_a_relay_dial(tmp_path, monkeypatch):
+    """Issue #1059, end to end. The prune above is pinned directly; in
+    production the lane's guard would also commit a leaked transaction, so
+    this test shows the reporter's scenario stays free of the lock rather
+    than guarding the prune itself. An outgoing-only node's first sync pass
+    pruned the relay attestation-bundle slots and committed only if a row
+    went, so the DELETE's implicit transaction -- and the database's write
+    lock -- stayed open on the background lane until the next job's commit.
+    That came after the first relay-candidate dial timed out, ~11 s later,
+    and every other connection's write failed at its 5 s busy timeout. Here
+    the dial never answers until released; while it hangs, another
+    connection must be able to take the write lock at once."""
+    import aiohttp
+
+    import netbbs.storage.execution as execution_module
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.storage.execution import DatabaseLane
+
+    # The production behaviour is what is measured: no strict-mode raise.
+    monkeypatch.setattr(execution_module, "STRICT_TRANSACTIONS", False)
+    database = Database(tmp_path / "outgoing.db")
+    lane = DatabaseLane(database.path)
+    node = LinkNode(identity=bootstrap_node_identity("outgoing-only"))
+    dialling = asyncio.Event()
+    release = asyncio.Event()
+    stop = asyncio.Event()
+    probe: dict[str, object] = {}
+
+    async def hanging_relay_selection(*args, **kwargs):
+        dialling.set()
+        await release.wait()
+        stop.set()
+
+    monkeypatch.setattr(sync_module, "_maintain_relay_selection", hanging_relay_selection)
+
+    class Hello:
+        async def refresh(self, lane):
+            pass
+
+        def __call__(self):
+            return node.build_hello(addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00")
+
+    def try_write_lock():
+        con = sqlite3.connect(database.path, timeout=0, isolation_level=None)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("ROLLBACK")
+            return None
+        except sqlite3.OperationalError as exc:
+            return str(exc)
+        finally:
+            con.close()
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            task = asyncio.create_task(sync_module.run_link_sync(
+                node, session, [], Hello(), lane, interval_seconds=60.0, stop_event=stop,
+                enforce_trust_policy=True,
+            ))
+            await asyncio.wait_for(dialling.wait(), timeout=30)
+            probe["error"] = await asyncio.to_thread(try_write_lock)
+            release.set()
+            await asyncio.wait_for(task, timeout=30)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        lane.close()
+        database.close()
+    assert probe["error"] is None, f"the write lock was held during the dial: {probe['error']}"
+
+
+def test_a_lane_job_that_leaves_a_transaction_open_is_caught():
+    """The class guard: in strict mode (the whole suite) a lane job that
+    returns with a transaction open fails; in production it is committed
+    and logged, so a missed commit can never hold the write lock."""
+    import tempfile
+    from pathlib import Path
+
+    import netbbs.storage.execution as execution_module
+    from netbbs.storage.execution import DatabaseLane, LeakedTransactionError
+
+    path = Path(tempfile.mkdtemp()) / "lane.db"
+    Database(path).close()
+
+    def leaky(db):
+        db.connection.execute("INSERT INTO node_config (key, value) VALUES ('leak', '1')")
+
+    def committed(db):
+        return db.connection.execute("SELECT value FROM node_config WHERE key = 'leak'").fetchone()
+
+    lane = DatabaseLane(path)
+    try:
+        with pytest.raises(LeakedTransactionError, match="leaky"):
+            asyncio.run(lane.run(leaky))
+        # Strict mode rolled it back: nothing was written.
+        assert asyncio.run(lane.run(committed)) is None
+        execution_module.STRICT_TRANSACTIONS = False
+        try:
+            asyncio.run(lane.run(leaky))
+        finally:
+            execution_module.STRICT_TRANSACTIONS = True
+        # Production committed it: the write the function made stands, and
+        # the lock is free.
+        assert asyncio.run(lane.run(committed))["value"] == "1"
+        con = sqlite3.connect(path, timeout=0, isolation_level=None)
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("ROLLBACK")
+        con.close()
+    finally:
+        lane.close()

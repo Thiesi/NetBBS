@@ -558,18 +558,32 @@ previously have been effectively atomic on the event loop. Re-audit
 `try/finally` coverage whenever migrating a path: cleanup must begin before
 the first new `await`, not where the old synchronous span happened to end.
 
-**A periodic pass must not hold the write lock across a whole table (issue
-#1059).** All connections share one SQLite write lock, and the main
-connection's busy timeout is 5 s. The per-pass trust recompute (#802) rewrote
-every subject's row inside one transaction on the background lane, about
-0.3 ms per subject, and on a node that had met many callers the first pass
-after startup kept the lock longer than that; a scheduled task writing
-`node_config` through the main connection then failed with `database is
-locked`. Two rules follow:
+**Every lane job returns with no transaction open (issue #1059).** All
+connections share one SQLite write lock, and the main connection's busy
+timeout is 5 s. Python's `sqlite3` (legacy isolation) opens a transaction
+implicitly before the first INSERT, UPDATE or DELETE, **even one that changes
+no row**, and holds the write lock until a commit. A function that commits
+only `if dropped:` (or any other "if something changed") leaves that
+transaction open on the lane's connection when nothing changed, and the lock
+then belongs to whatever job on that lane commits next. In v7.15.0
+`prune_expired_relay_attestation_bundles` did exactly this every sync pass;
+on an outgoing-only node the next commit came after the first relay-candidate
+dial timed out, about 11 s later, and every other connection's write failed
+meanwhile. A profiler showed every thread idle while the lock was held: the
+sign of a forgotten commit, not a slow query.
 
-- A periodic pass writes only rows whose value changed; reads do not block
-  writers under WAL, so a pass that finds nothing new takes no write lock.
-  When much does change, it commits in bounded batches.
+- Commit unconditionally, or write inside `with db.connection:`. Never
+  commit conditionally on what a write did.
+- `DatabaseLane._run_job` enforces it: a job that returns with a
+  transaction open raises `LeakedTransactionError` under
+  `STRICT_TRANSACTIONS`, which the test suite turns on (`tests/conftest.py`),
+  so the whole suite is the regression net. In production the transaction
+  is committed, since the function did write it and a rollback would
+  silently lose that, and a WARNING names the function. A job that raises
+  has its open transaction rolled back.
+- A periodic pass writes only rows whose value changed, and commits in
+  bounded batches when much does change (#1061: the trust recompute rewrote
+  every subject's row each pass).
 - A node-lifetime background task catches a failed pass, logs it and runs
   again; it never lets one exception end it for the uptime. The update
   check, reliable-nodes refresh, daybreak announcer, Link sync loop, backup
