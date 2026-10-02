@@ -2571,14 +2571,20 @@ _LEVEL_VIEWS = {
 }
 _LEVEL_VIEW_ORDER = tuple(_LEVEL_VIEWS)
 
-# The access word says the kind on its own (read/post a board, download/
-# upload a file area, join a channel, play a door), which keeps the table
-# inside 80 columns with a name still worth reading.
+# What kind of thing each row is, in a word that fits its column (dogfood:
+# the access word alone left a SysOp guessing whether "read" meant a board).
+_GATE_TYPE_WORDS = {
+    "board": "board", "file area": "area", "channel": "channel", "door": "door", "node-wide": "node",
+}
+
+# Kept inside 80 columns with a name still worth reading; ALSO gives way
+# first, and the narrow-terminal line (`_gate_description`) keeps it whole.
 _GATE_COLUMNS = [
+    ListColumn("type", 7, MUTED_COLOR),
     ListColumn("access", 8, VALUE_COLOR),
     ListColumn("level", 5, VALUE_COLOR, align_right=True),
     ListColumn("from", 16, MUTED_COLOR),
-    ListColumn("also", 24, MUTED_COLOR),
+    ListColumn("also", 12, MUTED_COLOR),
 ]
 
 
@@ -2587,19 +2593,19 @@ def _gate_stable_id(gate: Gate) -> int:
 
 
 def _gate_columns(gate: Gate) -> list[str]:
-    action, _what = GATE_WORDS[gate.kind]
+    action, what = GATE_WORDS[gate.kind]
     also = [f"off: {gate.off}"] if gate.off else []
     also += list(gate.conditions)
     if gate.note:
         also.append(gate.note)
-    return [action, str(gate.opens_at), gate_source(gate), ", ".join(also)]
+    return [_GATE_TYPE_WORDS[what], action, str(gate.opens_at), gate_source(gate), ", ".join(also)]
 
 
 def _gate_description(gate: Gate) -> str:
     """The table's columns as one line, for a terminal too narrow for the
-    table: `post at 10, from Community Market; age 18+`."""
-    action, level, source, also = _gate_columns(gate)
-    return f"{action} at {level}, {source}" + (f"; {also}" if also else "")
+    table: `board: post at 10, Community Market; age 18+`."""
+    kind, action, level, source, also = _gate_columns(gate)
+    return f"{kind}: {action} at {level}, {source}" + (f"; {also}" if also else "")
 
 
 def _gates_in_view(gates: list[Gate], level: int, view: str) -> list[Gate]:

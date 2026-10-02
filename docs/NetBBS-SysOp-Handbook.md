@@ -511,8 +511,10 @@ row is a level that matters on your node: one some board, file area,
 channel, door or setting is gated at, or one an account holds. The row shows
 how many enabled accounts hold exactly that level and what it adds to the
 levels below it, for example `2 read · 1 post · 1 door · Mail`. Pick a level
-to see its gates one by one, each with where its level comes from: set on the
-resource itself, inherited from a Community, the default of 0, or a setting.
+to see its gates one by one, each with what it is (a board, file area,
+channel, door, or a node-wide feature such as mail) and where its level comes
+from: set on the resource itself, inherited from a Community, the default of
+0, or a setting.
 `V` steps the list through what is new at this level, everything it opens,
 what stays closed to it, and what it opens while another gate (an age or
 verified-name requirement, a members-only channel) still applies. Picking a
