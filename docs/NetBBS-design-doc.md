@@ -230,6 +230,18 @@ Telnet, SSH, and web/xterm.js are first-class user transports. Product behavior
 should be transport-independent unless a capability genuinely requires a byte
 stream, browser code, or another transport-specific primitive.
 
+A key reaches the server when it is typed on every transport, including a
+phone's on-screen keyboard in the browser (issue #1066). An Android keyboard
+with prediction composes each word, and xterm.js sends a composition only
+when it ends, so letter hotkeys used to wait for Enter. The browser terminal
+asks the keyboard not to predict, correct or capitalise, and on Android sends
+the composed word as it changes: the letters added, and a DEL for each one
+taken away. What the keyboard turns the word into as it ends (an
+autocorrection) is not sent, since the letters are already on the server and
+a hotkey must not answer twice. Desktop browsers are left as they were: a
+desktop input method composes a spelling that is then converted (romaji,
+pinyin), and only the converted text is meant to be sent.
+
 ### 3.2 Rendering model
 
 Use hybrid terminal rendering:

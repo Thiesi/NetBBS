@@ -2109,6 +2109,29 @@ was itself an unresolved Tab — every other keystroke (including ones that
 change nothing, like Left then Right) must clear that flag before its own
 handling runs.
 
+### Android keyboard compositions in the web terminal (issue #1066)
+
+xterm.js sends composed text only when the composition ends, and an Android
+keyboard with prediction composes every letter, so without help a letter
+hotkey waited for Enter. On Android only, `netbbs-terminal.js` mirrors the
+composed word to the server as it changes (added letters, a DEL per removed
+code point) and keeps xterm from sending it again. That suppression rests on
+how the bundled xterm.js finishes a composition: it sends what its textarea
+holds past the offset recorded at `compositionstart`, on a timer after
+`compositionend`, or at once from `keydown` when another key ends the
+composition. The shim empties the textarea in capture-phase listeners on
+`term.element`, which run before xterm's own handlers on the textarea. It
+empties it again two timer turns after a composition ends and after any key
+typed outside one (xterm leaves a key it did not compose in the textarea), so
+the next composition starts at offset 0; otherwise the space or comma ending
+the next word lands before the recorded offset and is never sent. It cannot
+empty it at `compositionstart`: setting the value while a composition is open
+ends that composition. An
+xterm.js upgrade must re-check `CompositionHelper` (`_finalizeComposition`,
+`keydown`) against this; `tests/fixtures/composition_web_shim.cjs` doubles
+that helper and must change with it. The behaviour on a real device is not
+covered by any automated test.
+
 ### `edit_resource_draft` save contract: raise to retry, return to leave
 
 `edit_resource_draft` returns whatever the caller's `save(draft)` returns,
