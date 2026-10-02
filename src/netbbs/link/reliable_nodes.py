@@ -340,6 +340,10 @@ def reliable_nodes_source(db: Database) -> str:
     return "live" if get_cached_reliable_nodes(db) is not None else "built-in"
 
 
+#: Issue #1059: how soon a refresh whose roster could not be saved tries again.
+_RETRY_AFTER_FAILED_SAVE_SECONDS = 900.0
+
+
 async def run_scheduled_reliable_nodes_refresh(
     db: Database,
     *,
@@ -360,6 +364,7 @@ async def run_scheduled_reliable_nodes_refresh(
     serving the fallback.
     """
     while True:
+        delay = interval_seconds
         if get_auto_update_check_enabled(db):
             try:
                 nodes = await fetch_reliable_nodes(fetch=fetch)
@@ -374,5 +379,11 @@ async def run_scheduled_reliable_nodes_refresh(
                 # then retried on the next pass like any other failure.
                 _logger.exception("Scheduled reliable-nodes refresh failed unexpectedly")
             else:
-                set_cached_reliable_nodes(db, nodes)
-        await sleep(interval_seconds)
+                # Issue #1059: the write can meet another connection's lock;
+                # that, too, is one failed pass, not the end of the task.
+                try:
+                    set_cached_reliable_nodes(db, nodes)
+                except Exception:
+                    _logger.exception("Scheduled reliable-nodes refresh could not save the roster; trying again shortly")
+                    delay = min(interval_seconds, _RETRY_AFTER_FAILED_SAVE_SECONDS)
+        await sleep(delay)
