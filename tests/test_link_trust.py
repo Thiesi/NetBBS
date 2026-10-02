@@ -893,3 +893,32 @@ def test_append_only_trust_migration_preserves_existing_link_data(tmp_path, monk
         ).fetchone()[0] == 0
     finally:
         upgraded.close()
+
+
+def test_a_sole_authority_cannot_quarantine_on_unverified_evidence(db):
+    """Issue #1036 found during the v7.15.0 notes fact-check: the two-domain
+    threshold ignored unverified self-verifying evidence, but a reporter made
+    sole authority for the category still quarantined on it alone."""
+    subject = register_old_node(db)
+    configure_reporter(db, "emergency-reporter", "emergency-domain")
+    add_signal(db, subject, "emergency-reporter", 60, verified=False)
+    configure_sole_authority(
+        db,
+        "emergency-reporter",
+        TrustDimension.IDENTITY_INTEGRITY,
+        "signed_equivocation",
+        reason="locally verified emergency authority",
+        actor_user_id=None,
+        now_iso=stamp(NOW),
+    )
+    assert get_effective_trust_state(
+        db, subject, TrustDimension.IDENTITY_INTEGRITY
+    ).state == TrustState.PROBATIONARY
+
+    # Once the evidence reproduces, the grant applies as before.
+    from netbbs.link.trust import mark_signal_evidence_verified
+
+    assert mark_signal_evidence_verified(db, "signal-60", now_iso=stamp(NOW))
+    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert state.state == TrustState.QUARANTINED
+    assert state.reason_code == "sole_authority_signal"
