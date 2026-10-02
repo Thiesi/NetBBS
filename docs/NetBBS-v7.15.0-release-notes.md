@@ -1039,7 +1039,7 @@ as they were. Several things outlast the restore:
 
 ## Verification boundaries
 
-- **The release gate:** **13,719 passed, 138 skipped** in the full suite (`pytest -n 10`) and 5 of 5 `timing_sensitive` tests, on Windows, on the release tree (main at the release commit with the version bumped). No test ran on NetBSD or Linux for this release.
+- **The release gate:** **13,720 passed, 138 skipped** in the full suite (`pytest -n 10`) and 5 of 5 `timing_sensitive` tests, on Windows, on the exact release tree. No test ran on NetBSD or Linux for this release.
 - **The POSIX-only tests did not run for this release.** The SSH host-key
   change (#976) is POSIX-only. Its test of creating keys under a permissive
   umask and its test that an owner-only key is left alone are skipped on
