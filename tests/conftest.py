@@ -24,6 +24,7 @@ import nacl.pwhash
 import pytest
 
 import netbbs.auth.passwords as passwords_module
+import netbbs.storage.execution as execution_module
 import netbbs.identity.keys as keys_module
 import netbbs.net.ssh as ssh_module
 
@@ -108,3 +109,11 @@ def _fast_argon2id(monkeypatch):
     monkeypatch.setattr(passwords_module, "_PASSWORD_OPSLIMIT", nacl.pwhash.argon2id.OPSLIMIT_MIN)
     monkeypatch.setattr(passwords_module, "_PASSWORD_MEMLIMIT", nacl.pwhash.argon2id.MEMLIMIT_MIN)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _strict_lane_transactions(monkeypatch):
+    """Issue #1059: every lane job in the suite must return with no open
+    transaction. A job that leaks raises `LeakedTransactionError`, so the
+    whole suite is the regression net for the class."""
+    monkeypatch.setattr(execution_module, "STRICT_TRANSACTIONS", True)
