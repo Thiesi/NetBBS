@@ -144,6 +144,9 @@ class SlotArt:
     #: being used -- a run of text holding two keys, for one.
     notes: tuple[str, ...] = ()
     list: Slot | None = None
+    #: Every token parsed into a slot, in reading order -- including extra
+    #: `{menu}`/`{list}`/`{prompt}` tokens the fields above don't keep.
+    tokens: tuple[Slot, ...] = ()
 
     @property
     def slots(self) -> tuple[Slot, ...]:
@@ -218,7 +221,7 @@ def parse_slot_art(
         buffer=buffer, width=width, height=max(height, 1),
         menu=menus[0] if menus else None, prompt=prompts[0] if prompts else None,
         fields=fields, problems=tuple(problems), items=items, notes=notes,
-        list=lists[0] if lists else None,
+        list=lists[0] if lists else None, tokens=tuple(found),
     )
 
 
@@ -427,15 +430,20 @@ def _fill(buffer: ScreenBuffer, slot: Slot, rows: list[str], *, highlight_keys: 
 def fill_field_slots(text: str, fields: dict[str, str], *, ellipsis: str = "...", width: int = 80) -> str:
     """Banner art (the welcome and log-off screens) with its field slots
     filled in, returned as rows of ANSI text the art's own width, for
-    `write_preformatted_line`. Art without field tokens -- every banner
-    before issue #929 -- comes back unchanged, byte for byte, and so does
-    art whose tokens have problems or that holds a `{menu}`, `{list}` or
-    `{prompt}` slot, which only the main menu and list screens fill. Fields with no value in `fields`
-    are left blank."""
+    `write_preformatted_line`. Art without slot tokens -- every banner
+    before issue #929 -- comes back unchanged, byte for byte. Fields with
+    no value in `fields` are left blank.
+
+    Every other token is blanked, never sent as it was typed (issue
+    #1057): a `{menu}`, `{list}` or `{prompt}` slot, which only the main
+    menu and list screens fill, and a token with a problem (a bad size,
+    an overlap). Before, any of those made the whole banner go out raw,
+    so callers read `{node}` and the rest literally. `banner_slot_notes`
+    tells the SysOp what was blanked."""
     if "{" not in text:
         return text
     art = parse_slot_art(text, width=width, require_menu=False)
-    if not art.fields or art.problems or art.menu is not None or art.list is not None or art.prompt is not None:
+    if not art.slots and not art.problems:
         return text
     buffer = ScreenBuffer(art.width, art.height)
     for row in range(art.height):
@@ -445,6 +453,57 @@ def fill_field_slots(text: str, fields: dict[str, str], *, ellipsis: str = "..."
         value = truncate_to_width(sanitize_text(fields.get(slot.name, "")), slot.width, ellipsis=ellipsis)
         _fill(buffer, slot, [value], highlight_keys=False)
     return "\r\n".join(_render_row(buffer, row) for row in range(art.height)) + RESET
+
+
+_REGION_NAMES = ("menu", "list", "prompt")
+
+
+def banner_slot_notes(text: str, *, width: int = 80) -> list[str]:
+    """What a banner's Preview tells the SysOp about tokens callers don't
+    see as written (issue #1057), each saying what `fill_field_slots`
+    really does with it: a region slot -- which only the main menu and
+    list art fill -- or a token too broken to be a slot is blank; a field
+    given a row count is still filled on its one row; a field past the
+    art's width is cut off there; overlapping slots are drawn in reading
+    order, the later over the earlier. Empty when there is nothing to
+    say."""
+    if "{" not in text:
+        return []
+    art = parse_slot_art(text, width=width, require_menu=False)
+    notes = [
+        f"{_describe(slot)} is not used in a banner; callers see it blank"
+        for slot in art.tokens if slot.name in _REGION_NAMES
+    ]
+    region_starts = tuple("{" + name for name in _REGION_NAMES)
+    for problem in art.problems:
+        if problem.startswith(region_starts) and (
+            "takes no size" in problem or "runs past" in problem
+        ):
+            continue  # a region slot, already noted as blank
+        if "overlaps" in problem and (
+            problem.startswith(region_starts)
+            or any(f" overlaps {start}" in problem for start in region_starts)
+        ):
+            # Either side may be the region slot ("{first} overlaps
+            # {second}", in reading order). A banner never draws it, so the
+            # field it overlaps shows as written; the region slot is already
+            # noted as blank.
+            continue
+        if "slots; use one" in problem:
+            continue  # every one of them is a region slot, noted above
+        if "needs a size" in problem or "has an empty size" in problem:
+            notes.append(f"{problem}; callers see that token blank")
+        elif "is one row; give a width only" in problem:
+            notes.append(f"{problem}; the row count is ignored and it is filled on its one row")
+        elif "runs past" in problem:
+            notes.append(f"{problem}; callers see it cut off there")
+        elif "overlaps" in problem:
+            notes.append(f"{problem}; the later one is drawn over the earlier")
+        elif "slots; use at most" in problem:
+            notes.append(f"{problem}; a banner still fills them all")
+        else:
+            notes.append(problem)
+    return notes
 
 
 def _render_row(buffer: ScreenBuffer, row: int) -> str:

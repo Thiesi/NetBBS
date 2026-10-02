@@ -519,7 +519,9 @@ prepared once (iCE colours, CTerm's bright backgrounds) so no chunk loses a
 colour state. Nothing is paced for a session with no live terminal
 (`Session.paces_art`, set only by the Telnet, SSH and web transports), during
 a break-in, for ASCII callers, or for callers who chose quick under
-**Profile → [Q]uick or animated banners** (animated by default).
+**Profile → [Q]uick or animated banners** (animated by default). The welcome
+banner plays before sign-in, when the caller's choice is not known yet, so it
+always follows the SysOp's speed (issue #1055).
 
 A SysOp may override three of the node's branding colors -- accent (board/
 channel/user names and other navigable-item branding), header (section

@@ -1449,7 +1449,8 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             help=(
                 "Animated: a banner the SysOp gave a speed draws at that speed, as a modem of "
                 "the day would have, and any key draws the rest at once. Quick: every banner "
-                "is drawn at once."
+                "after you sign in is drawn at once. The welcome banner comes before you sign "
+                "in, so it always plays at the SysOp's speed; any key still draws the rest."
             ),
             section="Display",
         ),

@@ -562,7 +562,9 @@ your terminal:
 Some nodes draw their welcome art or main-menu art slowly, at the speed of an
 old modem. Press any key to draw the rest at once; that key is used up, so it
 doesn't also act at the next prompt. **Profile → [Q]uick or animated banners**
-set to quick draws every banner at once.
+set to quick draws every banner after you sign in at once. The welcome banner
+comes before you sign in, so it plays at the node's speed whatever you chose;
+any key still draws the rest.
 
 If your terminal did not say which it is, NetBBS asks once after you log in
 which of two sample lines looks right. If lines and arrows look wrong later,
