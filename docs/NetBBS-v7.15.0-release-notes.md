@@ -60,7 +60,7 @@ This is steps 3 to 6 of #929. **#929 stays open.** What is not done yet:
   deferred.
 - The before- and after-signup banners take no field tokens.
 
-**Nothing changes for callers until you act.** Every piece of art keeps its
+**No art setting changes until you act.** Every piece of art keeps its
 current mode (above the menu or list), speed (off) and credit line (off).
 These settings live in the node database, not in `netbbs.toml`, and there is
 no migration.
@@ -330,7 +330,7 @@ under rules the SysOp sets (#992).
 - **A board or file area that inherits its level says from where**:
   `none: 10 from Community Market · 41 users`, or `none: 0 the default · 41 users`.
 - **A write level below the read level is counted at the read level**, and
-  says so: `5 · 4 users (reading needs 10)`.
+  says so: `5 · 41 users (reading needs 10)`.
 - **A Community's default levels show what inherits them**: `10 · 41 users · inherited by 2 boards, 1 file area`.
 - This covers boards, file areas, Community defaults, chat channels, doors,
   and the node map, mail and MRC open-room settings. The count goes by level
