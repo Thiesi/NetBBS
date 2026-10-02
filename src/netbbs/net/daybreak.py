@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import logging
 from typing import Awaitable, Callable
 
 from netbbs.chat import Channel, ChatHub, list_channels, record_message
@@ -34,6 +35,8 @@ from netbbs.net.chat_flow import _TimestampedNotice
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import get_node_timezone
+
+_logger = logging.getLogger(__name__)
 
 _ORDINAL_SUFFIXES = {1: "st", 2: "nd", 3: "rd"}
 
@@ -160,8 +163,20 @@ async def run_daybreak_announcer(
     doesn't actually advance.
     """
     while True:
-        tz = get_node_timezone(db)
-        current_local = now().astimezone(tz)
+        # Issue #1059: a database error (a lock held by another connection,
+        # most likely) costs one announcement, not the rest of the uptime.
+        try:
+            tz = get_node_timezone(db)
+            current_local = now().astimezone(tz)
+        except Exception:
+            _logger.exception("Daybreak announcer could not read the node's time zone; trying again in a minute")
+            await sleep(60)
+            continue
         await sleep(_seconds_until_next_local_midnight(current_local))
         next_local_date = current_local.date() + datetime.timedelta(days=1)
-        await announce_new_day(db, hub, local_date=next_local_date)
+        try:
+            await announce_new_day(db, hub, local_date=next_local_date)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.exception("Daybreak announcement for %s failed", next_local_date)

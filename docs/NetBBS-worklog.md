@@ -558,6 +558,23 @@ previously have been effectively atomic on the event loop. Re-audit
 `try/finally` coverage whenever migrating a path: cleanup must begin before
 the first new `await`, not where the old synchronous span happened to end.
 
+**A periodic pass must not hold the write lock across a whole table (issue
+#1059).** All connections share one SQLite write lock, and the main
+connection's busy timeout is 5 s. The per-pass trust recompute (#802) rewrote
+every subject's row inside one transaction on the background lane, about
+0.3 ms per subject, and on a node that had met many callers the first pass
+after startup kept the lock longer than that; a scheduled task writing
+`node_config` through the main connection then failed with `database is
+locked`. Two rules follow:
+
+- A periodic pass writes only rows whose value changed; reads do not block
+  writers under WAL, so a pass that finds nothing new takes no write lock.
+  When much does change, it commits in bounded batches.
+- A node-lifetime background task catches a failed pass, logs it and runs
+  again; it never lets one exception end it for the uptime. The update
+  check, reliable-nodes refresh, daybreak announcer, Link sync loop, backup
+  scheduler and managed-DNS updater all follow this.
+
 ### Persistent data versus projections
 
 Store structured domain data, never terminal-rendered ANSI. Rebuild derived

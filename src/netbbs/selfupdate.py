@@ -522,38 +522,50 @@ async def run_scheduled_update_check(
     from netbbs import __version__ as current_version
 
     while True:
-        if get_auto_update_check_enabled(db):
-            last_checked_at, _ = get_last_check_summary(db)
-            due = True
-            if last_checked_at is not None:
-                try:
-                    elapsed = (now() - _parse_check_timestamp(last_checked_at)).total_seconds()
-                    due = elapsed >= min_recheck_interval_seconds
-                except ValueError:
-                    due = True  # unparseable timestamp -- fail open, never get stuck
-            if due:
-                known_etag, known_release = load_release_cache(db)
-                token = get_github_pat(db)
-                try:
-                    release, new_etag = await check_latest_release(
-                        known_etag=known_etag, known_release=known_release, token=token, fetch=fetch
-                    )
-                except UpdateError as exc:
-                    _logger.warning("Scheduled update check failed: %s", exc)
-                    # Recorded, not just logged (design doc §17 -- "fail
-                    # clearly," CLAUDE.md's own working convention): without
-                    # this, a SysOp glancing at the admin update screen after
-                    # several consecutive failing days would still see a
-                    # stale "3 weeks ago -- up to date," with the console the
-                    # only place a real, ongoing problem was ever visible.
-                    record_check_outcome(db, f"check failed: {exc}")
-                else:
-                    save_release_cache(db, new_etag, release)
-                    if is_newer(current_version, release.tag_name):
-                        record_check_outcome(db, f"newer release available: {release.tag_name}")
+        # Issue #1059: a pass that fails for any reason -- a database write
+        # that met another connection's lock, most likely -- is logged and
+        # tried again after the recheck window rather than a whole interval
+        # later. It used to end the task, and with it every automatic check,
+        # for the rest of the node's uptime.
+        delay = interval_seconds
+        try:
+            if get_auto_update_check_enabled(db):
+                last_checked_at, _ = get_last_check_summary(db)
+                due = True
+                if last_checked_at is not None:
+                    try:
+                        elapsed = (now() - _parse_check_timestamp(last_checked_at)).total_seconds()
+                        due = elapsed >= min_recheck_interval_seconds
+                    except ValueError:
+                        due = True  # unparseable timestamp -- fail open, never get stuck
+                if due:
+                    known_etag, known_release = load_release_cache(db)
+                    token = get_github_pat(db)
+                    try:
+                        release, new_etag = await check_latest_release(
+                            known_etag=known_etag, known_release=known_release, token=token, fetch=fetch
+                        )
+                    except UpdateError as exc:
+                        _logger.warning("Scheduled update check failed: %s", exc)
+                        # Recorded, not just logged (design doc §17 -- "fail
+                        # clearly," CLAUDE.md's own working convention): without
+                        # this, a SysOp glancing at the admin update screen after
+                        # several consecutive failing days would still see a
+                        # stale "3 weeks ago -- up to date," with the console the
+                        # only place a real, ongoing problem was ever visible.
+                        record_check_outcome(db, f"check failed: {exc}")
                     else:
-                        record_check_outcome(db, f"up to date ({current_version})")
-        await sleep(interval_seconds)
+                        save_release_cache(db, new_etag, release)
+                        if is_newer(current_version, release.tag_name):
+                            record_check_outcome(db, f"newer release available: {release.tag_name}")
+                        else:
+                            record_check_outcome(db, f"up to date ({current_version})")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.exception("Scheduled update check failed unexpectedly; trying again shortly")
+            delay = min(interval_seconds, min_recheck_interval_seconds)
+        await sleep(delay)
 
 
 # -- Download & extract -----------------------------------------------------
