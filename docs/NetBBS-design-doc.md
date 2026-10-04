@@ -2207,7 +2207,8 @@ two.
   carried in from other nodes are not held to it (issue #993). The map says
   so on that gate.
 
-**The Levels screen** (issue #1007). `Users ▸ Le[v]els` lists the levels that
+**The Levels screen, LAST** (issue #1007). `Users ▸ [L]evels (LAST)` opens the
+Level Admin SysOp Tool, which lists the levels that
 matter: 0, every level a gate opens at (switched-off gates aside), and every
 level an enabled, approved account holds. Each row shows how many such
 accounts hold exactly that level and what it first opens. A level's own
@@ -2243,7 +2244,7 @@ A name is at most 12 characters, needs a letter (so it cannot read as a
 number), and is unique regardless of case. Names are node configuration and
 travel in backups. Naming is recorded in the moderation log.
 
-**From the shell.** `python -m netbbs.admin levels` prints the ladder;
+**From the shell.** `python -m netbbs.admin last` (`levels` also works) prints the ladder;
 `levels <level>` (a number or a name) prints what a level opens and what stays
 closed; `levels --user <name> --to <level>` prints the change preview for one
 account. Each takes `--json`. The command only reads.

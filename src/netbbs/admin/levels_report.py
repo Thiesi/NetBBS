@@ -1,5 +1,6 @@
 """
-`python -m netbbs.admin levels` (design doc §5.7, issue #1009): the access map
+`python -m netbbs.admin last` (LAST, the Level Admin SysOp Tool; design doc §5.7,
+issue #1009; `levels` still works): the access map
 from the shell, for scripts and SysOps who would rather not open the console.
 Read-only. Three reports, each as text or `--json`:
 

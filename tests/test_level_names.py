@@ -125,7 +125,7 @@ def test_a_broken_stored_value_is_ignored(db, sysop):
 def test_the_ladder_shows_names_and_names_a_level(db, lane, sysop):
     create_board(db, "lounge", min_read_level=10, creator=sysop)
 
-    text = _screen(lane, sysop, ["u", "v", "m", "02", "Member"])
+    text = _screen(lane, sysop, ["u", "l", "m", "02", "Member"])
 
     assert get_level_names(db)[10] == "Member"
     assert "02. 10 (Member)" in text
@@ -134,7 +134,7 @@ def test_the_ladder_shows_names_and_names_a_level(db, lane, sysop):
 
 
 def test_a_refused_name_says_why_on_the_ladder(db, lane, sysop):
-    text = _screen(lane, sysop, ["u", "v", "m", "01", "123"])
+    text = _screen(lane, sysop, ["u", "l", "m", "01", "123"])
 
     assert "A level name needs a letter" in text
     assert 0 not in get_level_names(db)
@@ -144,7 +144,7 @@ def test_the_user_level_prompt_takes_a_name(db, lane, sysop):
     create_user(db, "alice", password="hunter2")
     set_level_name(db, 10, "Member", changed_by=sysop)
 
-    text = _screen(lane, sysop, ["u", "l", "s", "alice", "l", "member"])
+    text = _screen(lane, sysop, ["u", "u", "s", "alice", "l", "member"])
 
     assert get_user_by_username(db, "alice").user_level == 10
     assert "Level: 10 (Member)" in text
@@ -155,8 +155,8 @@ def test_the_preview_and_the_level_screen_use_names(db, lane, sysop):
     create_user(db, "alice", password="hunter2")
     set_level_name(db, 10, "Member", changed_by=sysop)
 
-    assert "Level 0 → 10 (Member)" in _screen(lane, sysop, ["u", "l", "s", "alice", "l", "10"])
-    assert "Level 10 (Member)" in _screen(lane, sysop, ["u", "v", "g", "Member"])
+    assert "Level 0 → 10 (Member)" in _screen(lane, sysop, ["u", "u", "s", "alice", "l", "10"])
+    assert "Level 10 (Member)" in _screen(lane, sysop, ["u", "l", "g", "Member"])
 
 
 # -- the CLI
@@ -205,3 +205,14 @@ def test_the_cli_refuses_what_it_cannot_answer(db, sysop, capsys, args, message)
         admin_main(["levels", *args, "--db", str(db.path)])
 
     assert message in str(exc.value.code)
+
+
+def test_the_cli_answers_to_last_and_still_to_levels(db, sysop, capsys):
+    create_board(db, "lounge", min_read_level=10, creator=sysop)
+    db.close()
+
+    admin_main(["last", "--db", str(db.path)])
+    as_last = capsys.readouterr().out
+    admin_main(["levels", "--db", str(db.path)])
+
+    assert "1 read" in as_last and as_last == capsys.readouterr().out

@@ -409,10 +409,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"the node's identity directory (default: {_DEFAULT_IDENTITY_DIR})",
     )
     _add_common(rotate, defaults=False)
+    # LAST, the Level Admin SysOp Tool. `levels` was its first name and is
+    # kept, so scripts written against it go on working.
     levels = subcommands.add_parser(
-        "levels",
-        help="show what each level opens, one level in full, or one account's level change",
+        "last",
+        aliases=["levels"],
+        help="LAST: what each level opens, one level in full, or one account's level change",
         description=(
+            "LAST, the Level Admin SysOp Tool, from the shell. "
             "Read-only. With no arguments: every level in use, its name, how many accounts hold it "
             "and what it first opens. With a level (a number or a level's name): what that level "
             "opens and what stays closed to it. With --user and --to: what moving that account to "
@@ -460,7 +464,7 @@ def main(argv: list[str] | None = None) -> None:
             )
         ) from exc
 
-    if args.command == "levels":
+    if args.command in ("last", "levels"):
         # Read-only and attributed to nobody: no SysOp to pick, no raw terminal.
         try:
             lines, data = run_levels_report(db, level=args.level, user=args.user, to=args.to)

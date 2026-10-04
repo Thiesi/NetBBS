@@ -1060,7 +1060,7 @@ def test_create_user_with_blank_username_is_cancelled(db, lane, sysop):
 
 
 def test_list_users_and_select_shows_detail(db, lane, sysop):
-    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "sysop" in _written_text(session)
     assert "Level: 255" in _normalized_visible(_written_text(session))
@@ -1071,7 +1071,7 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     # this same session, alongside review_composition) had no on-demand
     # help wired in at all until now.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "s", "alice", "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "alice", "CTRL+H", " ", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "moderator/sysop capability" in text.lower()
@@ -1080,7 +1080,7 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
 
 def test_user_detail_ctrl_h_narrows_to_the_highlighted_field(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "s", "alice", "DOWN", "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "alice", "DOWN", "CTRL+H", " ", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     # Down lands on "l" (Level, the first of _USER_DETAIL_FIELD_ORDER) --
@@ -1096,7 +1096,7 @@ def test_user_detail_arrow_nav_activates_the_highlighted_field(db, lane, sysop):
     # arrow-selectable fields (_USER_DETAIL_FIELD_ORDER = l, t, i, k, r);
     # Space then activates it exactly like pressing "t" directly would.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "s", "alice", "DOWN", "DOWN", " ", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "alice", "DOWN", "DOWN", " ", "y", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is not None
@@ -1104,7 +1104,7 @@ def test_user_detail_arrow_nav_activates_the_highlighted_field(db, lane, sysop):
 
 def test_user_detail_escape_clears_the_cursor_highlight_without_leaving(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "s", "alice", "DOWN", "ESCAPE", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "alice", "DOWN", "ESCAPE", "b", "b", "b"])
     _run(session, lane, sysop)
     # Esc only cancels the highlight -- the account is untouched and the
     # screen is still reachable (proven by the trailing backs succeeding
@@ -1120,7 +1120,7 @@ def test_user_detail_recent_admin_actions_show_who_performed_them(db, lane, syso
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     # The list is a screen of its own now ([H]istory, left with [B]ack);
     # the detail screen only counts the actions.
-    session = FakeSession(["u", "l", "0", "1", "l", "20", "h", "b", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "l", "20", "h", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     visible = _visible(_written_text(session))
@@ -1202,16 +1202,16 @@ def test_list_users_sort_by_highest_level_first_changes_pick_order(db, lane, sys
     # Default is alphabetical ascending -- press "l" twice (once for
     # level ascending, again to flip to descending) to get highest
     # level first.
-    session = FakeSession(["u", "l", "l", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "l", "l", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Level: 255" in _normalized_visible(_written_text(session))  # sysop, picked as item 01
 
 
 def test_list_users_defaults_to_alphabetical_ascending_with_no_sort_prompt_needed(db, lane, sysop):
-    """[L]ist users jumps straight to the listing now -- no separate
+    """List [u]sers jumps straight to the listing now -- no separate
     one-shot sort-order prompt to answer first."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "alice" in _written_text(session)  # item 01 alphabetically
     assert "Sorted by: Alphabetical ↑" in _written_text(session)
@@ -1226,7 +1226,7 @@ def test_user_picker_pressing_the_active_sort_key_again_toggles_direction(db, la
     # descending -- sysop (level 255) now sorts before alice (Z before A
     # doesn't apply here, but "sysop" > "alice" alphabetically, so
     # descending puts sysop first).
-    session = FakeSession(["u", "l", "a", "b", "b", "b"])
+    session = FakeSession(["u", "u", "a", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Sorted by: Alphabetical ↓" in text
@@ -1237,7 +1237,7 @@ def test_user_picker_pressing_the_active_sort_key_again_toggles_direction(db, la
 
 
 def test_user_picker_pressing_the_active_sort_key_a_third_time_returns_to_ascending(db, lane, sysop):
-    session = FakeSession(["u", "l", "a", "a", "b", "b", "b"])
+    session = FakeSession(["u", "u", "a", "a", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Sorted by: Alphabetical ↑" in _written_text(session)
 
@@ -1247,7 +1247,7 @@ def test_user_picker_switching_to_a_different_sort_mode_starts_ascending(db, lan
     ascending, regardless of what direction the previous mode was left
     in."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "a", "l", "b", "b", "b"])  # a (desc) -> l (level, ascending)
+    session = FakeSession(["u", "u", "a", "l", "b", "b", "b"])  # a (desc) -> l (level, ascending)
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Sorted by: Level ↑" in text
@@ -1256,7 +1256,7 @@ def test_user_picker_switching_to_a_different_sort_mode_starts_ascending(db, lan
 
 def test_user_picker_registration_toggle_shows_both_directions(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "r", "b", "b", "b"])
+    session = FakeSession(["u", "u", "r", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Sorted by: Registration date ↑" in text
@@ -1265,7 +1265,7 @@ def test_user_picker_registration_toggle_shows_both_directions(db, lane, sysop):
 
 def test_user_picker_search_still_works(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "s", "alice", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "alice", "b", "b", "b"])
     _run(session, lane, sysop)
     # A single match auto-selects straight into the detail screen.
     assert "Level: 10" in _normalized_visible(_written_text(session))
@@ -1281,7 +1281,7 @@ def test_user_picker_visibility_toggle_hides_disabled_users_on_first_press(db, l
     bob = create_user(db, "bob", password="hunter2", user_level=10)
     set_user_disabled(db, bob, True, changed_by=sysop)
 
-    session = FakeSession(["u", "l", "v", "b", "b", "b"])
+    session = FakeSession(["u", "u", "v", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     marker = "Showing: Active users only (disabled hidden)"
@@ -1301,7 +1301,7 @@ def test_user_picker_visibility_toggle_shows_only_disabled_on_second_press(db, l
     bob = create_user(db, "bob", password="hunter2", user_level=10)
     set_user_disabled(db, bob, True, changed_by=sysop)
 
-    session = FakeSession(["u", "l", "v", "v", "b", "b", "b"])
+    session = FakeSession(["u", "u", "v", "v", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     marker = "Showing: Disabled users only"
@@ -1318,7 +1318,7 @@ def test_user_picker_visibility_toggle_returns_to_all_on_third_press(db, lane, s
     bob = create_user(db, "bob", password="hunter2", user_level=10)
     set_user_disabled(db, bob, True, changed_by=sysop)
 
-    session = FakeSession(["u", "l", "v", "v", "v", "b", "b", "b"])
+    session = FakeSession(["u", "u", "v", "v", "v", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     marker = "Showing: All users"
@@ -1342,7 +1342,7 @@ def test_user_picker_visibility_filter_scopes_search(db, lane, sysop):
 
     # Active-only filter is on; searching for the hidden, disabled "bob"
     # finds nothing even though the account exists.
-    session = FakeSession(["u", "l", "v", "s", "bob", "b", "b", "b"])
+    session = FakeSession(["u", "u", "v", "s", "bob", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No matches." in _written_text(session)
 
@@ -1353,7 +1353,7 @@ def test_list_users_unrecognized_key_sounds_a_bell_and_changes_nothing(db, lane,
     establishes -- not a lenient fallback, since there's no longer a
     separate one-shot prompt where that made sense."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "l", "z", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "z", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "\b \b\a" in _written_text(session)
     assert "alice" in _written_text(session)  # still item 01 alphabetically -- sort unchanged
@@ -1366,7 +1366,7 @@ def test_central_editor_lets_a_sysop_promote_then_disable_the_same_user_without_
     picking them a second time through a separate flow."""
     create_user(db, "alice", password="hunter2", user_level=10)
     session = FakeSession(
-        ["u", "l", "0", "1", "l", "20", "t", "y", "b", "b", "b"]
+        ["u", "u", "0", "1", "l", "20", "t", "y", "b", "b", "b"]
     )
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -6711,7 +6711,7 @@ def test_list_users_shows_pending_approval_status(db, lane, sysop):
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "pending approval" in _written_text(session)
 
@@ -6720,7 +6720,7 @@ def test_approving_a_pending_user_clears_the_gate(db, lane, sysop):
     from netbbs.auth.users import create_user, list_users
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["u", "l", "0", "1", "a", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "a", "y", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.pending_approval is False
@@ -6731,7 +6731,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, lane, sysop):
     from netbbs.auth.users import create_user, list_users
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["u", "l", "0", "1", "a", "n", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "a", "n", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.pending_approval is True
@@ -6740,7 +6740,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, lane, sysop):
 def test_detail_screen_for_a_non_pending_user_has_no_approve_prompt(db, lane, sysop):
     # sysop themselves is the sole (non-pending) user -- picking their
     # own entry must not prompt for approval at all.
-    session = FakeSession(["u", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Approve this account" not in _written_text(session)
 
@@ -6750,7 +6750,7 @@ def test_detail_screen_can_grant_verify_identity_permission(db, lane, sysop):
 
     create_user(db, "carol", password="hunter2pw")
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["u", "l", "0", "1", "i", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "i", "y", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.can_verify_identity is True
@@ -6762,7 +6762,7 @@ def test_detail_screen_can_revoke_verify_identity_permission(db, lane, sysop):
 
     carol = create_user(db, "carol", password="hunter2pw")
     set_can_verify_identity(db, carol, True, changed_by=sysop)
-    session = FakeSession(["u", "l", "0", "1", "i", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "i", "y", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.can_verify_identity is False
@@ -6850,7 +6850,7 @@ def test_registration_settings_screen_shows_pending_count(db, lane, sysop):
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
     session = FakeSession(["u", "r", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "Awaiting approval: 1 account(s) -- see [L]ist users" in _normalized_visible(_written_text(session))
+    assert "Awaiting approval: 1 account(s) -- see List [u]sers" in _normalized_visible(_written_text(session))
 
 
 # -- self-update (design doc §17) --------------------------------------------
@@ -9944,7 +9944,7 @@ def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
         create_user(db, name, password="hunter2", user_level=10)
 
     # Search "ali" (matches alice and alina, not bob), then re-sort.
-    session = FakeSession(["u", "l", "s", "ali", "l", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "ali", "l", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -9964,7 +9964,7 @@ def test_user_picker_forgets_a_search_that_found_nothing(db, lane, sysop):
         create_user(db, name, password="hunter2", user_level=10)
 
     # Search for something absent, then re-sort by level.
-    session = FakeSession(["u", "l", "s", "zzz", "l", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "zzz", "l", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -9980,7 +9980,7 @@ def test_user_picker_refresh_clears_a_remembered_search(db, lane, sysop):
         create_user(db, name, password="hunter2", user_level=10)
 
     # Narrow to ali*, refresh, then re-sort: bob must be back.
-    session = FakeSession(["u", "l", "s", "ali", "CTRL+r", "l", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "ali", "CTRL+r", "l", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -10002,7 +10002,7 @@ def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop
     set_user_disabled(db, bob, True, changed_by=sysop)
 
     # Narrow to ali*, then switch to disabled-only: no ali* is disabled.
-    session = FakeSession(["u", "l", "s", "ali", "v", "v", "b", "b", "b"])
+    session = FakeSession(["u", "u", "s", "ali", "v", "v", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))

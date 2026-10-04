@@ -2473,7 +2473,7 @@ async def _users_menu(
 ) -> None:
     """Every user-account action, grouped together (design doc): create,
     list/detail, registration policy, promote/demote, enable/disable,
-    delete. `[L]ist users`/`[P]romote/demote`/`[E]nable/disable`/
+    delete. `List [u]sers`/`[P]romote/demote`/`[E]nable/disable`/
     `[D]elete user` all route through the same `_pick_and_edit_user` ->
     `_user_detail_screen` central editor now (design doc -- node
     management, Thiesi's own dogfood-testing report), differing only in
@@ -2514,7 +2514,7 @@ async def _users_menu(
             await _create_user_screen(session, lane, actor)
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
-        elif choice == "l":
+        elif choice == "u":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Registered users")
             stats = await lane.run(_load_stats)
@@ -2544,7 +2544,7 @@ async def _users_menu(
             await _promotion_rules_screen(session, lane, actor)
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
-        elif choice == "v":
+        elif choice == "l":
             await session.write_line("")
             await _levels_screen(session, lane, actor, node_controls=node_controls, link_context=link_context)
             stats = await lane.run(_load_stats)
@@ -2790,7 +2790,7 @@ async def _levels_screen(
             description_of=lambda step: (
                 f"{step.users} user{'s' if step.users != 1 else ''}; opens {ladder_summary(step)}"
             ),
-            title="Levels",
+            title="Level Admin SysOp Tool (LAST)",
             empty_message="No levels in use.",
             refresh=_load,
             live_keys={"g": _other_level},
@@ -3099,10 +3099,10 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
 
     entries = [
         MenuEntry(label=menu_key("C", "reate user"), brief="Add a new user account"),
-        MenuEntry(label=menu_key("L", "ist users"), brief="Browse and edit accounts"),
+        MenuEntry(label=menu_key("u", "sers", prefix="List "), brief="Browse and edit accounts"),
         MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
         MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
-        MenuEntry(label=menu_key("v", "els", prefix="Le"), brief="What each level opens"),
+        MenuEntry(label=menu_key("L", "evels (LAST)"), brief="What each level opens"),
         MenuEntry(label=menu_key("o", "motion rules", prefix="Pr"), brief="Raise new accounts automatically"),
         MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
         MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
@@ -7140,7 +7140,7 @@ async def _pick_and_edit_user(
     central editor rather than picking the same user again through
     three separate single-purpose screens to promote them, then disable
     them, then...). `title` is the only thing that still varies by
-    which top-level `[U]sers` menu entry got here -- `[L]ist users`/
+    which top-level `[U]sers` menu entry got here -- `List [u]sers`/
     `[P]romote/demote`/`[E]nable/disable`/`[D]elete user` all land on
     the exact same full editor once a user is actually selected, so a
     SysOp who only meant to promote someone can still also disable them
@@ -7997,7 +7997,7 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
     open/approval_required/closed, replacing the earlier plain
     require-approval toggle -- and surfaces how many self-registered
     accounts are currently waiting on approval. Approving/rejecting any
-    of them individually still happens via `[L]ist users` -> a pending
+    of them individually still happens via `List [u]sers` -> a pending
     account's own detail screen (`_user_detail_screen`'s `[A]pprove` action),
     reusing the existing user-management flow rather than building a
     second, parallel pending-accounts queue UI.
@@ -8030,7 +8030,7 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
         ))
         if pending_count:
             rows.append(Field(
-                "Awaiting approval", f"{pending_count} account(s) -- see [L]ist users", color=WARNING_COLOR
+                "Awaiting approval", f"{pending_count} account(s) -- see List [u]sers", color=WARNING_COLOR
             ))
         if current == RegistrationMode.APPROVAL_REQUIRED:
             # Issue #835: a SysOp's banner promised newcomers they could
