@@ -8,8 +8,8 @@ the node database stays at schema 116, and every protocol, door API, save and
 world version is unchanged. Upgrading is a wheel swap and a restart; rolling
 back to v7.15.2 is the reverse.
 
-**Two keys moved** in `SysOp ▸ Users`: List users is now `[U]` (was `[L]`),
-and the levels screen is now `[L]` (was `[V]`). See "LAST" below.
+**Two keys moved** in `SysOp ▸ Users`: `[L]ist users` is now `List [u]sers`,
+and `Le[v]els` is now `[L]evels (LAST)`. See "LAST" below.
 
 ## Guest sessions can't change the shared guest account (#1073, #1075)
 
@@ -94,7 +94,7 @@ everyone. The same rule applies to clicks in the browser.
 ## The levels screen is LAST, and says what each row is (#1068, #1072)
 
 - The levels screen is now the **Level Admin SysOp Tool (LAST)**, opened with
-  `[L]evels (LAST)` in `SysOp ▸ Users`. **List users moved to `[U]`.**
+  `[L]evels (LAST)` in `SysOp ▸ Users`. **List users moved to `List [u]sers`.**
 - From the shell it is `python -m netbbs.admin last`; `levels` still works
   as an alias, so existing scripts keep running.
 - A level's own list gains a TYPE column (`board`, `area`, `channel`, `door`,
