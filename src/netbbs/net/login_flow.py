@@ -93,6 +93,7 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_enabled,
 )
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
+from netbbs.guest_call import guest_call
 from netbbs.user_preferences import session_scoped_preferences
 from netbbs.net.animation_preference import animations_enabled
 from netbbs.net.art_pacing import WELCOME_ART, art_speed, write_paced_art
@@ -705,13 +706,17 @@ async def run_authenticated_session(
     the session's own task and before anything reads a preference, so the
     login questions, every screen and every task the session starts all see
     it; `_login` itself runs under `asyncio.wait_for`, in a task of its own,
-    where a context variable set would not outlive it."""
+    where a context variable set would not outlive it.
+
+    The call's drafts and bundled-door saves are kept to it the same way
+    (`netbbs.guest_call`, issue #1075), in a directory deleted when this
+    returns."""
     options = dict(
         node_controls=node_controls, lane=lane, link_context=link_context,
         direct_invites=direct_invites, throttle=throttle,
     )
     if getattr(session, "authenticated_without_credential", False):
-        with session_scoped_preferences(user):
+        with session_scoped_preferences(user), guest_call():
             await _run_signed_in(session, db, hub, presence, mailbox, user, **options)
     else:
         await _run_signed_in(session, db, hub, presence, mailbox, user, **options)

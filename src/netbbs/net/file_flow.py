@@ -126,6 +126,11 @@ from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.session import Session, physical_terminal_width
+from netbbs.net.shared_account import (
+    authored_earlier_by_shared_account,
+    earlier_guest_refusal,
+    note_created_this_call,
+)
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.moderation import BoardPermission, has_permission
@@ -2186,6 +2191,11 @@ async def _handle_describe(
             )
         )
         return page
+    if entry.uploader_user_id == user.id and authored_earlier_by_shared_account(session, "file", entry.id):
+        # Issue #1075: every guest uploads as the one shared account, so a
+        # guest describes only what it uploaded during this call.
+        announce_styled(session, colored("\r\n" + earlier_guest_refusal("this file"), fg_color=ERROR_COLOR))
+        return page
     if not can_edit_any_file and area.moderated and entry.status == "approved":
         # Refused before an editor opens, not after it is filled in
         # (Codex review) -- the domain would reject this save, and the
@@ -2412,6 +2422,8 @@ def _tell_of_upload(session: Session, area: FileArea, *, accent: int) -> Callabl
         live = owner()
         if live is None:
             return
+        # A guest may describe what it uploaded in this call (issue #1075).
+        note_created_this_call(live, "file", entry.id)
         _announce_upload(live, area, entry, accent=accent)
 
     return tell
@@ -2814,6 +2826,8 @@ async def _handle_upload(
             return stored
 
         entry = await lane.run(_store_and_announce)
+        # A guest may describe what it uploaded in this call (issue #1075).
+        note_created_this_call(session, "file", entry.id)
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         # NotImplementedError: some transports (netbbs.net.web) can't
         # carry raw bytes at all -- see WebSession's docstring. Handled

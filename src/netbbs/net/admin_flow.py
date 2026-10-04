@@ -858,6 +858,7 @@ from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.rendering.sauce import Sauce, split_sauce
 from netbbs.net import notices as _notices
 from netbbs.guest import (
+    guest_privileges,
     guest_user,
     pre_login_notice,
     set_guest_user,
@@ -3939,13 +3940,14 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
         name = (draft["guest_username"] or "").strip()
         account = None
         if name:
-            def _check(db: Database) -> User | None:
+            def _check(db: Database) -> tuple[User | None, list[str]]:
                 try:
-                    return get_user_by_username(db, name)
+                    found = get_user_by_username(db, name)
                 except AuthError:
-                    return None
+                    return None, []
+                return found, guest_privileges(db, found)
 
-            account = await lane.run(_check)
+            account, privileges = await lane.run(_check)
             if account is None:
                 # Raised, not returned: a bare `return None` closes the
                 # editor and discards the notice typed alongside it
@@ -3974,6 +3976,13 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
                 raise AuthError(
                     f"{name!r} is a SysOp account. Guest login skips the password, so it cannot "
                     "be a SysOp."
+                )
+            if privileges:
+                # Issue #1075: the same reasoning for every privilege a
+                # SysOp grants a person -- the guest account is everyone.
+                raise AuthError(
+                    f"{name!r} holds {' and '.join(privileges)}. Guest login skips the password, "
+                    "so every guest would hold them too. Remove them first."
                 )
 
         def _apply(db: Database) -> None:

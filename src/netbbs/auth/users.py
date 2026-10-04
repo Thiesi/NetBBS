@@ -1655,6 +1655,16 @@ def remove_ssh_key(db: Database, target: User, fingerprint: str, *, changed_by: 
     return _get_user_by_id(db, target.id)
 
 
+def _refuse_guest_grant(db: Database, target: User, what: str) -> None:
+    """Issue #1075: the guest account is every anonymous caller, so `what`
+    granted to it would be granted to each of them. Removing is always
+    allowed."""
+    from netbbs.guest import guest_grant_refusal, is_guest_account  # netbbs.guest imports this module
+
+    if is_guest_account(db, target):
+        raise UserManagementError(guest_grant_refusal(target, what))
+
+
 def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, changed_by: User) -> User:
     """
     Grant or revoke `target`'s identity-verification permission (design
@@ -1673,6 +1683,8 @@ def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, cha
         return target
     # Design doc §5.6: staff cannot grant anything.
     _require_sysop(db, changed_by)
+    if can_verify:
+        _refuse_guest_grant(db, target, "identity verification")
     db.connection.execute(
         "UPDATE users SET can_verify_identity = ? WHERE id = ?", (int(can_verify), target.id)
     )
@@ -1718,6 +1730,8 @@ def set_staff_permissions(
             raise UserManagementError(
                 f"{current.username!r} is still awaiting approval -- approve the account first"
             )
+        if new_mask:
+            _refuse_guest_grant(db, current, "staff permissions")
         db.connection.execute("UPDATE users SET staff_permissions = ? WHERE id = ?", (new_mask, current.id))
         record_action_without_commit(
             db, actor=changed_by, action="set_staff_permissions", target_user_id=current.id,

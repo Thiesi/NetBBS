@@ -129,6 +129,11 @@ from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, physical_terminal_width, post_body_width, write_prompt
+from netbbs.net.shared_account import (
+    authored_earlier_by_shared_account,
+    earlier_guest_refusal,
+    note_created_this_call,
+)
 from netbbs.net.session_activity import records_activity
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -547,6 +552,17 @@ def _can_edit_post(db: Database, post: Post, user: User) -> bool:
     return post.author_user_id == user.id or has_permission(
         db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT
     )
+
+
+def _earlier_guest_post(session: Session, db: Database, post: Post, user: User) -> bool:
+    """Whether `post` is the shared guest account's from before this call,
+    so that authorship cannot be this session's (issue #1075). Refused
+    outright rather than falling back to `BoardPermission.EDIT`: the guest
+    account cannot hold a moderator grant (`netbbs.guest`), and an edit by
+    the post's own account is carried over the Link as the author's."""
+    if post.author_user_id is None or post.author_user_id != user.id:
+        return False
+    return authored_earlier_by_shared_account(session, "post", post.root_post_id)
 
 
 def _can_tombstone_post(db: Database, post: Post, user: User) -> bool:
@@ -1610,6 +1626,9 @@ async def _show_board(
         except PostError as exc:
             announce(session, f"Could not create post: {exc}", tone="muted")
             return False
+        # A guest may later edit or withdraw what it wrote in this call, and
+        # nothing an earlier guest wrote (issue #1075).
+        note_created_this_call(session, "post", post.root_post_id)
         # A caller's own post is not news to them (issue #710). A held
         # one is recorded too, so it is not new when it is approved.
         if record_post_opened(db, user, board, post):
@@ -1990,6 +2009,9 @@ async def _edit_existing_post(
     """
     if not _can_edit_post(db, post, user):
         announce(session, "You can't edit that post.", tone="muted")
+        return
+    if _earlier_guest_post(session, db, post, user):
+        announce(session, earlier_guest_refusal("this post"), tone="error")
         return
     # An art post is revised in the editor that drew it (issue #711), with
     # a draft slot of its own: the prose editors' recovery must never be
@@ -2544,6 +2566,9 @@ async def _withdraw_existing_post(
     `WITHDRAWN_PLACEHOLDER`, after saying yes. An ordinary author edit, so
     it is carried like one and can be edited again. Returns whether the
     post was withdrawn."""
+    if _earlier_guest_post(session, db, post, user):
+        announce(session, earlier_guest_refusal("this post"), tone="error")
+        return False
     # Says what withdrawing does and does not do (issue #675): the text is
     # hidden, not deleted -- other nodes keep the signed original, and a
     # moderator can still read it in the post's history.

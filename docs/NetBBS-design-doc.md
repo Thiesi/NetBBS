@@ -1618,10 +1618,11 @@ That is the whole feature, and the boundary is deliberate: guest login is an
 ordinary account, so levels, per-object permissions, age and name gates,
 moderation, auditing and Link trust apply to it exactly as to any other
 caller, and **no code branches on whether a caller is a guest** -- with the
-exceptions below: mail, and what a session that signed in without a credential
-may change about the account it shares. A SysOp says what a guest may do the same way they say
+exceptions below: mail, what a session that signed in without a credential
+may change about the account it shares or keep after the call, and the
+privileges the guest account may hold. A SysOp says what a guest may do the same way they say
 it for anybody else: by setting the guest account's level, and by granting or
-withholding per-object permissions.
+withholding per-object access.
 
 Three consequences follow, and are intended rather than gaps:
 
@@ -1697,6 +1698,48 @@ Three consequences follow, and are intended rather than gaps:
   signed-in session starts) and its reads see its own choices over the
   account's stored values. The stored values are what every guest starts
   from; a SysOp sets them by signing in as the account with guest login off.
+- A guest session's **drafts are its own and last for the call** (issue
+  #1075). Post and file-description drafts are files named after the account,
+  so on the shared account one guest's unfinished post was offered to the
+  next, and two guests at once wrote the same file. A guest call keeps its
+  drafts in a directory of its own (`netbbs.guest_call`, entered with the
+  preference overlay), deleted when the call ends. Kept as files rather than
+  in memory because that is what both editors write: autosave, `/exit` and a
+  refused save's kept draft all work as for anyone else, within the call.
+- A guest session **may edit or withdraw only what it wrote during the call**
+  (issue #1075). Every guest's posts and uploads carry the one account as
+  author, so "your own post" meant every guest's: any guest could rewrite or
+  withdraw an earlier guest's words, and the edit was carried over the Link
+  as the author's. The session records the posts (by root post id) and
+  uploads (Zmodem or a web link) it creates; editing, withdrawing or
+  describing anything else the account wrote is refused before an editor
+  opens, with the reason on screen. Nothing else lets an author change their
+  own content -- deleting a post or file is a moderator's, and mail is closed
+  to the guest.
+- A guest session **plays the bundled doors without a save that outlives the
+  call** (issue #1075). Voidrunner and War Dialer key their saves on the drop
+  file's `user_id`, so every guest shared one career and one crew, and the
+  callsign a guest typed showed in Voidrunner's public Hall of Fame. A guest
+  call plays a bundled door under a `user_id` of its own (above any rowid, so
+  never an account's) with `VOIDRUNNER_SAVE_DIR` and `WAR_DIALER_DB_PATH` in
+  the call's directory: Voidrunner starts from a copy of the node's Hall of
+  Fame records and War Dialer from a copy of the world (SQLite's backup API),
+  so the guest sees the real standings and rivals, and nothing it does
+  reaches them. The door's outbound hook answers it as a rehearsal. The
+  call's save stays for the rest of the call, so a guest can leave a game and
+  come back. A SysOp's own doors keep receiving the guest account: what an
+  external game stores is its own, a fresh identity every call would fill a
+  legacy door's player list, and whether a guest reaches the door at all is
+  its level.
+- **The guest account holds no privilege a SysOp grants a person** (issue
+  #1075): staff permissions, identity verification, or a moderator grant
+  (edit, delete or approve on a board or file area; any channel permission).
+  Each would belong to every anonymous caller at once. Granting one to the
+  designated account is refused where it is written, with the reason; an
+  account holding one cannot be designated; and `guest_is_eligible` refuses
+  it at sign-in, for a grant made before either check existed. Read and post
+  grants are not privileges in this sense: they open an area to the guest the
+  way its level does, which is the mechanism this section describes.
 - The re-checks are applied to the row that is **ultimately returned**, not
   only to the one first resolved. The login path awaits transport I/O and then
   re-reads the account to stamp `last_login_at`; a promotion, a block or a
