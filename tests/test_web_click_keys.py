@@ -20,7 +20,9 @@ def _key_at(cases: list[tuple[str, int]]) -> list[str | None]:
     source = SCRIPT.read_text(encoding="utf-8")
     function = re.search(r"function keyAt\(text, col\) \{.*?\n  \}", source, re.S).group(0)
     program = f"{function}\nconsole.log(JSON.stringify({json.dumps(cases)}.map(c => keyAt(c[0], c[1]))));"
-    output = subprocess.run(["node", "-e", program], capture_output=True, text=True, check=True, timeout=60)
+    output = subprocess.run(
+        ["node", "-e", program], capture_output=True, text=True, encoding="utf-8", check=True, timeout=60
+    )
     return json.loads(output.stdout)
 
 
@@ -44,3 +46,14 @@ def test_a_row_drawn_inside_art_gives_its_number():
 
 def test_a_drawn_menu_item_is_not_mistaken_for_a_numbered_row():
     assert _key_at([("| [B]oards   [F]iles 2024. |", 4)]) == ["b"]
+
+
+def test_a_frame_character_ends_an_entry_as_two_spaces_do():
+    # Issue #1070: the click means the item art_slots.py finds there.
+    row = "■ [M]essage boards│ ■ [N]ew scan"
+    assert _key_at([(row, 15), (row, 3), (row, 21), (row, 28), (row, 18)]) == ["m", "m", "n", "n", None]
+    assert _key_at([("║ [S]ysOp console ║", 10), ("[B]oards █ [E]-mail", 14)]) == ["s", "e"]
+
+
+def test_a_key_drawn_as_a_frame_character_is_still_one_entry():
+    assert _key_at([("[─] Divider", 1), ("[─] Divider", 6)]) == ["─", "─"]

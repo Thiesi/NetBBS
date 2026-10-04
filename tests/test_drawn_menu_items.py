@@ -61,6 +61,27 @@ def test_two_keys_in_one_run_are_one_item_holding_both_and_are_noted():
     assert any("holds 2 keys" in note for note in art.notes)
 
 
+def test_a_frame_character_between_two_keys_separates_their_items():
+    # Issue #1070: panels with a "│" gutter one space from the next item.
+    art = parse_slot_art("■ [M]essage boards│ ■ [N]ew scan\r\n{menu 10x1}")
+    assert [(i.key, i.keys, i.col, i.text) for i in art.items] == [
+        ("m", ("m",), 0, "■ [M]essage boards"),
+        ("n", ("n",), 20, "■ [N]ew scan"),
+    ]
+    assert art.notes == ()
+
+
+def test_a_block_character_between_two_keys_separates_them_too():
+    art = parse_slot_art("[B]oards █ [E]-mail ▌[L]ogoff\r\n{menu 10x1}")
+    assert [(i.key, i.text) for i in art.items] == [("b", "[B]oards"), ("e", "[E]-mail"), ("l", "[L]ogoff")]
+    assert art.notes == ()
+
+
+def test_a_key_drawn_as_a_frame_character_is_not_split():
+    art = parse_slot_art("[─] Divider [B]oards\r\n{menu 10x1}")
+    assert [(i.key, i.keys, i.text) for i in art.items] == [("─", ("─", "b"), "[─] Divider [B]oards")]
+
+
 def test_bracketed_text_inside_a_slot_is_not_an_item():
     art = parse_slot_art("{menu 20x2}\r\n[X] under the menu")
     assert art.items == ()
@@ -205,6 +226,15 @@ def test_a_run_whose_keys_the_caller_cannot_use_is_blanked(tmp_path):
     db, user = _setup(tmp_path, b"  [S]ysOp [V]erify  [L]ogoff\r\n{menu 74x6}")
     row = _screen(_draw(db, user))[0]
     assert "[S]ysOp" not in row and "[V]erify" not in row and "[L]ogoff" in row
+    db.close()
+
+
+def test_items_split_by_a_frame_character_are_blanked_one_by_one(tmp_path):
+    # Issue #1070: [S]ysOp shares a row with [L]ogoff, a "│" between them.
+    art = b"  [S]ysOp console\xe2\x94\x82 [L]ogoff\r\n{menu 74x6}"
+    db, user = _setup(tmp_path, art)
+    row = _screen(_draw(db, user))[0]
+    assert "[S]ysOp" not in row and row.strip() == "│ [L]ogoff"
     db.close()
 
 
