@@ -1374,6 +1374,17 @@ account has mail from before this rule, it stays in the database, unreadable
 by guests; turn guest login off and sign in as the account to read or delete
 it.
 
+A session that came in through guest login also can't change what other
+callers see of the guest account: its bio, signature, name and details, who it
+blocks, whether it takes messages, its MRC settings, its chat alias or its MRC
+hub registration. Without that, any anonymous caller could rewrite the profile
+every caller sees, and a self-entered birthdate would open age-gated areas for
+every later guest. A guest may still change display settings (character set,
+colors, redraw style, banners, sort orders), but only for that call. To set the
+profile and the display defaults every guest starts with, turn guest login off,
+sign in as the account with its password, set them under **Profile**, and turn
+guest login back on.
+
 Under **Operations → Node and sessions**:
 
 - **Monitor** is a live table of everyone connected, refreshed every two

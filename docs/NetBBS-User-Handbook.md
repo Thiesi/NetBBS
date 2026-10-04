@@ -566,6 +566,16 @@ set to quick draws every banner after you sign in at once. The welcome banner
 comes before you sign in, so it plays at the node's speed whatever you chose;
 any key still draws the rest.
 
+Signed in as the board's guest, you share one account with every other
+guest, so Profile won't change anything other callers see of it: the bio,
+signature, name and details, who it blocks, whether it takes messages, or its
+MRC settings. Each of those says so when you press it, and so do `/nick` and
+`/mrc register`, `identify` or `send` in chat and **Bloc[k]** in Who's online. Display
+settings still change, for this call only: character set, color depth, redraw
+style, banners, editor, colors and sort orders go back to the account's own
+the next time anyone signs in as the guest. Register an account of your own to
+keep them.
+
 If your terminal did not say which it is, NetBBS asks once after you log in
 which of two sample lines looks right. If lines and arrows look wrong later,
 change this setting. If colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.

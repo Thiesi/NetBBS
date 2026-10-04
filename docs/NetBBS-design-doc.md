@@ -1617,8 +1617,9 @@ That is the whole feature, and the boundary is deliberate: guest login is an
 *authentication* shortcut and never an authorization model. The guest is an
 ordinary account, so levels, per-object permissions, age and name gates,
 moderation, auditing and Link trust apply to it exactly as to any other
-caller, and **no code branches on whether a caller is a guest** -- with one
-exception, mail, below. A SysOp says what a guest may do the same way they say
+caller, and **no code branches on whether a caller is a guest** -- with the
+exceptions below: mail, and what a session that signed in without a credential
+may change about the account it shares. A SysOp says what a guest may do the same way they say
 it for anybody else: by setting the guest account's level, and by granting or
 withholding per-object permissions.
 
@@ -1667,6 +1668,35 @@ Three consequences follow, and are intended rather than gaps:
   account -- removing the primary key changes the fingerprint its Link events
   are authored under. Signing in with the account's own password reaches key
   management normally.
+- A guest session **may not change what other callers see of the account**
+  (issue #1073). Every anonymous caller shares it, so whatever one guest
+  writes there every later guest and every other caller gets: its bio and
+  bio visibility, signature, display name, location, birthdate and their
+  visibility switches, the verified-badge and Link-sharing switches, whether
+  it takes direct messages, read receipts, whether its name is shown on
+  Previous callers, who it blocks (from Profile or from Who's online), its
+  MRC settings that the node-wide bridge reads per handle (private messages,
+  last-seen, nick color), its chat alias (`/nick`, which is announced and kept
+  in scrollback) and its MRC hub registration (`/mrc register`, `identify`,
+  `roompass`, `update password`, and raw `/mrc send`, whose free text could
+  carry any of them). Like the key screen, this is a check on how
+  the session got in (`authenticated_without_credential`), not on the
+  account: the entries stay where they are and say why when pressed, and the
+  account signed in with its own password changes all of it as before.
+  Birthdate matters beyond defacement: a self-entered birthdate is what local
+  `min_age` gates check when the account has no age attestation (§18), so a
+  guest who could set one would have opened every age gate for every later
+  guest.
+- A guest session's **display settings last for the call** (issue #1073). A
+  guest on a plain-ASCII or 16-colour terminal needs a character set, colour
+  depth, redraw style, banner speed, editor, colour toggles, sort orders and
+  so on as much as anyone, so these stay open; but one guest's choice must not
+  become the next guest's. For such a session every write to the per-user
+  preference store and to the sort-order store stays in memory
+  (`netbbs.user_preferences.session_scoped_preferences`, entered when the
+  signed-in session starts) and its reads see its own choices over the
+  account's stored values. The stored values are what every guest starts
+  from; a SysOp sets them by signing in as the account with guest login off.
 - The re-checks are applied to the row that is **ultimately returned**, not
   only to the one first resolved. The login path awaits transport I/O and then
   re-reads the account to stamp `last_login_at`; a promotion, a block or a

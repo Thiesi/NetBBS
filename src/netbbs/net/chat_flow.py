@@ -185,6 +185,7 @@ from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import Session, SessionClosedError, physical_terminal_width, write_prompt
+from netbbs.net.shared_account import shared_account_refusal, signed_in_without_credential
 from netbbs.net.session_activity import records_activity
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
@@ -3160,7 +3161,16 @@ async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
     their own typed scrollback event, recorded for the channel this
     command was run in — announced the same way join/leave/action
     events are.
+
+    Refused to a session that signed in without a credential (issue
+    #1073): the alias is the shared guest account's, shown to everyone and
+    written to the channel's scrollback.
     """
+    if signed_in_without_credential(ctx.session):
+        await ctx.session.write_line(
+            colored(shared_account_refusal("this account's chat alias"), fg_color=MUTED_COLOR)
+        )
+        return
     if not args:
         await ctx.lane.run(set_nick, ctx.user, "")
         await _announce_nick_change(ctx, new_nick=None)
@@ -3518,6 +3528,13 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
             await _handle_mrc_private(ctx, None, rest)
             return
         if subcommand in _MRC_SECRET_COMMANDS or (subcommand == "update" and rest.lower().startswith("password")):
+            if signed_in_without_credential(ctx.session):
+                # Issue #1073: the first guest to register the shared guest
+                # account's handle with the hub would own it for every guest.
+                await ctx.session.write_line(colored(
+                    shared_account_refusal("this account's MRC registration"), fg_color=MUTED_COLOR,
+                ))
+                return
             # Issue #304: the secret is asked for with echo off and sent
             # once as the caller's own nick; it is stored nowhere and never
             # enters the input history (no `history` on that read).
@@ -3540,6 +3557,15 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
                 await ctx.session.write_line(colored("(sent to the hub; its answer follows)", fg_color=MUTED_COLOR))
             return
         if subcommand == "send":
+            if signed_in_without_credential(ctx.session):
+                # Review of #1074: a raw hub command is free text, so it can
+                # carry REGISTER, IDENTIFY or any account command the hub
+                # adds later; screening the text would always trail the hub.
+                # A guest uses the named /mrc commands instead.
+                await ctx.session.write_line(colored(
+                    shared_account_refusal("raw MRC hub commands"), fg_color=MUTED_COLOR,
+                ))
+                return
             if not rest:
                 await _show_usage(ctx.session, "mrc")
                 return

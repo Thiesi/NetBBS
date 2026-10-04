@@ -23,11 +23,12 @@ ambiguous the same way `object_id` alone already is for
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from netbbs.auth.users import User
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
+from netbbs.user_preferences import session_preferences_for
 
 # Every resource kind this module covers, and every sort mode a
 # picker's [O]rder command can offer. "volume" means a different
@@ -114,32 +115,44 @@ def get_effective_sort_mode(
     default, appropriate for a top-level, uncategorized listing.
     """
     _check_resource_kind(resource_kind)
+    # Issue #1073: a guest session's own choices, scope by scope, ahead of
+    # what the shared account has stored (`netbbs.user_preferences`).
+    overlay = session_preferences_for(user)
+
+    def _stored(scope: tuple[str, int | None, int | None], sql: str, params: tuple) -> str | None:
+        if overlay is not None and scope in overlay.sort_modes:
+            return overlay.sort_modes[scope]
+        row = db.connection.execute(sql, params).fetchone()
+        return row["sort_mode"] if row is not None else None
 
     if category_id is not None:
-        row = db.connection.execute(
+        mode = _stored(
+            (resource_kind, None, category_id),
             "SELECT sort_mode FROM user_sort_preferences "
             "WHERE user_id = ? AND resource_kind = ? AND category_id = ?",
             (user.id, resource_kind, category_id),
-        ).fetchone()
-        if row is not None:
-            return row["sort_mode"]
+        )
+        if mode is not None:
+            return mode
 
     if community_id is not None:
-        row = db.connection.execute(
+        mode = _stored(
+            (resource_kind, community_id, None),
             "SELECT sort_mode FROM user_sort_preferences "
             "WHERE user_id = ? AND resource_kind = ? AND community_id = ?",
             (user.id, resource_kind, community_id),
-        ).fetchone()
-        if row is not None:
-            return row["sort_mode"]
+        )
+        if mode is not None:
+            return mode
 
-    row = db.connection.execute(
+    mode = _stored(
+        (resource_kind, None, None),
         "SELECT sort_mode FROM user_sort_preferences "
         "WHERE user_id = ? AND resource_kind = ? AND community_id IS NULL AND category_id IS NULL",
         (user.id, resource_kind),
-    ).fetchone()
-    if row is not None:
-        return row["sort_mode"]
+    )
+    if mode is not None:
+        return mode
 
     return DEFAULT_SORT_MODE_BY_KIND[resource_kind]
 
@@ -169,6 +182,11 @@ def set_sort_preference(
         raise ValueError(f"sort_mode {sort_mode!r} does not apply to {resource_kind!r}")
     if community_id is not None and category_id is not None:
         raise ValueError("set_sort_preference takes at most one of community_id/category_id, not both")
+
+    overlay = session_preferences_for(user)
+    if overlay is not None:
+        overlay.sort_modes[(resource_kind, community_id, category_id)] = sort_mode
+        return
 
     if category_id is not None:
         conflict_target = "(user_id, resource_kind, category_id) WHERE category_id IS NOT NULL"
@@ -202,6 +220,11 @@ def clear_sort_preference(
     _check_resource_kind(resource_kind)
     if community_id is not None and category_id is not None:
         raise ValueError("clear_sort_preference takes at most one of community_id/category_id, not both")
+
+    overlay = session_preferences_for(user)
+    if overlay is not None:
+        overlay.sort_modes[(resource_kind, community_id, category_id)] = None
+        return
 
     if category_id is not None:
         db.connection.execute(
@@ -247,7 +270,7 @@ def list_sort_preferences(db: Database, user: User) -> list[SortPreference]:
         """,
         (user.id,),
     ).fetchall()
-    return [
+    stored = [
         SortPreference(
             id=row["id"],
             resource_kind=row["resource_kind"],
@@ -258,3 +281,26 @@ def list_sort_preferences(db: Database, user: User) -> list[SortPreference]:
         )
         for row in rows
     ]
+    overlay = session_preferences_for(user)
+    if overlay is None or not overlay.sort_modes:
+        return stored
+    # Issue #1073: what this session sees is the account's rows as its own
+    # choices left them -- changed, cleared, or added. An added one has no
+    # row, so it gets a negative id no stored row can have.
+    merged: list[SortPreference] = []
+    for pref in stored:
+        scope = (pref.resource_kind, pref.community_id, pref.category_id)
+        if scope not in overlay.sort_modes:
+            merged.append(pref)
+        elif overlay.sort_modes[scope] is not None:
+            merged.append(replace(pref, sort_mode=overlay.sort_modes[scope]))
+    stored_scopes = {(pref.resource_kind, pref.community_id, pref.category_id) for pref in stored}
+    for index, (scope, mode) in enumerate(overlay.sort_modes.items(), start=1):
+        if mode is None or scope in stored_scopes:
+            continue
+        kind, community_id, category_id = scope
+        merged.append(SortPreference(
+            id=-index, resource_kind=kind, community_id=community_id, category_id=category_id,
+            sort_mode=mode, created_at=utc_now_iso(),
+        ))
+    return merged

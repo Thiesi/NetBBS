@@ -71,7 +71,7 @@ from netbbs.net.draft_storage import drafts_directory
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.mail_flow import mail_blocked_notice, mail_open_to, mail_someone
 from netbbs.net.menu_description_preference import menu_description_level, set_menu_description_level
-from netbbs.net.notices import announce, pending_notice_rows, write_notices
+from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
 from netbbs.net.node_theme import (
     effective_accent_color,
     effective_accent_color_256,
@@ -85,6 +85,7 @@ from netbbs.net.animation_preference import animations_enabled, set_animations_e
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
 from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, live_choice_field
 from netbbs.net.session import Session, write_prompt
+from netbbs.net.shared_account import shared_account_refusal, signed_in_without_credential
 from netbbs.digits import is_ascii_number
 from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.password_screen import manage_password_screen
@@ -997,7 +998,47 @@ async def _sort_preferences_screen(session: Session, lane: DatabaseLane, user: U
                 user, selected.resource_kind,
                 community_id=selected.community_id, category_id=selected.category_id,
             )
-            await session.write_line(colored("Cleared.", fg_color=MUTED_COLOR))
+            await session.write_line(colored(
+                "Cleared for this call." if signed_in_without_credential(session) else "Cleared.",
+                fg_color=MUTED_COLOR,
+            ))
+
+
+# -- a session that signed in without a credential (issue #1073) -----------
+#
+# Everything other callers see of the account -- bio, signature, name and
+# details, whether it takes messages, who it blocks -- and what a node-wide
+# service reads from it (the MRC bridge's per-handle settings) is refused
+# (`netbbs.net.shared_account`). Each such entry stays on the screen, as the
+# password and key entries do, and says why when pressed. Display settings
+# stay open: a guest on a plain-ASCII or 16-colour terminal needs them, and
+# what this session writes lasts for the call
+# (`netbbs.user_preferences.session_scoped_preferences`, entered at sign-in).
+
+
+def _refuse_shared_account(session: Session, what: str) -> None:
+    """Carry the reason into the next screen drawn, which is the redraw of
+    the one the caller pressed the key on."""
+    announce(session, shared_account_refusal(what), tone="error")
+
+
+def _unless_signed_in_without_credential(what: str, prompt):
+    """`prompt`, refused with the reason for a session that signed in
+    without a credential."""
+
+    async def guarded(session: Session, lane: DatabaseLane, draft: Draft) -> None:
+        if signed_in_without_credential(session):
+            _refuse_shared_account(session, what)
+            return
+        await prompt(session, lane, draft)
+
+    return guarded
+
+
+_SHARED_ACCOUNT_NOTE = (
+    "You signed in as a guest, on an account every guest shares. What other callers see of it "
+    "can't be changed here; display settings you change last for this call only."
+)
 
 
 def _profile_field(label: str, value: str, *, value_color: int = VALUE_COLOR) -> str:
@@ -1122,6 +1163,11 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         a real list/add/remove screen backed by `add_ssh_key`/
         `remove_ssh_key`/`list_ssh_keys`, none of which ever revoke a
         different key."""
+        if signed_in_without_credential(session):
+            # The screen refuses too (issue #531); refused here as well so
+            # the reason survives Profile's in-place redraw (issue #1073).
+            _refuse_shared_account(session, "this account's keys")
+            return
         nonlocal user
         user = await manage_ssh_keys_screen(session, lane, user, changed_by=user)
         draft["ssh_key_count"] = len(await lane.run(list_ssh_keys, user))
@@ -1134,6 +1180,9 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         password_screen`); `changed_by=user` records the account acting
         on itself, which is also what makes the screen demand the
         current password first."""
+        if signed_in_without_credential(session):
+            _refuse_shared_account(session, "this account's password")
+            return
         nonlocal user
         user = await manage_password_screen(session, lane, user, changed_by=user)
         draft["password_set"] = await lane.run(has_password, user)
@@ -1190,6 +1239,11 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         else:
             lines.append(colored("(no bio set)", fg_color=MUTED_COLOR))
         lines.append("")
+        if signed_in_without_credential(session):
+            lines.extend(
+                colored(line, fg_color=MUTED_COLOR)
+                for line in reflow(_SHARED_ACCOUNT_NOTE, width=session.terminal_width).split("\n")
+            )
         lines.append(
             _profile_field(
                 "Transport report",
@@ -1221,7 +1275,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         FieldSpec(
             key="bio", hotkey="e", menu_text=menu_key("E", "dit bio"), label="Bio",
             render=lambda d: f"{len(d['bio'].splitlines())} line(s)" if d["bio"] else "(none)",
-            prompt=_bio_prompt,
+            prompt=_unless_signed_in_without_credential("the bio", _bio_prompt),
             brief="Change your public bio text",
             help=(
                 "Free-form text shown on your public profile (Directory, Who's online, etc.) "
@@ -1232,9 +1286,9 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         FieldSpec(
             key="bio_visible", hotkey="v", menu_text=menu_key("V", "isibility"), label="Visibility",
             render=lambda d: "public" if d["bio_visible"] else "private",
-            prompt=live_choice_field(
+            prompt=_unless_signed_in_without_credential("who sees the bio", live_choice_field(
                 "bio_visible", [False, True], persist=lambda lane, v: lane.run(set_bio_visible, user, v)
-            ),
+            )),
             brief="Toggle bio public/private",
             help=(
                 "Whether your Bio is shown to other callers at all, independent of what the "
@@ -1245,7 +1299,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         FieldSpec(
             key="signature", hotkey="g", menu_text=menu_key("g", "nature", prefix="Si"), label="Signature",
             render=lambda d: f"{len(d['signature'].splitlines())} line(s)" if d["signature"] else "(none)",
-            prompt=_signature_prompt,
+            prompt=_unless_signed_in_without_credential("the signature", _signature_prompt),
             brief="Auto-appended to mail and posts you send",
             help=(
                 "Text automatically appended to every message you send from this account -- "
@@ -1257,7 +1311,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="identity_details", hotkey="n", menu_text=menu_key("N", "ame & details"),
             label="Name & details",
             render=lambda d: "(edit)",
-            prompt=_identity_details_prompt,
+            prompt=_unless_signed_in_without_credential("the name and details", _identity_details_prompt),
             brief="Display name, location, age",
             help=(
                 "Opens a separate screen for your display name, location, and birthdate -- "
@@ -1288,10 +1342,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="accepts_dm", hotkey="m", menu_text=menu_key("M", "essages"),
             label="Direct messages",
             render=lambda d: "accepted" if d["accepts_dm"] else "not accepted",
-            prompt=live_choice_field(
+            prompt=_unless_signed_in_without_credential("whether this account takes messages", live_choice_field(
                 "accepts_dm", [False, True],
                 persist=lambda lane, v: lane.run(set_accepts_direct_messages, user, v),
-            ),
+            )),
             brief="Direct-message preferences",
             help=(
                 "Whether other callers can send you live one-to-one messages: /msg, /private, "
@@ -1305,7 +1359,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="blocked_senders", hotkey="o", menu_text=menu_key("o", "cked people", prefix="Bl"),
             label="Blocked people",
             render=lambda d: f"{d['blocked_sender_count']} blocked" if d["blocked_sender_count"] else "(none)",
-            prompt=_blocked_senders_prompt,
+            prompt=_unless_signed_in_without_credential("who this account blocks", _blocked_senders_prompt),
             brief="Refuse mail and messages from someone",
             help=(
                 "Lists the people you block, on this BBS and on linked BBSes, and lets you block "
@@ -1323,10 +1377,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="read_receipts", hotkey="x", menu_text=menu_key("x", "change read receipts", prefix="E"),
             label="Let senders see when I've read their mail",
             render=lambda d: "yes" if d["read_receipts"] else "no",
-            prompt=live_choice_field(
+            prompt=_unless_signed_in_without_credential("read receipts", live_choice_field(
                 "read_receipts", [False, True],
                 persist=lambda lane, v: lane.run(set_shares_read_receipts, user, v),
-            ),
+            )),
             brief="Mail read receipts, both ways",
             help=(
                 "On (the default): someone who sends you mail on this BBS sees in their Sent "
@@ -1344,10 +1398,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="mrc_private", hotkey="p", menu_text=menu_key("P", "rivate MRC messages"),
             label="Private messages from MRC users",
             render=lambda d: "accepted" if d["mrc_private"] else "not accepted",
-            prompt=live_choice_field(
+            prompt=_unless_signed_in_without_credential("private MRC messages", live_choice_field(
                 "mrc_private", [False, True],
                 persist=lambda lane, v: lane.run(set_mrc_private_messages_enabled, user, v),
-            ),
+            )),
             brief="Off by default; also needed to send",
             help=(
                 "Whether users on the Multi Relay Chat network can message you privately "
@@ -1361,10 +1415,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="mrc_lastseen", hotkey="w", menu_text=menu_key("W", "hen last seen on MRC"),
             label="MRC may remember when you were last seen",
             render=lambda d: "yes" if d["mrc_lastseen"] else "no",
-            prompt=live_choice_field(
+            prompt=_unless_signed_in_without_credential("what MRC remembers", live_choice_field(
                 "mrc_lastseen", [False, True],
                 persist=lambda lane, v: lane.run(set_mrc_lastseen_recorded, user, v),
-            ),
+            )),
             brief="The hub's LASTSEEN record; on is the hub's default",
             help=(
                 "Whether the Multi Relay Chat hub may answer other users' LASTSEEN questions about "
@@ -1377,10 +1431,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="history_name_visible", hotkey="h", menu_text=menu_key("H", "istory visibility"),
             label="Name shown to other callers",
             render=lambda d: "yes" if d["history_name_visible"] else "no (hidden)",
-            prompt=live_choice_field(
+            prompt=_unless_signed_in_without_credential("whether the name is shown", live_choice_field(
                 "history_name_visible", [False, True],
                 persist=lambda lane, v: lane.run(set_session_history_name_visible, user, v),
-            ),
+            )),
             brief="Show your name to other callers",
             help=(
                 "Whether your username appears in this node's previous-callers roll -- the "
@@ -1508,10 +1562,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="mrc_nick_color", hotkey="y", menu_text=menu_key("Y", "our MRC nick color"),
             label="MRC nick color",
             render=lambda d: f"{CGA_COLOR_NAMES[d['mrc_nick_color']]} (|{d['mrc_nick_color']:02d})",
-            prompt=live_choice_field(
+            prompt=_unless_signed_in_without_credential("the MRC nick color", live_choice_field(
                 "mrc_nick_color", list(range(16)),
                 persist=lambda lane, v: lane.run(set_mrc_nick_color, user, v),
-            ),
+            )),
             brief="The color your handle wears on MRC",
             help=(
                 "Every line you send to the Multi Relay Chat network carries your handle in front "
@@ -1600,6 +1654,9 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         collapsed=collapsed,
         accent_color=accent_color,
         header_color=header_color,
+        # What a field reported -- a refusal above all (issue #1073) -- is
+        # shown on the redraw instead of above a screen the redraw clears.
+        notices=lambda: take_notices(session),
     )
 
 
@@ -1632,6 +1689,9 @@ async def _edit_bio(session: Session, lane: DatabaseLane, user: User) -> None:
     confirmed step instead, only offered when there's an existing bio
     to lose.
     """
+    if signed_in_without_credential(session):
+        _refuse_shared_account(session, "the bio")
+        return
     if await lane.run(fullscreen_editor_enabled, user):
         current = await lane.run(get_bio, user) or ""
         result = await edit_prose(
@@ -1684,6 +1744,9 @@ async def _edit_signature(session: Session, lane: DatabaseLane, user: User) -> N
     exists over a bespoke line-at-a-time loop -- that reasoning applies
     here unchanged, not something worth re-deriving via a shared helper
     for two four-line call sites."""
+    if signed_in_without_credential(session):
+        _refuse_shared_account(session, "the signature")
+        return
     if await lane.run(fullscreen_editor_enabled, user):
         current = await lane.run(get_signature, user) or ""
         result = await edit_prose(
@@ -1751,6 +1814,9 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
     Sections group the self-reported and verified halves so the screen
     paginates cleanly on a 24-row terminal.
     """
+    if signed_in_without_credential(session):
+        _refuse_shared_account(session, "the name and details")
+        return
     description_level = await lane.run(menu_description_level, user)
     redraw_in_place = await lane.run(redraw_in_place_enabled, user)
     unicode_style = await lane.run(unicode_style_enabled, user)

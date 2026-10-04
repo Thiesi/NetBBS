@@ -589,6 +589,39 @@ sign of a forgotten commit, not a slow query.
   check, reliable-nodes refresh, daybreak announcer, Link sync loop, backup
   scheduler and managed-DNS updater all follow this.
 
+**A lane job runs in the caller's `contextvars` context (issue #1073).**
+`DatabaseLane.run` submits the job through `contextvars.copy_context().run`,
+as `asyncio.to_thread` does. A guest session's own preferences
+(`netbbs.user_preferences.session_scoped_preferences`) live in a context
+variable that `get_user_preference`/`set_user_preference` and
+`netbbs.sort_preferences` consult; without the copy, every getter run on the
+lane would have read the shared account's stored values instead. The
+context is copied, so a context variable *set* inside a lane job does not
+reach the caller.
+
+### Session-scoped preferences reach only the session's own reads (issue #1073)
+
+For a session that signed in without a credential, `run_authenticated_session`
+enters `session_scoped_preferences(user)`: writes through
+`set_user_preference` and the sort-order setters stay in memory, keyed to that
+account, and that session's reads see them first. It is entered there, not in
+`_login`, because `_login` runs under `asyncio.wait_for`, in a task of its own
+on Python 3.11, whose context dies with it. It covers only reads made in the
+session's own context. These do not see it, so anything they read must be
+refused to a guest rather than left to the overlay:
+
+- another session reading the guest account (Directory, Who's online, chat
+  labels, a sender checking `accepts_direct_messages`);
+- raw SQL over `user_preferences` (`mail._shares_read_receipts_by_id`,
+  `mail.read_receipts`, the session-history name-visibility backfill);
+- writes that bypass `set_user_preference` (`set_session_history_name_visible`
+  upserts directly so the fallback rows change in the same transaction);
+- the MRC bridge, which loads nick colour, private opt-in and last-seen by
+  username and caches them node-wide (`mrc_*_for_username`): an override read
+  through a guest's context would reach every guest via that cache.
+
+`netbbs.net.shared_account` holds the check and the on-screen reason.
+
 ### Persistent data versus projections
 
 Store structured domain data, never terminal-rendered ANSI. Rebuild derived
