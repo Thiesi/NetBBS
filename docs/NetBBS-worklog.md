@@ -622,6 +622,28 @@ refused to a guest rather than left to the overlay:
 
 `netbbs.net.shared_account` holds the check and the on-screen reason.
 
+### A guest call's files live in its own directory (issue #1075)
+
+`run_authenticated_session` also enters `netbbs.guest_call.guest_call()` for
+a credential-less session: a temporary directory and a door `user_id` above
+`2**62`, removed when the session ends. `drafts_directory(db)` returns the
+call's `drafts/` while it is current, so every caller that builds a draft
+path from it (posts, art, file descriptions, bio) is per call without a
+change of its own; the mail draft helpers build their path from the lane
+instead and are not covered, which is fine only while mail stays closed to
+the guest. `run_door` gives a bundled door launched by such a session the
+call's identity and directories (`_prepare_guest_sandbox`, made once per
+call) and makes a throwaway call of its own when none is current, so the
+sandbox does not depend on the session having been entered through the
+login flow. A new per-account file a guest can write needs the same
+treatment.
+
+What a guest may change of the account's own content is tracked on the
+session (`note_created_this_call`, read by
+`authored_earlier_by_shared_account`), not in the database: posts by
+`root_post_id`, uploads by row id, and an HTTP upload records itself through
+the grant's `on_stored` callback, which runs outside the session's task.
+
 ### Persistent data versus projections
 
 Store structured domain data, never terminal-rendered ANSI. Rebuild derived

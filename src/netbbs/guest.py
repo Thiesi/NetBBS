@@ -58,6 +58,14 @@ once it has re-checked everything the password path would have:
   action, and the login path would hand back a SysOp. The prohibition
   has to hold at the moment it is used, not only at the moment it is
   set.
+- it holds no privilege a SysOp grants a person (issue #1075): staff
+  permissions, identity verification, or a moderator grant. Each would
+  belong to every anonymous caller at once, for the same reason SysOp
+  level would. The grants themselves are refused for the account that is
+  the guest (`guest_grant_refusal`, checked where each is written), and
+  this check covers one made before the designation, or before #1075.
+  Read and post grants are not refused: they open an area to the guest
+  the way its level does, which is the mechanism this module describes.
 
 It also matches the typed name against the *resolved* account rather
 than against a separately-read configuration value, so a concurrent
@@ -200,6 +208,38 @@ def guest_user(db: Database) -> User | None:
     return user
 
 
+def is_guest_account(db: Database, user: User) -> bool:
+    """Whether `user` is the designated guest account, whether or not guest
+    login can use it right now -- the account a grant must not reach."""
+    designation = guest_designation(db)
+    return designation is not None and designation == (user.id, user.created_at)
+
+
+def guest_grant_refusal(user: User, what: str) -> str:
+    """Why `what` ("staff permissions", "a moderator grant") cannot be
+    given to `user`, the guest account (issue #1075)."""
+    return (
+        f"{user.username!r} is the guest account. Guest login skips the password, so it cannot "
+        f"hold {what}: every caller who signs in as a guest would."
+    )
+
+
+def guest_privileges(db: Database, user: User) -> list[str]:
+    """What `user` holds that the guest account may not, by name: empty for
+    an account fit to be the guest. SysOp level is `guest_is_eligible`'s and
+    the Guest access screen's own check."""
+    from netbbs.moderation.roles import holds_moderator_powers
+
+    held = []
+    if user.staff_permissions:
+        held.append("staff permissions")
+    if user.can_verify_identity:
+        held.append("identity verification")
+    if holds_moderator_powers(db, user):
+        held.append("a moderator grant")
+    return held
+
+
 def guest_is_eligible(db: Database, user: User) -> bool:
     """Whether `user` is, right now, the account this node signs in
     without a password.
@@ -220,7 +260,10 @@ def guest_is_eligible(db: Database, user: User) -> bool:
         return False
     if user.disabled_at is not None or user.pending_approval:
         return False
-    return not meets_level(user, SYSOP_LEVEL)
+    if meets_level(user, SYSOP_LEVEL):
+        return False
+    # Issue #1075: a privilege on the guest account is every guest's.
+    return not guest_privileges(db, user)
 
 
 def guest_login_for(db: Database, username: str) -> User | None:

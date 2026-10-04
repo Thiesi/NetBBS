@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from netbbs.guest_call import current_guest_call
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session
 from netbbs.rendering import MUTED_COLOR, colored
@@ -50,7 +51,19 @@ def drafts_directory(db: Database) -> Path:
     composition/edit, so this is a subdirectory rather than a single
     flat sibling file. Single source of truth for the convention
     `netbbs.net.board_flow._post_draft_path`/`netbbs.net.profile_flow.
-    _bio_draft_path` and `prune_stale_drafts` below all build on."""
+    _bio_draft_path` and `prune_stale_drafts` below all build on.
+
+    A guest call's drafts are its own (issue #1075): guest login puts every
+    anonymous caller on one account, and a file named after that account
+    would offer one guest's unfinished post to the next, or have two guests
+    write it at once. Such a call gets its own directory
+    (`netbbs.guest_call`), deleted when the call ends. Kept as files rather
+    than in memory because that is what both editors write, autosave and
+    `/exit` included, and they behave exactly as for anyone else within
+    the call."""
+    call = current_guest_call()
+    if call is not None:
+        return call.subdirectory("drafts")
     directory = db.path.parent / f"{db.path.name}_drafts"
     directory.mkdir(parents=True, exist_ok=True)
     return directory

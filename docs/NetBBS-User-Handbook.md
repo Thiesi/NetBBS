@@ -576,6 +576,13 @@ style, banners, editor, colors and sort orders go back to the account's own
 the next time anyone signs in as the guest. Register an account of your own to
 keep them.
 
+The same goes for what you leave behind. As a guest, your unfinished posts and
+file descriptions are kept only until you hang up, and you can edit, withdraw
+or describe only what you wrote during this call; posts other guests wrote
+under the account can't be changed. The bundled games play normally, but your
+progress lasts for the call only, and your scores and callsign don't reach the
+Hall of Fame or the War Dialer world.
+
 If your terminal did not say which it is, NetBBS asks once after you log in
 which of two sample lines looks right. If lines and arrows look wrong later,
 change this setting. If colors are poor, change the color preference. **Ctrl+L** redraws ordinary NetBBS screens after a display problem.

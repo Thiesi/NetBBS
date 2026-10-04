@@ -34,6 +34,8 @@ from netbbs.timeutil import resolve_display_preferences
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.session import SessionClosedError, physical_terminal_width
 from netbbs.net.session_activity import records_activity
+from netbbs.net.shared_account import signed_in_without_credential
+from netbbs.guest_call import current_guest_call, discard_guest_call, new_guest_call
 from netbbs.moderation.log import record_action
 from netbbs.rendering.charset import CP437, UTF8, encode_text, input_codec
 
@@ -113,8 +115,10 @@ def _minted_once(db, key: str) -> str:
 
 
 def _write_door_info(db, workdir, session, player, war_dialer=False, session_limit_seconds=None,
-                     door_id=None, rehearsal=False):
-    info = {"handle": player.username, "user_id": player.id,
+                     door_id=None, rehearsal=False, user_id=None):
+    # `user_id` is a guest call's own door identity (issue #1075), never an
+    # account's; otherwise the player's.
+    info = {"handle": player.username, "user_id": player.id if user_id is None else user_id,
             "terminal_width": physical_terminal_width(session), "terminal_height": session.terminal_height,
             "color_depth": "truecolor" if effective_truecolor(session, db, player) else "256",
             "node_name": session.node_display_name,
@@ -397,6 +401,67 @@ def record_voidrunner_save_dir(db) -> Path:
     return resolved
 
 
+#: The most Hall of Fame records a guest call copies into its own Voidrunner
+#: directory -- the cap `netbbs.backup` puts on the whole directory.
+_GUEST_SCORES_COPIED = 10000
+
+
+def _prepare_guest_sandbox(call, world_path, voidrunner_dir):
+    """Where a guest call plays the bundled doors (issue #1075): its own
+    Voidrunner directory and its own copy of War Dialer's world, inside the
+    call's directory and gone when the call ends. Returns `(voidrunner_dir,
+    world_path)` for the door's environment.
+
+    Made once, at the call's first launch, and played from for the rest of
+    it, so a guest who leaves a game and comes back finds it where they left
+    it. The Voidrunner directory starts with a copy of the node's Hall of
+    Fame records, so a guest sees the real standings; what the guest scores
+    is written to the copy. War Dialer's world is copied whole, through
+    SQLite's backup API so a live game's writes cannot tear it: the guest
+    plays against the node's real crews and exchanges, and none of it
+    reaches them. A node whose world does not exist yet gives the guest a
+    fresh one, as the door makes for anyone."""
+    doors = call.subdirectory("doors")
+    sandbox_voidrunner = doors / VOIDRUNNER_DIRNAME
+    if not sandbox_voidrunner.exists():
+        staging = doors / (VOIDRUNNER_DIRNAME + ".copying")
+        shutil.rmtree(staging, ignore_errors=True)
+        (staging / "scores").mkdir(parents=True)
+        copied = 0
+        try:
+            records = sorted((Path(voidrunner_dir) / "scores").iterdir())
+        except OSError:
+            records = []
+        for record in records:
+            if copied >= _GUEST_SCORES_COPIED:
+                break
+            if record.is_symlink() or not record.is_file() or re.fullmatch(r"[0-9]+\.json", record.name) is None:
+                continue
+            try:
+                shutil.copyfile(record, staging / "scores" / record.name)
+            except OSError:
+                continue
+            copied += 1
+        os.replace(staging, sandbox_voidrunner)
+    sandbox_world = None
+    if world_path is not None:
+        sandbox_world = doors / "war-dialer.db"
+        if not sandbox_world.exists() and Path(world_path).is_file():
+            partial = doors / "war-dialer.db.copying"
+            partial.unlink(missing_ok=True)
+            source = sqlite3.connect(str(world_path), timeout=5)
+            try:
+                target = sqlite3.connect(str(partial))
+                try:
+                    source.backup(target)
+                finally:
+                    target.close()
+            finally:
+                source.close()
+            os.replace(partial, sandbox_world)
+    return sandbox_voidrunner, sandbox_world
+
+
 def _door_environment(info_path, war_dialer_path=None, voidrunner_dir=None):
     env = {"NETBBS_DOOR_INFO": str(info_path)}
     try:
@@ -575,6 +640,14 @@ def children_start_ignoring_resize_signal() -> bool:
     signal.signal(signal.SIGUSR1, signal.SIG_IGN)
     _CHILDREN_IGNORE_RESIZE_SIGNAL = True
     return True
+
+
+def _is_bundled(door) -> bool:
+    """Whether `door` launches this install's own copy of a bundled door."""
+    from netbbs.doors.bundled import launched_bundled_door
+
+    install_dir = door.profile.install_dir if door.profile else None
+    return launched_bundled_door(door.executable_path, tuple(door.args), install_dir) is not None
 
 
 def bundled_follows_resize(door) -> bool:
@@ -818,6 +891,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
     reason, exit_code = "failed_to_start", None
     mode_entered = False
     handled_failure = False
+    # A guest call made here, when the session has none of its own to play in
+    # (issue #1075); removed with the run.
+    own_guest_call = None
     try:
         problems = await asyncio.to_thread(preflight, door, session, check_terminal=False)
         if problems:
@@ -834,15 +910,32 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             identity = str(Path(profile.install_dir).resolve()) if profile.install_dir else f"door-{door.id}"
             # Small local lock operation; no await that could lose an acquired lease on cancellation.
             lease = NodeLease(root, identity, profile.max_sessions)
+        voidrunner_dir = await lane.run(voidrunner_save_dir)
+        # Issue #1075: a session that signed in without a credential is one of
+        # every anonymous caller sharing the guest account, and the bundled
+        # doors key their saves on the account. Such a session plays them as
+        # an identity of its own, with saves that are thrown away at hang-up
+        # and never reach the Hall of Fame or the shared world. A SysOp's own
+        # doors keep the account: what they store is theirs, and is gated by
+        # level.
+        guest_call = None
+        if signed_in_without_credential(session) and await asyncio.to_thread(_is_bundled, door):
+            guest_call = current_guest_call()
+            if guest_call is None:
+                guest_call = own_guest_call = new_guest_call()
+            voidrunner_dir, world_path = await asyncio.to_thread(
+                _prepare_guest_sandbox, guest_call, world_path, voidrunner_dir)
+            # Nothing a guest's game does is published through the outbound
+            # hook either: it answers as a rehearsal (issue #520) does.
+            rehearsal = True
         workdir = Path(tempfile.mkdtemp(prefix="netbbs-door-"))
         info_path = await lane.run(_write_door_info, workdir, session, player, world_path is not None,
                                    effective_wall_limit(profile, wall_time_limit_seconds), door.id,
-                                   rehearsal)
+                                   rehearsal, guest_call.door_user_id if guest_call is not None else None)
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else physical_terminal_width(session)
         height = profile.height if profile and profile.height else session.terminal_height
-        env = _door_environment(info_path, world_path,
-                                await lane.run(voidrunner_save_dir))
+        env = _door_environment(info_path, world_path, voidrunner_dir)
         # Decided before the spawn, because the guard has to be in place before
         # there is a child to inherit it.
         vouched = (os.name == "posix" and bundled_follows_resize(door)
@@ -886,6 +979,10 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                                  "door_sys": str(drops / ("door.sys" if lower else "DOOR.SYS"))}
                 argv = [argv[0], *(arg.format_map(substitutions) for arg in argv[1:])]
                 env.update(profile.environment)
+                if guest_call is not None:
+                    # A profile's own save directory is the account's, not
+                    # this guest call's (issue #1075).
+                    env["VOIDRUNNER_SAVE_DIR"] = str(voidrunner_dir)
                 if world_path is not None:
                     # Keep a profile's relative path anchored to the server cwd,
                     # never the temporary node directory or installation directory.
@@ -1102,6 +1199,8 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     await _publish_chat_lines(chat_fanout, published, door)
                 if workdir is not None:
                     shutil.rmtree(workdir, ignore_errors=True)
+                if own_guest_call is not None:
+                    discard_guest_call(own_guest_call)
                 if lease:
                     lease.close()
             diagnostic = bytes(tail[-_DIAGNOSTIC_BYTES:]).decode("utf-8", errors="replace")

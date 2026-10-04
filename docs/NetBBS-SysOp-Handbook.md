@@ -1385,6 +1385,23 @@ profile and the display defaults every guest starts with, turn guest login off,
 sign in as the account with its password, set them under **Profile**, and turn
 guest login back on.
 
+Each guest call is kept apart from the next in three more ways. Its drafts are
+its own and are deleted at hang-up. It may edit, withdraw or describe only the
+posts and files it wrote during that call; whatever earlier guests wrote under
+the account stays as it is, and says so. And it plays Voidrunner, War Dialer
+and Retro Trivia under an identity of its own, with a save that is thrown away
+at hang-up: a guest sees the real Hall of Fame and the real War Dialer world,
+but its career, its callsign and its moves never reach them. Your own
+(non-bundled) doors still see the guest account; gate them by level if a guest
+should not reach them.
+
+The guest account can't be given staff permissions, identity verification or a
+moderator grant: anyone who signs in as the guest would hold it. Each screen
+that grants one says so, an account holding one can't be designated as the
+guest, and a guest account that somehow holds one signs nobody in until you
+remove it. Read and post grants still work, to open an area to guests above
+its level.
+
 Under **Operations → Node and sessions**:
 
 - **Monitor** is a live table of everyone connected, refreshed every two

@@ -112,6 +112,38 @@ class ModeratorGrant:
         return bool(self.permissions & int(permission))
 
 
+#: The board and file-area bits that make a moderator. READ and WRITE are
+#: access, not authority: they let an account past an area's level, as the
+#: level itself does.
+MODERATOR_BOARD_PERMISSIONS = BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE
+
+
+def _is_moderator_grant(object_type: str, permissions: int) -> bool:
+    if object_type == "channel":
+        return bool(permissions)
+    return bool(permissions & int(MODERATOR_BOARD_PERMISSIONS))
+
+
+def holds_moderator_powers(db: Database, user: User) -> bool:
+    """Whether `user` holds a moderator grant anywhere: an edit, delete or
+    approve bit on a board or file area, or any channel bit."""
+    return db.connection.execute(
+        "SELECT 1 FROM moderator_grants WHERE user_id = ? AND ("
+        "(object_type IN ('board', 'file_area') AND (permissions & ?) != 0) "
+        "OR (object_type = 'channel' AND permissions != 0)) LIMIT 1",
+        (user.id, int(MODERATOR_BOARD_PERMISSIONS)),
+    ).fetchone() is not None
+
+
+def _refuse_guest_moderator(db: Database, target: User) -> None:
+    """Issue #1075: the guest account is every anonymous caller, so a
+    moderator grant on it would make each of them a moderator."""
+    from netbbs.guest import guest_grant_refusal, is_guest_account
+
+    if is_guest_account(db, target):
+        raise ModeratorGrantError(guest_grant_refusal(target, "a moderator grant"))
+
+
 def grant_permissions(
     db: Database,
     target: User,
@@ -139,6 +171,8 @@ def grant_permissions(
     determined by the object itself.
     """
     enum_type = _validate_permission_type(object_type, permissions)
+    if _is_moderator_grant(object_type, int(permissions)):
+        _refuse_guest_moderator(db, target)
     row = _get_grant_row(db, target.id, object_type, object_id, community_id)
 
     if row is None:
@@ -196,6 +230,8 @@ def grant_everywhere(
     )
     for object_type, permissions in wanted:
         _validate_permission_type(object_type, permissions)
+    if any(_is_moderator_grant(object_type, int(permissions)) for object_type, permissions in wanted):
+        _refuse_guest_moderator(db, target)
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         for object_type, permissions in wanted:
