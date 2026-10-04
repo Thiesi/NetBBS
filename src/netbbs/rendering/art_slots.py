@@ -35,7 +35,8 @@ the art themselves, as text holding a bracketed key -- `[B]oards`,
 `Moder[a]tion`. Every such `[K]` is found with no token at all, by the
 same rule the browser uses to turn a click into a key
 (`netbbs-terminal.js`, `keyAt`): the item is the run of text around the
-key, bounded by two or more spaces. A drawn item the caller can't use
+key, bounded by two or more spaces or by a box-drawing or block
+character (issue #1070). A drawn item the caller can't use
 is blanked -- repainted as spaces in each cell's own background, so the
 frames and fills around it stay whole -- and an item the caller can use
 that the art doesn't draw goes into the `{menu}` region, as overflow.
@@ -79,7 +80,8 @@ MAX_SLOTS = 64
 #: clickable key (`netbbs-terminal.js`, `keyAt`), so whatever a caller can
 #: click in the art is exactly what this module counts as an item.
 _DRAWN_KEY = re.compile(r"\[([^\]\s])\]")
-#: Two or more spaces end a drawn item, as they end a clickable one.
+#: Two or more spaces end a drawn item, as they end a clickable one; so
+#: does a frame character (`_is_frame`).
 _ITEM_GAP = re.compile(r" {2,}")
 
 _TOKEN = re.compile(r"\{(menu|list|prompt|" + "|".join(FIELD_NAMES) + r")(?: ([0-9]{1,3})(?:x([0-9]{1,3}))?)?\}")
@@ -111,7 +113,8 @@ class DrawnItem:
     `width` are the cells it covers on its one row, and `text` what it
     says, for the console's check. `keys` holds every key drawn in the
     run -- normally just `key`, but `[B]oards [E]-mail` with one space is
-    one run holding two, and each counts as drawn."""
+    one run holding two, and each counts as drawn. A frame character
+    between two keys separates them, as two spaces do (issue #1070)."""
 
     key: str
     row: int
@@ -243,22 +246,35 @@ def _find_drawn_items(
         start = 0
         for gap in [*_ITEM_GAP.finditer(line), None]:
             end = gap.start() if gap is not None else len(line)
-            keys = list(_DRAWN_KEY.finditer(line, start, end))
-            if keys:
-                if len(keys) > 1:
-                    notes.append(
-                        f"row {row + 1}: {line[start:end].strip()!r} holds {len(keys)} keys, so it is blanked "
-                        "only for a caller who can use none of them; put two spaces between items"
-                    )
+            for keys in _split_at_frames(line, list(_DRAWN_KEY.finditer(line, start, end))):
                 item = _drawn_item(
                     line, row, start, end, keys[0].start(), keys[-1].start(), tuple(k.group(1) for k in keys)
                 )
+                if len(keys) > 1:
+                    notes.append(
+                        f"row {row + 1}: {item.text!r} holds {len(keys)} keys, so it is blanked only for a "
+                        "caller who can use none of them; put two spaces or a frame character between items"
+                    )
                 if not any(_inside(item, slot) for slot in slots):
                     items.append(item)
             if gap is None:
                 break
             start = gap.end()
     return tuple(items), tuple(notes)
+
+
+def _split_at_frames(line: str, keys: list[re.Match[str]]) -> list[list[re.Match[str]]]:
+    """`keys`, found in one run, grouped into items: a frame character
+    between two keys starts a new item (issue #1070). Only the text
+    between keys is looked at, so a key drawn as a frame character,
+    `[─]`, is never split."""
+    groups: list[list[re.Match[str]]] = []
+    for key in keys:
+        if groups and not any(_is_frame(char) for char in line[groups[-1][-1].end():key.start()]):
+            groups[-1].append(key)
+        else:
+            groups.append([key])
+    return groups
 
 
 def _is_frame(char: str) -> bool:

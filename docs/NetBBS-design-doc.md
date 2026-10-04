@@ -489,13 +489,16 @@ generated list, as does every case that makes the main menu fall back.
 leaving them to a `{menu WxH}` region (written `{menu}` below; it is the same
 token). Every bracketed key drawn in the art,
 `[K]`, marks one item; the item spans the run of text around it, bounded by
-two or more spaces, which is also how the browser terminal finds what a click
-means. Box-drawing and block characters also end an item, so a frame drawn
-one space from it is not part of it, and an item drawn inside a slot is not an
-item, since the slot is drawn over it. A run holding two keys, such as
-`[B]oards [E]-mail` with one space, is one item holding both: both count as
-drawn, it is blanked only for a caller who can use neither, and the console's
-check suggests two spaces between them. An item the caller cannot use is
+two or more spaces or by a box-drawing or block character (U+2500-259F), which
+is also how the browser terminal finds what a click means. So a frame drawn
+one space from an item is not part of it, and `[M]essage boards│ [N]ew scan`
+is two items, as a panel gutter between them should make it. A key drawn as
+such a character, `[─]`, is still a key. An item drawn inside a slot is not an
+item, since the slot is drawn over it. A run holding two keys with neither
+between them, such as `[B]oards [E]-mail` with one space, is one item holding
+both: both count as drawn, it is blanked only for a caller who can use
+neither, and the console's check suggests two spaces or a frame character
+between them. An item the caller cannot use is
 blanked: its cells are repainted as spaces in the background each cell shows,
 so frames and fills stay whole and the caller sees only what the generated
 menu would show. Items the caller can use that the art does not draw go into

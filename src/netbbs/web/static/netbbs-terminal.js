@@ -277,7 +277,10 @@
 
   // The key a click at `col` on `text` means, or null. Menu entries are
   // separated by two or more spaces, so the entry around the click is the
-  // run between such gaps; its bracketed letter is its key.
+  // run between such gaps; its bracketed letter is its key. A box-drawing
+  // or block character (U+2500-259F) also ends an entry, as it ends an
+  // item drawn into SysOp art (art_slots.py, issue #1070), unless it is
+  // itself a bracketed key; a click on such a frame means nothing.
   function keyAt(text, col) {
     var row = /^(?:> |  )?\s*(\d{2})\.\s/.exec(text);
     if (row) return row[1];
@@ -286,9 +289,13 @@
     // and the whole row picks it, its value column included.
     var drawn = /^[^A-Za-z0-9\[]*?\s(\d{2})\.\s/.exec(text);
     if (drawn) return drawn[1];
+    function frame(i) {
+      return text[i] >= "\u2500" && text[i] <= "\u259f" && !(text[i - 1] === "[" && text[i + 1] === "]");
+    }
+    if (frame(col)) return null;
     var start = col, end = col;
-    while (start > 0 && !(text[start - 1] === " " && text[start - 2] === " ")) start--;
-    while (end < text.length && !(text[end] === " " && text[end + 1] === " ")) end++;
+    while (start > 0 && !(text[start - 1] === " " && text[start - 2] === " ") && !frame(start - 1)) start--;
+    while (end < text.length && !(text[end] === " " && text[end + 1] === " ") && !frame(end)) end++;
     var entry = /\[([^\]\s])\]/.exec(text.slice(start, end));
     return entry ? entry[1].toLowerCase() : null;
   }

@@ -1543,10 +1543,11 @@ You can also draw the menu's items into the art yourself, such as `[B]oards`
 or `Moder[a]tion`, instead of leaving all of them to `{menu}`:
 - **Any bracketed key is an item.** You don't need a token. The item is the
   text around the key, up to two spaces or a frame character on either side,
-  which is also what a browser caller can click. Put at least two spaces
-  between items: `[B]oards [E]-mail` with one space is one item, blanked
-  only for a caller who can use neither key, and a browser click on it
-  always means `[B]`.
+  which is also what a browser caller can click. Put at least two spaces or
+  a frame character such as `│` between items: `[B]oards [E]-mail` with one
+  space is one item, blanked only for a caller who can use neither key, and
+  a browser click on it always means `[B]`, while `[B]oards│ [E]-mail` is
+  two.
 - **Items a caller can't use are blanked.** A level-20 caller doesn't see your
   drawn `[S]ysOp console` at all: its cells are painted over in the colour
   behind them, so your frame and fill stay whole. Putting staff-only items on
