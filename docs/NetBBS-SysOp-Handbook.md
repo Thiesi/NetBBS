@@ -506,7 +506,9 @@ with the reason (a pending account, for example); `U` turns it on or off.
 Each automatic promotion appears in the moderation log as **(system)**,
 naming the rule.
 
-To see what every level opens in one place, open **Users ▸ Le[v]els**. Each
+#### Level Admin SysOp Tool (LAST)
+
+To see what every level opens in one place, open **Users ▸ [L]evels (LAST)**. Each
 row is a level that matters on your node: one some board, file area,
 channel, door or setting is gated at, or one an account holds. The row shows
 how many enabled accounts hold exactly that level and what it adds to the
@@ -521,20 +523,20 @@ verified-name requirement, a members-only channel) still applies. Picking a
 board, file area, channel or door there opens its own screen, where you can
 change its levels. `G` on the level list shows any level, in use or not.
 
-You can name a level, for example "Member" for 10: on the Levels screen,
+You can name a level, for example "Member" for 10: in LAST,
 press `M` (Na[m]e) on its row and type the name, or a blank line to clear
 it. 255 is always "SysOp". From then on the console shows that level as
-`10 (Member)`, and the level prompt on a user's screen and `G` on the Levels
-screen take `member` as well as `10`. A name is only a label: renaming or
+`10 (Member)`, and the level prompt on a user's screen and `G` in LAST
+take `member` as well as `10`. A name is only a label: renaming or
 clearing it changes nobody's access. It can be up to 12 characters, needs at
 least one letter, and no two levels can share one.
 
 The same overview is available from the shell, without opening the console:
 
 ```sh
-python -m netbbs.admin levels                          # every level in use
-python -m netbbs.admin levels member                   # what one level opens
-python -m netbbs.admin levels --user alice --to 50     # one account's change, previewed
+python -m netbbs.admin last                          # every level in use
+python -m netbbs.admin last member                   # what one level opens
+python -m netbbs.admin last --user alice --to 50     # one account's change, previewed
 ```
 
 Add `--json` to any of them for scripts. The command only reads; it changes

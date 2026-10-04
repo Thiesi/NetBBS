@@ -210,7 +210,7 @@ def test_the_level_prompt_shows_the_preview_before_changing_anything(db, lane, s
     create_board(db, "lounge", min_read_level=10, creator=sysop)
     create_user(db, "alice", password="hunter2")
 
-    rows = _screen(lane, sysop, ["u", "l", "s", "alice", "l", "10"])
+    rows = _screen(lane, sysop, ["u", "u", "s", "alice", "l", "10"])
 
     text = _flat(rows)
     assert "Level 0 → 10" in text
@@ -223,7 +223,7 @@ def test_apply_makes_the_change(db, lane, sysop):
     create_board(db, "lounge", min_read_level=10, creator=sysop)
     create_user(db, "alice", password="hunter2")
 
-    rows = _screen(lane, sysop, ["u", "l", "s", "alice", "l", "10", "a"])
+    rows = _screen(lane, sysop, ["u", "u", "s", "alice", "l", "10", "a"])
 
     assert get_user_by_username(db, "alice").user_level == 10
     assert "'alice' is now level 10." in rows
@@ -233,7 +233,7 @@ def test_back_leaves_the_level_alone(db, lane, sysop):
     create_board(db, "lounge", min_read_level=10, creator=sysop)
     create_user(db, "alice", password="hunter2")
 
-    rows = _screen(lane, sysop, ["u", "l", "s", "alice", "l", "10", "b"])
+    rows = _screen(lane, sysop, ["u", "u", "s", "alice", "l", "10", "b"])
 
     assert get_user_by_username(db, "alice").user_level == 0
     assert "'alice' stays at level 0." in rows
@@ -242,14 +242,14 @@ def test_back_leaves_the_level_alone(db, lane, sysop):
 def test_a_change_that_opens_nothing_is_applied_without_a_preview(db, lane, sysop):
     create_user(db, "alice", password="hunter2")
 
-    rows = _screen(lane, sysop, ["u", "l", "s", "alice", "l", "10"])
+    rows = _screen(lane, sysop, ["u", "u", "s", "alice", "l", "10"])
 
     assert get_user_by_username(db, "alice").user_level == 10
     assert "'alice' is now level 10. That opens and closes nothing for them." in rows
 
 
 def test_a_refused_change_is_refused_before_any_preview(db, lane, sysop):
-    rows = _screen(lane, sysop, ["u", "l", "s", "sysop", "l", "10"])
+    rows = _screen(lane, sysop, ["u", "u", "s", "sysop", "l", "10"])
 
     assert "Level 255" not in _flat(rows)
     assert any("only active SysOp-level account" in row for row in rows)
