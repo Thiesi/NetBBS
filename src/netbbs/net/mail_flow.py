@@ -178,6 +178,7 @@ from netbbs.net.mail_recipients import (
 )
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, take_notices, write_notices
 from netbbs.net.session import Session, write_prompt
+from netbbs.net.shared_account import shared_account_refusal, signed_in_without_credential
 from netbbs.rendering.detail import Section, Styled
 from netbbs.quoting import forward_body, forward_subject, quote_body, reply_subject, sign_forward
 from netbbs.signature import append_signature, get_signature
@@ -2125,6 +2126,10 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
     mail and live messages from, newest first. `[A]dd` blocks someone by name -- a local user, or
     `name@TheirBBS` for someone on a linked BBS -- and `[U]nblock`, or
     picking a row, unblocks it. Each outcome is carried into the redraw."""
+    if signed_in_without_credential(session):
+        # Issue #1073: who the shared guest account blocks is every guest's.
+        announce(session, shared_account_refusal("who this account blocks"), tone="error")
+        return
 
     async def _reload() -> list[_BlockedRow]:
         return await lane.run(_load_blocked_rows, user)

@@ -40,6 +40,7 @@ from netbbs.net.notices import announce, write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
+from netbbs.net.shared_account import shared_account_refusal, signed_in_without_credential
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -441,6 +442,11 @@ async def _caller_who_screen(
 
     async def _toggle(target: BlockTarget) -> None:
         assert lane is not None
+        if signed_in_without_credential(session):
+            # Issue #1073: a block on the shared guest account refuses that
+            # person's messages to every guest, and tells them so.
+            announce(session, shared_account_refusal("who this account blocks"), tone="error")
+            return
         text, tone = await lane.run(toggle_block, user, target)
         announce(session, text, tone=tone)
 

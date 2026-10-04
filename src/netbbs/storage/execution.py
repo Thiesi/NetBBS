@@ -28,6 +28,7 @@ threads through async handler code from here on, since no single shared
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import logging
 import os
@@ -154,7 +155,12 @@ class DatabaseLane:
             )
         async with self._semaphore:
             loop = asyncio.get_running_loop()
-            job = functools.partial(self._run_job, func, *args, **kwargs)
+            # The job runs in the caller's context, as `asyncio.to_thread`
+            # would: a guest session's own preferences (issue #1073,
+            # `netbbs.user_preferences.session_scoped_preferences`) live in
+            # a context variable that the getters on this thread must see.
+            context = contextvars.copy_context()
+            job = functools.partial(context.run, self._run_job, func, *args, **kwargs)
             return await loop.run_in_executor(self._executor, job)
 
     def _run_job(self, func: Callable[..., T], *args, **kwargs) -> T:

@@ -93,6 +93,7 @@ from netbbs.net.unicode_style_preference import (
     unicode_style_enabled,
 )
 from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
+from netbbs.user_preferences import session_scoped_preferences
 from netbbs.net.animation_preference import animations_enabled
 from netbbs.net.art_pacing import WELCOME_ART, art_speed, write_paced_art
 from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
@@ -680,6 +681,43 @@ def _welcome_line(
 
 
 async def run_authenticated_session(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    user: User,
+    *,
+    node_controls: NodeControls | None = None,
+    lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
+    direct_invites: DirectChatInvites | None = None,
+    throttle: LoginThrottle | None = None,
+) -> None:
+    """`_run_signed_in`, with the preferences of a session that signed in
+    without a credential kept to that session (issue #1073).
+
+    Guest login (issue #531) puts every anonymous caller on one shared
+    account. Such a caller may still pick a character set, colour depth or
+    sort order -- a plain-ASCII terminal needs to -- but the choice lasts for
+    this call and never becomes the next guest's
+    (`netbbs.user_preferences.session_scoped_preferences`). Entered here, in
+    the session's own task and before anything reads a preference, so the
+    login questions, every screen and every task the session starts all see
+    it; `_login` itself runs under `asyncio.wait_for`, in a task of its own,
+    where a context variable set would not outlive it."""
+    options = dict(
+        node_controls=node_controls, lane=lane, link_context=link_context,
+        direct_invites=direct_invites, throttle=throttle,
+    )
+    if getattr(session, "authenticated_without_credential", False):
+        with session_scoped_preferences(user):
+            await _run_signed_in(session, db, hub, presence, mailbox, user, **options)
+    else:
+        await _run_signed_in(session, db, hub, presence, mailbox, user, **options)
+
+
+async def _run_signed_in(
     session: Session,
     db: Database,
     hub: ChatHub,
