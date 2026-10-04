@@ -3557,6 +3557,15 @@ async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
                 await ctx.session.write_line(colored("(sent to the hub; its answer follows)", fg_color=MUTED_COLOR))
             return
         if subcommand == "send":
+            if signed_in_without_credential(ctx.session):
+                # Review of #1074: a raw hub command is free text, so it can
+                # carry REGISTER, IDENTIFY or any account command the hub
+                # adds later; screening the text would always trail the hub.
+                # A guest uses the named /mrc commands instead.
+                await ctx.session.write_line(colored(
+                    shared_account_refusal("raw MRC hub commands"), fg_color=MUTED_COLOR,
+                ))
+                return
             if not rest:
                 await _show_usage(ctx.session, "mrc")
                 return

@@ -570,7 +570,7 @@ Signed in as the board's guest, you share one account with every other
 guest, so Profile won't change anything other callers see of it: the bio,
 signature, name and details, who it blocks, whether it takes messages, or its
 MRC settings. Each of those says so when you press it, and so do `/nick` and
-`/mrc register` or `identify` in chat and **Bloc[k]** in Who's online. Display
+`/mrc register`, `identify` or `send` in chat and **Bloc[k]** in Who's online. Display
 settings still change, for this call only: character set, color depth, redraw
 style, banners, editor, colors and sort orders go back to the account's own
 the next time anyone signs in as the guest. Register an account of your own to

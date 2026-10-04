@@ -1679,7 +1679,8 @@ Three consequences follow, and are intended rather than gaps:
   MRC settings that the node-wide bridge reads per handle (private messages,
   last-seen, nick color), its chat alias (`/nick`, which is announced and kept
   in scrollback) and its MRC hub registration (`/mrc register`, `identify`,
-  `roompass`, `update password`). Like the key screen, this is a check on how
+  `roompass`, `update password`, and raw `/mrc send`, whose free text could
+  carry any of them). Like the key screen, this is a check on how
   the session got in (`authenticated_without_credential`), not on the
   account: the entries stay where they are and say why when pressed, and the
   account signed in with its own password changes all of it as before.

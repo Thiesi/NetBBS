@@ -83,6 +83,29 @@ def test_a_guest_session_cannot_register_the_accounts_mrc_handle(db, lane, hub, 
     asyncio.run(scenario())
 
 
+def test_a_guest_session_cannot_send_raw_hub_commands(db, lane, hub, presence, channel, alice):
+    """Review of #1074: `/mrc send REGISTER ...` reached the hub under the
+    shared account's nick, past the register/identify guard."""
+    async def scenario():
+        rig = await _rig(db, lane, hub, channel)
+        try:
+            session = _guest_chat_session([
+                "/mrc send REGISTER s3cret", "/mrc send identify s3cret", "/mrc send UPDATE password x", "/quit",
+            ])
+            await _chat(session, lane, hub, presence, channel, alice, mrc_bridge=rig.bridge)
+            text = "\n".join(session.written)
+            assert _REASON in text
+            await asyncio.sleep(0.2)
+            assert not [
+                p for p in rig.fake.received
+                if p.body.upper().startswith(("REGISTER", "IDENTIFY", "UPDATE"))
+            ]
+        finally:
+            await rig.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.fixture
 def bob(db):
     return create_user(db, "bob", password="hunter2", user_level=10)
