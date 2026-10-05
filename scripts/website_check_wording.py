@@ -31,6 +31,10 @@ from pathlib import Path
 PAGES = {
     "index.html": "https://www.netbbs.org/",
     "overview.html": "https://www.netbbs.org/overview.html",
+    "boards.html": "https://www.netbbs.org/boards.html",
+    "files.html": "https://www.netbbs.org/files.html",
+    "doors.html": "https://www.netbbs.org/doors.html",
+    "mrc.html": "https://www.netbbs.org/mrc.html",
 }
 PROTECTED = re.compile(r"<pre\b.*?</pre>|<style>.*?</style>|<script>.*?</script>", re.S)
 TAG = re.compile(r"<[^>]+>")
