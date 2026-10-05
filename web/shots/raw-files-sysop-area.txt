@@ -1,0 +1,22 @@
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mUtilities[0m
+[38;5;240m─────────────────────────[0m
+
+[1m[38;5;246mFILE AREA[0m
+[38;5;75m  Description:[0m      [38;5;252mNode utilities and helper scripts[0m
+[38;5;75m  Files:[0m            [38;5;252m5 (last upload 04.10.2026 10:12)[0m
+[38;5;75m  Community:[0m        [38;5;252m(none)[0m
+
+[1m[38;5;246mACCESS[0m
+[38;5;75m  Read level:[0m       [38;5;252m0[0m                   [38;5;75m  Write level:[0m      [38;5;252m0[0m
+[38;5;75m  Minimum age:[0m      [38;5;248mnone[0m                [38;5;75m  Name requirement:[0m [38;5;248mnone[0m
+
+[1m[38;5;246mBEHAVIOR[0m
+[38;5;75m  Place:[0m            [38;5;252m1 of 5[0m              [38;5;75m  Moderated:[0m        [38;5;252mno[0m
+[38;5;75m  Max file age:[0m     [38;5;252munlimited[0m
+
+[1m[38;5;246mNETBBS LINK[0m
+[38;5;75m  Linked:[0m           [38;5;252mno[0m
+
+[[1m[38;5;46mE[0m]dit  [[1m[38;5;46mD[0m]own  [[1m[38;5;46mR[0m]emove  [[1m[38;5;46mP[0m]ending files  E[[1m[38;5;46mx[0m]pired files  [[1m[38;5;46mH[0m]istory
+[[1m[38;5;46mL[0m]ink this file area  [[1m[38;5;46mB[0m]ack
+Choice: 
