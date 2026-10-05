@@ -1,0 +1,14 @@
+[2J[H[1m[38;5;51mRe: Recapping a C64 breadbin[0m
+[38;5;240m────────────────────────────[0m
+wren[38;5;246m · [0m[38;5;246m04.09.2026 09:55[0m
+[38;5;246mreply to "Recapping a C64 breadbin"[0m
+
+otto wrote:
+[38;5;248m> [0m[38;5;248mFinally opened up the breadbin I found at the flea market. Every[0m
+[38;5;248m> [0m[38;5;248melectrolytic on the board is the original. Anyone have a cap list[0m
+[38;5;248m> [0m[38;5;248mfor the 250407 board, and is it worth doing the whole lot at once?[0m
+Do them all at once. The 250407 list is in the file area under
+Utilities -- recap-250407.txt. Mind the polarity on C35.
+
+[[1m[38;5;46mR[0m]eply  [[1m[38;5;46mM[0m]ail author  [[1m[38;5;46mN[0m]ext post  [[1m[38;5;46mP[0m]revious post  [[1m[38;5;46mB[0m]ack
+Choice: 
