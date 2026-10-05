@@ -124,6 +124,13 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 #        exactly two of them -- and a digit that lands on a transfer instead
 #        publishes a garrison preview under the service's caption.
 #
+#   `~`  the launch splash, as its last frame leaves it. Every other walk runs
+#        with `DOOR_SPLASH=0`, so a panel is the screen behind the splash
+#        and a launch costs no animation; this one turns the splash back on and
+#        keeps what was drawn between the splash's own clear and its handover.
+#        A preset without motion has no splash, so `SPLASH_PRESETS` names the
+#        presets this walk is taken in.
+#
 # A walk photographs one screen: the one it is looking at when its keys run out.
 # Passing *through* a picker on the way somewhere else therefore reviews nothing
 # of it, so a screen on the way to another screen needs a walk of its own that
@@ -132,6 +139,8 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 WALKS: dict[str, list[tuple[str, bytes]]] = {
     "voidrunner": [
         # (label, keys) or (label, keys, fixture). The default fixture is "base".
+        # The animated launch splash, in the presets that animate.
+        ("Launch splash", b"~"),
         # A career saved mid-fight opens on the notice that says so, and waits
         # for a key before it draws the fight (issue #641).
         ("Journey Resumed", b"", "combat"),
@@ -190,6 +199,8 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # walk would otherwise throw away. Its scanline is the door's only
         # gradient, and had no panel to be reviewed on at all.
         ("Masthead", b"^"),
+        # The animated launch splash in front of it, in the presets that animate.
+        ("Launch splash", b"~"),
         # Before the career exists: the guide every new caller is handed, paged
         # with any key, which is why it is walked with Enter rather than [N].
         ("First visit", b"\r%"),
@@ -499,6 +510,7 @@ SHOWS: dict[str, dict[str, str]] = {
         # `painted` collapses runs of spaces, so the letter-spaced wordmark is
         # matched single-spaced; Fast mode draws no art and says it plainly.
         "Masthead": {"*": "W A R D I A L E R", "fast": "WAR DIALER"},
+        "Launch splash": "CONNECT 14400",
         "First visit": "FIRST VISIT",
         "While you were away": "WHILE YOU WERE AWAY",
         "Switchboard, season closing": "SEASON RESET",
@@ -562,6 +574,16 @@ SHOWS: dict[str, dict[str, str]] = {
     },
 }
 
+# The presets in which a door plays its launch splash: the rest turn motion off,
+# and with it the splash, so a `~` walk there would photograph nothing.
+SPLASH_PRESETS: dict[str, tuple[str, ...]] = {
+    "voidrunner": ("auto", "basic"),
+    # War Dialer can tell an idle terminal from typed-ahead keys only with
+    # `select()`, which a Windows pipe does not support, so it plays no splash
+    # there -- and a development gallery on Windows has none to photograph.
+    "war_dialer": ("auto",) if os.name != "nt" else (),
+}
+
 # Every preset a caller can choose, applied to the fixture's copy rather than
 # passed as a flag: Voidrunner keeps its display style in the career (all four of
 # `DISPLAY_STYLES`), War Dialer takes `unicode_style` from the drop file.
@@ -618,13 +640,14 @@ class Door:
     """
 
     def __init__(self, door: pathlib.Path, state: pathlib.Path, width: int, height: int,
-                 info_extra: dict) -> None:
+                 info_extra: dict, *, splash: bool = False) -> None:
         self.door = door
         self.size = f"{width}x{height}"
         env = dict(os.environ)
         env.update(NETBBS_DOOR_INFO=str(drop_file(state, width, height, info_extra)),
                    VOIDRUNNER_SAVE_DIR=str(state / "saves"),
                    WAR_DIALER_DB_PATH=str(state / "war-dialer.db"),
+                   DOOR_SPLASH="1" if splash else "0",
                    PYTHONIOENCODING="utf-8")
         self.proc = subprocess.Popen(
             [sys.executable, str(door)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -886,10 +909,18 @@ class Door:
 def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, height: int,
             info_extra: dict, *, expect: bool = True) -> list[str]:
     """Drive a walk and return the screen -- or pages -- it ends on."""
-    running = Door(door, state, width, height, info_extra)
+    running = Door(door, state, width, height, info_extra, splash=keys == b"~")
     pages: list[str] | None = None
     try:
         running.settle()
+        if keys == b"~":
+            # The splash clears once to start and once to hand over, and draws
+            # every frame in between by cursor address; the emulator replays
+            # them into the last frame. It keeps drawing until it hands over,
+            # so the settle above has already waited the whole animation out.
+            running.finish()
+            parts = running.read().split(CLEAR)
+            return [parts[1] if len(parts) > 2 else ""]
         if keys == b"^":
             # The masthead, and anything else a door draws before its first
             # screen clears. `last_screen` keeps what follows the clear, so
@@ -1294,6 +1325,7 @@ def build(door_name: str, widths: list[int], heights: dict[int, int],
     shots = [(label, keys, preset, extra, width, heights.get(width, 24), fixture)
              for label, keys, fixture in walks
              for preset, extra in PRESETS[door_name].items()
+             if keys != b"~" or preset in SPLASH_PRESETS.get(door_name, ())
              for width in widths]
 
     run_dir = pathlib.Path(tempfile.mkdtemp(prefix="gallery-run-"))

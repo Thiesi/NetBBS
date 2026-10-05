@@ -9895,6 +9895,21 @@ drawn before stdin is open -- is skipped rather than slept through, because an
 animation nobody is watching is only a delay. `fast` is a display preset beside
 `auto`: the same palette with every effect off.
 
+**The launch splash is motion too.** Once per launch, after the career's
+preset is applied and before the title card, the door plays a full-screen
+splash of about two and a half seconds: a parallax starfield, a ringed planet
+drawn two pixels to a cell in half blocks, a ship crossing on a cooling plasma
+trail, and the wordmark resolving in over it. It follows every rule above, and
+it is the one effect that takes the key that ends it: whatever follows is a new
+screen the caller has not seen yet, so a key pressed to skip a title card must
+not act on it. Keys typed before the splash appears are left for the game, and
+a launch that has already shown a refusal or a recovery screen skips it. It
+draws only the cells that change between frames, never the bottom-right cell,
+and composes a complete picture at every size the door accepts (the large face
+from 72x20, a 39-column compact one below). At sixteen colors each color is
+read by hue family rather than nearest distance, which kept the planet magenta
+instead of grey.
+
 Voidrunner offers saved display presets from station Display Options: full palette
 using the existing terminal color depth, the same palette with motion off
 (`fast`), basic 16-color, monochrome Unicode, and plain text with ASCII artwork.
@@ -12034,6 +12049,18 @@ the commit -- a result is written to the database first and only then revealed.
 Motion is forward-only except for one row it rewrites in place and owns, so the
 screen a caller is left looking at is identical whether motion played, was
 skipped, or was never enabled.
+
+*Launch splash.* The one exception to forward-only motion is the splash a
+session opens with: the call dialing out, the handshake, `CONNECT`, the
+masthead burning in and the ring of ten exchanges lighting in its holders'
+colors, drawn by cursor-addressed cell updates for about two and a half
+seconds and then cleared, so it leaves nothing behind on the screens that
+follow. Any key ends it and is consumed whole; it is omitted under every preset
+that omits motion, and whenever input is already waiting or stdin cannot be
+polled without reading it, so it never takes a keystroke meant for a later
+screen. A frame is written at least every 50 ms until the hand-over: the splash
+is never silent, so a driver that waits for output to settle does not type into
+it.
 
 *Presets.* Scene offers a free Display screen with immediate ASCII-decoration,
 monochrome and Fast-mode toggles. Back writes nothing. Store one bounded boolean

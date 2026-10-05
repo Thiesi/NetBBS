@@ -43,6 +43,14 @@ error. The detailed game strategy and screen walkthroughs formerly repeated here
 are available in the games' help and the developer design reference; this guide
 focuses on operating and recovering them.
 
+Each bundled game opens with an animated title of about two and a half seconds,
+which any key skips. It plays only on a live terminal, never when the caller has
+already typed ahead, and Voidrunner and War Dialer leave it out when the caller's
+display settings turn motion off. War Dialer plays it only on hosts where it can
+poll the terminal without reading from it, so not on Windows. **MANUAL — inside
+NetBBS:** to open a game straight on its first screen for every caller, add
+`{"DOOR_SPLASH":"0"}` to that door's profile environment JSON.
+
 ## War Dialer shared-world sessions
 
 The bundled War Dialer uses a world beside the node database: for `/srv/bbs/netbbs.db`,

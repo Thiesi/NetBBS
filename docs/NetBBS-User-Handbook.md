@@ -542,7 +542,9 @@ depends on what your SysOp has registered.
 - **Voidrunner:** build a persistent space-trading and exploration career.
 - **War Dialer:** develop a crew in a shared world of fictional BBS networks.
 
-Each game has its own controls and help. Quit through the game's own menu
+Each game opens with a short animated title screen; any key skips it.
+Voidrunner and War Dialer leave it out when their display settings turn motion
+off. Each game has its own controls and help. Quit through the game's own menu
 to return to NetBBS. A busy game may have a session limit; try again later.
 Your SysOp controls the time allowed and can help with a missing or locked save.
 

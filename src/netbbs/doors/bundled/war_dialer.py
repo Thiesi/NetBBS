@@ -66,6 +66,7 @@ XP earned" vs. "current HP" split any RPG already makes.
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import re
@@ -76,6 +77,7 @@ import textwrap
 import tempfile
 import time
 import unicodedata
+import zlib
 from contextlib import contextmanager, nullcontext, ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -3392,6 +3394,368 @@ def reveal(p: Palette, rows: list[str], *, frame: float = MOTION_FRAME_SECONDS,
             skipped = _beat(frame, hand_back=hand_back)
 
 
+# ---------------------------------------------------------------------------
+# The launch splash: the call going out, before the switchboard answers.
+#
+# A modem dials, screeches, connects, and the masthead burns in on a phosphor
+# tube; the ring of ten exchanges is sketched beneath it, lighting up in the
+# colors the crews hold them in. It is motion, so it follows the motion rules
+# (issue #494): any key ends it at once, and it is absent from every preset
+# that exists because a caller wants less. It is also absent whenever input is
+# already waiting or stdin cannot be polled -- a script that typed ahead, a
+# closed pipe, a test double -- so it can never eat or reorder a keystroke
+# that was meant for the screens after it.
+#
+# Every frame writes only the cells that change, addressed by cursor position,
+# and a frame goes out every SPLASH_FRAME_SECONDS until the hand-over: the
+# splash is never quiet, so nothing watching the output for silence mistakes
+# it for a screen waiting on a key.
+# ---------------------------------------------------------------------------
+
+SPLASH_FRAME_SECONDS = 0.045
+SPLASH_NUMBER = "555-0142"
+SPLASH_CONNECT = "CONNECT 14400"
+SPLASH_TAGLINE = "Rival crews. Ten exchanges. One scene."
+SPLASH_TAGLINE_SHORT = "Ten exchanges. One scene."
+SPLASH_HINT = "any key skips"
+
+# The large masthead: five rows of solid blocks, two-column strokes, open
+# counters, and a two-column gap between letters so the shadow never closes it.
+_SPLASH_FONT = {
+    "W": ("██   ██", "██   ██", "██ █ ██", "███████", " ██ ██ "),
+    "A": (" ████ ", "██  ██", "██████", "██  ██", "██  ██"),
+    "R": ("█████ ", "██  ██", "█████ ", "██ ██ ", "██  ██"),
+    "D": ("█████ ", "██  ██", "██  ██", "██  ██", "█████ "),
+    "I": ("██", "██", "██", "██", "██"),
+    "L": ("██    ", "██    ", "██    ", "██    ", "██████"),
+    "E": ("██████", "██    ", "█████ ", "██    ", "██████"),
+}
+# The compact masthead: three rows of half blocks, 36 columns, for 40x12.
+_SPLASH_FONT_SMALL = {
+    "W": ("█   █", "█ █ █", " ▀ ▀ "),
+    "A": ("▄▀▄", "█▀█", "▀ ▀"),
+    "R": ("█▀▄", "█▀▄", "▀ ▀"),
+    "D": ("█▀▄", "█ █", "▀▀ "),
+    "I": ("█", "█", "▀"),
+    "L": ("█  ", "█  ", "▀▀▀"),
+    "E": ("█▀▀", "█▀ ", "▀▀▀"),
+}
+_SPLASH_NOISE = "≈~∿≋░▒#%&*+=<>/\\|^"
+# Who holds each exchange, clockwise from the top of the ring. Unclaimed ones
+# stay hollow; the rest light in their crew's color, the same meanings the
+# switchboard gives them: you in phosphor, rivals in magenta, operators in cyan.
+_SPLASH_HOLDERS = ("phosphor", "magenta", "cyan", "magenta", None,
+                   "cyan", "magenta", "phosphor", "cyan", None)
+
+# One write: (row, column, [(style, text), ...]), 1-based screen coordinates.
+SplashOp = tuple[int, int, list[tuple[str, str]]]
+
+
+def _splash_word(font: dict[str, tuple[str, ...]], text: str, gap: int, space: int) -> list[str]:
+    rows = len(next(iter(font.values())))
+    out_rows = [""] * rows
+    for index, ch in enumerate(text):
+        if ch == " ":
+            out_rows = [row + " " * space for row in out_rows]
+            continue
+        glyph_rows = font[ch]
+        follows = index + 1 < len(text) and text[index + 1] != " "
+        out_rows = [row + glyph_rows[r] + (" " * gap if follows else "") for r, row in enumerate(out_rows)]
+    return out_rows
+
+
+def _splash_rgb(p: Palette, rgb: tuple[int, int, int], idx256: int) -> str:
+    return p._sgr(tuple(max(0, min(255, int(v))) for v in rgb), idx256)
+
+
+def _splash_scale(rgb: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
+    return tuple(int(v * factor) for v in rgb)
+
+
+def splash_layout(width: int, height: int) -> tuple[str, int, int, int, int]:
+    """("large" | "compact", top, left, rows, columns) of the composition.
+
+    The large one wants 72x24; anything smaller that the door runs in at all
+    gets the compact one, centered, so the splash fits every terminal the
+    door accepts and is never cut."""
+    if width >= 72 and height >= 24:
+        cols = min(width, 80)
+        return "large", (height - 24) // 2, (width - cols) // 2, 24, cols
+    cols = min(width, 40)
+    return "compact", max(0, (height - 12) // 2), (width - cols) // 2, 12, cols
+
+
+def splash_frames(p: Palette, info: dict, season_number: int, width: int, height: int,
+                  *, seed: int = 0) -> list[list[SplashOp]]:
+    """The whole animation as frames of cell writes, composed up front.
+
+    Pure: no I/O and no clock, so a test can hold every write to the terminal's
+    bounds. `play_splash` puts them on the wire."""
+    rng = random.Random(seed)
+    kind, top, left, rows, cols = splash_layout(width, height)
+    large = kind == "large"
+    tc = p._truecolor
+    frames: list[list[SplashOp]] = []
+
+    def at(r: int, c: int, *segments: tuple[str, str]) -> SplashOp:
+        return (top + r, left + c, [seg for seg in segments if seg[1]])
+
+    def frame(*ops: SplashOp) -> None:
+        frames.append([op for op in ops if op[2]])
+
+    phosphor, dim, grey = p.phosphor, p.phosphor_dim, p.grey
+    amber_b = p.amber + BOLD
+    ink = _splash_rgb(p, (235, 255, 240), 231)
+    hot = _splash_rgb(p, (190, 255, 205), 157)
+
+    # -- the call --------------------------------------------------------------
+    hint_col = cols - len(SPLASH_HINT) - 1
+    if large:
+        frame(at(2, hint_col, (grey, SPLASH_HINT)))
+        for typed in ("AT", "Z"):
+            frame(at(2, 3 + (0 if typed == "AT" else 2), (phosphor, typed)))
+        frame(at(2, 6, (grey, "  OK")))
+        dial_row, noise_row, cmd_col = 3, 4, 3
+    else:
+        frame()
+        dial_row, noise_row, cmd_col = 1, 2, 2
+    command = f"ATDT {SPLASH_NUMBER}"
+    for start in range(0, len(command), 3):
+        frame(at(dial_row, cmd_col + start, (phosphor, command[start:start + 3])))
+    noise_width = min(26 if large else 22, cols - cmd_col - 1)
+    noise_tones = (dim, grey, p.cyan, p.mint, dim)
+    for _ in range(6):
+        col = cmd_col
+        segments: list[tuple[str, str]] = []
+        while col < cmd_col + noise_width:
+            run = min(rng.randint(2, 5), cmd_col + noise_width - col)
+            segments.append((rng.choice(noise_tones), "".join(rng.choice(_SPLASH_NOISE) for _ in range(run))))
+            col += run
+        frame(at(noise_row, cmd_col, *segments))
+    frame(at(noise_row, cmd_col, (amber_b, SPLASH_CONNECT),
+             ("", " " * (noise_width - len(SPLASH_CONNECT)))))
+    cursor_at = (noise_row, cmd_col + len(SPLASH_CONNECT) + 1)
+
+    # -- the masthead burns in ---------------------------------------------------
+    letters = (_splash_word(_SPLASH_FONT, "WAR DIALER", 2, 4) if large
+               else _splash_word(_SPLASH_FONT_SMALL, "WAR DIALER", 1, 2))
+    if large:
+        # A drop shadow down and to the right, where the letter itself is not.
+        logo_w = len(letters[0]) + 1
+        grid = [list(row.ljust(logo_w)) for row in letters] + [[" "] * logo_w]
+        cells = [[(ch, "logo") if ch != " " else (" ", "") for ch in row] for row in grid]
+        for r in range(1, len(grid)):
+            for c in range(1, logo_w):
+                if cells[r][c][1] == "" and grid[r - 1][c - 1] != " ":
+                    cells[r][c] = ("█", "shadow")
+        logo_top = 6
+    else:
+        logo_w = len(letters[0])
+        cells = [[(ch, "logo") if ch != " " else (" ", "") for ch in row] for row in letters]
+        logo_top = 4
+    logo_h = len(cells)
+    logo_left = max(1, (cols - logo_w) // 2 + 1)
+
+    # One phosphor ramp down the strokes, a whole row at a time: the color
+    # changes between rows of a letter, never inside one, so it cannot break a
+    # letter's shape. The shadow is one dark tone.
+    ramp_tc = [(150, 255, 160), (95, 255, 90), (57, 255, 20), (40, 215, 30), (28, 175, 36)]
+    ramp_256 = [120, 119, 82, 46, 40]
+    if not large:
+        ramp_tc, ramp_256 = [ramp_tc[0], ramp_tc[2], ramp_tc[4]], [ramp_256[0], ramp_256[2], ramp_256[4]]
+
+    def logo_style(r: int, c: int, role: str) -> str:
+        if role == "shadow":
+            return _splash_rgb(p, (16, 58, 30), 22)
+        index = min(r, len(ramp_tc) - 1)
+        return _splash_rgb(p, ramp_tc[index], ramp_256[index])
+
+    def logo_run(r: int, c0: int, c1: int, override: str | None = None) -> SplashOp:
+        segments: list[tuple[str, str]] = []
+        for c in range(c0, c1):
+            ch, role = cells[r][c]
+            style = (override if role == "logo" and override else logo_style(r, c, role)) if role else ""
+            if segments and segments[-1][0] == style:
+                segments[-1] = (style, segments[-1][1] + ch)
+            else:
+                segments.append((style, ch))
+        return at(logo_top + r, logo_left + c0, *segments)
+
+    step = 6
+    blink = False
+    for c0 in range(0, logo_w + step, step):
+        ops = []
+        for r in range(logo_h):
+            if c0 < logo_w:
+                ops.append(logo_run(r, c0, min(logo_w, c0 + step), ink))
+            if c0 - step >= 0:
+                ops.append(logo_run(r, c0 - step, min(logo_w, c0), None))
+        frame(*ops)
+
+    # -- a scanline sweeps the tube; the pitch types itself beneath it -------------
+    tagline = SPLASH_TAGLINE if large and len(SPLASH_TAGLINE) <= cols - 2 else SPLASH_TAGLINE_SHORT
+    tagline = _fit(tagline, cols - 2)
+    tag_row = logo_top + logo_h + (1 if large else 1)
+    tag_col = max(1, (cols - _dlen(tagline)) // 2 + 1)
+    sweep_rows = list(range(logo_h)) + [None]
+    for index, r in enumerate(sweep_rows):
+        ops = []
+        if r is not None:
+            ops.append(logo_run(r, 0, logo_w, hot))
+        if index:
+            ops.append(logo_run(sweep_rows[index - 1], 0, logo_w, None))
+        chunk = 6
+        piece = tagline[index * chunk:(index + 1) * chunk]
+        if piece:
+            ops.append(at(tag_row, tag_col + index * chunk, (p.mint, piece)))
+        frame(*ops)
+    rest = tagline[len(sweep_rows) * 6:]
+    if rest:
+        frame(at(tag_row, tag_col + len(sweep_rows) * 6, (p.mint, rest)))
+
+    # -- the ring of ten exchanges -------------------------------------------------
+    def holder_style(holder: str | None) -> str:
+        return p.role(holder) + BOLD if holder else dim
+
+    def node_glyph(holder: str | None) -> str:
+        return "●" if holder else "○"
+
+    handle = _event_plain(str(info.get("handle", "Guest")))
+    node = _event_plain(str(info.get("node_name", "NetBBS")))
+    chip = f"◆ SEASON {season_number} ◆"
+    if large:
+        # A loop of line, not an ellipse: a terminal draws a rounded box
+        # cleanly, where an ellipse this flat breaks into gaps at its sides.
+        cy, cx, half_w, half_h = 18, cols // 2, 26, 3
+        x0, x1, y0, y1 = cx - half_w, cx + half_w, cy - half_h, cy + half_h
+        stops = [x0 + round((x1 - x0) * (i + 1) / 5) for i in range(4)]
+        nodes = ([(y0, x) for x in stops] + [(cy, x1)]
+                 + [(y1, x) for x in reversed(stops)] + [(cy, x0)])
+        taken = set(nodes)
+        path = ([(y0, x) for x in range(x0, x1 + 1)] + [(y, x1) for y in range(y0 + 1, y1)]
+                + [(y1, x) for x in range(x1, x0 - 1, -1)] + [(y, x0) for y in range(y1 - 1, y0, -1)])
+        corners = {(y0, x0): "╭", (y0, x1): "╮", (y1, x1): "╯", (y1, x0): "╰"}
+        links = [(r, c, corners.get((r, c), "─" if r in (y0, y1) else "│"))
+                 for r, c in path if (r, c) not in taken]
+
+        def link_style(r: int) -> str:
+            # Tilted toward the caller: the near edge of the ring is brighter.
+            if not tc:
+                return dim
+            return _splash_rgb(p, _splash_scale((78, 138, 98), 0.6 + 0.4 * (r - y0) / (y1 - y0)), 0)
+
+        quarter = max(1, -(-len(links) // 4))
+        for start in range(0, len(links), quarter):
+            frame(*(at(r, c, (link_style(r), ch)) for r, c, ch in links[start:start + quarter]))
+
+        def label(k: int) -> SplashOp:
+            r, c = nodes[k]
+            text = f"{k + 1:02d}"
+            if r == y0:
+                return at(r - 1, c - 1, (grey, text))
+            if r == y1:
+                return at(r + 1, c - 1, (grey, text))
+            return at(r, c + 2, (grey, text)) if c == x1 else at(r, c - 1 - len(text), (grey, text))
+
+        info_text = f"node › {_fit(node, 24)}   ·   handle › {_fit(handle, 18)}"
+        info_row = 23
+        for k in range(10):
+            ops = [at(*nodes[k], (ink, "◉"))]
+            if k:
+                ops += [at(*nodes[k - 1], (holder_style(_SPLASH_HOLDERS[k - 1]), node_glyph(_SPLASH_HOLDERS[k - 1]))),
+                        label(k - 1)]
+            if k == 5:
+                ops.append(at(cy, cx - len(chip) // 2 + 1, (amber_b, chip)))
+            frame(*ops)
+        frame(at(*nodes[9], (holder_style(_SPLASH_HOLDERS[9]), node_glyph(_SPLASH_HOLDERS[9]))), label(9),
+              at(info_row, max(1, (cols - _dlen(info_text)) // 2 + 1),
+                 (grey, "node › "), (p.cyan, _fit(node, 24)), (dim, "   ·   "),
+                 (grey, "handle › "), (p.mint, _fit(handle, 18))))
+    else:
+        chain_row, chain_left = 10, max(1, (cols - 19) // 2 + 1)
+        nodes = [(chain_row, chain_left + 2 * k) for k in range(10)]
+        frame(at(chain_row, chain_left, (dim, "─".join("·" * 10))))
+        for k in range(10):
+            ops = [at(*nodes[k], (ink, "◉"))]
+            if k:
+                ops.append(at(*nodes[k - 1], (holder_style(_SPLASH_HOLDERS[k - 1]), node_glyph(_SPLASH_HOLDERS[k - 1]))))
+            frame(*ops)
+        tail = f"{chip}  {handle}"
+        tail = _fit(tail, cols - 2)
+        frame(at(*nodes[9], (holder_style(_SPLASH_HOLDERS[9]), node_glyph(_SPLASH_HOLDERS[9]))),
+              at(11, max(1, (cols - _dlen(tail)) // 2 + 1),
+                 (amber_b, tail[:len(chip)]), (p.mint, tail[len(chip):])))
+
+    # -- carrier held: the cursor blinks, an exchange twinkles ----------------------
+    lit = [k for k in range(10) if _SPLASH_HOLDERS[k]]
+    previous = None
+    for tick in range(8):
+        ops = []
+        if tick % 3 == 0:
+            blink = not blink
+            ops.append(at(*cursor_at, (phosphor, "█" if blink else " ")))
+        if previous is not None:
+            ops.append(at(*nodes[previous], (holder_style(_SPLASH_HOLDERS[previous]),
+                                            node_glyph(_SPLASH_HOLDERS[previous]))))
+        previous = rng.choice(lit) if tick < 7 else None
+        if previous is not None:
+            ops.append(at(*nodes[previous], (ink, "◉")))
+        frame(*ops)
+    return frames
+
+
+def splash_bytes(frames: list[list[SplashOp]]) -> list[str]:
+    """Each frame as the text that draws it: a cursor move, then styled runs."""
+    rendered = []
+    for ops in frames:
+        parts = []
+        for row, col, segments in ops:
+            parts.append(f"{ESC}[{row};{col}H" + "".join(sty(style, text) for style, text in segments))
+        rendered.append("".join(parts))
+    return rendered
+
+
+def _splash_ready(p: Palette) -> bool:
+    """Whether a caller is plainly there, watching, with nothing typed yet."""
+    if not motion_enabled(p) or _PENDING_INPUT:
+        return False
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        # Not pollable without reading: a Windows pipe, a test double. A
+        # splash that cannot be skipped without risking a keystroke is no
+        # splash at all.
+        return False
+    return not ready  # typed-ahead input, or a closed stdin, belongs to the screens after
+
+
+def splash_switched_off() -> bool:
+    """`DOOR_SPLASH=0` (or `off`, `no`, `false`) turns the launch splash off.
+
+    A SysOp sets it in the door's environment to open straight on the game; the
+    door gallery sets it so its panels photograph the screens behind the splash,
+    and turns it back on only for the walk that photographs the splash itself.
+    """
+    return os.environ.get("DOOR_SPLASH", "").strip().lower() in ("0", "off", "no", "false")
+
+
+def play_splash(p: Palette, info: dict, season_number: int, width: int, height: int) -> bool:
+    """Draw the splash if it may be drawn. True if it ran (to the end or skipped)."""
+    if splash_switched_off() or not _splash_ready(p) or width < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
+        return False
+    seed = zlib.crc32(f"{info.get('node_name', '')}/{info.get('handle', '')}".encode("utf-8"))
+    frames = splash_bytes(splash_frames(p, info, season_number, width, height, seed=seed))
+    out(f"{ESC}[?25l{ESC}[2J{ESC}[H")
+    try:
+        for text in frames:
+            out(text)
+            if _beat(SPLASH_FRAME_SECONDS, hand_back=False):
+                break
+    finally:
+        out(f"{RESET}{ESC}[2J{ESC}[H{ESC}[?25h")
+    return True
+
+
 def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
     """The masthead: the door's name, its one-line pitch, a fading scanline rule
     and the season chip."""
@@ -5810,6 +6174,7 @@ def main() -> int:
         player = load_or_create_player(conn, user_id, handle, now, season_number)
 
         apply_display(palette, read_display(conn, user_id))
+        play_splash(palette, info, player.season_number, _OUTPUT_WIDTH, height)
         draw_title(palette, info, player.season_number, w)
         if is_new_player:
             draw_help(palette, w, height, onboarding=True)
