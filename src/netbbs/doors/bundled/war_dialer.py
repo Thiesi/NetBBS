@@ -3729,9 +3729,19 @@ def _splash_ready(p: Palette) -> bool:
     return not ready  # typed-ahead input, or a closed stdin, belongs to the screens after
 
 
+def splash_switched_off() -> bool:
+    """`DOOR_SPLASH=0` (or `off`, `no`, `false`) turns the launch splash off.
+
+    A SysOp sets it in the door's environment to open straight on the game; the
+    door gallery sets it so its panels photograph the screens behind the splash,
+    and turns it back on only for the walk that photographs the splash itself.
+    """
+    return os.environ.get("DOOR_SPLASH", "").strip().lower() in ("0", "off", "no", "false")
+
+
 def play_splash(p: Palette, info: dict, season_number: int, width: int, height: int) -> bool:
     """Draw the splash if it may be drawn. True if it ran (to the end or skipped)."""
-    if not _splash_ready(p) or width < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
+    if splash_switched_off() or not _splash_ready(p) or width < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
         return False
     seed = zlib.crc32(f"{info.get('node_name', '')}/{info.get('handle', '')}".encode("utf-8"))
     frames = splash_bytes(splash_frames(p, info, season_number, width, height, seed=seed))

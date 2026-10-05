@@ -5629,6 +5629,10 @@ both constrain how the hold may behave:
   door's output has gone quiet. A silent hold would read as a settled screen, and
   the first scripted key would be spent skipping the splash. The splash therefore
   writes a frame at least every 0.1 s until it has cleared and handed over.
+  The gallery also runs every walk with `DOOR_SPLASH=0`: the splash clears the
+  screen, so with it on the `^` walk keeps nothing but the splash, and War
+  Dialer's masthead -- drawn after it -- has no panel. Only the `~` walk turns it
+  on, to photograph the splash itself.
 - Unit tests and the door runtime tests feed stdin before or just after launch.
   The splash plays only when stdin is a live, pollable terminal with nothing
   already waiting; otherwise it draws nothing and consumes nothing. Input

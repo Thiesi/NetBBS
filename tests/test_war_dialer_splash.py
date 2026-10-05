@@ -176,3 +176,14 @@ def test_the_large_masthead_spells_the_name():
     assert len(small[0]) <= 38
     for row in rows + small:
         assert all(unicodedata.east_asian_width(ch) != "W" for ch in row)
+
+
+@pytest.mark.parametrize("value", ["0", "off", "No", " false "])
+def test_the_environment_can_switch_the_splash_off(monkeypatch, value):
+    written = []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd.select, "select", lambda r, w, x, t: ([], [], []))
+    monkeypatch.setattr(wd.sys, "stdin", io.StringIO(""))
+    monkeypatch.setenv("DOOR_SPLASH", value)
+    assert wd.play_splash(_palette(), INFO, 1, 80, 24) is False
+    assert written == []

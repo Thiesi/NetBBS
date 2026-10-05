@@ -684,9 +684,13 @@ class _KeyPoll:
                 self._ready(remaining)
             else:
                 time.sleep(min(0.01, remaining))
+        # The rest of the unit may not have arrived yet: an arrow key over a
+        # pipe or socket often comes as ESC in one read and "[A" in the next.
+        # Nothing waiting (`None`) is not the end of the unit -- keep waiting
+        # out the settle window; only end of input (`b""`) stops early.
         taken = len(data)
         settle = time.monotonic() + _SPLASH_UNIT_SECONDS
-        while data and taken < _SPLASH_UNIT_LIMIT and time.monotonic() < settle:
+        while data != b"" and taken < _SPLASH_UNIT_LIMIT and time.monotonic() < settle:
             data = self._read_now(64)
             if data:
                 taken += len(data)
@@ -1230,10 +1234,22 @@ def splash_frames(p: Palette, info: dict, width: int, height: int) -> list[str] 
     return _Splash(p, info, width, height, random.Random(seed)).frames()
 
 
+def splash_switched_off() -> bool:
+    """`DOOR_SPLASH=0` (or `off`, `no`, `false`) turns the launch splash off.
+
+    A SysOp sets it in the door's environment to open straight on the game; the
+    door gallery sets it so its panels photograph the screens behind the splash,
+    and turns it back on only for the walk that photographs the splash itself.
+    """
+    return os.environ.get("DOOR_SPLASH", "").strip().lower() in ("0", "off", "no", "false")
+
+
 def play_splash(p: Palette, info: dict, width: int, height: int, poll: _KeyPoll | None = None) -> bool:
     """Show the splash. Returns True if it ran (to the end or until a key),
     False if it was not shown: no live input to skip it with, typing-ahead
     already waiting, or a terminal too small for it."""
+    if splash_switched_off():
+        return False
     if poll is None:
         poll = _open_key_poll()
     if poll is None:

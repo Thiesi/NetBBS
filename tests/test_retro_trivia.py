@@ -18,6 +18,7 @@ import io
 import os
 import re
 import select
+import threading
 from pathlib import Path
 
 import pytest
@@ -409,6 +410,28 @@ def test_the_key_that_skips_is_spent_whole(use_select):
 
 
 @pytest.mark.parametrize("use_select", _poll_modes())
+def test_a_key_split_across_reads_is_still_spent_whole(use_select):
+    # Over a pipe or socket an arrow key often arrives as ESC in one read and
+    # "[A" in the next. The rest of the unit must be waited for and spent, not
+    # left to be read as keys by the round-length picker.
+    reader, writer = os.pipe()
+    try:
+        poll = rt._KeyPoll(reader, use_select)
+        os.write(writer, b"\x1b")
+        late = threading.Timer(rt._SPLASH_UNIT_SECONDS / 3, os.write, (writer, b"[A"))
+        late.start()
+        try:
+            assert poll.take(0.2)
+        finally:
+            late.join()
+        assert not poll.waiting(0.05), "the tail of the key was left for the round-length picker"
+    finally:
+        os.close(reader)
+        os.close(writer)
+        rt._PUSHBACK.clear()
+
+
+@pytest.mark.parametrize("use_select", _poll_modes())
 def test_typing_ahead_is_kept_in_order(use_select):
     reader, writer = os.pipe()
     try:
@@ -421,3 +444,13 @@ def test_typing_ahead_is_kept_in_order(use_select):
         os.close(reader)
         os.close(writer)
         rt._PUSHBACK.clear()
+
+
+@pytest.mark.parametrize("value", ["0", "off", "No", " false "])
+def test_the_environment_can_switch_the_splash_off(monkeypatch, value):
+    monkeypatch.setenv("DOOR_SPLASH", value)
+    poll = _FakePoll()
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        assert not rt.play_splash(rt.Palette(truecolor=True), {}, 80, 24, poll=poll)
+    assert buffer.getvalue() == "" and poll.takes == 0
