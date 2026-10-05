@@ -1,0 +1,9 @@
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mPending files in 'Incoming'[0m
+[38;5;246mpage 1/1, 2 total[0m
+[38;5;240m───────────────────────────────────────────[0m
+[1m[38;5;75m      NAME                             KIND   BY                SUBMITTED[0m
+[38;5;46m  01. [0m[38;5;220mqwk-reader-1.4.zip             [0m[38;5;248m  [0m[38;5;252mfile [0m[38;5;248m  [0m[38;5;79malice           [0m[38;5;248m  [0m[38;5;110m03.10.2026 22:18[0m
+[38;5;46m  02. [0m[38;5;220msunset-harbor.ans              [0m[38;5;248m  [0m[38;5;252mfile [0m[38;5;248m  [0m[38;5;79motto            [0m[38;5;248m  [0m[38;5;110m04.10.2026 19:56[0m
+
+[[1m[38;5;46mS[0m]earch  [[1m[38;5;46mB[0m]ack — or type a number to select; Ctrl-L: redraw, Ctrl-H: help
+Choice: 
