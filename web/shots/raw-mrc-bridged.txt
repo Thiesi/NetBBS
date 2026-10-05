@@ -1,0 +1,21 @@
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mNode[0m[38;5;246m › [0m[38;5;51mChat bridge (MRC)[0m
+[38;5;246mThis node's link to the Multi Relay Chat network, live.[0m
+[38;5;240m───────────────────────────────────────────────────────[0m
+
+[1m[38;5;246mCALLER-OPENED ROOMS[0m
+[38;5;75m  Open rooms:[0m          [38;5;252m1 of 32 open, retired after 7 idle days[0m
+[38;5;75m  Heard of:[0m            [38;5;252m6 rooms[0m
+[38;5;75m  Retired since start:[0m [38;5;252m0[0m
+
+[1m[38;5;246mBRIDGED CHANNELS[0m
+  [1m[38;5;246mChannel[0m    [1m[38;5;246mMRC room[0m  [1m[38;5;246mState[0m      [1m[38;5;246mUsers[0m  [1m[38;5;246mWho[0m
+  [38;5;240m──────────────────────────────────────────────────────────────────────────────[0m
+  [38;5;220mlobby[0m      [38;5;252m#lobby[0m    [38;5;82mbridged[0m        [38;5;252m5[0m  [38;5;246mjasper@vertigo, kite@blackwater,[0m
+                                         [38;5;246mmarla@theouterrim, nyx@amberlight,[0m
+                                         [38;5;246motto@silverlining[0m
+  [38;5;220mmrc:retro[0m  [38;5;252m#retro[0m    [38;5;82mopen room[0m      [38;5;252m3[0m  [38;5;246mdex@vertigo, quill@pixelpit,[0m
+                                         [38;5;246mwren@theouterrim[0m
+
+[[1m[38;5;46mR[0m]econnect now  [[1m[38;5;46mS[0m]ettings  [[1m[38;5;46mN[0m]ext page  [[1m[38;5;46mP[0m]rev page  [[1m[38;5;46mB[0m]ack
+[38;5;248m(Page 2 of 2 -- PgUp/PgDn to switch)[0m
+Choice: 

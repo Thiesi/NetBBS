@@ -1,0 +1,11 @@
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mAvailable chat channels[0m
+[38;5;246mpage 1/1, 4 total[0m
+[38;5;240m───────────────────────────────────────[0m
+[38;5;46m  01. [0m[38;5;220m[Multi Relay Chat][0m[38;5;248m - rooms on the MRC network[0m
+[38;5;46m  02. [0m[38;5;220mgames[0m[38;5;248m - Door games, high scores and trash talk (0 online)[0m
+[38;5;46m  03. [0m[38;5;220mharbor-talk[0m[38;5;248m - Local only: news and notes from the node (0 online)[0m
+[38;5;46m  04. [0m[38;5;220mlobby[0m[38;5;248m - The front room, bridged to MRC (1 online)[0m
+
+[[1m[38;5;46mS[0m]earch  [[1m[38;5;46mO[0m]rder  [[1m[38;5;46mB[0m]ack
+Sort: Alphabetical; or type a number to select; Ctrl-L: redraw, Ctrl-H: help
+Choice: 

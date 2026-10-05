@@ -1,0 +1,23 @@
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mNode[0m[38;5;246m › [0m[38;5;51mChat bridge (MRC)[0m
+[38;5;246mThis node's link to the Multi Relay Chat network, live.[0m
+[38;5;240m───────────────────────────────────────────────────────[0m
+
+[1m[38;5;246mCONNECTION[0m
+[38;5;75m  State:[0m               [1m[38;5;82m● CONNECTED[0m
+[38;5;75m  Hub:[0m                 [38;5;252mmrc.bottomlessabyss.net:5001 (TLS)[0m
+[38;5;75m  Site name:[0m           [38;5;252mHarbor Lights[0m
+[38;5;75m  Connected since:[0m     [38;5;110m12.09.2026 21:24[0m
+
+[1m[38;5;246mTRAFFIC[0m
+[38;5;75m  Connection attempts:[0m [38;5;252m1[0m
+[38;5;75m  Callers announced:[0m   [38;5;252m2[0m
+[38;5;75m  Dropped lines:[0m       [38;5;252m0 outbound, 0 inbound[0m
+
+[1m[38;5;246mNETWORK[0m
+[38;5;75m  Network size:[0m        [38;5;252m12 users on 7 boards, 3 rooms, low activity (as of 0 min[0m
+                       [38;5;252mago)[0m
+[38;5;75m  Hub round trip:[0m      [38;5;252m1 ms (as of 0 s ago)[0m
+
+[[1m[38;5;46mR[0m]econnect now  [[1m[38;5;46mS[0m]ettings  [[1m[38;5;46mN[0m]ext page  [[1m[38;5;46mP[0m]rev page  [[1m[38;5;46mB[0m]ack
+[38;5;248m(Page 1 of 2 -- PgUp/PgDn to switch)[0m
+Choice: 
