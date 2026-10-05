@@ -171,6 +171,9 @@
   .feature .icon{width:32px; height:32px; border-radius:8px; background:rgba(139,143,255,0.14); color:var(--violet); display:flex; align-items:center; justify-content:center; margin-bottom:1rem;}
   .feature h3{font-size:1rem; margin-bottom:0.5rem;}
   .feature p{color:var(--sub); font-size:0.88rem; line-height:1.6; margin:0;}
+  a.tour-card{display:block; text-decoration:none; transition:border-color .15s ease, transform .15s ease;}
+  a.tour-card:hover{border-color:#3a4256; transform:translateY(-1px);}
+  .tour-card .more{display:inline-block; margin-top:0.9rem; color:var(--violet); font-size:0.84rem; font-weight:600;}
 
   /* quickstart */
   .quickstart-box{background:var(--panel); border:1px solid var(--line); border-radius:16px; overflow:hidden;}
@@ -411,7 +414,7 @@
       <div class="section-head">
         <span class="eyebrow">Not a mockup</span>
         <h2>Real screens, from a real node.</h2>
-        <p>A caller's session, end to end: signing on, talking, reading, downloading, and finding a game. Every terminal below is an unedited capture from an actual NetBBS session over Telnet — same ANSI, same colors, same content a caller would really see. The screens a <em>SysOp</em> works in are on the <a href="overview.html#screens">overview</a>.</p>
+        <p>A caller's session, end to end: signing on, talking, reading, downloading, and finding a game. Every terminal below is an unedited capture from an actual NetBBS session over Telnet — same ANSI, same colors, same content a caller would really see. The screens a <em>SysOp</em> works in are on the <a href="overview.html#screens">overview</a>, and <a href="#tour">four tour pages</a> go through message boards, file areas, doors and the MRC bridge screen by screen.</p>
       </div>
       <div class="shots">
         <div class="term shot shot-tall">
@@ -616,6 +619,43 @@
     </div>
   </section>
 
+  <!-- ============================= TOUR ============================= -->
+  <section class="section" id="tour">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Take a closer look</span>
+        <h2>Screen by screen.</h2>
+        <p>Each of these pages follows one part of NetBBS from the caller&#8217;s first keypress to the SysOp console behind it, in real captures like the ones above.</p>
+      </div>
+      <div class="features">
+        <a class="feature tour-card" href="boards.html">
+          <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1" y="2" width="14" height="12" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M3.5 5.5H12.5M3.5 8H12.5M3.5 10.5H9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+          <h3>Message boards</h3>
+          <p>Reading, replying and searching, and the moderation and NetBBS Link carriage behind them.</p>
+          <span class="more">See the screens &rarr;</span>
+        </a>
+        <a class="feature tour-card" href="files.html">
+          <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 1.8H9.5L13 5.3V14.2H3V1.8Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.5V11.5M5.8 9.4L8 11.6L10.2 9.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h3>File areas</h3>
+          <p>Browsing, descriptions, uploads and downloads, and how a SysOp keeps file areas tidy.</p>
+          <span class="more">See the screens &rarr;</span>
+        </a>
+        <a class="feature tour-card" href="doors.html">
+          <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="4" width="13" height="9" rx="2" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 7V10M3 8.5H6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="10.5" cy="7.7" r="0.9" fill="currentColor"/><circle cx="12.3" cy="9.3" r="0.9" fill="currentColor"/></svg></div>
+          <h3>Doors</h3>
+          <p>The bundled games, DOS classics under DOSBox-X, remote door services, and how each one is set up.</p>
+          <span class="more">See the screens &rarr;</span>
+        </a>
+        <a class="feature tour-card" href="mrc.html">
+          <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1.6 3H10V8.2H4.8L2.6 10V8.2H1.6V3Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M6 5.8H14.4V11H13.4V12.8L11.2 11H8.4" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
+          <h3>The MRC bridge</h3>
+          <p>Chat channels joined to the Multi Relay Chat network, from the caller&#8217;s side and the SysOp console.</p>
+          <span class="more">See the screens &rarr;</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
   <!-- ============================= FEATURES ============================= -->
   <section class="section" id="features">
     <div class="wrap">
@@ -735,6 +775,13 @@ python -m netbbs --db netbbs.db --ssh-host 127.0.0.1 --disable-link</pre>
           <a href="https://github.com/Thiesi/NetBBS" target="_blank" rel="noopener">GitHub</a>
           <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">Releases</a>
           <a href="https://github.com/Thiesi/NetBBS/issues" target="_blank" rel="noopener">Report an abusive *.netbbs.org name</a>
+        </div>
+        <div class="foot-col">
+          <h4>Take a tour</h4>
+          <a href="boards.html">Message boards</a>
+          <a href="files.html">File areas</a>
+          <a href="doors.html">Doors</a>
+          <a href="mrc.html">The MRC bridge</a>
         </div>
         <div class="foot-col">
           <h4>Start here</h4>

@@ -1,10 +1,10 @@
 # www.netbbs.org
 
-Developer reference for the public project site. The two pages and their
+Developer reference for the public project site. The pages and their
 embedded captures are the source of truth. Edit them here and review the diff;
 deployment is a separate operation using the procedure below.
 
-Both pages are first-contact material. Explain what callers and SysOps can do,
+Every page is first-contact material. Explain what callers and SysOps can do,
 link to the three [handbooks](../docs/README.md), and keep protocol or implementation
 detail in the developer references. Do not copy phase-by-phase development
 history into the landing page. Claims about compatibility and readiness must
@@ -15,6 +15,10 @@ historical copies, not an editing or publishing route.
 web/
   netbbs-index.html      -> https://www.netbbs.org/
   netbbs-overview.html   -> https://www.netbbs.org/overview.html
+  netbbs-boards.html     -> https://www.netbbs.org/boards.html   tour pages: one
+  netbbs-files.html      -> https://www.netbbs.org/files.html    subsystem each,
+  netbbs-doors.html      -> https://www.netbbs.org/doors.html    linked from both
+  netbbs-mrc.html        -> https://www.netbbs.org/mrc.html      main pages
   shots/
     raw-*.txt            raw ANSI as the door wrote it
     shot-*.html          the same capture converted for embedding
@@ -22,7 +26,7 @@ web/
 
 ## Rules that are easy to get wrong
 
-- **LF only.** Both pages are stored LF. A capture converted to LF and embedded
+- **LF only.** Every page is stored LF. A capture converted to LF and embedded
   in a CRLF page turns every row break into `\r\r\n`, which HTML renders as a
   blank line between every terminal row. Keep one line ending everywhere.
 - **Never `write_text` a capture on Windows.** It turns the doors' CR LF into
@@ -93,7 +97,10 @@ already covers, under the same label, so the two cannot drift apart silently.
 names the ten NetBBS screens; `website_capture_chat_mrc.py`,
 `website_capture_door_menu.py` and `website_capture_door_profile.py` cover three
 more; `website_capture_door_screen.py <door> --list` names the walks the two
-bundled games offer. The raw ANSI for each lives in `shots/raw-<name>.txt` and
+bundled games offer. The tour pages add `website_capture_boards_showcase.py`,
+`website_capture_files_showcase.py`, `website_capture_doors_showcase.py` and
+`website_capture_mrc_showcase.py`, each with its own `--list`; their captures
+are `shots/raw-<page>-<name>.txt` (door screens are named after their game). The raw ANSI for each lives in `shots/raw-<name>.txt` and
 its converted form in `shots/shot-<name>.html`, so a capture can be regenerated,
 diffed, and re-embedded rather than rebuilt by hand.
 
