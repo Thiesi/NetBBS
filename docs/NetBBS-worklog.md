@@ -5619,6 +5619,26 @@ belong in issues, commits, or Git history.
 
 ---
 
+### A bundled door's launch splash must never look settled
+
+The three bundled doors open with an animated splash that holds the screen for
+about 2.5 seconds. Two kinds of tooling drive those doors with scripted keys, and
+both constrain how the hold may behave:
+
+- `scripts/door_gallery.py` and the website capture scripts type each key once a
+  door's output has gone quiet. A silent hold would read as a settled screen, and
+  the first scripted key would be spent skipping the splash. The splash therefore
+  writes a frame at least every 0.1 s until it has cleared and handed over.
+- Unit tests and the door runtime tests feed stdin before or just after launch.
+  The splash plays only when stdin is a live, pollable terminal with nothing
+  already waiting; otherwise it draws nothing and consumes nothing. Input
+  waiting at launch skips the splash and keeps every byte in order.
+
+A key that ends a splash is consumed whole -- an escape sequence or a paste
+included -- so it cannot act on the screen that follows. This is the one place
+door motion consumes its interrupting key; other effects leave it for the next
+reader.
+
 ## 12. Outstanding architectural areas
 
 This list is intentionally broad. GitHub issues are authoritative for current
