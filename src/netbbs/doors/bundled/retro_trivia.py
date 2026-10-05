@@ -763,7 +763,28 @@ _PIXEL_FONT = {
     "V": ("#.#", "#.#", "#.#", ".#.", ".#."),
     "A": (".#.", "#.#", "###", "#.#", "#.#"),
 }
-_QUESTION_PIXELS = (".###.", "#...#", "....#", "..##.", "..#..", ".....", "..#..")
+#: The large sign's own letters: the same shapes as the pixel face, drawn by
+#: hand with half blocks so bowls round off and V closes to a clean point.
+#: Every letter is six columns but I, which is two; one blank column always
+#: separates neighbours, and nothing is drawn into it.
+_BIG_FONT = {
+    "R": ("█████▄", "██  ██", "█████▀", "██ ▀█▄", "██  ██"),
+    "E": ("██████", "██    ", "█████ ", "██    ", "██████"),
+    "T": ("██████", "  ██  ", "  ██  ", "  ██  ", "  ██  "),
+    "O": ("▄████▄", "██  ██", "██  ██", "██  ██", "▀████▀"),
+    "I": ("██", "██", "██", "██", "██"),
+    "V": ("██  ██", "██  ██", "▀█▄▄█▀", " ████ ", "  ▀▀  "),
+    "A": ("▄████▄", "██  ██", "██████", "██  ██", "██  ██"),
+}
+#: The question mark under the spotlight: a round hook whose left end tucks
+#: under, a stem, a full blank row, and the dot.
+_QUESTION_ART = (" ▄▄█████▄▄ ",
+                 "███▀   ▀███",
+                 "▀▀▀    ▄██▀",
+                 "     ▄██▀  ",
+                 "    ███    ",
+                 "           ",
+                 "    ███    ")
 _TAGLINE_TEXT = "The Classic BBS & Retro Computing Challenge"
 _TAGLINE_SHORT = "BBS & Retro Computing"
 
@@ -899,11 +920,10 @@ class _Splash:
             pixels = _PIXEL_FONT[ch]
             cells = []
             if big:
-                for r, line in enumerate(pixels):
-                    for c, pixel in enumerate(line):
-                        if pixel == "#":
-                            cells += [(r, col + 2 * c, "█"), (r, col + 2 * c + 1, "█")]
-                col += 2 * len(pixels[0]) + 1
+                art = _BIG_FONT[ch]
+                for r, line in enumerate(art):
+                    cells += [(r, col + c, glyph) for c, glyph in enumerate(line) if glyph != " "]
+                col += len(art[0]) + 1
             else:
                 for r in range(3):
                     upper = pixels[2 * r]
@@ -918,7 +938,7 @@ class _Splash:
 
     @staticmethod
     def _word_width(word: str, big: bool) -> int:
-        widths = [len(_PIXEL_FONT[ch][0]) * (2 if big else 1) for ch in word]
+        widths = [len(_BIG_FONT[ch][0]) if big else len(_PIXEL_FONT[ch][0]) for ch in word]
         return sum(widths) + len(widths) - 1
 
     def _compose(self) -> None:
@@ -1041,10 +1061,13 @@ class _Splash:
         if big:
             # Each tube throws its own color on the backdrop behind it: a
             # shadow in the tube's hue reads as neon glow, a grey one as mud.
+            # The glow stays inside its own letter's columns: spilling into the
+            # blank column between letters ran neighbours together ("TRWIA").
             for letter, glow in zip(self.letters, self.glows):
+                last = max(c for _, c, _, _ in letter)
                 for r, c, _, _ in letter:
-                    if (r + 1, c + 1) not in lit_cells and c + 1 <= self.right - 2:
-                        self.cells[(r + 1, c + 1)] = ("█", glow)
+                    if (r + 1, c + 1) not in lit_cells and c + 1 <= last:
+                        self.cells[(r + 1, c + 1)] = ("▀", glow)
         for letter in self.letters:
             for r, c, glyph, _ in letter:
                 self.cells[(r, c)] = (glyph, off)
@@ -1058,16 +1081,11 @@ class _Splash:
             half = 3 + (step * 3) // 2
             for c in range(max(left, centre - half), min(right, centre + half) + 1):
                 self.cone.append((row + step, c))
-        mark_left = centre - len(_QUESTION_PIXELS[0])
-        for r, line in enumerate(_QUESTION_PIXELS):
-            color = _QUESTION_RAMP[r]
-            cells = []
-            for c, pixel in enumerate(line):
-                if pixel == "#":
-                    style = self.style(color, bold=True)
-                    cells += [(row + 1 + r, mark_left + 2 * c, "█", style),
-                              (row + 1 + r, mark_left + 2 * c + 1, "█", style)]
-            self.question.append(cells)
+        mark_left = centre - len(_QUESTION_ART[0]) // 2
+        for r, line in enumerate(_QUESTION_ART):
+            style = self.style(_QUESTION_RAMP[r], bold=True)
+            self.question.append([(row + r, mark_left + c, glyph, style)
+                                  for c, glyph in enumerate(line) if glyph != " "])
         floor_row = row + 8
         half = 3 + (8 * 3) // 2
         for c in range(max(left, centre - half), min(right, centre + half) + 1):
