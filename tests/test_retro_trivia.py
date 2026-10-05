@@ -15,7 +15,9 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import re
+import select
 from pathlib import Path
 
 import pytest
@@ -250,3 +252,172 @@ def test_the_question_header_keeps_its_box_on_one_row(keys, terminal):
     opening = [row for row in _rows(drawn) if row.startswith("╭")]
     assert len(opening) == 1, opening
     assert opening[0].endswith("╮"), opening[0]
+
+
+# -- the launch splash ---------------------------------------------------
+
+_CURSOR = re.compile(r"\x1b\[(\d+);(\d+)H|\x1b\[(\d+)C|\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+def _screen(frames: list[str]) -> dict[tuple[int, int], str]:
+    """The glyph left in each cell once `frames` have all been drawn."""
+    screen: dict[tuple[int, int], str] = {}
+    row = col = 1
+    for frame in frames:
+        position = 0
+        for match in _CURSOR.finditer(frame + "\x1b[0m"):
+            for ch in frame[position:match.start()]:
+                assert ch not in "\r\n", "a splash frame must not scroll the terminal"
+                width = rt._char_width(ch)
+                if width:
+                    screen[(row, col)] = ch
+                    _WRITES.append((row, col + width - 1))
+                    col += width
+            if match.group(1):
+                row, col = int(match.group(1)), int(match.group(2))
+            elif match.group(3):
+                col += int(match.group(3))
+            position = match.end()
+    return screen
+
+
+_WRITES: list[tuple[int, int]] = []
+
+
+def _cells_written(frames: list[str]) -> list[tuple[int, int]]:
+    """Every (row, col) a frame writes a glyph to, following its cursor moves."""
+    _WRITES.clear()
+    _screen(frames)
+    return list(_WRITES)
+
+
+def _screen_rows(frames: list[str]) -> list[str]:
+    screen = _screen(frames)
+    height = max(row for row, _ in screen)
+    width = max(col for _, col in screen)
+    return ["".join(screen.get((row, col), " ") for col in range(1, width + 1)) for row in range(1, height + 1)]
+
+
+@pytest.mark.parametrize("width,height", [(40, 12), (60, 18), (80, 24), (132, 50)])
+@pytest.mark.parametrize("truecolor", [True, False])
+def test_every_splash_frame_stays_inside_its_terminal(width, height, truecolor):
+    frames = rt.splash_frames(rt.Palette(truecolor=truecolor), {"handle": "keeper", "node_name": "Harbor Lights"},
+                              width, height)
+    assert frames and len(frames) == rt.SPLASH_FRAMES
+    cells = _cells_written(frames)
+    # The last column is never written: a glyph there leaves some terminals
+    # waiting to wrap, and the next write scrolls the screen.
+    assert all(1 <= row <= height and 1 <= col <= width - 1 for row, col in cells)
+    assert sum(len(frame.encode()) for frame in frames) < 40_000 or width > 80
+
+
+def test_the_splash_shows_the_stage_only_where_it_fits():
+    p = rt.Palette(truecolor=True)
+    full = "\n".join(_screen_rows(rt.splash_frames(p, {"handle": "keeper"}, 80, 24)))
+    compact = "\n".join(_screen_rows(rt.splash_frames(p, {"handle": "keeper"}, 40, 12)))
+    assert "TONIGHT'S CONTESTANT" in full and "keeper" in full and "Retro Computing Challenge" in full
+    assert "keeper" in compact and "Retro Computing Challenge" not in compact
+    assert rt.splash_frames(p, {}, 39, 24) is None
+    assert rt.splash_frames(p, {}, 80, 11) is None
+
+
+def test_a_hostile_handle_cannot_reach_the_terminal_through_the_splash():
+    frames = rt.splash_frames(rt.Palette(truecolor=True),
+                              {"handle": "\x1b[2Jx\x07" + "界" * 40, "node_name": "N\x1b]0;t\x07"}, 40, 12)
+    drawn = "".join(frames)
+    assert drawn.count("\x1b[2J") == 1  # the splash's own clear, nothing from the handle
+    assert "\x07" not in drawn and "\x1b]" not in drawn
+    assert all(col <= 39 for _, col in _cells_written(frames))
+
+
+class _FakePoll:
+    def __init__(self, *, typed_ahead=False, key_after=None):
+        self.typed_ahead = typed_ahead
+        self.key_after = key_after
+        self.takes = 0
+
+    def waiting(self, timeout):
+        return self.typed_ahead
+
+    def take(self, timeout):
+        self.takes += 1
+        return self.key_after is not None and self.takes > self.key_after
+
+
+def test_a_key_ends_the_splash_at_once_and_hands_over_a_clear_screen():
+    poll = _FakePoll(key_after=3)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        assert rt.play_splash(rt.Palette(truecolor=True), {"handle": "keeper"}, 80, 24, poll=poll)
+    assert poll.takes == 4  # three frames ran out, the fourth was interrupted
+    assert buffer.getvalue().endswith("\x1b[2J\x1b[H\x1b[?25h")
+
+
+def test_typing_ahead_skips_the_splash_and_draws_nothing():
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        shown = rt.play_splash(rt.Palette(truecolor=True), {}, 80, 24, poll=_FakePoll(typed_ahead=True))
+    assert not shown and buffer.getvalue() == ""
+
+
+def test_without_a_live_input_stream_the_splash_is_not_drawn(monkeypatch):
+    class NoFileno:
+        def fileno(self):
+            raise io.UnsupportedOperation("not a real stream")
+
+    monkeypatch.setattr(rt.sys, "stdin", NoFileno())
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        assert not rt.play_splash(rt.Palette(truecolor=True), {}, 80, 24)
+    assert buffer.getvalue() == ""
+
+
+def _poll_modes():
+    modes = []
+    reader, writer = os.pipe()
+    try:
+        try:
+            select.select([reader], [], [], 0)
+            modes.append(True)
+        except OSError:
+            pass
+        try:
+            os.set_blocking(reader, False)
+            os.set_blocking(reader, True)
+            modes.append(False)
+        except OSError:
+            pass
+    finally:
+        os.close(reader)
+        os.close(writer)
+    return modes
+
+
+@pytest.mark.parametrize("use_select", _poll_modes())
+def test_the_key_that_skips_is_spent_whole(use_select):
+    reader, writer = os.pipe()
+    try:
+        poll = rt._KeyPoll(reader, use_select)
+        assert not poll.take(0.02)  # nothing typed yet
+        os.write(writer, b"\x1b[A")  # an arrow key: three bytes, one key
+        assert poll.take(0.2)
+        assert not poll.waiting(0.05), "part of the key was left for the round-length picker"
+    finally:
+        os.close(reader)
+        os.close(writer)
+        rt._PUSHBACK.clear()
+
+
+@pytest.mark.parametrize("use_select", _poll_modes())
+def test_typing_ahead_is_kept_in_order(use_select):
+    reader, writer = os.pipe()
+    try:
+        poll = rt._KeyPoll(reader, use_select)
+        os.write(writer, b"2A")
+        assert poll.waiting(0.2)
+        kept = "".join(rt._PUSHBACK) + os.read(reader, 8).decode()
+        assert kept == "2A"
+    finally:
+        os.close(reader)
+        os.close(writer)
+        rt._PUSHBACK.clear()

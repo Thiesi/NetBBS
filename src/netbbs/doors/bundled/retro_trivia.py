@@ -28,8 +28,11 @@ import json
 import os
 import random
 import re
+import select
 import sys
+import time
 import unicodedata
+import zlib
 
 ESC = "\x1b"
 RESET = f"{ESC}[0m"
@@ -307,6 +310,8 @@ def read_key() -> str:
     the `except EOFError` below in the common case (NetBBS's own runtime
     just SIGTERMs this process directly once the relay notices) -- kept
     anyway for the rarer case of stdin closing gracefully first."""
+    if _PUSHBACK:
+        return _PUSHBACK.pop(0)
     data = sys.stdin.buffer.read(1)
     if not data:
         raise EOFError("stdin closed")
@@ -586,6 +591,666 @@ LETTERS = ["A", "B", "C", "D"]
 QUIT_KEY = "Q"
 
 
+# -- the launch splash -------------------------------------------------------
+#
+# A late-night game-show stage, played once before the masthead: a marquee of
+# chasing bulbs, the name in neon tubes that stutter on one letter at a time, a
+# spotlit question mark, and the caller introduced on a lower third.
+#
+# Three rules shape it. It never holds anybody up: any key ends it at once, and
+# that key is spent on the splash rather than handed to the round-length
+# picker, so pressing "skip" can never also pick a round. It never steals
+# typing-ahead: a caller (or a script) who has already typed something before
+# the splash starts gets no splash and keeps every byte, in order. And it is
+# never quiet until it hands over: a frame goes out every tenth of a second,
+# because the tools that drive a door wait for its output to settle before
+# typing, and a silent hold would look like a screen waiting for a key.
+
+SPLASH_FRAME_SECONDS = 0.1
+SPLASH_FRAMES = 25
+#: How long the door listens for typing-ahead before it draws anything.
+SPLASH_GRACE_SECONDS = 0.2
+#: The rest of a key's input unit (an arrow key is three bytes) arrives within
+#: this of its first byte, and goes with it.
+_SPLASH_UNIT_SECONDS = 0.03
+_SPLASH_UNIT_LIMIT = 4096
+
+#: Bytes the splash read while checking for typing-ahead, returned by
+#: `read_key` before anything else so nothing is lost or reordered.
+_PUSHBACK: list[str] = []
+
+
+class _KeyPoll:
+    """Timed, non-blocking reads of the caller's stdin, for the splash alone.
+
+    POSIX polls with `select()`. Windows cannot `select()` a pipe, so there the
+    descriptor is switched to non-blocking for each read and polled, the way
+    War Dialer's `_poll_read_key_windows` does. Every read goes to the
+    descriptor directly: the splash runs before anything has read through
+    `sys.stdin.buffer`, so there is no buffered input it could miss.
+    """
+
+    def __init__(self, fd: int, use_select: bool):
+        self.fd = fd
+        self.use_select = use_select
+
+    def _ready(self, timeout: float) -> bool:
+        ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout))
+        return bool(ready)
+
+    def _read_now(self, size: int) -> bytes | None:
+        """What is waiting right now: `None` if nothing, `b""` at end of input."""
+        if self.use_select:
+            return os.read(self.fd, size) if self._ready(0) else None
+        os.set_blocking(self.fd, False)
+        try:
+            return os.read(self.fd, size)
+        except BlockingIOError:
+            return None
+        finally:
+            os.set_blocking(self.fd, True)
+
+    def waiting(self, timeout: float) -> bool:
+        """Has anything been typed, within `timeout`? Never spends it: on POSIX
+        nothing is read, and the byte Windows has to read to find out is
+        returned through `_PUSHBACK`."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if self.use_select:
+                return self._ready(remaining)
+            data = self._read_now(1)
+            if data:
+                _PUSHBACK.append(data.decode("ascii", errors="replace"))
+                return True
+            if data == b"":
+                return True  # end of input: `read_key` reports it, as before
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+
+    def take(self, timeout: float) -> bool:
+        """Wait up to `timeout` for a key. If one comes, spend its whole input
+        unit and return True; end of input also ends the wait."""
+        deadline = time.monotonic() + timeout
+        while True:
+            data = self._read_now(64)
+            if data is not None:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self.use_select:
+                self._ready(remaining)
+            else:
+                time.sleep(min(0.01, remaining))
+        taken = len(data)
+        settle = time.monotonic() + _SPLASH_UNIT_SECONDS
+        while data and taken < _SPLASH_UNIT_LIMIT and time.monotonic() < settle:
+            data = self._read_now(64)
+            if data:
+                taken += len(data)
+                settle = time.monotonic() + _SPLASH_UNIT_SECONDS
+            elif data is None:
+                time.sleep(0.005)
+        return True
+
+
+def _open_key_poll() -> _KeyPoll | None:
+    """A poll of the caller's stdin, or `None` when there is no live stream to
+    poll -- a test harness's stand-in stdin, a closed one -- in which case the
+    splash is skipped entirely: an effect nobody can skip is only a delay."""
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    try:
+        select.select([fd], [], [], 0)
+        return _KeyPoll(fd, use_select=True)
+    except (OSError, ValueError):
+        pass
+    try:
+        os.set_blocking(fd, False)
+        os.set_blocking(fd, True)
+    except (OSError, ValueError):
+        return None
+    return _KeyPoll(fd, use_select=False)
+
+
+#: (truecolor RGB, xterm-256 index) pairs, so the 256-color splash is chosen
+#: color by color rather than approximated.
+_BULB_LIT = ((255, 240, 190), 230)
+_BULB_DIM = ((120, 72, 24), 94)
+_TUBE_OFF = ((58, 28, 66), 53)
+_CONE = ((196, 156, 66), 137)
+_HINT = ((120, 112, 140), 244)
+_HEADER = ((255, 120, 200), 211)
+_HEADER_STAR = ((255, 214, 90), 221)
+_TAGLINE = ((110, 220, 255), 81)
+_LABEL_FG = ((24, 10, 32), 16)
+_LABEL_BG = ((255, 200, 60), 220)
+_HANDLE_FG = ((255, 255, 255), 231)
+_HANDLE_BG = ((176, 34, 132), 126)
+#: The tail that trails the lower third away into the stage.
+_TAIL = (((176, 34, 132), 126), ((118, 26, 96), 90), ((70, 18, 64), 53))
+#: Each tube's color, left to right across the sign, and its 256-color twin.
+_NEON = (((255, 70, 160), 205), ((255, 92, 120), 204), ((255, 130, 80), 209),
+         ((255, 175, 60), 214), ((255, 222, 80), 221), ((175, 245, 90), 155),
+         ((80, 245, 160), 85), ((70, 225, 235), 80), ((90, 170, 255), 75),
+         ((140, 120, 255), 105), ((200, 100, 255), 171))
+#: Each tube's glow on the backdrop behind it, in 256 colors; truecolor
+#: darkens the tube's own color instead.
+_NEON_GLOW_256 = (53, 52, 52, 94, 58, 22, 22, 23, 17, 54, 54)
+#: The question mark under the spotlight, top row to bottom.
+_QUESTION_RAMP = (((255, 255, 255), 231), ((255, 250, 220), 230), ((255, 240, 180), 229),
+                  ((255, 226, 130), 228), ((255, 210, 90), 221), ((255, 190, 60), 220),
+                  ((250, 165, 40), 214))
+#: The pool of light on the stage floor, centre outwards.
+_FLOOR = (((255, 228, 140), 222), ((220, 170, 70), 179), ((150, 108, 40), 136),
+          ((96, 70, 28), 94))
+_SPARKLE = (((255, 255, 255), 231), ((255, 220, 120), 222), ((150, 200, 255), 153),
+            ((255, 150, 220), 218))
+_SPARKLE_GLYPHS = ("✦", "✧", "·", "✦", "⋆")
+
+#: A 3x5 pixel face. The large sign draws each pixel as two full blocks; the
+#: compact one packs two pixel rows into one text row with half blocks.
+_PIXEL_FONT = {
+    "R": ("###", "#.#", "##.", "#.#", "#.#"),
+    "E": ("###", "#..", "##.", "#..", "###"),
+    "T": ("###", ".#.", ".#.", ".#.", ".#."),
+    "O": ("###", "#.#", "#.#", "#.#", "###"),
+    "I": ("#", "#", "#", "#", "#"),
+    "V": ("#.#", "#.#", "#.#", ".#.", ".#."),
+    "A": (".#.", "#.#", "###", "#.#", "#.#"),
+}
+#: The large sign's own letters: the same shapes as the pixel face, drawn by
+#: hand with half blocks so bowls round off and V closes to a clean point.
+#: Every letter is six columns but I, which is two; one blank column always
+#: separates neighbours, and nothing is drawn into it.
+_BIG_FONT = {
+    "R": ("█████▄", "██  ██", "█████▀", "██ ▀█▄", "██  ██"),
+    "E": ("██████", "██    ", "█████ ", "██    ", "██████"),
+    "T": ("██████", "  ██  ", "  ██  ", "  ██  ", "  ██  "),
+    "O": ("▄████▄", "██  ██", "██  ██", "██  ██", "▀████▀"),
+    "I": ("██", "██", "██", "██", "██"),
+    "V": ("██  ██", "██  ██", "▀█▄▄█▀", " ████ ", "  ▀▀  "),
+    "A": ("▄████▄", "██  ██", "██████", "██  ██", "██  ██"),
+}
+#: The question mark under the spotlight: a round hook whose left end tucks
+#: under, a stem, a full blank row, and the dot.
+_QUESTION_ART = (" ▄▄█████▄▄ ",
+                 "███▀   ▀███",
+                 "▀▀▀    ▄██▀",
+                 "     ▄██▀  ",
+                 "    ███    ",
+                 "           ",
+                 "    ███    ")
+_TAGLINE_TEXT = "The Classic BBS & Retro Computing Challenge"
+_TAGLINE_SHORT = "BBS & Retro Computing"
+
+
+def _splash_plain(value: object) -> str:
+    """Caller- or SysOp-supplied text, made safe to draw: escapes and control
+    characters out, so a handle can neither move the cursor nor recolor."""
+    text = ANSI_ESCAPE_RE.sub("", str(value))
+    return "".join(ch for ch in text if not unicodedata.category(ch).startswith("C")).strip()
+
+
+def _splash_fit(text: str, width: int) -> str:
+    """`text` cut to `width` display columns, with an ellipsis if it was cut."""
+    if width <= 0:
+        return ""
+    if _visible_width(text) <= width:
+        return text
+    kept = ""
+    for ch in text:
+        if _visible_width(kept + ch) > width - 1:
+            break
+        kept += ch
+    return kept + "…"
+
+
+class _Canvas:
+    """Cell writes as escape sequences, with the cursor and the current style
+    tracked so a frame only moves where it must and only restyles when the
+    style changes. Every write is checked against the terminal's bounds, so a
+    composition that would wrap or scroll fails here rather than on a caller's
+    screen."""
+
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        self.row = 0
+        self.col = 0
+        self.style = ""
+        self.parts: list[str] = []
+
+    def take(self) -> str:
+        frame = "".join(self.parts)
+        self.parts = []
+        return frame
+
+    def raw(self, text: str) -> None:
+        self.parts.append(text)
+
+    def home(self) -> None:
+        self.row = self.col = 1
+        self.style = RESET
+
+    def put(self, row: int, col: int, text: str, style: str) -> None:
+        span = _visible_width(text)
+        if not (1 <= row <= self.height and 1 <= col and col + span - 1 <= self.width):
+            raise ValueError(f"splash write outside {self.width}x{self.height}: row {row}, col {col}, {text!r}")
+        if row == self.row and col == self.col:
+            pass
+        elif row == self.row and 0 < col - self.col <= 3:
+            self.parts.append(f"{ESC}[{col - self.col}C")
+        else:
+            self.parts.append(f"{ESC}[{row};{col}H")
+        if style != self.style:
+            self.parts.append(style)
+            self.style = style
+        self.parts.append(text)
+        self.row, self.col = row, col + span
+
+
+class _Splash:
+    """The splash for one terminal: its first frame and every frame after."""
+
+    def __init__(self, p: Palette, info: dict, width: int, height: int, rng: random.Random):
+        self.p = p
+        self.rng = rng
+        # One column is left free on the right: a write to a terminal's last
+        # column leaves the cursor in a pending-wrap state some clients resolve
+        # by scrolling. Bulbs sit every second column, so the frame's right
+        # edge is the last odd column that is left.
+        usable = width - 1
+        self.right = usable if usable % 2 else usable - 1
+        self.bottom = height
+        self.canvas = _Canvas(usable, height)
+        self.node = _splash_plain(info.get("node_name", "NetBBS")) or "NetBBS"
+        self.handle = _splash_plain(info.get("handle", "Guest")) or "Guest"
+        self.cells: dict[tuple[int, int], tuple[str, str]] = {}
+        self.letters: list[list[tuple[int, int, str, str]]] = []
+        self.glows: list[str] = []
+        self.sparkles: list[tuple[int, int]] = []
+        self.question: list[list[tuple[int, int, str, str]]] = []
+        self.cone: list[tuple[int, int]] = []
+        self.floor: list[tuple[int, int, str, str]] = []
+        self.lower_third: list[tuple[int, int, str, str]] = []
+        self.hint: tuple[int, int, str] | None = None
+        self.bulbs = self._bulb_ring()
+        self._compose()
+
+    # -- palette -------------------------------------------------------------
+
+    def style(self, fg, bg=None, *, bold: bool = False) -> str:
+        """One escape that resets and sets everything a cell needs."""
+        params = ["0"] + (["1"] if bold else [])
+        if self.p._truecolor:
+            params.append("38;2;{};{};{}".format(*fg[0]))
+            if bg is not None:
+                params.append("48;2;{};{};{}".format(*bg[0]))
+        else:
+            params.append(f"38;5;{fg[1]}")
+            if bg is not None:
+                params.append(f"48;5;{bg[1]}")
+        return f"{ESC}[{';'.join(params)}m"
+
+    @staticmethod
+    def _shade(color, factor: float):
+        rgb, index = color
+        return tuple(max(0, min(255, round(channel * factor))) for channel in rgb), index
+
+    # -- composition ---------------------------------------------------------
+
+    def _bulb_ring(self) -> list[tuple[int, int]]:
+        """Bulb positions clockwise from the top-left corner."""
+        top = [(1, col) for col in range(1, self.right + 1, 2)]
+        right = [(row, self.right) for row in range(2, self.bottom)]
+        bottom = [(self.bottom, col) for col in range(self.right, 0, -2)]
+        left = [(row, 1) for row in range(self.bottom - 1, 1, -1)]
+        return top + right + bottom + left
+
+    def _logo_glyphs(self, word: str, big: bool) -> list[list[tuple[int, int, str]]]:
+        """Each letter of `word` as (row, col, glyph) cells, relative to the word."""
+        letters = []
+        col = 0
+        for ch in word:
+            pixels = _PIXEL_FONT[ch]
+            cells = []
+            if big:
+                art = _BIG_FONT[ch]
+                for r, line in enumerate(art):
+                    cells += [(r, col + c, glyph) for c, glyph in enumerate(line) if glyph != " "]
+                col += len(art[0]) + 1
+            else:
+                for r in range(3):
+                    upper = pixels[2 * r]
+                    lower = pixels[2 * r + 1] if 2 * r + 1 < len(pixels) else "." * len(upper)
+                    for c, (top, bottom) in enumerate(zip(upper, lower)):
+                        glyph = {"##": "█", "#.": "▀", ".#": "▄"}.get(top + bottom)
+                        if glyph:
+                            cells.append((r, col + c, glyph))
+                col += len(pixels[0]) + 1
+            letters.append(cells)
+        return letters
+
+    @staticmethod
+    def _word_width(word: str, big: bool) -> int:
+        widths = [len(_BIG_FONT[ch][0]) if big else len(_PIXEL_FONT[ch][0]) for ch in word]
+        return sum(widths) + len(widths) - 1
+
+    def _compose(self) -> None:
+        field_left, field_right = 3, self.right - 2
+        top_row, bottom_row = 2, self.bottom - 1
+        rows = bottom_row - top_row + 1
+        centre = (field_left + field_right) // 2
+        # On a wide terminal the show keeps an 80-column stage in the middle,
+        # and the extra width is sky for the sparkles; a lower third pinned to
+        # the far edge of a 200-column window would be nowhere near the show.
+        half = min((field_right - field_left) // 2, 37)
+        inner_left, inner_right = centre - half, centre + half
+        inner_width = inner_right - inner_left + 1
+
+        big_width = self._word_width("RETRO", True) + 3 + self._word_width("TRIVIA", True)
+        line_width = self._word_width("RETRO", False) + 2 + self._word_width("TRIVIA", False)
+        if inner_width >= big_width + 2 and rows >= 11:
+            logo = ("big", 6)
+        elif inner_width >= line_width + 2:
+            logo = ("line", 3)
+        else:
+            logo = ("stacked", 6)
+        tagline = _TAGLINE_TEXT if inner_width >= len(_TAGLINE_TEXT) + 4 else _TAGLINE_SHORT
+        stage = logo[0] == "big" and rows >= 22
+
+        # Display order, and the priority that decides what goes first when
+        # the terminal is short: the stage, then the tagline, then the header.
+        items = [("header", 1, 3), ("logo", logo[1], 0), ("tagline", 1, 4),
+                 ("stage", 9, 2), ("contestant", 1, 1)]
+        if not stage:
+            items = [item for item in items if item[0] != "stage"]
+        if len(tagline) > inner_width:
+            items = [item for item in items if item[0] != "tagline"]
+        while (sum(height for _, height, _ in items) + len(items) - 1 > rows
+               and any(item[2] > 1 for item in items)):
+            items.remove(max(items, key=lambda item: item[2]))
+        total = sum(height for _, height, _ in items)
+        gap = 1 if total + len(items) - 1 <= rows else 0
+        used = total + gap * (len(items) - 1)
+        row = top_row + (rows - used) // 2
+
+        for name, height, _ in items:
+            if name == "header":
+                self._compose_header(row, inner_left, inner_width, centre)
+            elif name == "logo":
+                self._compose_logo(row, logo[0], centre)
+            elif name == "tagline":
+                self._compose_tagline(row, tagline, centre)
+            elif name == "stage":
+                self._compose_stage(row, inner_left, inner_right, centre)
+            elif name == "contestant":
+                self._compose_contestant(row, inner_left, inner_right)
+            row += height + gap
+
+        # Sparkles: blank cells inside the frame, away from everything drawn,
+        # in the stage when there is one and around the sign when not.
+        taken = set(self.cone)
+
+        def occupy(r: int, c: int, text: str) -> None:
+            taken.update((r, c + offset) for offset in range(_visible_width(text)))
+
+        for (r, c), (text, _) in self.cells.items():
+            occupy(r, c, text)
+        for r, c, text, _ in [cell for line in self.question for cell in line] +                 [cell for letter in self.letters for cell in letter] + self.floor + self.lower_third:
+            occupy(r, c, text)
+        for spot in (getattr(self, "_tagline", None), self.hint):
+            if spot is not None:
+                occupy(*spot)
+        candidates = [(r, c) for r in range(top_row, bottom_row + 1)
+                      for c in range(field_left, field_right + 1)
+                      if all((r + dr, c + dc) not in taken for dr in (-1, 0, 1) for dc in (-2, -1, 0, 1, 2))]
+        self.rng.shuffle(candidates)
+        for spot in candidates:
+            if len(self.sparkles) >= max(6, min(18, len(candidates) // 12)):
+                break
+            if all(abs(spot[0] - r) + abs(spot[1] - c) // 2 > 3 for r, c in self.sparkles):
+                self.sparkles.append(spot)
+
+    def _compose_header(self, row: int, left: int, width: int, centre: int) -> None:
+        star = self.style(_HEADER_STAR, bold=True)
+        text_style = self.style(_HEADER, bold=True)
+        for lead in ("LIVE FROM ", ""):
+            room = width - 6 - len(lead)
+            if room >= 6 or not lead:
+                body = lead + _splash_fit(self.node.upper(), max(1, room))
+                break
+        full = f"✦  {body}  ✦"
+        col = centre - _visible_width(full) // 2
+        self.cells[(row, col)] = ("✦", star)
+        self.cells[(row, col + 3)] = (body, text_style)
+        self.cells[(row, col + 3 + _visible_width(body) + 2)] = ("✦", star)
+
+    def _compose_logo(self, row: int, kind: str, centre: int) -> None:
+        big = kind == "big"
+        words = [("RETRO", "TRIVIA")] if kind != "stacked" else [("RETRO",), ("TRIVIA",)]
+        gap = 3 if big else 2
+        word_height = 5 if big else 3
+        index = 0
+        for line, words_on_line in enumerate(words):
+            width = sum(self._word_width(word, big) for word in words_on_line) + gap * (len(words_on_line) - 1)
+            col = centre - width // 2
+            top = row + line * word_height
+            for word in words_on_line:
+                for cells in self._logo_glyphs(word, big):
+                    tone = index * (len(_NEON) - 1) // 10
+                    tube = _NEON[tone]
+                    glow = self.style((self._shade(tube, 0.3)[0], _NEON_GLOW_256[tone]))
+                    lit = []
+                    for r, c, glyph in cells:
+                        depth = r / (word_height - 1)
+                        # Hot at the top of the tube, deeper towards its foot.
+                        style = self.style(self._shade(tube, 1.18 - 0.42 * depth), bold=True)
+                        lit.append((top + r, col + c, glyph, style))
+                    self.letters.append(lit)
+                    self.glows.append(glow)
+                    index += 1
+                col += self._word_width(word, big) + gap
+        off = self.style(_TUBE_OFF)
+        lit_cells = {(r, c) for letter in self.letters for r, c, _, _ in letter}
+        if big:
+            # Each tube throws its own color on the backdrop behind it: a
+            # shadow in the tube's hue reads as neon glow, a grey one as mud.
+            # The glow stays inside its own letter's columns: spilling into the
+            # blank column between letters ran neighbours together ("TRWIA").
+            for letter, glow in zip(self.letters, self.glows):
+                last = max(c for _, c, _, _ in letter)
+                for r, c, _, _ in letter:
+                    if (r + 1, c + 1) not in lit_cells and c + 1 <= last:
+                        self.cells[(r + 1, c + 1)] = ("▀", glow)
+        for letter in self.letters:
+            for r, c, glyph, _ in letter:
+                self.cells[(r, c)] = (glyph, off)
+
+    def _compose_tagline(self, row: int, text: str, centre: int) -> None:
+        self._tagline = (row, centre - len(text) // 2, text)
+
+    def _compose_stage(self, row: int, left: int, right: int, centre: int) -> None:
+        # The beam: narrow where it leaves the lamp, wide on the boards.
+        for step in range(8):
+            half = 3 + (step * 3) // 2
+            for c in range(max(left, centre - half), min(right, centre + half) + 1):
+                self.cone.append((row + step, c))
+        mark_left = centre - len(_QUESTION_ART[0]) // 2
+        for r, line in enumerate(_QUESTION_ART):
+            style = self.style(_QUESTION_RAMP[r], bold=True)
+            self.question.append([(row + r, mark_left + c, glyph, style)
+                                  for c, glyph in enumerate(line) if glyph != " "])
+        floor_row = row + 8
+        half = 3 + (8 * 3) // 2
+        for c in range(max(left, centre - half), min(right, centre + half) + 1):
+            distance = abs(c - centre) / max(1, half)
+            band = min(len(_FLOOR) - 1, int(distance * len(_FLOOR)))
+            self.floor.append((floor_row, c, "▀", self.style(_FLOOR[band])))
+
+    def _compose_contestant(self, row: int, left: int, right: int) -> None:
+        width = right - left + 1
+        label_style = self.style(_LABEL_FG, _LABEL_BG, bold=True)
+        handle_style = self.style(_HANDLE_FG, _HANDLE_BG, bold=True)
+        for label in (" TONIGHT'S CONTESTANT ", " CONTESTANT ", " YOU "):
+            room = width - len(label) - 2 - len(_TAIL)
+            if room >= 6:
+                break
+        handle = " " + _splash_fit(self.handle, max(1, room - 2)) + " "
+        cells = [(row, left, label, label_style)]
+        col = left + len(label)
+        for ch in handle:
+            cells.append((row, col, ch, handle_style))
+            col += _visible_width(ch)
+        for index, color in enumerate(_TAIL):
+            if col + index <= right:
+                cells.append((row, col + index, "▓▒░"[index], self.style(color)))
+        self.lower_third = cells
+        hint = "any key to begin"
+        hint_col = right - len(hint) + 1
+        if hint_col > col + len(_TAIL) + 3:
+            self.hint = (row, hint_col, hint)
+
+    def _beam(self) -> list[tuple[int, int, str, str]]:
+        """The spotlight: brightest down its middle, falling off to the edges,
+        with the lamp itself at its head."""
+        if not self.cone:
+            return []
+        rows = sorted({r for r, _ in self.cone})
+        centre = sum(c for _, c in self.cone) / len(self.cone)
+        cells = []
+        for r, c in self.cone:
+            half = max(1, sum(1 for rr, _ in self.cone if rr == r) / 2)
+            glow = max(0.0, 1 - abs(c - centre) / half)
+            depth = (r - rows[0]) / max(1, len(rows) - 1)
+            factor = 0.22 + 0.78 * glow * (1 - 0.4 * depth)
+            glyph = "▒" if glow > 0.55 and depth < 0.5 else "░"
+            cells.append((r, c, glyph, self.style(self._shade(_CONE, factor))))
+        return cells
+
+    # -- frames --------------------------------------------------------------
+
+    def _bulb_style(self, index: int, phase: int) -> str:
+        return self.style(_BULB_LIT, bold=True) if (index + phase) % 3 == 0 else self.style(_BULB_DIM)
+
+    def _draw_bulbs(self, phase: int, previous: int | None) -> None:
+        """Every bulb on the first frame; afterwards only the ones that change,
+        the ones going dark first and then the ones lighting, so each group
+        needs its style set once."""
+        changes = [(i, spot) for i, spot in enumerate(self.bulbs)
+                   if previous is None or ((i + phase) % 3 == 0) != ((i + previous) % 3 == 0)]
+        changes.sort(key=lambda item: (item[0] + phase) % 3 == 0)
+        for i, (r, c) in changes:
+            self.canvas.put(r, c, "●", self._bulb_style(i, phase))
+
+    def _draw_letter(self, index: int, lit: bool) -> None:
+        off = self.style(_TUBE_OFF)
+        for r, c, glyph, style in self.letters[index]:
+            self.canvas.put(r, c, glyph, style if lit else off)
+
+    def frames(self) -> list[str]:
+        """The whole show, as one string per frame. The first clears the
+        screen and draws the stage dark; each later one changes only what
+        moves."""
+        canvas = self.canvas
+        canvas.raw(f"{ESC}[?25l{RESET}{ESC}[2J")
+        canvas.home()
+        canvas.row = canvas.col = 0  # force an absolute move for the first write
+        for (r, c), (glyph, style) in sorted(self.cells.items()):
+            canvas.put(r, c, glyph, style)
+        self._draw_bulbs(0, None)
+        frames = [canvas.take()]
+
+        rng = self.rng
+        order = list(range(len(self.letters)))
+        rng.shuffle(order)
+        lights: dict[int, list[tuple[int, bool]]] = {}
+        for rank, letter in enumerate(order):
+            on = 1 + (rank * 8) // max(1, len(order))
+            lights.setdefault(on, []).append((letter, True))
+            if rng.random() < 0.4:  # a tube that catches, dies, and catches again
+                lights.setdefault(on + 1, []).append((letter, False))
+                lights.setdefault(on + 2 + rng.randrange(2), []).append((letter, True))
+        buzz = rng.choice(order) if order else None
+        tagline_frame, cone_frame, floor_frame, contestant_frame = 9, 8, 13, 13
+        typed = 0
+        phase = 0
+        for frame in range(1, SPLASH_FRAMES):
+            for letter, lit in lights.get(frame, ()):
+                self._draw_letter(letter, lit)
+            if buzz is not None and frame in (19, 20):
+                self._draw_letter(buzz, frame == 20)
+            if frame == cone_frame and self.cone:
+                for r, c, glyph, style in self._beam():
+                    canvas.put(r, c, glyph, style)
+            if self.question and cone_frame + 1 <= frame <= cone_frame + 3:
+                band = frame - cone_frame - 1
+                per = -(-len(self.question) // 3)
+                for line in self.question[band * per:(band + 1) * per]:
+                    for r, c, glyph, style in line:
+                        canvas.put(r, c, glyph, style)
+            if frame == floor_frame:
+                for r, c, glyph, style in self.floor:
+                    canvas.put(r, c, glyph, style)
+            if frame == tagline_frame and getattr(self, "_tagline", None):
+                r, c, text = self._tagline
+                canvas.put(r, c, text, self.style(_TAGLINE))
+            if frame >= contestant_frame and typed < len(self.lower_third):
+                # The label lands whole; the name types itself in.
+                batch = 1 if typed == 0 else 3
+                for r, c, text, style in self.lower_third[typed:typed + batch]:
+                    canvas.put(r, c, text, style)
+                typed += batch
+                if typed >= len(self.lower_third) and self.hint:
+                    r, c, text = self.hint
+                    canvas.put(r, c, text, self.style(_HINT))
+            if frame % 2 == 0:
+                previous, phase = phase, (phase - 1) % 3
+                self._draw_bulbs(phase, previous)
+            for _ in range(2):
+                if self.sparkles:
+                    r, c = rng.choice(self.sparkles)
+                    canvas.put(r, c, rng.choice(_SPARKLE_GLYPHS), self.style(rng.choice(_SPARKLE)))
+            frames.append(canvas.take())
+        return frames
+
+
+def splash_frames(p: Palette, info: dict, width: int, height: int) -> list[str] | None:
+    """Every frame of the splash for a `width` x `height` terminal, or `None`
+    when the terminal is smaller than the compact composition needs."""
+    if width < 40 or height < 12:
+        return None
+    width, height = min(width, 240), min(height, 80)
+    seed = zlib.crc32(f"{info.get('node_name', '')}/{info.get('handle', '')}".encode("utf-8", "replace"))
+    return _Splash(p, info, width, height, random.Random(seed)).frames()
+
+
+def play_splash(p: Palette, info: dict, width: int, height: int, poll: _KeyPoll | None = None) -> bool:
+    """Show the splash. Returns True if it ran (to the end or until a key),
+    False if it was not shown: no live input to skip it with, typing-ahead
+    already waiting, or a terminal too small for it."""
+    if poll is None:
+        poll = _open_key_poll()
+    if poll is None:
+        return False
+    frames = splash_frames(p, info, width, height)
+    if frames is None or poll.waiting(SPLASH_GRACE_SECONDS):
+        return False
+    try:
+        for frame in frames:
+            out(frame)
+            if poll.take(SPLASH_FRAME_SECONDS):
+                break
+    finally:
+        out(f"{RESET}{ESC}[2J{ESC}[H{ESC}[?25h")
+    return True
+
+
 def draw_title(p: Palette, info: dict, width: int = 78) -> None:
     """The masthead, drawn once before the caller is asked anything.
 
@@ -840,7 +1505,12 @@ def main() -> int:
     except (TypeError, ValueError):
         _OUTPUT_WIDTH = 80
     w = min(78, _OUTPUT_WIDTH)
+    try:
+        height = max(1, int(info.get("terminal_height", 24)))
+    except (TypeError, ValueError):
+        height = 24
 
+    play_splash(palette, info, _OUTPUT_WIDTH, height)
     draw_title(palette, info, width=w)
 
     score = 0
