@@ -538,7 +538,8 @@ later or tell your SysOp.
 Choose **Games** on the main menu, or a Community's games. Availability
 depends on what your SysOp has registered.
 
-- **Retro Trivia:** answer a short round of multiple-choice questions.
+- **Retro Trivia:** answer a short round of multiple-choice questions. It opens
+  with a short animated title; any key skips it.
 - **Voidrunner:** build a persistent space-trading and exploration career.
 - **War Dialer:** develop a crew in a shared world of fictional BBS networks.
 
