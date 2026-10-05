@@ -1,0 +1,20 @@
+[1m[38;5;51mHarbor Lights / Door compatibility[0m
+[38;5;240m----------------------------------[0m
+[38;5;248mExternal installs are manual. See docs/NetBBS-door-guide.md. Templates need
+local paths and game setup.[0m
+[1m[38;5;246mADVANCED[0m
+[38;5;75m  Custom environment (JSON):[0m         [38;5;248m{}[0m
+[38;5;75m  External runner argv (JSON):[0m       [38;5;248m[][0m
+[38;5;75m  Adapter options (JSON):[0m            [38;5;248m{"accel": "tcg", "boot_timeout_seconds":[0m
+                                     [38;5;248m60, "command": "{install_dir}/door[0m
+                                     [38;5;248m-D{door32} -X", "guest_memory_mb": 256,[0m
+                                     [38;5;248m"initrd":[0m
+                                     [38;5;248m"/var/games/netbbs/vm/initrd.cpio",[0m
+                                     [38;5;248m"kernel": "/var/games/netbbs/vm/vmlinux"}[0m
+[38;5;75m  Companion service (JSON):[0m          [38;5;248m{}[0m
+
+[[1m[38;5;46mX[0m] Custom environment (JSON)  [[1m[38;5;46mR[0m] External runner argv (JSON)
+[[1m[38;5;46mQ[0m] Adapter options (JSON)  [[1m[38;5;46m4[0m] Companion service (JSON)  [[1m[38;5;46mS[0m]ave  [[1m[38;5;46mB[0m]ack
+[38;5;248m(Ctrl-H for help on these fields)[0m
+[38;5;248m(Section 5 of 6 -- PgUp/PgDn to switch)[0m
+Choice: 

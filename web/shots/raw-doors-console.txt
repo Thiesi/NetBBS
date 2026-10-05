@@ -1,0 +1,13 @@
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mDoors[0m
+[38;5;246mpage 1/1, 7 total[0m
+[38;5;240m─────────────────────[0m
+[38;5;46m  01. [0m[38;5;220mAmiga Empire[0m[38;5;248m - A Linux door in a per-caller VM[0m
+[38;5;46m  02. [0m[38;5;220mDoorParty[0m[38;5;248m - Dozens of doors on a remote server[0m
+[38;5;46m  03. [0m[38;5;220mGlobal War[0m[38;5;248m - Turn-based world conquest[0m
+[38;5;46m  04. [0m[38;5;220mLegend of the Red Dragon[0m[38;5;248m - LORD 4.07 under DOSBox-X[0m
+[38;5;46m  05. [0m[38;5;220mTradeWars 2002[0m[38;5;248m - The classic space trading game[0m
+[38;5;46m  06. [0m[38;5;220mVoidrunner[0m[38;5;248m - Bundled: trade, fight and explore a living galaxy[0m
+[38;5;46m  07. [0m[38;5;220mWar Dialer[0m[38;5;248m - Bundled: build a phreaker crew, raid your rivals[0m
+
+[[1m[38;5;46mS[0m]earch  [[1m[38;5;46mB[0m]ack — or type a number to select; Ctrl-L: redraw, Ctrl-H: help
+Choice: 

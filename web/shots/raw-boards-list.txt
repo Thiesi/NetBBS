@@ -1,0 +1,16 @@
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mAvailable message boards[0m
+[38;5;246mpage 1/1, 5 total[0m
+[38;5;240m────────────────────────────────────────[0m
+[1m[38;5;75m      NAME                       ACTIVITY         ABOUT[0m
+[38;5;46m  01. [0m[38;5;220m[This node]              [0m[38;5;248m  [0m[38;5;248m               [0m[38;5;248m  [0m[38;5;248mNews and housekeeping[0m
+[38;5;46m  02. [0m[38;5;220m[Hobbies]                [0m[38;5;248m  [0m[38;5;248m               [0m[38;5;248m  [0m[38;5;248mWhat we do when we're not o...[0m
+[38;5;46m  03. [0m[38;5;220mGeneral                  [0m[38;5;248m  [0m[38;5;248mnot visited yet[0m[38;5;248m  [0m[38;5;248mAnything that fits nowhere ...[0m
+[38;5;46m  04. [0m[38;5;220mClassifieds              [0m[38;5;248m  [0m[38;5;248mnot visited yet[0m[38;5;248m  [0m[38;5;248mBuy, sell, swap -- every po...[0m
+[38;5;46m  05. [0m[38;5;220mNetBBS Users             [0m[38;5;248m  [0m[38;5;248mnot visited yet[0m[38;5;248m  [0m[38;5;248m[LINK][0m
+
+  [[1m[38;5;46mS[0m]earch                                 [[1m[38;5;46mB[0m]ack
+[38;5;248m    Search by name[0m                       [38;5;248m    Return without picking[0m
+  [[1m[38;5;46mO[0m]rder
+[38;5;248m    Change sort order[0m
+Sort: SysOp's order; or type a number to select; Ctrl-L: redraw, Ctrl-H: help
+Choice: 

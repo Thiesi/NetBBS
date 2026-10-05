@@ -33,6 +33,10 @@ from pathlib import Path
 PAGES = {
     "index.html": "https://www.netbbs.org/",
     "overview.html": "https://www.netbbs.org/overview.html",
+    "boards.html": "https://www.netbbs.org/boards.html",
+    "files.html": "https://www.netbbs.org/files.html",
+    "doors.html": "https://www.netbbs.org/doors.html",
+    "mrc.html": "https://www.netbbs.org/mrc.html",
 }
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr"}

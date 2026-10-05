@@ -1,0 +1,15 @@
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mAvailable file areas[0m
+[38;5;246mpage 1/1, 5 total[0m
+[38;5;240m────────────────────────────────────[0m
+[38;5;46m  01. [0m[38;5;220mUtilities[0m[38;5;248m - Node utilities and helper scripts[0m
+[38;5;46m  02. [0m[38;5;220mANSI Art[0m[38;5;248m - Mastheads, logos and art packs from callers[0m
+[38;5;46m  03. [0m[38;5;220mDoor Games[0m[38;5;248m - Saves, maps and add-ons for the doors here[0m
+[38;5;46m  04. [0m[38;5;220mText Files[0m[38;5;248m - Guides, histories and the occasional rant[0m
+[38;5;46m  05. [0m[38;5;220mIncoming[0m[38;5;248m - New uploads, checked by the SysOp before they go public[0m
+
+  [[1m[38;5;46mS[0m]earch                                 [[1m[38;5;46mB[0m]ack
+[38;5;248m    Search by name[0m                       [38;5;248m    Return without picking[0m
+  [[1m[38;5;46mO[0m]rder
+[38;5;248m    Change sort order[0m
+Sort: SysOp's order; or type a number to select; Ctrl-L: redraw, Ctrl-H: help
+Choice: 
