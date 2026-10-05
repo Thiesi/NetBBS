@@ -87,11 +87,22 @@ class Node:
     """A node with MRC on, one bridged channel and the bridge connected."""
 
     async def __aenter__(self) -> Node:
+        # `async with` never calls `__aexit__` when `__aenter__` raises, so a
+        # setup that fails part way (the bridge never connecting, say) closes
+        # what it opened here, before the error leaves.
+        self.db = self.lane = self.fake = self.bridge = None
+        try:
+            await self._setup()
+        except BaseException:
+            await self.__aexit__(None, None, None)
+            raise
+        return self
+
+    async def _setup(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="netbbs-mrc-shot-"))
         self.db = Database(self.tmp / "node.db")
         self.lane = DatabaseLane(self.db.path)
         self.fake = FakeMrcHub()
-        self.bridge = None
         self.sysop = create_user(self.db, "carrier", password="hunter2", user_level=SYSOP_LEVEL)
         self.alice = create_user(self.db, "alice", password="hunter2", user_level=10)
         create_user(self.db, "bob", password="hunter2", user_level=10)
@@ -135,14 +146,16 @@ class Node:
         await self.bridge.start()
         await until(lambda: self.bridge.state is MrcState.CONNECTED, 5,
                     f"the bridge to connect ({self.bridge.status()})")
-        return self
 
     async def __aexit__(self, *exc) -> None:
         if self.bridge is not None:
             await self.bridge.close()
-        await self.fake.close()
-        self.lane.close()
-        self.db.close()
+        if self.fake is not None:
+            await self.fake.close()
+        if self.lane is not None:
+            self.lane.close()
+        if self.db is not None:
+            self.db.close()
 
     async def seat_local(self, username: str, session_id: int) -> None:
         """A local caller already in the bridged lobby, announced to the hub."""
@@ -160,6 +173,10 @@ async def snapshot_task(session, coroutine, expect: str, *, settle: float = 0.5)
             raise TimeoutError(f"{error}; the screen ends: {on_screen(session)[-400:]!r}") from None
         if task.done():
             task.result()
+            # The screen returned on its own: `until` stopped on `task.done()`,
+            # not on `expect`, so what is on the terminal may be another screen.
+            if expect not in on_screen(session):
+                raise RuntimeError(f"the screen returned before {expect!r} was drawn")
         await asyncio.sleep(settle)
         return on_terminal(session)
     finally:
@@ -235,7 +252,9 @@ async def shot_who(node: Node) -> str:
         await until(lambda: "bring snacks" in on_screen(session), 10, "the MRC lines")
         await asyncio.sleep(1.5)
         session.inputs.put_nowait("/who")
-        await until(lambda: "jasper" in on_screen(session).split("/who", 1)[-1], 10, "the /who roster")
+        # Only the roster says "(on MRC)"; the chat lines above name the same
+        # people, and the typed "/who" is never echoed to look for.
+        await until(lambda: "(on MRC)" in on_screen(session), 10, "the /who roster")
         await asyncio.sleep(0.5)
         return "".join(session.written)
     finally:
