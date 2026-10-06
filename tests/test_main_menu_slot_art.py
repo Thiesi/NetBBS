@@ -208,3 +208,32 @@ def test_the_console_masthead_preview_explains_slots_mode(tmp_path):
     assert "(the main menu as you see it)" in text
     assert "no masthead" not in text
     db.close()
+
+
+def test_an_answer_to_a_choice_starts_below_the_notices_not_over_them(tmp_path):
+    """Issue #1083: with the prompt at its slot inside the art, "Log off?"
+    landed on the row under it -- the notice -- and overwrote it:
+    "Log off? [y/N]: ng approval: SysOp -> Users."."""
+    from netbbs.net.art_prompt import end_choice_line
+
+    db, user = _setup(tmp_path)
+    session = FakeSession()
+    _draw(db, user, session, notice="1 account awaiting approval: SysOp -> Users.")
+    asyncio.run(end_choice_line(session))
+    asyncio.run(session.write("Log off? [y/N]: "))
+    screen = _screen("".join(session.written))
+    assert screen[11] == "1 account awaiting approval: SysOp -> Users."
+    assert screen[12] == "Log off? [y/N]:"
+    db.close()
+
+
+def test_the_generated_menu_ends_a_choice_with_a_plain_new_line(tmp_path):
+    from netbbs.net.art_prompt import end_choice_line
+
+    db, user = _setup(tmp_path)
+    session = FakeSession(charset="ascii")  # ASCII callers get the generated menu
+    _draw(db, user, session)
+    before = len(session.written)
+    asyncio.run(end_choice_line(session))
+    assert session.written[before:] == ["\r\n"]
+    db.close()

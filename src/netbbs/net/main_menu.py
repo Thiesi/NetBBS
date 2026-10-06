@@ -19,6 +19,7 @@ import logging
 import re
 from dataclasses import dataclass, replace
 
+from netbbs.net.art_prompt import clear_prompt_in_art, end_choice_line, mark_prompt_in_art
 from netbbs.auth.users import (
     SYSOP_LEVEL, User, current_account, describe_staff_permissions, is_usable_sysop, list_users,
 )
@@ -392,6 +393,7 @@ async def _draw_main_menu(
     `notice`, if given, is a result line carried into this redraw (issue
     #659's access-change line) and shown just above the prompt.
     """
+    clear_prompt_in_art(session)
     # Carried above the prompt like any other notice (issue #823): written
     # here, before the redraw-in-place clear below, they were wiped unseen.
     for text, created_at in mailbox.flush(session):
@@ -667,6 +669,9 @@ async def _draw_slot_main_menu(
     await write_notices(session)
     if plan.prompt_at_slot:
         await session.write(move_cursor(art.prompt.row + 1, art.prompt.col + 1))
+        # Below the art, its notices and anything the menu wrote under it
+        # (issue #1083): where whatever answers a choice starts.
+        mark_prompt_in_art(session, art.height + 1 + below)
     await write_prompt(session, prompt)
     return True
 
@@ -1110,13 +1115,13 @@ async def _main_menu_loop(
                 continue
 
             if choice == "l":
-                await session.write_line("")
+                await end_choice_line(session)
                 if not await prompt_yes_no(session, "Log off?", default=False):
                     redraw = True
                     continue
                 return True
             elif choice in ("m", "c", "f") or (choice == "g" and has_visible_doors(db, user)):
-                await session.write_line("")
+                await end_choice_line(session)
                 await _browse_kind(
                     session, db, hub, presence, mailbox, history, user, choice,
                     node_controls=node_controls, lane=lane, link_context=link_context,
@@ -1125,7 +1130,7 @@ async def _main_menu_loop(
                 )
                 redraw = True
             elif choice == "o" and _has_visible_communities(db, user):
-                await session.write_line("")
+                await end_choice_line(session)
                 await _enter_communities(
                     session, db, hub, presence, mailbox, history, user,
                     node_controls=node_controls, lane=lane, link_context=link_context,
@@ -1133,7 +1138,7 @@ async def _main_menu_loop(
                 )
                 redraw = True
             elif choice == "n":
-                await session.write_line("")
+                await end_choice_line(session)
                 # Issue #56: same lane-is-None degrade-gracefully reasoning
                 # as "e"/"s" above -- a direct test call site without a real
                 # lane simply can't reach the new-scan screen's own
@@ -1151,11 +1156,11 @@ async def _main_menu_loop(
                     )
                 redraw = True
             elif choice in ("?", HELP_KEY):
-                await session.write_line("")
+                await end_choice_line(session)
                 await _how_this_board_works(session, db, user)
                 redraw = True
             elif choice == "/":
-                await session.write_line("")
+                await end_choice_line(session)
                 if lane is not None:
                     await _find_screen(
                         session, db, lane, hub, presence, mailbox, history, user, link_context=link_context,
@@ -1168,11 +1173,11 @@ async def _main_menu_loop(
                     )
                 redraw = True
             elif choice == "d":
-                await session.write_line("")
+                await end_choice_line(session)
                 await _browse_directory(session, db, user, lane=lane, link_context=link_context)
                 redraw = True
             elif choice == "p":
-                await session.write_line("")
+                await end_choice_line(session)
                 # Issue #160's cursor-nav follow-up: the profile screen is
                 # now built on edit_resource_draft, which needs a real
                 # DatabaseLane -- see the "e" (mail) branch above for the
@@ -1215,7 +1220,7 @@ async def _main_menu_loop(
                 # Not gated here: `browse_mail` refuses a caller mail is
                 # closed to (issue #816) and says why, which a menu drawn
                 # before the SysOp changed the mail level still needs.
-                await session.write_line("")
+                await end_choice_line(session)
                 # design doc, issue #57: mail is one of the features
                 # migrated onto the two-lane database execution model --
                 # `lane` is None only for a direct test call site that
@@ -1237,32 +1242,32 @@ async def _main_menu_loop(
                     )
                 redraw = True
             elif choice == "h":
-                await session.write_line("")
+                await end_choice_line(session)
                 await _last_sessions_screen(session, db, user)
                 redraw = True
             elif choice == "r":
-                await session.write_line("")
+                await end_choice_line(session)
                 await _previous_callers_screen(
                     session, db, user, current_history_id=current_history_id,
                     lane=lane, link_context=link_context,
                 )
                 redraw = True
             elif choice == "w" and node_controls is not None:
-                await session.write_line("")
+                await end_choice_line(session)
                 await _caller_who_screen(
                     session, db, node_controls, user, hub, presence, direct_invites, lane, link_context=link_context
                 )
                 redraw = True
             elif choice == "i" and list_pending_invitations_for_user(db, user):
-                await session.write_line("")
+                await end_choice_line(session)
                 await _show_pending_invitations(session, db, user)
                 redraw = True
             elif choice == "v" and (user.can_verify_identity or meets_level(user, SYSOP_LEVEL)):
-                await session.write_line("")
+                await end_choice_line(session)
                 await _verify_identity_menu(session, db, user)
                 redraw = True
             elif choice == "s" and meets_level(user, SYSOP_LEVEL):
-                await session.write_line("")
+                await end_choice_line(session)
                 # design doc: admin is one of the features
                 # migrated onto the two-lane database execution model -- see
                 # the "e" (mail) branch above for the identical lane-is-None
@@ -1278,7 +1283,7 @@ async def _main_menu_loop(
                     )
                 redraw = True
             elif choice == "t" and sees_staff_list(db, user):
-                await session.write_line("")
+                await end_choice_line(session)
                 if lane is not None:
                     await staff_list_screen(session, lane, user)
                 else:
@@ -1287,7 +1292,7 @@ async def _main_menu_loop(
                     )
                 redraw = True
             elif choice == "s" and is_staff(user):
-                await session.write_line("")
+                await end_choice_line(session)
                 set_root_activity(session, "Staff console")
                 if lane is not None:
                     await staff_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
@@ -1297,7 +1302,7 @@ async def _main_menu_loop(
                     )
                 redraw = True
             elif choice == "a" and not meets_level(user, SYSOP_LEVEL) and has_moderation_scope(db, user):
-                await session.write_line("")
+                await end_choice_line(session)
                 if lane is not None:
                     await moderation_queue(
                         session, lane, user, link_context=link_context,

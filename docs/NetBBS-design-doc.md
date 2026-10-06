@@ -466,7 +466,11 @@ node logs it once; the console's check warns when a level-255 SysOp's menu
 would not fit. ASCII callers, a terminal smaller than the art, and art that
 fails the check get the generated menu too. Art narrower than the screen is
 drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
-token places it. The main menu, the welcome and logoff banners and the three
+token places it. A prompt placed in the art leaves the cursor mid-screen, so
+whatever answers a choice there ("Log off?", "Search:") starts on the first
+free row below the art, its notices and its navigation lines, never on the row
+under the prompt, which it would overwrite (issue #1083,
+`netbbs.net.art_prompt`). The main menu, the welcome and logoff banners and the three
 lists below use slots, and the main menu also takes hand-drawn items. Pacing
 works for the welcome banner, the main menu's art and the three lists' art.
 
