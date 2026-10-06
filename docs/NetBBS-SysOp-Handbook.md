@@ -572,6 +572,16 @@ requires its exact name. Existing content retains its recorded author label.
 
 ### Account lifecycle
 
+A caller sets their own display name and birthdate under **Your profile → Name
+& details**. If one needs correcting, a typo or a display name that has to go,
+open the account under **Users** and use **Display [n]ame** or **Birthdat[e]**.
+The value opens in the line to edit; a blank line clears it, Esc keeps it. The
+same rules apply as for the caller's own change. The account's **History**
+records each edit with your name, the old and new display name, and for a
+birthdate only that it changed. A verified age or real name is a separate
+record that these never change, and the screen says so when one is on record.
+Staff with **Manage accounts** can do the same for accounts within their reach.
+
 A disabled account, and a signup still awaiting approval, receive no mail:
 callers here are told so at the To prompt, and Link mail bounces with "that
 account is not taking mail at the moment", which does not tell the other node

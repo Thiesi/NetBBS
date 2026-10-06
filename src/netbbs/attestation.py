@@ -30,10 +30,19 @@ exists" shape already used for `boards.origin_node_fingerprint`.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
-from netbbs.auth.users import SYSOP_LEVEL, User, presentation_name_problem
+from netbbs.auth.users import (
+    SYSOP_LEVEL,
+    StaffPermission,
+    User,
+    UserManagementError,
+    get_user_by_id,
+    presentation_name_problem,
+    require_account_authority,
+)
 from netbbs.moderation.log import record_action
 from netbbs.rendering import VERIFIED_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
@@ -95,18 +104,40 @@ def set_display_name(db: Database, user: User, name: str) -> None:
     protected here, unlike aliases: a display name is meant to be a
     person's own name, and two people can share one.
     """
+    problem = display_name_problem(db, name, owner=user)
+    if problem is not None:
+        raise ProfileFieldError(problem)
+    set_user_preference(db, user, _DISPLAY_NAME_KEY, name)
+
+
+def display_name_problem(db: Database, name: str, *, owner: User) -> str | None:
+    """Why `name` can't be `owner`'s display name, or `None`. One rule for
+    the caller's own Profile and a SysOp's edit (issue #1110)."""
     if RESERVED_DISPLAY_NAME_MARKER in name:
-        raise ProfileFieldError(
+        return (
             f"display name cannot contain {RESERVED_DISPLAY_NAME_MARKER!r} "
             "(reserved for verified real names)"
         )
     byte_count = len(name.encode("utf-8"))
     if byte_count > MAX_DISPLAY_NAME_BYTES:
-        raise ProfileFieldError(f"display name cannot exceed {MAX_DISPLAY_NAME_BYTES} bytes, got {byte_count}")
-    problem = presentation_name_problem(db, name, owner=user, protect_every_username=False)
-    if problem is not None:
-        raise ProfileFieldError(problem)
-    set_user_preference(db, user, _DISPLAY_NAME_KEY, name)
+        return f"display name cannot exceed {MAX_DISPLAY_NAME_BYTES} bytes, got {byte_count}"
+    return presentation_name_problem(db, name, owner=owner, protect_every_username=False)
+
+
+#: The earliest birthdate either the caller or a SysOp may enter (issue
+#: #1110): a typo such as 0198-05-01 would otherwise make anyone old enough
+#: for every age gate.
+EARLIEST_BIRTHDATE = date(1900, 1, 1)
+
+
+def birthdate_problem(birthdate: date) -> str | None:
+    """Why `birthdate` can't be stored, or `None`. One rule for the caller's
+    own Profile and a SysOp's edit (issue #1110)."""
+    if birthdate > _today():
+        return "birthdate cannot be in the future"
+    if birthdate < EARLIEST_BIRTHDATE:
+        return f"birthdate cannot be before {EARLIEST_BIRTHDATE.isoformat()}"
+    return None
 
 
 def get_display_name(db: Database, user: User) -> str | None:
@@ -144,9 +175,117 @@ def is_location_visible(db: Database, user: User) -> bool:
 
 
 def set_birthdate(db: Database, user: User, birthdate: date) -> None:
-    if birthdate > _today():
-        raise ProfileFieldError("birthdate cannot be in the future")
+    problem = birthdate_problem(birthdate)
+    if problem is not None:
+        raise ProfileFieldError(problem)
     set_user_preference(db, user, _BIRTHDATE_KEY, birthdate.isoformat())
+
+
+# -- a SysOp's edit of a caller's own fields (issue #1110) -------------------
+
+
+def _write_preference_without_commit(db: Database, user_id: int, key: str, value: str | None) -> None:
+    if value is None:
+        db.connection.execute("DELETE FROM user_preferences WHERE user_id = ? AND key = ?", (user_id, key))
+    else:
+        db.connection.execute(
+            """
+            INSERT INTO user_preferences (user_id, key, value) VALUES (?, ?, ?)
+            ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value
+            """,
+            (user_id, key, value),
+        )
+
+
+def _stored_preference(db: Database, user_id: int, key: str) -> str | None:
+    row = db.connection.execute(
+        "SELECT value FROM user_preferences WHERE user_id = ? AND key = ?", (user_id, key)
+    ).fetchone()
+    return row["value"] if row is not None else None
+
+
+def _change_profile_field(
+    db: Database, target: User, key: str, value: str | None, *, changed_by: User,
+    check: Callable[[User], str | None], action: str, detail: Callable[[str | None, str | None], str],
+) -> bool:
+    """One audited change to `target`'s own profile field, by someone else.
+    Returns whether anything changed."""
+    from netbbs.moderation.log import record_action_without_commit
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = get_user_by_id(db, target.id)
+        if current is None:
+            raise UserManagementError("that account no longer exists")
+        # Design doc §5.6: what a manager may do to an account's details
+        # follows the same reach as a password reset -- below 255, no
+        # staff permission, never their own.
+        require_account_authority(db, changed_by, current, StaffPermission.MANAGE_ACCOUNTS)
+        if value is not None:
+            problem = check(current)
+            if problem is not None:
+                raise ProfileFieldError(problem)
+        old = _stored_preference(db, current.id, key)
+        if old == value:
+            db.connection.rollback()
+            return False
+        _write_preference_without_commit(db, current.id, key, value)
+        record_action_without_commit(
+            db, actor=changed_by, action=action, target_user_id=current.id, detail=detail(old, value)
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return True
+
+
+def change_display_name(db: Database, target: User, name: str | None, *, changed_by: User) -> bool:
+    """
+    A SysOp's (or an account manager's) edit of `target`'s display name
+    (issue #1110): the same rules as the caller's own Profile
+    (`display_name_problem`), `None` or blank to clear it, and recorded in
+    the account's admin history with the old and new name -- a display name
+    is shown to everyone, so the record keeps both. The caller's own
+    visibility setting for it is not touched. Raises `ProfileFieldError`
+    for a name the rules refuse, `UserManagementError` for an actor who
+    may not change this account. Returns whether anything changed.
+    """
+    value = name.strip() if name is not None else None
+    value = value or None
+    return _change_profile_field(
+        db, target, _DISPLAY_NAME_KEY, value, changed_by=changed_by,
+        check=lambda current: display_name_problem(db, value, owner=current),
+        action="set_display_name",
+        detail=lambda old, new: f"{old!r} -> {new!r}" if new is not None else f"{old!r} cleared",
+    )
+
+
+def change_birthdate(db: Database, target: User, birthdate: date | None, *, changed_by: User) -> bool:
+    """
+    A SysOp's (or an account manager's) edit of `target`'s self-entered
+    birthdate (issue #1110): the same rules as the caller's own Profile
+    (`birthdate_problem`), `None` to clear it. The admin history records
+    that it was set, changed or cleared, never the date itself: a birthdate
+    is private unless its owner shows it, and the history is read by every
+    SysOp and manager. A verified age (`attest_age`) is a separate record
+    and is left alone; it still decides every age gate. Returns whether
+    anything changed.
+    """
+    value = birthdate.isoformat() if birthdate is not None else None
+
+    def _detail(old: str | None, new: str | None) -> str:
+        if new is None:
+            return "birthdate cleared"
+        return "birthdate set" if old is None else "birthdate changed"
+
+    return _change_profile_field(
+        db, target, _BIRTHDATE_KEY, value, changed_by=changed_by,
+        check=lambda _current: birthdate_problem(birthdate),
+        action="set_birthdate",
+        detail=_detail,
+    )
 
 
 def get_birthdate(db: Database, user: User) -> date | None:

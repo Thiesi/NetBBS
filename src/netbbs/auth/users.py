@@ -1089,6 +1089,14 @@ def _require_account_authority(db: Database, actor: User, target: User, permissi
         )
 
 
+def require_account_authority(db: Database, actor: User, target: User, permission: StaffPermission) -> None:
+    """`_require_account_authority` for account changes kept outside this
+    module (issue #1110: a caller's display name and birthdate, in
+    `netbbs.attestation`). Same rule, same refusal; `target` must be the
+    caller's fresh row, read inside its own transaction."""
+    _require_account_authority(db, actor, target, permission)
+
+
 def _check_level_change(db: Database, current: User, new_level: int, changed_by: User) -> None:
     """Every refusal `set_user_level` makes, against the account as read
     now. Raises `UserManagementError`."""

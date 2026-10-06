@@ -87,7 +87,16 @@ from netbbs.access_map import (
     list_gates,
 )
 from netbbs.age_requirement import VERIFIED as VERIFIED_AGE
-from netbbs.attestation import AttestationError, withdraw_link_visibility
+from netbbs.attestation import (
+    AttestationError,
+    ProfileFieldError,
+    change_birthdate,
+    change_display_name,
+    get_attestation,
+    get_birthdate,
+    get_display_name,
+    withdraw_link_visibility,
+)
 from netbbs.auth.users import (
     CO_SYSOP_PRESET,
     NEW_ACCOUNT_SENTINEL,
@@ -1221,7 +1230,8 @@ def _co_sysop_question(username: str) -> str:
     SysOp grants it to a helper on its own, with [i] on the account."""
     return (
         f"Make {username!r} a Co-SysOp -- approve accounts, manage accounts (disable, "
-        "password reset, levels up to 254) and moderate everything? They can't act on "
+        "password reset, display names and birthdates, levels up to 254) and moderate "
+        "everything? They can't act on "
         "SysOps or other staff, or reach Settings, Link, Node, DNS or backups, and members "
         "see them on the Staff list. Verifying identity is granted separately, with [i] "
         "on this account."
@@ -7308,6 +7318,16 @@ async def _draw_user_detail(
                 "r", "Blocked", "yes (local blocklist)" if blocked else "no",
                 color=ERROR_COLOR if blocked else VALUE_COLOR,
             ),
+            # Issue #1110: the caller's own name and birthdate, which a SysOp
+            # or account manager can correct. In this section, not one of
+            # their own: the screen has to fit 24 rows.
+            *_detail_fields(
+                await lane.run(get_display_name, target),
+                await lane.run(get_birthdate, target),
+                age_verified=await lane.run(get_attestation, target, "age") is not None,
+                name_verified=await lane.run(get_attestation, target, "name") is not None,
+                field=_editable,
+            ),
             # The list itself is a screen of its own (`[H]istory`): ten rows of
             # it here pushed the account's own fields off a 24-row terminal.
             Field(
@@ -7364,6 +7384,10 @@ async def _draw_user_detail(
         options.append(MenuEntry(label=menu_key("u", "to promotion", prefix="A"), brief="Promotion rules on or off"))
     if "t" in offered:
         options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
+    if "n" in offered:
+        options.append(MenuEntry(label=menu_key("n", "ame", prefix="Display "), brief="Correct or clear the display name"))
+    if "e" in offered:
+        options.append(MenuEntry(label=menu_key("e", "", prefix="Birthdat"), brief="Correct or clear the birthdate"))
     if "s" in offered:
         options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
     if "i" in offered:
@@ -7390,10 +7414,10 @@ async def _draw_user_detail(
     return blocked
 
 
-_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "k", "p", "s", "i", "u")
+_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "n", "e", "k", "p", "s", "i", "u")
 
 #: Every action key on the account detail -- what a SysOp gets.
-_ALL_USER_DETAIL_KEYS = frozenset("alutrkpsihd")
+_ALL_USER_DETAIL_KEYS = frozenset("alutrnekpsihd")
 
 
 def _auto_promotion_label(target: User, kept: str | None) -> str:
@@ -7411,7 +7435,8 @@ def _user_detail_keys(actor: User, target: User) -> frozenset[str]:
     The account-detail actions `actor` is offered on `target` (design doc
     §5.6). A SysOp gets all of them. A staff member gets `[H]istory`, and
     -- only on an account below 255 holding no staff permission -- level,
-    enable/disable and password with manage accounts, approve and decline
+    enable/disable, password, display name and birthdate (issue #1110)
+    with manage accounts, approve and decline
     with approve accounts. Never keys, the blocklist, staff, identity
     verification, or deleting an account.
 
@@ -7423,10 +7448,37 @@ def _user_detail_keys(actor: User, target: User) -> frozenset[str]:
     keys = {"h"}
     within_reach = target.user_level < SYSOP_LEVEL and not target.staff_permissions
     if within_reach and actor.has_staff(StaffPermission.MANAGE_ACCOUNTS):
-        keys |= {"l", "u", "t", "p"}
+        keys |= {"l", "u", "t", "p", "n", "e"}
     if within_reach and target.pending_approval and actor.has_staff(StaffPermission.APPROVE_ACCOUNTS):
         keys |= {"a", "d"}
     return frozenset(keys)
+
+
+def _detail_fields(
+    display_name: str | None,
+    birthdate: datetime.date | None,
+    *,
+    age_verified: bool,
+    name_verified: bool,
+    field: Callable[..., Field],
+) -> list[Field]:
+    """The account detail's display name and birthdate (issue #1110), the
+    caller's own fields. A verification on record is said in the value,
+    since an edit here never changes it and it still decides the gates.
+    The display name can come from the caller, so it is sanitized like any
+    other text they typed."""
+    name = sanitize_text(display_name) if display_name else "(not set)"
+    born = birthdate.isoformat() if birthdate else "(not set)"
+    return [
+        field(
+            "n", "Display name", name + ("; real name verified" if name_verified else ""),
+            color=VALUE_COLOR if display_name else MUTED_COLOR,
+        ),
+        field(
+            "e", "Birthdate", born + ("; age verified" if age_verified else ""),
+            color=VALUE_COLOR if birthdate else MUTED_COLOR,
+        ),
+    ]
 
 
 def _grant_summaries(db: Database, target: User) -> list[str]:
@@ -7519,6 +7571,20 @@ async def _read_user_detail_key(session: Session) -> EditorKey:
 # screen's status lines are drawn by `_draw_user_detail` directly, not
 # through `netbbs.net.resource_editor`.
 _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
+    "n": (
+        "Display name",
+        "The name this caller chose for themselves (Your profile > Name & details). "
+        "Correct or clear it here, for a typo or a name that has to go; blank clears it. "
+        "The same rules as the caller's own apply, and the change is recorded in the "
+        "account's history. A verified real name is a separate record and is not changed.",
+    ),
+    "e": (
+        "Birthdate",
+        "The birthdate this caller entered themselves, which age gates use when there is "
+        "no verified age. Correct or clear it here; blank clears it. The history records "
+        "that it changed, never the date. A verified age is a separate record, is not "
+        "changed here, and still decides every age gate.",
+    ),
     "u": (
         "Auto promotion",
         "Whether the node's promotion rules (Users > Promotion rules) may raise this "
@@ -7539,7 +7605,8 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
     "s": (
         "Staff",
         "Staff permissions: approve accounts, manage accounts (disable/"
-        "enable, password reset, levels up to 254) and moderate everything. Co-SysOp sets "
+        "enable, password reset, display name and birthdate, levels up to 254) and "
+        "moderate everything. Co-SysOp sets "
         "all three. A staff member never acts on level 255 or on other staff, and can't "
         "grant anything.",
     ),
@@ -7567,6 +7634,45 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
         "block also survives the account being re-enabled.",
     ),
 }
+
+
+async def _edit_account_detail(
+    session: Session, lane: DatabaseLane, actor: User, target: User, choice: str
+) -> None:
+    """Issue #1110: correct or clear `target`'s display name (`n`) or
+    birthdate (`e`). The value opens in the line, as the level does; blank
+    clears it, Esc keeps it."""
+    if choice == "n":
+        current = await lane.run(get_display_name, target) or ""
+        label = f"Display name for {target.username!r} (blank clears it, {_EDIT_HINT}):"
+    else:
+        stored = await lane.run(get_birthdate, target)
+        current = stored.isoformat() if stored else ""
+        label = f"Birthdate for {target.username!r} as YYYY-MM-DD (blank clears it, {_EDIT_HINT}):"
+    await write_field_prompt(session, colored(label, fg_color=MUTED_COLOR), hint=_EDIT_HINT)
+    try:
+        raw = (await _read_seeded_line(session, initial=current)).strip()
+    except InputCancelled:
+        return
+    if raw == current:
+        return
+    try:
+        if choice == "n":
+            changed = await lane.run(change_display_name, target, raw or None, changed_by=actor)
+            what = f"Display name for {target.username!r} " + (f"is now {raw!r}." if raw else "cleared.")
+        else:
+            try:
+                new_birthdate = datetime.date.fromisoformat(raw) if raw else None
+            except ValueError:
+                _announce_line(session, colored("Not a valid date (expected YYYY-MM-DD) -- unchanged.", fg_color=MUTED_COLOR))
+                return
+            changed = await lane.run(change_birthdate, target, new_birthdate, changed_by=actor)
+            what = f"Birthdate for {target.username!r} " + ("updated." if raw else "cleared.")
+    except (ProfileFieldError, UserManagementError) as exc:
+        _announce_line(session, colored(f"Not changed: {exc}", fg_color=MUTED_COLOR))
+        return
+    if changed:
+        _announce_line(session, what)
 
 
 async def _show_user_detail_help(
@@ -7831,6 +7937,10 @@ async def _user_detail_screen(
                     )
                     if target.disabled_at is not None:
                         await _revoke_live_sessions(session, node_controls, target, actor)
+            blocked = await _redraw()
+        elif choice in ("n", "e"):
+            await session.write_line("")
+            await _edit_account_detail(session, lane, actor, target, choice)
             blocked = await _redraw()
         elif choice == "i":
             await session.write_line("")
