@@ -144,7 +144,7 @@ def test_the_user_level_prompt_takes_a_name(db, lane, sysop):
     create_user(db, "alice", password="hunter2")
     set_level_name(db, 10, "Member", changed_by=sysop)
 
-    text = _screen(lane, sysop, ["u", "u", "s", "alice", "l", "member"])
+    text = _screen(lane, sysop, ["u", "u", "/", "alice", "l", "member"])
 
     assert get_user_by_username(db, "alice").user_level == 10
     assert "Level: 10 (Member)" in text
@@ -155,7 +155,7 @@ def test_the_preview_and_the_level_screen_use_names(db, lane, sysop):
     create_user(db, "alice", password="hunter2")
     set_level_name(db, 10, "Member", changed_by=sysop)
 
-    assert "Level 0 → 10 (Member)" in _screen(lane, sysop, ["u", "u", "s", "alice", "l", "10"])
+    assert "Level 0 → 10 (Member)" in _screen(lane, sysop, ["u", "u", "/", "alice", "l", "10"])
     assert "Level 10 (Member)" in _screen(lane, sysop, ["u", "l", "g", "Member"])
 
 
