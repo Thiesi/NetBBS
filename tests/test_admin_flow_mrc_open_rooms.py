@@ -79,7 +79,7 @@ def test_open_room_detail_offers_adopt_and_retire_but_never_link_or_unbridge(db,
 
     # The detail screen with Link available: no [L]ink, no [U]nbridge,
     # no [M]RC room for an open room; "l"/"u"/"m" are rejected keys.
-    session = FakeSession(["l", "u", "m", "b"])
+    session = FakeSession(["PAGE_UP", "l", "u", "m", "b"])
     asyncio.run(admin_flow._channel_detail_screen(session, lane, sysop, channel, link_context=_Link(), mrc_bridge=None))
     text = _visible(_written_text(session))
     assert "open room -- opened by a caller" in text
@@ -88,7 +88,7 @@ def test_open_room_detail_offers_adopt_and_retire_but_never_link_or_unbridge(db,
     assert not is_channel_linked(db, channel)
 
     # Adopt: origin cleared, scrollback kept, sweeper ignores it from now on.
-    session = FakeSession(["a", "b"])
+    session = FakeSession(["a", "PAGE_UP", "b"])
     asyncio.run(admin_flow._channel_detail_screen(session, lane, sysop, channel, mrc_bridge=None))
     text = " ".join(_visible(_written_text(session)).split())
     assert "Adopted: 'mrc:lobby' stays bridged to MRC room #lobby" in text

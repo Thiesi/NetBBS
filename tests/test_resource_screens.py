@@ -1,8 +1,9 @@
 """
-Issue #1081: a console resource opens on its own fields. A Community's and a
-category's screen is its editor -- place above the fields, the cursor on the
-first field, actions keeping their letters, and a changed draft offering only
-Save and Back.
+Issue #1081: a console resource opens on its own fields. A Community's,
+category's, message board's, file area's, chat channel's and door's screen
+is its editor -- a read-only header above the fields, the cursor on the first
+field, actions keeping their letters, and a changed draft offering only Save
+and Back.
 """
 
 from __future__ import annotations
@@ -104,6 +105,42 @@ def test_a_file_areas_screen_opens_on_its_fields_with_its_actions(db, lane, syso
     assert "[E]dit" not in screen
 
 
+def test_a_chat_channels_screen_opens_on_its_fields_with_its_actions(db, lane, sysop):
+    from netbbs.chat.channels import create_channel
+
+    create_channel(db, "Lobby", creator=sysop)
+    # Content > Chat channels > List > 01, Back out.
+    session = FakeSession(["m", "n", "l", "0", "1", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    screen = _screen_with(_visible(_written_text(session)), "no MRC room")
+    assert "> Name:" in screen
+    for action in ("[D]elete", "[R]estrictions", "[M]RC room"):
+        assert action in screen
+    assert "[E]dit" not in screen and "[S]ave" not in screen
+
+
+def test_a_doors_screen_opens_on_its_fields_and_a_changed_one_hides_delete(db, lane, sysop):
+    import sys
+
+    from netbbs.doors import create_door, list_doors
+
+    create_door(db, "Lotto", sys.executable, creator=sysop)
+    # Content > Doors > List > 01; Down six times to Pinned, Enter toggles
+    # it; "d" is refused while it waits (no delete prompt); Save; Back out.
+    session = FakeSession(["m", "d", "l", "0", "1", *(["DOWN"] * 6), "ENTER", "d", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    screen = _screen_with(text, "Compatibility: NetBBS native API")
+    assert "> Name:" in screen
+    for action in ("[C]ompatibility", "[L]ast diagnostic", "[O]utbound", "[D]elete"):
+        assert action in screen
+    assert "[E]dit" not in screen
+    changed = _screen_with(text, r"Pinned:\s+yes")
+    assert "[S]ave" in changed and "[D]elete" not in changed
+    assert "Type the door name" not in text
+    assert list_doors(db)[0].pinned
+
+
 def test_a_renamed_community_and_category_are_titled_by_their_new_name(db, lane, sysop):
     create_community(db, "Politics", creator=sysop)
     session = FakeSession(["m", "o", "l", "0", "1", "ENTER", "Civics", "s", "b", "b", "b", "b", "b"])
@@ -128,3 +165,22 @@ def test_a_renamed_board_is_titled_by_its_new_name(db, lane, sysop):
     _run(session, lane, sysop)
     saved = _screen_with(_visible(_written_text(session)), "Updated 'Nib Repair'")
     assert "› Nib Repair" in saved and "Pen Repair" not in saved
+
+
+def test_a_renamed_channel_and_door_are_titled_by_their_new_names(db, lane, sysop):
+    import sys
+
+    from netbbs.chat.channels import create_channel
+    from netbbs.doors import create_door
+
+    create_channel(db, "Lobby", creator=sysop)
+    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lounge", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    saved = _screen_with(_visible(_written_text(session)), "Updated 'Lounge'")
+    assert "› Lounge" in saved and "Lobby" not in saved
+
+    create_door(db, "Lotto", sys.executable, creator=sysop)
+    session = FakeSession(["m", "d", "l", "0", "1", "ENTER", "Lotto2", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    saved = _screen_with(_visible(_written_text(session)), "Updated 'Lotto2'")
+    assert "› Lotto2" in saved and "› Lotto\r" not in saved

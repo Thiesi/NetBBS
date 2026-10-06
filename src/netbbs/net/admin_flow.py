@@ -7260,9 +7260,9 @@ async def _draw_user_detail(
     unlike `disabled_at`, blocked status isn't a field on `User` itself,
     so `_user_detail_screen`'s dispatch loop needs it back to know
     which of `[R]estrict`'s two directions a confirmation should offer,
-    same shape `_render_profile`/`_draw_channel_detail` already use to
-    hand a caller-needed piece of drawn state back to their own dispatch
-    loops.
+    same shape `_render_profile` already uses to
+    hand a caller-needed piece of drawn state back to its own dispatch
+    loop.
 
     `selected` (issue #160's cursor-navigation follow-up), if given one
     of this screen's five field hotkeys (`l`/`t`/`i`/`k`/`r`), highlights
@@ -21586,6 +21586,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
     return [
         FieldSpec(
             key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            section="Door",
             render=lambda d: d.get("name") or "(blank)",
             prompt=text_field("name", required=True),
             brief="The door's display name",
@@ -21593,6 +21594,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
         ),
         FieldSpec(
             key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            section="Door",
             render=lambda d: d.get("description") or "(none)",
             prompt=text_field("description"),
             brief="Shown when browsing doors",
@@ -21600,6 +21602,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
         ),
         FieldSpec(
             key="executable_path", hotkey="e", menu_text=menu_key("E", "xecutable path"), label="Executable path",
+            section="Launch",
             render=lambda d: d.get("executable_path") or "(blank)",
             prompt=text_field("executable_path", required=True),
             brief="Path to the program to launch",
@@ -21612,6 +21615,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
         ),
         FieldSpec(
             key="args_line", hotkey="a", menu_text=menu_key("A", "rgs"), label="Arguments",
+            section="Launch",
             render=lambda d: d.get("args_line") or "(none)",
             prompt=text_field("args_line"),
             brief="Fixed command-line arguments",
@@ -21619,6 +21623,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
         ),
         FieldSpec(
             key="min_play_level", hotkey="p", menu_text=menu_key("P", "lay level"), label="Min play level",
+            section="Access",
             render=lambda d: _plain_level_label(levels, d.get("min_play_level")),
             prompt=_int_field("min_play_level", "Minimum play level"),
             brief="Level required to launch it",
@@ -21626,6 +21631,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
         ),
         FieldSpec(
             key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
+            section="Placement",
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(actor=actor),
             brief="Where it's offered from",
@@ -21633,6 +21639,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
         ),
         FieldSpec(
             key="pinned", hotkey="i", menu_text=menu_key("i", "nned", prefix="P"), label="Pinned",
+            section="Placement",
             render=lambda d: "yes" if d.get("pinned") else "no",
             prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
@@ -21641,39 +21648,39 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
     ]
 
 
-async def _door_screen(
-    session: Session, lane: DatabaseLane, actor: User, *,
-    existing: Door | None = None, prefill: dict | None = None,
-) -> Door | None:
-    """Unified create/edit screen -- see `_area_screen`'s own docstring
-    for the general shape and reasoning, identical here.
-
-    `prefill` (issue #172's door-gallery follow-up): starting field
-    values for a brand-new door, merged over the ordinary blank draft --
-    still the exact same editor, save validation, and `create_door` call
-    as manual `[C]reate`, just not starting from an all-blank form. Only
-    meaningful when `existing` is `None`; silently ignored otherwise --
-    editing an existing door already has real values to start from, and
-    a caller select-then-edit flow (`_door_gallery_screen`) only ever
-    reaches this with `existing=None` in the first place."""
-    if existing is not None:
-        draft = {
-            "name": existing.name, "description": existing.description,
-            "executable_path": existing.executable_path, "args_line": " ".join(existing.args),
-            "min_play_level": existing.min_play_level, "community_id": existing.community_id,
-            "pinned": existing.pinned,
-        }
-        draft["community_id_label"] = (
-            (await lane.run(get_community, existing.community_id)).name
-            if existing.community_id is not None else None
-        )
-    else:
-        draft = {
+def _door_draft(door: Door | None) -> dict:
+    if door is None:
+        return {
             "name": "", "description": None, "executable_path": "", "args_line": "",
             "min_play_level": 0, "community_id": None, "pinned": False, "community_id_label": None,
         }
-        if prefill is not None:
-            draft.update(prefill)
+    return {
+        "name": door.name, "description": door.description,
+        "executable_path": door.executable_path, "args_line": " ".join(door.args),
+        "min_play_level": door.min_play_level, "community_id": door.community_id,
+        "pinned": door.pinned,
+    }
+
+
+async def _door_screen(
+    session: Session, lane: DatabaseLane, actor: User, *,
+    existing: Door | None = None, prefill: dict | None = None,
+    door_services: Any = None, backup_identity_dir: Path | None = None,
+) -> Door | None:
+    """A door's one screen (issue #1081, design doc §3.5), and the screen
+    that registers one -- the same shape as `_board_screen`: its
+    compatibility above the fields, its companion service (if it declares
+    one) after them, and [C]ompatibility, [L]ast diagnostic, [O]utbound,
+    [W]orld, [D]elete and the service actions while nothing waits to be
+    saved.
+
+    `prefill` (issue #172's door-gallery follow-up): starting field values
+    for a brand-new door, merged over the ordinary blank draft -- the same
+    screen, save validation and `create_door` call as manual `[C]reate`,
+    just not starting from an all-blank form. Ignored when editing."""
+    from netbbs.net.door_profile_flow import edit_door_profile, show_door_diagnostic
+
+    current: dict[str, Door | None] = {"door": existing}
 
     async def save(draft: dict) -> Door:
         if not draft["name"]:
@@ -21684,40 +21691,140 @@ async def _door_screen(
             args = tuple(shlex.split(draft["args_line"]))
         except ValueError as exc:
             raise DoorError(f"could not parse arguments -- {exc}") from exc
-        if existing is None:
-            return await lane.run(
+        door = current["door"]
+        if door is None:
+            created = await lane.run(
                 create_door,
                 draft["name"], draft["executable_path"], description=draft["description"], args=args,
                 min_play_level=draft["min_play_level"], pinned=draft["pinned"],
                 community_id=draft["community_id"], creator=actor,
             )
-        return await lane.run(
+            _announce_line(session, f"Registered door {created.name!r}.")
+            return created
+        updated = await lane.run(
             update_door,
-            existing, name=draft["name"], description=draft["description"],
+            door, name=draft["name"], description=draft["description"],
             executable_path=draft["executable_path"], args=args, min_play_level=draft["min_play_level"],
             pinned=draft["pinned"], community_id=draft["community_id"], changed_by=actor,
         )
+        _announce_line(session, f"Updated {updated.name!r}.")
+        if door_services is not None:
+            # The edit can change the executable a service launches, so it
+            # reconciles now; otherwise the old one runs on until a caller
+            # arrives.
+            await door_services.adopt(updated)
+        return updated
+
+    def _act(run: Callable[[Door], Awaitable[bool | None]], *, line: bool = True):
+        async def action(session: Session, lane: DatabaseLane) -> bool:
+            if line:
+                await session.write_line("")
+            return bool(await run(current["door"]))
+        return action
+
+    async def _compatibility(door: Door) -> bool:
+        updated = await edit_door_profile(session, lane, actor, door, door_services=door_services)
+        if updated is not None and door_services is not None:
+            # Reconcile straight away. Waiting for the next caller would leave
+            # an edited service's old process running, and removing a service
+            # hides the very controls which could stop it.
+            await door_services.adopt(updated)
+        return False
+
+    async def _diagnostic(door: Door) -> bool:
+        await show_door_diagnostic(session, lane, door)
+        return False
+
+    async def _outbound(door: Door) -> bool:
+        await _door_outbound_screen(session, lane, actor, door)
+        return False
+
+    async def _world(door: Door) -> bool:
+        await _war_dialer_world_screen(session, lane, actor, door, backup_identity_dir=backup_identity_dir)
+        return False
+
+    async def _delete(door: Door) -> bool:
+        deleted = await _delete_door_screen(session, lane, actor, door, door_services=door_services)
+        if deleted and door_services is not None:
+            # The registration is gone, so nothing could reach its service
+            # again; without this the companion and its restart loop run on
+            # until the node stops, with no control left to halt it.
+            await door_services.forget(door.id)
+        return deleted
+
+    def _service(choice: str):
+        async def run(door: Door) -> bool:
+            await _door_service_action(session, lane, actor, door, choice, door_services)
+            return False
+        return run
+
+    async def refresh() -> DetailState:
+        door = current["door"]
+        if door is None:
+            return DetailState(draft={**_door_draft(None), **(prefill or {})})
+
+        def _load(db: Database):
+            fresh = next((d for d in list_doors(db) if d.id == door.id), door)
+            community = get_community(db, fresh.community_id) if fresh.community_id is not None else None
+            return fresh, {"community_id_label": community.name if community is not None else None}
+
+        door, labels = await lane.run(_load)
+        current["door"] = door
+        header = "Compatibility: " + (door.profile.adapter if door.profile else "NetBBS native API")
+        after = ""
+        if door.profile and door.profile.service:
+            # Issue #466: only a door which declares a service says anything
+            # about one, so most doors look exactly as before.
+            status = door_services.status(door.id) if door_services is not None else None
+            service_rows: list[Field | Note] = [Field(
+                "Service", status.summary() if status is not None else "not supervised by this process",
+                color=VALUE_COLOR if status is not None else MUTED_COLOR,
+            )]
+            if status is not None and status.last_exit_code is not None:
+                service_rows.append(Field(
+                    "Last service exit code", str(status.last_exit_code),
+                    color=VALUE_COLOR if status.last_exit_code == 0 else WARNING_COLOR,
+                ))
+            after = _sections_text(
+                [Section("Companion service", service_rows)], width=session.terminal_width,
+                unicode_style=await lane.run(unicode_style_enabled, actor),
+            )
+        actions = [
+            DetailAction("c", menu_key("C", "ompatibility"), _act(_compatibility, line=False), brief="Profile, preflight and test launch"),
+            DetailAction("l", menu_key("L", "ast diagnostic"), _act(_diagnostic, line=False), brief="View runtime errors"),
+            DetailAction("o", menu_key("O", "utbound"), _act(_outbound, line=False), brief="Whether it may post to a board"),
+        ]
+        if await asyncio.to_thread(_is_war_dialer_door, await lane.run(_node_db_path), door):
+            actions.append(DetailAction("w", menu_key("W", "orld"), _act(_world, line=False), brief="Status and maintenance"))
+        actions.append(DetailAction("d", menu_key("D", "elete"), _act(_delete), brief="Permanently remove this door"))
+        if door.profile and door.profile.service and door_services is not None:
+            actions += [
+                DetailAction("s", menu_key("S", "tart service"), _act(_service("s")), brief="Start its companion process"),
+                DetailAction("h", menu_key("H", "alt service"), _act(_service("h")), brief="Stop this door's companion process"),
+                DetailAction("r", menu_key("R", "estart service"), _act(_service("r")), brief="Stop then start it again"),
+                DetailAction("v", menu_key("V", "iew service log"), _act(_service("v")), brief="Recent service stderr"),
+            ]
+        return DetailState(
+            draft={**_door_draft(door), **labels},
+            title=sanitize_text(door.name),
+            header=colored(header, fg_color=MUTED_COLOR), after_fields=after, actions=actions,
+        )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    door = await edit_resource_draft(
+    return await edit_resource_draft(
         session, lane,
-        title="Edit door" if existing is not None else "Register door",
+        title=sanitize_text(existing.name) if existing is not None else "Register door",
         fields=_door_field_specs(actor=actor, levels=await lane.run(level_context)),
-        draft=draft, save=save, error_type=DoorError,
+        draft={}, save=save, error_type=DoorError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
-        unicode_style=unicode_style,
-        collapsed=collapsed,
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
+        detail=DetailMode(refresh=refresh, stay_after_save=existing is not None),
     )
-    if door is not None:
-        verb = "Updated" if existing is not None else "Registered door"
-        _announce_line(session, f"{verb} {door.name!r}.")
-    return door
 
 
 def _find_door_by_name(db: Database, name: str) -> Door | None:
@@ -22011,129 +22118,10 @@ async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User, 
 
 async def _door_detail_screen(session: Session, lane: DatabaseLane, actor: User, door: Door, *,
                               door_services: Any = None, backup_identity_dir: Path | None = None) -> None:
-    from netbbs.net.door_profile_flow import edit_door_profile, show_door_diagnostic
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-    while True:
-        choice = (await session.read_key()).lower()
-
-        if choice == "b":
-            await session.write_line("")
-            return
-        elif choice == "c":
-            updated = await edit_door_profile(session, lane, actor, door, door_services=door_services)
-            if updated is not None:
-                door = updated
-                # Reconcile straight away. Waiting for the next caller would
-                # leave an edited service's old process running, and removing
-                # a service hides the very controls which could stop it.
-                if door_services is not None:
-                    await door_services.adopt(door)
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-        elif choice == "l":
-            await show_door_diagnostic(session, lane, door)
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-        elif choice == "e":
-            await session.write_line("")
-            updated = await _door_screen(session, lane, actor, existing=door)
-            if updated is not None:
-                door = updated
-                # The basic edit can change the executable a service launches,
-                # so it reconciles for the same reason the Compatibility save
-                # does; otherwise the old one runs on until a caller arrives.
-                if door_services is not None:
-                    await door_services.adopt(door)
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-        elif choice == "d":
-            await session.write_line("")
-            deleted = await _delete_door_screen(session, lane, actor, door, door_services=door_services)
-            if deleted:
-                # The registration is gone, so nothing could reach its service
-                # again; without this the companion and its restart loop run
-                # on until the node stops, with no control left to halt it.
-                if door_services is not None:
-                    await door_services.forget(door.id)
-                return
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-        elif choice == "o":
-            await _door_outbound_screen(session, lane, actor, door)
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-        elif choice == "w" and await asyncio.to_thread(_is_war_dialer_door, await lane.run(_node_db_path), door):
-            await _war_dialer_world_screen(session, lane, actor, door, backup_identity_dir=backup_identity_dir)
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-        elif choice in {"s", "h", "r", "v"} and door_services is not None and door.profile and door.profile.service:
-            await session.write_line("")
-            await _door_service_action(session, lane, actor, door, choice, door_services)
-            await _draw_door_detail(session, lane, door, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, door_services=door_services)
-        else:
-            await session.write(reject_unhandled_key(choice))
-
-
-async def _draw_door_detail(
-    session: Session, lane: DatabaseLane, door: Door, *,
-    description_level: str = "off", redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
-    door_services: Any = None,
-) -> None:
-    await session.write_line(
-        "\r\n" + screen_title(sanitize_text(door.name),
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
+    """A door's screen is its editor (issue #1081): see `_door_screen`."""
+    await _door_screen(
+        session, lane, actor, existing=door, door_services=door_services, backup_identity_dir=backup_identity_dir,
     )
-    sections = [
-        Section("Door", [
-            _description_field(door.description),
-            Field("Community", await lane.run(_community_label, door.community_id)),
-        ]),
-        Section("Launch", [
-            Field("Executable", door.executable_path),
-            Field("Arguments", " ".join(door.args), color=VALUE_COLOR) if door.args
-            else Field("Arguments", "(none)", color=MUTED_COLOR),
-            Field("Compatibility", door.profile.adapter if door.profile else "NetBBS native API"),
-        ]),
-        Section("Access", [
-            Field("Play level", str(door.min_play_level)),
-            Field("Pinned", _yes_no(door.pinned)),
-        ], paired=True),
-    ]
-    options = [
-        MenuEntry(label=menu_key("C", "ompatibility"), brief="Profile, preflight and test launch"),
-        MenuEntry(label=menu_key("L", "ast diagnostic"), brief="View runtime errors"),
-        MenuEntry(label=menu_key("E", "dit"), brief="Change this door's settings"),
-        MenuEntry(label=menu_key("O", "utbound"), brief="Whether it may post to a board"),
-        MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this door"),
-        MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
-    ]
-    if await asyncio.to_thread(_is_war_dialer_door, await lane.run(_node_db_path), door):
-        options.insert(4, MenuEntry(label=menu_key("W", "orld"), brief="Status and maintenance"))
-    # Issue #466: only a door which actually declares a service says anything
-    # about one, so the overwhelming majority of doors look exactly as before.
-    if door.profile and door.profile.service:
-        status = door_services.status(door.id) if door_services is not None else None
-        service_rows = [Field(
-            "Service", status.summary() if status is not None else "not supervised by this process",
-            color=VALUE_COLOR if status is not None else MUTED_COLOR,
-        )]
-        if status is not None and status.last_exit_code is not None:
-            service_rows.append(Field(
-                "Last service exit code", str(status.last_exit_code),
-                color=VALUE_COLOR if status.last_exit_code == 0 else WARNING_COLOR,
-            ))
-        sections.append(Section("Companion service", service_rows))
-        if door_services is not None:
-            options[-1:-1] = [
-                MenuEntry(label=menu_key("S", "tart service"), brief="Start its companion process"),
-                MenuEntry(label=menu_key("H", "alt service"), brief="Stop this door's companion process"),
-                MenuEntry(label=menu_key("R", "estart service"), brief="Stop then start it again"),
-                MenuEntry(label=menu_key("V", "iew service log"), brief="Recent service stderr"),
-            ]
-    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
-    await session.write_line(
-        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 4)
-    )
-    await _choice_prompt(session)
 
 
 def _door_target_description(board: Board) -> str | None:
@@ -23091,12 +23079,79 @@ def _channel_field_specs(
     ]
 
 
+def _channel_draft(channel: Channel | None) -> dict:
+    if channel is None:
+        return {
+            "name": "", "description": None, "min_level": 0,
+            "community_id": None, "category_id": None, "pinned": False, "hidden": False,
+            "members_only": False, "allow_member_invites": False,
+            "min_age": None, "name_requirement": None,
+            "community_id_label": None, "category_id_label": None, "age_requirement": None,
+        }
+    return {
+        "name": channel.name, "description": channel.description, "min_level": channel.min_level,
+        "community_id": channel.community_id, "category_id": channel.category_id,
+        "pinned": channel.pinned, "hidden": channel.hidden, "members_only": channel.members_only,
+        "allow_member_invites": channel.allow_member_invites,
+        "min_age": channel.min_age, "name_requirement": channel.name_requirement,
+        "age_requirement": channel.age_requirement,
+    }
+
+
+async def _channel_sharing_rows(
+    lane: DatabaseLane, channel: Channel, link_context: LinkContext | None, *, linked: bool,
+    mrc_mapping: MrcChannelMapping | None,
+) -> list[Field | Note]:
+    """The Sharing section of a channel's screen: NetBBS Link and its MRC room."""
+    sharing: list[Field | Note] = []
+    if link_context is not None:
+        sharing.append(Field("Linked", _yes_no(linked)))
+        if linked:
+            sharing.extend(
+                await _peer_reach_rows(lane, link_context, link_context.link_node.channels.get(channel.channel_id))
+            )
+    open_room = mrc_mapping is not None and mrc_mapping.is_open_room
+    if mrc_mapping is None:
+        sharing.append(Field("MRC room", "none (not bridged)", color=MUTED_COLOR))
+    elif open_room:
+        last_active = mrc_mapping.last_active_at
+        if last_active:
+            display_format, display_timezone = await lane.run(resolve_display_preferences)
+            last_active = format_for_display(last_active, override_format=display_format, override_timezone=display_timezone)
+        sharing.append(Field(
+            "MRC room",
+            f"#{mrc_mapping.room} (open room -- opened by a caller"
+            f"{', paused' if mrc_mapping.paused else ''}; last active {last_active or 'unknown'})",
+        ))
+        sharing.append(Note(
+            "Retired automatically once idle and unfollowed; adopt it to keep it as an ordinary bridged "
+            "channel. Never shared over NetBBS Link."
+        ))
+    else:
+        state = "paused" if mrc_mapping.paused else "bridged"
+        sharing.append(Field(
+            "MRC room", f"#{mrc_mapping.room} ({state})",
+            color=WARNING_COLOR if mrc_mapping.paused else SUCCESS_COLOR,
+        ))
+        if not (await lane.run(load_mrc_settings)).enabled:
+            sharing.append(Note(
+                "MRC is switched off node-wide -- nothing is relayed until you enable it under "
+                "Settings > Inter-BBS chat (MRC).",
+                color=WARNING_COLOR,
+            ))
+    return sharing
+
+
 async def _channel_screen(
     session: Session, lane: DatabaseLane, actor: User, *, existing: Channel | None = None,
-    chat_hub: ChatHub | None = None,
+    chat_hub: ChatHub | None = None, link_context: LinkContext | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> Channel | None:
-    """Unified create/edit screen -- see `_board_screen`'s own
-    docstring for the general shape and reasoning, identical here.
+    """A chat channel's one screen (issue #1081, design doc §3.5), and the
+    screen that creates one -- the same shape as `_board_screen`: whether it
+    is Linked and its MRC room above the fields, the Sharing section after
+    them, and [D]elete, [R]estrictions, [L]ink and the MRC actions while
+    nothing waits to be saved.
 
     `chat_hub` (issue #277): live membership in `ChatHub` is keyed by
     channel *name*, and every session already inside holds the old name
@@ -23105,47 +23160,25 @@ async def _channel_screen(
     afterwards, so with the running node in reach the rename is refused
     until the channel is empty; the standalone admin CLI, which cannot
     see occupancy, says what a rename does to anyone inside instead."""
-    if existing is not None:
-        draft = {
-            "name": existing.name, "description": existing.description, "min_level": existing.min_level,
-            "community_id": existing.community_id, "category_id": existing.category_id,
-            "pinned": existing.pinned, "hidden": existing.hidden, "members_only": existing.members_only,
-            "allow_member_invites": existing.allow_member_invites,
-            "min_age": existing.min_age, "name_requirement": existing.name_requirement,
-            "age_requirement": existing.age_requirement,
-        }
-        draft["community_id_label"] = (
-            (await lane.run(get_community, existing.community_id)).name
-            if existing.community_id is not None else None
-        )
-        draft["category_id_label"] = (
-            (await lane.run(get_channel_category_by_id, existing.category_id)).name
-            if existing.category_id is not None else None
-        )
-    else:
-        draft = {
-            "name": "", "description": None, "min_level": 0,
-            "community_id": None, "category_id": None, "pinned": False, "hidden": False,
-            "members_only": False, "allow_member_invites": False,
-            "min_age": None, "name_requirement": None,
-            "community_id_label": None, "category_id_label": None, "age_requirement": None,
-        }
+    current: dict = {"channel": existing, "mrc": None}
+    own_fingerprint = link_context.node_identity.fingerprint if link_context is not None else None
 
     async def save(draft: dict) -> Channel:
         if not draft["name"]:
             raise ChannelError("name cannot be blank")
-        if existing is not None and draft["name"] != existing.name and chat_hub is not None:
-            occupants = chat_hub.participant_count(existing.name)
+        channel = current["channel"]
+        if channel is not None and draft["name"] != channel.name and chat_hub is not None:
+            occupants = chat_hub.participant_count(channel.name)
             if occupants:
                 # A carried Link channel's name comes from a remote signed
                 # genesis: sanitize before it is styled into the refusal.
                 raise ChannelError(
-                    f"{sanitize_text(existing.name)!r} cannot be renamed while {occupants} caller(s) are in it: "
+                    f"{sanitize_text(channel.name)!r} cannot be renamed while {occupants} caller(s) are in it: "
                     "live chat membership follows the channel name, so they would be cut off from "
                     "everyone who joins afterwards. Wait until the channel is empty."
                 )
-        if existing is None:
-            return await lane.run(
+        if channel is None:
+            created = await lane.run(
                 create_channel,
                 draft["name"], description=draft["description"], min_level=draft["min_level"],
                 category_id=draft["category_id"], pinned=draft["pinned"], hidden=draft["hidden"],
@@ -23153,27 +23186,144 @@ async def _channel_screen(
                 min_age=draft["min_age"], name_requirement=draft["name_requirement"],
                 community_id=draft["community_id"], age_requirement=draft["age_requirement"], creator=actor,
             )
-        return await lane.run(
+            _announce_line(session, f"Created chat channel {created.name!r}.")
+            return created
+        updated = await lane.run(
             update_channel,
-            existing, name=draft["name"], description=draft["description"], min_level=draft["min_level"],
+            channel, name=draft["name"], description=draft["description"], min_level=draft["min_level"],
             category_id=draft["category_id"], pinned=draft["pinned"], hidden=draft["hidden"],
             members_only=draft["members_only"], allow_member_invites=draft["allow_member_invites"],
             min_age=draft["min_age"], name_requirement=draft["name_requirement"],
             community_id=draft["community_id"], age_requirement=draft["age_requirement"], changed_by=actor,
         )
+        _announce_line(session, f"Updated {updated.name!r}.")
+        if updated.name != channel.name:
+            if chat_hub is None:
+                _announce_line(session, colored(
+                    "If the node is running with callers in this channel, they keep the old name "
+                    "until they leave and rejoin.",
+                    fg_color=MUTED_COLOR,
+                ))
+            if mrc_bridge is not None and current["mrc"] is not None:
+                # The bridge caches the mapped channel's name for hub
+                # delivery; a rename must reach it now (issue #275).
+                await mrc_bridge.refresh_channel_mappings()
+        return updated
+
+    def _act(run: Callable[[Channel], Awaitable[bool | None]]):
+        async def action(session: Session, lane: DatabaseLane) -> bool:
+            await session.write_line("")
+            return bool(await run(current["channel"]))
+        return action
+
+    async def _delete(channel: Channel) -> bool:
+        deleted = await _delete_channel_screen(
+            session, lane, actor, channel, own_fingerprint=own_fingerprint, chat_hub=chat_hub,
+        )
+        if deleted and mrc_bridge is not None and current["mrc"] is not None:
+            # The running bridge must forget the room now, not on the next
+            # inbound line for it (issue #275).
+            await mrc_bridge.refresh_channel_mappings()
+        return deleted
+
+    async def _restrictions(channel: Channel) -> bool:
+        await _channel_restrictions_screen(session, lane, actor, channel)
+        return False
+
+    async def _link(channel: Channel) -> bool:
+        await _link_channel_screen(session, lane, actor, channel, link_context)
+        return False
+
+    async def _mrc_room(channel: Channel) -> bool:
+        await _mrc_room_screen(session, lane, actor, channel, current["mrc"], mrc_bridge=mrc_bridge)
+        return False
+
+    async def _adopt(channel: Channel) -> bool:
+        await _adopt_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge)
+        return False
+
+    async def _retire(channel: Channel) -> bool:
+        return await _retire_open_room_screen(
+            session, lane, actor, channel, mrc_bridge=mrc_bridge, chat_hub=chat_hub,
+        )
+
+    async def _unbridge(channel: Channel) -> bool:
+        await _unbridge_mrc_room(session, lane, actor, channel, current["mrc"], mrc_bridge=mrc_bridge)
+        return False
+
+    async def _pause(channel: Channel) -> bool:
+        await _toggle_mrc_pause(session, lane, actor, channel, current["mrc"], mrc_bridge=mrc_bridge)
+        return False
+
+    async def refresh() -> DetailState:
+        channel = current["channel"]
+        if channel is None:
+            return DetailState(draft=_channel_draft(None))
+
+        def _load(db: Database):
+            fresh = next((c for c in list_channels(db) if c.id == channel.id), channel)
+            community = get_community(db, fresh.community_id) if fresh.community_id is not None else None
+            category = get_channel_category_by_id(db, fresh.category_id) if fresh.category_id is not None else None
+            labels = {
+                "community_id_label": community.name if community is not None else None,
+                "category_id_label": category.name if category is not None else None,
+            }
+            return fresh, get_mrc_mapping(db, fresh), labels
+
+        channel, mrc_mapping, labels = await lane.run(_load)
+        current["channel"], current["mrc"] = channel, mrc_mapping
+        linked = await lane.run(is_channel_linked, channel) if link_context is not None else False
+        open_room = mrc_mapping is not None and mrc_mapping.is_open_room
+        header_bits = []
+        if link_context is not None:
+            header_bits.append("Linked" if linked else "not Linked")
+        if mrc_mapping is None:
+            header_bits.append("no MRC room")
+        else:
+            state = "open room" if open_room else ("paused" if mrc_mapping.paused else "bridged")
+            header_bits.append(f"MRC #{mrc_mapping.room} ({state})")
+        after = _sections_text(
+            [Section("Sharing", await _channel_sharing_rows(
+                lane, channel, link_context, linked=linked, mrc_mapping=mrc_mapping,
+            ))],
+            width=session.terminal_width, unicode_style=await lane.run(unicode_style_enabled, actor),
+        )
+        actions = [
+            DetailAction("d", menu_key("D", "elete"), _act(_delete), brief="Permanently remove this channel"),
+            DetailAction("r", menu_key("R", "estrictions"), _act(_restrictions), brief="Active mutes and bans"),
+        ]
+        if link_context is not None and not linked and not open_room:
+            actions.append(DetailAction("l", menu_key("L", "ink this chat channel"), _act(_link), brief="Share it via NetBBS Link"))
+        if open_room:
+            actions.append(DetailAction("a", menu_key("A", "dopt"), _act(_adopt), brief="Keep it as a bridged channel"))
+            actions.append(DetailAction("t", menu_key("t", "ire", prefix="Re"), _act(_retire), brief="Remove it and its scrollback now"))
+        else:
+            actions.append(DetailAction("m", menu_key("M", "RC room"), _act(_mrc_room), brief="Bridge to a Multi Relay Chat room"))
+        if mrc_mapping is not None and not open_room:
+            actions.append(DetailAction("u", menu_key("U", "nbridge"), _act(_unbridge), brief="Stop relaying and forget the room"))
+            if mrc_mapping.paused:
+                actions.append(DetailAction("p", menu_key("P", "ause MRC bridge", prefix="Un"), _act(_pause), brief="Resume relaying to MRC"))
+            else:
+                actions.append(DetailAction("p", menu_key("P", "ause MRC bridge"), _act(_pause), brief="Keep the mapping, relay nothing"))
+        return DetailState(
+            draft={**_channel_draft(channel), **labels},
+            title=sanitize_text(channel.name),
+            header=colored(" · ".join(header_bits), fg_color=MUTED_COLOR),
+            after_fields=after, actions=actions,
+        )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    channel = await edit_resource_draft(
+    return await edit_resource_draft(
         session, lane,
-        title="Edit chat channel" if existing is not None else "Create chat channel",
+        title=sanitize_text(existing.name) if existing is not None else "Create chat channel",
         fields=_channel_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
             levels=await lane.run(level_context),
         ),
-        draft=draft, save=save, error_type=ChannelError,
+        draft={}, save=save, error_type=ChannelError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
@@ -23181,19 +23331,8 @@ async def _channel_screen(
         collapsed=collapsed,
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
+        detail=DetailMode(refresh=refresh, stay_after_save=existing is not None),
     )
-    if channel is not None:
-        verb = "Updated" if existing is not None else "Created chat channel"
-        _announce_line(session, f"{verb} {channel.name!r}.")
-        if existing is not None and channel.name != existing.name and chat_hub is None:
-            _announce_line(session,
-                colored(
-                    "If the node is running with callers in this channel, they keep the old name "
-                    "until they leave and rejoin.",
-                    fg_color=MUTED_COLOR,
-                )
-            )
-    return channel
 
 
 async def _list_channels_screen(
@@ -23245,187 +23384,11 @@ async def _channel_detail_screen(
     mrc_bridge: MrcBridge | None = None,
     chat_hub: ChatHub | None = None,
 ) -> None:
+    """A chat channel's screen is its editor (issue #1081): see `_channel_screen`."""
     await lane.run(mark_carried_reviewed, "channels", channel.channel_id)
-    linked = await lane.run(is_channel_linked, channel) if link_context is not None else False
-    mrc_mapping = await lane.run(get_mrc_mapping, channel)
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-
-    async def _redraw() -> None:
-        await _draw_channel_detail(
-            session, lane, channel, linked=linked, link_context=link_context, mrc_mapping=mrc_mapping,
-            description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
-            collapsed=collapsed,
-        )
-
-    await _redraw()
-    while True:
-        choice = (await session.read_key()).lower()
-
-        if choice == "b":
-            await session.write_line("")
-            return
-        elif choice == "e":
-            await session.write_line("")
-            updated = await _channel_screen(session, lane, actor, existing=channel, chat_hub=chat_hub)
-            if updated is not None:
-                channel = updated
-                if mrc_bridge is not None and mrc_mapping is not None:
-                    # The bridge caches the mapped channel's name for hub
-                    # delivery; a rename must reach it now (issue #275).
-                    await mrc_bridge.refresh_channel_mappings()
-                    mrc_mapping = await lane.run(get_mrc_mapping, channel)
-            await _redraw()
-        elif choice == "d":
-            await session.write_line("")
-            deleted = await _delete_channel_screen(
-                session, lane, actor, channel,
-                own_fingerprint=link_context.node_identity.fingerprint if link_context is not None else None,
-                chat_hub=chat_hub,
-            )
-            if deleted:
-                if mrc_bridge is not None and mrc_mapping is not None:
-                    # The running bridge must forget the room now, not on
-                    # the next inbound line for it (issue #275).
-                    await mrc_bridge.refresh_channel_mappings()
-                return
-            await _redraw()
-        elif choice == "r":
-            await session.write_line("")
-            await _channel_restrictions_screen(session, lane, actor, channel)
-            await _redraw()
-        elif choice == "l" and link_context is not None and not linked and not (
-            mrc_mapping is not None and mrc_mapping.is_open_room
-        ):
-            await session.write_line("")
-            await _link_channel_screen(session, lane, actor, channel, link_context)
-            linked = await lane.run(is_channel_linked, channel)
-            await _redraw()
-        elif choice == "m" and not (mrc_mapping is not None and mrc_mapping.is_open_room):
-            await session.write_line("")
-            mrc_mapping = await _mrc_room_screen(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
-            await _redraw()
-        elif choice == "a" and mrc_mapping is not None and mrc_mapping.is_open_room:
-            await session.write_line("")
-            mrc_mapping = await _adopt_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge)
-            await _redraw()
-        elif choice == "t" and mrc_mapping is not None and mrc_mapping.is_open_room:
-            await session.write_line("")
-            if await _retire_open_room_screen(session, lane, actor, channel, mrc_bridge=mrc_bridge, chat_hub=chat_hub):
-                return
-            await _redraw()
-        elif choice == "u" and mrc_mapping is not None and not mrc_mapping.is_open_room:
-            await session.write_line("")
-            mrc_mapping = await _unbridge_mrc_room(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
-            await _redraw()
-        elif choice == "p" and mrc_mapping is not None and not mrc_mapping.is_open_room:
-            # An open room has no pause (it is retired, not paused); the
-            # key is rejected rather than acting on an unlisted action.
-            await session.write_line("")
-            mrc_mapping = await _toggle_mrc_pause(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
-            await _redraw()
-        else:
-            await session.write(reject_unhandled_key(choice))
-
-
-async def _draw_channel_detail(
-    session: Session,
-    lane: DatabaseLane,
-    channel: Channel,
-    *,
-    linked: bool = False,
-    link_context: LinkContext | None = None,
-    mrc_mapping: MrcChannelMapping | None = None,
-    description_level: str = "off",
-    redraw_in_place: bool = False,
-    unicode_style: bool = False,
-    collapsed: bool = False,
-) -> None:
-    await session.write_line(
-        "\r\n" + screen_title(sanitize_text(channel.name),
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
+    await _channel_screen(
+        session, lane, actor, existing=channel, chat_hub=chat_hub, link_context=link_context, mrc_bridge=mrc_bridge,
     )
-    sections = [
-        Section("Chat channel", [
-            _description_field(channel.description),
-            Field("Community", await lane.run(_community_label, channel.community_id)),
-        ]),
-        Section("Access", [
-            Field("Minimum level", str(channel.min_level)),
-            Field("Members-only", _yes_no(channel.members_only)),
-            _gate_field("Minimum age", _age_gate_value(channel.min_age, channel.age_requirement)),
-            _gate_field("Name requirement", channel.name_requirement),
-        ], paired=True),
-        Section("Behavior", [
-            Field("Pinned", _yes_no(channel.pinned)),
-            Field("Hidden", _yes_no(channel.hidden)),
-            Field("Allow member invites", _yes_no(channel.allow_member_invites)),
-        ], paired=True),
-    ]
-    sharing: list[Field | Note] = []
-    if link_context is not None:
-        sharing.append(Field("Linked", _yes_no(linked)))
-        if linked:
-            sharing.extend(
-                await _peer_reach_rows(lane, link_context, link_context.link_node.channels.get(channel.channel_id))
-            )
-    open_room = mrc_mapping is not None and mrc_mapping.is_open_room
-    if mrc_mapping is None:
-        sharing.append(Field("MRC room", "none (not bridged)", color=MUTED_COLOR))
-    elif open_room:
-        last_active = mrc_mapping.last_active_at
-        if last_active:
-            display_format, display_timezone = await lane.run(resolve_display_preferences)
-            last_active = format_for_display(last_active, override_format=display_format, override_timezone=display_timezone)
-        sharing.append(Field(
-            "MRC room",
-            f"#{mrc_mapping.room} (open room -- opened by a caller"
-            f"{', paused' if mrc_mapping.paused else ''}; last active {last_active or 'unknown'})",
-        ))
-        sharing.append(Note(
-            "Retired automatically once idle and unfollowed; adopt it to keep it as an ordinary bridged "
-            "channel. Never shared over NetBBS Link."
-        ))
-    else:
-        state = "paused" if mrc_mapping.paused else "bridged"
-        sharing.append(Field(
-            "MRC room", f"#{mrc_mapping.room} ({state})",
-            color=WARNING_COLOR if mrc_mapping.paused else SUCCESS_COLOR,
-        ))
-        if not (await lane.run(load_mrc_settings)).enabled:
-            sharing.append(Note(
-                "MRC is switched off node-wide -- nothing is relayed until you enable it under "
-                "Settings > Inter-BBS chat (MRC).",
-                color=WARNING_COLOR,
-            ))
-    sections.append(Section("Sharing", sharing))
-    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
-    options = [
-        MenuEntry(label=menu_key("E", "dit"), brief="Change this channel's settings"),
-        MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this channel"),
-        MenuEntry(label=menu_key("R", "estrictions"), brief="Active mutes and bans"),
-    ]
-    if link_context is not None and not linked and not open_room:
-        options.append(MenuEntry(label=menu_key("L", "ink this chat channel"), brief="Share it via NetBBS Link"))
-    if open_room:
-        options.append(MenuEntry(label=menu_key("A", "dopt"), brief="Keep it as a bridged channel"))
-        options.append(MenuEntry(label=menu_key("t", "ire", prefix="Re"), brief="Remove it and its scrollback now"))
-    else:
-        options.append(MenuEntry(label=menu_key("M", "RC room"), brief="Bridge to a Multi Relay Chat room"))
-    if mrc_mapping is not None and not open_room:
-        options.append(MenuEntry(label=menu_key("U", "nbridge"), brief="Stop relaying and forget the room"))
-        if mrc_mapping.paused:
-            options.append(MenuEntry(label=menu_key("P", "ause MRC bridge", prefix="Un"), brief="Resume relaying to MRC"))
-        else:
-            options.append(MenuEntry(label=menu_key("P", "ause MRC bridge"), brief="Keep the mapping, relay nothing"))
-    options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
-    await session.write_line(
-        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 4)
-    )
-    await _choice_prompt(session)
 
 
 async def _adopt_open_room_screen(

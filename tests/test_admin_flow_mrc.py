@@ -167,7 +167,7 @@ async def _open_channel_detail(session, lane, sysop, lobby, *, mrc_bridge=None):
 
 
 def test_channel_detail_maps_pauses_and_unmaps_a_room(db, lane, sysop, lobby):
-    session = FakeSession(["m", "#General", "p", "p", "u", "b"])
+    session = FakeSession(["PAGE_UP", "m", "#General", "p", "p", "u", "b"])
     asyncio.run(_open_channel_detail(session, lane, sysop, lobby))
     # The detail screen is an aligned label/value panel: fold the padding
     # between a label and its value back to one space before comparing.
@@ -360,7 +360,7 @@ def test_renaming_a_mapped_channel_refreshes_the_running_bridge(db, lane, sysop,
         await bridge.start()
         try:
             await _wait_state(bridge, MrcState.CONNECTED)
-            session = FakeSession(["e", "n", "lounge", "s", "b"])
+            session = FakeSession(["ENTER", "lounge", "s", "b"])
             await _open_channel_detail(session, lane, sysop, lobby, mrc_bridge=bridge)
             assert "Updated 'lounge'" in _visible(_written_text(session))
             assert bridge.mapping_for(lobby).channel.name == "lounge"
