@@ -93,12 +93,19 @@ def announce(session: Session, text: str, *, tone: str = "success", color: int |
     _pending.setdefault(_owner(session), []).append(line)
 
 
-def announce_styled(session: Session, line: str, *, first: bool = False) -> None:
+def announce_styled(session: Session, line: str, *, first: bool = False, news: bool = False) -> None:
     """Queue a line that is already sanitized and styled; with `first`,
     ahead of whatever is already queued (login's Welcome line, issue #949,
-    which mail arriving during the login questions must not precede)."""
+    which mail arriving during the login questions must not precede).
+
+    A line wholly in a status colour is the outcome of an action and gets
+    its mark (issue #1109). `news` says the line is not an outcome but news
+    in the good-news green, which is the success green's own index (waiting
+    mail): it keeps its colour and gets no mark (#1109 review)."""
     queue = _pending.setdefault(_owner(session), [])
-    line = _as_result(_LEADING_BREAK.sub(r"\1", line))
+    line = _LEADING_BREAK.sub(r"\1", line)
+    if not news:
+        line = _as_result(line)
     if first:
         queue.insert(0, line)
     else:

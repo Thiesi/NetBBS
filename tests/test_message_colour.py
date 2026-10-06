@@ -199,3 +199,19 @@ def test_the_marks_have_stand_ins_for_classic_and_ascii_terminals():
     assert map_text("\u2713 Saved.", "ascii") == "* Saved."
     assert map_text("\u2717 Failed.", "cp437") == "x Failed."
     assert map_text("\u2717 Failed.", "ascii") == "x Failed."
+
+
+def test_news_in_the_good_news_green_is_not_marked_as_an_outcome():
+    # #1109 review: waiting mail is in the good-news green, the success
+    # green's own index. Queued as news it keeps its colour, unmarked.
+    session = _Session()
+    news = colored("Mail: 2 unread (1 new).", fg_color=NEW_MAIL_COLOR)
+    notices.announce_styled(session, news, news=True)
+    assert notices.take_notices(session) == [news]
+
+
+def test_new_scan_with_nothing_new_keeps_its_mail_line_as_news():
+    from netbbs.net import scan_and_find
+
+    source = Path(scan_and_find.__file__).read_text(encoding="utf-8")
+    assert "announce_styled(session, line, news=True)" in source
