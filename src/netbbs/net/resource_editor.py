@@ -250,11 +250,67 @@ class FieldSpec:
     step: Callable[[Draft, int], None] | None = None
     brief: str | None = None
     section: str | None = None
+    # Issue #1081: a field shown in place but not editable here -- on a
+    # Linked resource this node is not the origin of, the origin sets it.
+    # The text says why ("set by origin") and is shown after the value;
+    # activating the field says so instead of opening its prompt.
+    locked: str | None = None
+
+
+@dataclass(frozen=True)
+class DetailAction:
+    """An action on a resource's own screen (issue #1081): `[U]p`,
+    `[R]emove`, `[L]ink ...`. `run` does it and returns `True` when the
+    screen should close (the resource is gone, or the action opened
+    somewhere the caller does not come back from), `False` to stay, in
+    which case the screen reloads what it shows."""
+
+    hotkey: str
+    menu_text: str
+    run: Callable[[Session, DatabaseLane], Awaitable[bool]]
+    brief: str | None = None
+
+
+@dataclass
+class DetailState:
+    """What a resource's screen shows besides its fields, fresh from the
+    database: `draft` (the stored values), `header` (the read-only rows
+    above the fields), `after_fields` (a section after them, the NetBBS
+    Link details), and `actions`."""
+
+    draft: Draft
+    header: str = ""
+    after_fields: str = ""
+    actions: Sequence[DetailAction] = ()
+
+
+@dataclass(frozen=True)
+class DetailMode:
+    """Turns `edit_resource_draft` into a resource's one screen (issue
+    #1081, design doc §3.5): read-only header, then the fields chosen by
+    the cursor alone (no field letters, so actions keep theirs), then the
+    actions. `refresh` loads a `DetailState`; it runs on entry, after a
+    save and after an action that stays. While the draft differs from
+    what is stored only `[S]ave` and `[B]ack` are offered.
+    `stay_after_save=False` (creating a resource) returns what `save`
+    returned instead of staying."""
+
+    refresh: Callable[[], Awaitable[DetailState]]
+    stay_after_save: bool = True
 
 
 _SAVE_BRIEF = "Write this draft to the database"
 _BACK_BRIEF = "Discard the draft, nothing saved"
 _BACK_BRIEF_IMMEDIATE = "Nothing pending -- already saved"
+_BACK_BRIEF_DETAIL = "Return to the list"
+_SAVE_BRIEF_DETAIL = "Store the changed fields"
+_DISCARD_BRIEF_DETAIL = "Leave, discarding the changes"
+
+
+def _detail_hint(unicode_style: bool) -> str:
+    if unicode_style:
+        return "↑↓ choose · Enter change · ←→ step"
+    return "Up/Down choose, Enter change, Left/Right step"
 
 
 def _field_value_lines(
@@ -300,6 +356,8 @@ def _field_value_lines(
                 ).split("\r\n"))
             previous_section = f.section
         value = sanitize_text(f.render(draft))
+        if f.locked:
+            value = f"{value}  ({sanitize_text(f.locked)})"
         is_selected = f is selected
         # One colored() call, not marker/label separately -- two calls
         # would insert an SGR reset between "> " and the label text,
@@ -346,6 +404,8 @@ def _build_menu_line(
     description_level: str,
     session: Session,
     fixed_lines: int,
+    extra_entries: Sequence[MenuEntry] = (),
+    save_brief: str = _SAVE_BRIEF,
 ) -> str:
     """Builds the hotkey/menu row for one field subset (the whole
     screen, or one page's worth once `edit_resource_draft` has
@@ -361,8 +421,11 @@ def _build_menu_line(
     budgets its own height against what's left, it never recomputes
     anyone else's."""
     menu_entries = [MenuEntry(label=f.menu_text, brief=f.brief, detailed=f.help) for f in fields]
+    # A resource's own screen (issue #1081) passes no fields here -- they
+    # are chosen by the cursor -- and its actions instead.
+    menu_entries.extend(extra_entries)
     if save is not None:
-        menu_entries.append(MenuEntry(label=save_menu_text, brief=_SAVE_BRIEF))
+        menu_entries.append(MenuEntry(label=save_menu_text, brief=save_brief))
     menu_entries.append(MenuEntry(label=back_menu_text, brief=back_brief))
     # Grouped into the same sections the value list above just used
     # (empty title = "no heading," `menu_grid`'s own existing
@@ -462,6 +525,7 @@ async def edit_resource_draft(
     collapsed: bool = False,
     accent_color: int = ACCENT_COLOR,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    detail: DetailMode | None = None,
 ) -> Any | None:
     """
     Drives one draft-based create/edit screen: renders `title` plus
@@ -584,9 +648,24 @@ async def edit_resource_draft(
     Save step that doesn't exist here. Every other caller keeps passing
     a real `save`/`error_type`/`save_menu_text` exactly as before; nothing
     changes for them.
+
+    `detail` (issue #1081, design doc §3.5) makes this a resource's one
+    screen instead of an editor reached through an overview's `[E]dit`:
+    `DetailMode.refresh` supplies the stored values, a read-only header,
+    a section shown after the fields and the actions. The cursor starts
+    on the first field and is how fields are chosen -- their letters are
+    not offered, so the actions keep theirs. While the draft differs from
+    what is stored only `[S]ave` and `[B]ack` are offered; a save stays
+    on the screen and reloads it. A `FieldSpec.locked` field is shown but
+    says why it can't be changed instead of opening its prompt.
     """
+    detail_state: DetailState | None = None
+    if detail is not None:
+        detail_state = await detail.refresh()
+        draft.clear()
+        draft.update(detail_state.draft)
     initial_draft = dict(draft)
-    selected: int | None = None
+    selected: int | None = 0 if detail is not None and fields else None
     redraw_count = 0
     pending_edit: int | None = None
     field_message: str | None = None
@@ -605,6 +684,8 @@ async def edit_resource_draft(
             node_name_gradient=session.node_name_gradient,
         )
         header_blocks = [title_text if redraw_in_place else "\r\n" + title_text]
+        if detail_state is not None and detail_state.header:
+            header_blocks.append(detail_state.header)
         preamble_text = preamble(draft) if callable(preamble) else preamble
         if preamble_text:
             header_blocks.append(preamble_text)
@@ -628,6 +709,24 @@ async def edit_resource_draft(
         fully_sectioned = bool(fields) and all(f.section is not None for f in fields)
         selected_field = fields[selected] if selected is not None else None
         back_brief = _BACK_BRIEF if save is not None else _BACK_BRIEF_IMMEDIATE
+        # A resource's own screen (issue #1081): fields are not on the menu
+        # row (the cursor chooses them); the actions are, but only while the
+        # draft matches what is stored -- a changed draft offers Save and Back.
+        menu_fields: list[FieldSpec] = fields
+        menu_save = save
+        extra_entries: list[MenuEntry] = []
+        save_brief = _SAVE_BRIEF
+        after_text = ""
+        if detail_state is not None:
+            dirty = draft != initial_draft
+            menu_fields = []
+            menu_save = save if dirty else None
+            save_brief = _SAVE_BRIEF_DETAIL
+            back_brief = _DISCARD_BRIEF_DETAIL if dirty else _BACK_BRIEF_DETAIL
+            if not dirty:
+                extra_entries = [MenuEntry(label=a.menu_text, brief=a.brief) for a in detail_state.actions]
+            after_text = detail_state.after_fields
+        hint_lines = 1 if detail_state is not None and fields else 0
         # Everything on screen except the field values and the menu row
         # itself -- both vary depending on whether this redraw ends up
         # paginated, everything here doesn't. The Ctrl-H hint is gated
@@ -654,7 +753,9 @@ async def edit_resource_draft(
             + 1  # "Choice: " prompt line
             + (1 if redraw_hint and redraw_count >= 1 else 0)
             + (wrap_terminal_text(field_message, width).count("\r\n") + 1 if field_message else 0)
+            + hint_lines
         )
+        after_lines = wrap_terminal_text(after_text, width).count("\r\n") + 1 if after_text else 0
 
         # The "full" candidate is computed unconditionally every redraw
         # -- not cached -- so a mid-session terminal resize (NAWS
@@ -672,12 +773,14 @@ async def edit_resource_draft(
             positions=positions,
         )
         full_menu_line = _build_menu_line(
-            fields, save=save, save_menu_text=save_menu_text, back_menu_text=back_menu_text, back_brief=back_brief,
-            description_level=description_level, session=session,
-            fixed_lines=base_fixed_lines + len(full_lines),
+            menu_fields, save=menu_save, save_menu_text=save_menu_text, back_menu_text=back_menu_text,
+            back_brief=back_brief, description_level=description_level, session=session,
+            fixed_lines=base_fixed_lines + len(full_lines) + after_lines,
+            extra_entries=extra_entries, save_brief=save_brief,
         )
         fits = (
-            base_fixed_lines + len(full_lines) + (full_menu_line.count("\r\n") + 1) <= session.terminal_height
+            base_fixed_lines + len(full_lines) + after_lines + (full_menu_line.count("\r\n") + 1)
+            <= session.terminal_height
         )
         # Only a *sectioned* screen has a natural page boundary to fall
         # back to -- an unsectioned screen that doesn't fit keeps
@@ -690,6 +793,7 @@ async def edit_resource_draft(
             value_lines = full_lines
             menu_line = full_menu_line
             page_hint: str | None = None
+            shown_after = after_text
         else:
             positions = {}
             page_fields = [f for f in fields if f.section == current_page]
@@ -700,13 +804,25 @@ async def edit_resource_draft(
             )
             page_number = section_names.index(current_page) + 1
             page_hint = f"(Section {page_number} of {len(section_names)} -- PgUp/PgDn to switch)"
+            # The section after the fields goes with the last page only, so
+            # every page keeps its rows for its own fields.
+            shown_after = after_text if current_page == section_names[-1] else ""
             menu_line = _build_menu_line(
-                page_fields, save=save, save_menu_text=save_menu_text, back_menu_text=back_menu_text,
-                back_brief=back_brief, description_level=description_level, session=session,
-                fixed_lines=base_fixed_lines + len(value_lines) + 1,  # +1: page_hint's own line
+                page_fields if detail_state is None else [], save=menu_save, save_menu_text=save_menu_text,
+                back_menu_text=back_menu_text, back_brief=back_brief, description_level=description_level,
+                session=session,
+                fixed_lines=(
+                    base_fixed_lines + len(value_lines) + 1  # +1: page_hint's own line
+                    + (wrap_terminal_text(shown_after, width).count("\r\n") + 1 if shown_after else 0)
+                ),
+                extra_entries=extra_entries, save_brief=save_brief,
             )
 
+        if shown_after:
+            value_lines = [*value_lines, *shown_after.split("\r\n")]
         tail_blocks = [f"\r\n{menu_line}"]
+        if hint_lines:
+            tail_blocks.append(colored(_detail_hint(unicode_style), fg_color=MUTED_COLOR))
         if field_message:
             tail_blocks.append(field_message)
         if any(f.help for f in fields):
@@ -787,15 +903,18 @@ async def edit_resource_draft(
             # Same "any working-set change drops the highlight" precedent
             # netbbs.net.picker.pick_item's own paging already established
             # -- a `selected` index into the *previous* page's fields has
-            # no meaningful counterpart on the new one.
+            # no meaningful counterpart on the new one. A resource's own
+            # screen always has a cursor, so it lands on the page's first.
             selected = None
+            if detail_state is not None:
+                selected = next((i for i, f in enumerate(fields) if f.section == current_page), None)
             continue
         if key.kind in (EditorKeyKind.LEFT, EditorKeyKind.RIGHT):
             # Deliberately silent, not a bell-and-reject: pressing
             # Left/Right while sitting on a field with nothing to step
             # (or with no field highlighted at all) isn't a mistake the
             # way an unrecognized hotkey letter is, just a no-op.
-            if selected is not None and fields[selected].step is not None:
+            if selected is not None and fields[selected].step is not None and not fields[selected].locked:
                 fields[selected].step(draft, 1 if key.kind == EditorKeyKind.RIGHT else -1)
             continue
         if key.kind == EditorKeyKind.ESCAPE:
@@ -806,7 +925,9 @@ async def edit_resource_draft(
             # more predictable convention, and `[B]ack`/Ctrl-C already
             # own "actually leave." A no-op (just the bell) when nothing
             # is highlighted -- there is no cursor-nav state to cancel.
-            if selected is not None:
+            # A resource's own screen (issue #1081) keeps its cursor: it is
+            # how fields are chosen there.
+            if selected is not None and detail_state is None:
                 selected = None
                 continue
             await session.write("\a")
@@ -848,6 +969,12 @@ async def edit_resource_draft(
             # next redraw, same bug as the hotkey path already fixed.
             if fields[selected].section is not None and fields[selected].section != current_page:
                 current_page = fields[selected].section
+            if fields[selected].locked:
+                field_message = colored(
+                    f"{fields[selected].label}: {fields[selected].locked}, so it can't be changed here.",
+                    fg_color=MUTED_COLOR,
+                )
+                continue
             if redraw_in_place and getattr(fields[selected].prompt, "_inline_field", False):
                 field_message = None
                 pending_edit = selected
@@ -882,10 +1009,11 @@ async def edit_resource_draft(
                 if not await prompt_yes_no(session, "Discard unsaved changes?", default=False):
                     continue
             return None
-        if save is not None and choice == save_hotkey:
+        dirty = draft != initial_draft
+        if save is not None and choice == save_hotkey and (detail_state is None or dirty):
             await session.write_line("")
             try:
-                return await save(draft)
+                result = await save(draft)
             except error_type as exc:
                 refusal = colored(f"Could not save: {exc}", fg_color=MUTED_COLOR)
                 if redraw_in_place:
@@ -895,6 +1023,33 @@ async def edit_resource_draft(
                 else:
                     await session.write_line(refusal)
                 continue
+            if detail is None or not detail.stay_after_save:
+                return result
+            # Saved on a resource's own screen: stay, showing what is now
+            # stored, with the actions back on the bar.
+            detail_state = await detail.refresh()
+            draft.clear()
+            draft.update(detail_state.draft)
+            initial_draft = dict(draft)
+            continue
+
+        if detail_state is not None:
+            # Fields are chosen by the cursor here; letters are the actions',
+            # offered only while nothing is waiting to be saved.
+            action = None if dirty else next(
+                (a for a in detail_state.actions if a.hotkey.lower() == choice), None
+            )
+            if action is None:
+                await session.write(reject_unhandled_key(choice))
+                continue
+            await session.write_line("")
+            if await action.run(session, lane):
+                return None
+            detail_state = await detail.refresh()
+            draft.clear()
+            draft.update(detail_state.draft)
+            initial_draft = dict(draft)
+            continue
 
         field_index = next((i for i, f in enumerate(fields) if f.hotkey.lower() == choice), None)
         if field_index is None:
