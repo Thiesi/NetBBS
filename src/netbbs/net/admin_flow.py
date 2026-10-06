@@ -7065,6 +7065,9 @@ class _UserListView:
     mode: str = "a"
     descending: bool = False
     visibility: str = "all"
+    # The accounts the list showed last, in order: where Back lands when
+    # the account just viewed is gone (deleted from its own screen).
+    shown_ids: list[int] = dataclasses.field(default_factory=list)
 
 
 async def _pick_target_user(
@@ -7113,14 +7116,19 @@ async def _pick_target_user(
             # The Staff console's accounts waiting for approval (issue #836).
             users = [u for u in users if u.pending_approval]
         if view.visibility == "active_only":
-            return [u for u in users if u.disabled_at is None]
-        if view.visibility == "disabled_only":
-            return [u for u in users if u.disabled_at is not None]
+            users = [u for u in users if u.disabled_at is None]
+        elif view.visibility == "disabled_only":
+            users = [u for u in users if u.disabled_at is not None]
+        view.shown_ids = [u.id for u in users]
         return users
 
     unicode_style = await lane.run(unicode_style_enabled, actor)
     users = await lane.run(_load)
-    if not users:
+    # Nobody to list at all ends here. A filter kept from the last visit
+    # that now matches no one (the one disabled account was just
+    # re-enabled) stays on the list instead, which says "No users match
+    # that view." and lets [V] widen it again (#1109 review).
+    if not users and view.visibility == "all":
         _announce_line(session, "\r\nNo accounts are waiting for approval." if pending_only else "\r\nNo registered users yet.")
         return None
 
@@ -7203,6 +7211,18 @@ async def _pick_target_user(
     )
 
 
+def _neighbour_id(ids: list[int], gone: int) -> int | None:
+    """The account after `gone` in `ids`, or the one before it when it was
+    the last; `None` when it was the only one."""
+    if gone not in ids:
+        return None
+    position = ids.index(gone)
+    rest = ids[:position] + ids[position + 1:]
+    if not rest:
+        return None
+    return rest[min(position, len(rest) - 1)]
+
+
 async def _pick_and_edit_user(
     session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls | None, *, title: str,
     pending_only: bool = False,
@@ -7231,8 +7251,13 @@ async def _pick_and_edit_user(
         )
         if target is None:
             return
+        shown = list(view.shown_ids)
         await _user_detail_screen(session, lane, actor, target, node_controls)
         start_id = target.id
+        if await lane.run(get_user_by_id, target.id) is None:
+            # Deleted from its own screen: land on the account that took
+            # its place in the list, not back at the top (#1109 review).
+            start_id = _neighbour_id(shown, target.id)
 
 
 def _status_label(user: User) -> str:
