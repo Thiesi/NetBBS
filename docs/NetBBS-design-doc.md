@@ -1048,10 +1048,14 @@ A key a caller can press is highlighted wherever it is offered, not only on
 menus (issue #974): a prompt that lists its choices in running text
 ("Unsaved changes. [S]ave, [D]iscard, or [C]ancel?") and a detail-panel label
 that names a key ("[R]otate") colour the bracketed key as a menu entry does
-(`highlight_hotkeys`). A key merely mentioned in explanatory prose -- a
-notice's "use [P]review to check it", a help page -- stays plain, the way the
-help screens write keys. A test keeps prompts and menu labels from writing a
-bare `[X]word` again.
+(`highlight_hotkeys`). Issue #1083 extended this to outcomes and reports: a
+notice's "Use [P]review to verify it looks right." highlights its key too, in
+the notice helpers themselves (`notices.announce`, the console's
+`_announce_line`), and a report line (a `[C]heck` verdict, an art's size) puts
+its numbers in the emphasis colour (`highlight_report`). A saved file's path
+reads in the value colour, and a SAUCE credit shows its title and its artist
+(author/group) as separate fields. Only help pages still write keys plain. A
+test keeps prompts and menu labels from writing a bare `[X]word` again.
 With redraw-in-place enabled, the selected text, optional-integer, age,
 integer, float or optional-text field is edited at its displayed value row.
 The existing Choice row carries the editing key hint; no typing prompt opens

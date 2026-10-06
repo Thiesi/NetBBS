@@ -26,7 +26,7 @@ import re
 import weakref
 
 from netbbs.net.session import Session
-from netbbs.rendering import ERROR_COLOR, MUTED_COLOR, SUCCESS_COLOR, colored, sanitize_text
+from netbbs.rendering import ERROR_COLOR, MUTED_COLOR, SUCCESS_COLOR, colored, highlight_hotkeys, sanitize_text
 from netbbs.rendering.reflow import wrap_terminal_text
 
 _pending: "weakref.WeakKeyDictionary[Session, list[str]]" = weakref.WeakKeyDictionary()
@@ -45,8 +45,9 @@ def _owner(session: Session) -> Session:
 def announce(session: Session, text: str, *, tone: str = "success", color: int | None = None) -> None:
     """Queue one plain outcome line for the next screen drawn on `session`.
     `tone` is `success`, `error` or `muted` (an outcome that changed
-    nothing); `color` overrides it."""
-    line = colored(sanitize_text(text), fg_color=color if color is not None else _TONE_COLORS[tone])
+    nothing); `color` overrides it. A key it mentions ("Use [P]review")
+    is highlighted like a menu key (issue #1083)."""
+    line = highlight_hotkeys(sanitize_text(text), color=color if color is not None else _TONE_COLORS[tone])
     _pending.setdefault(_owner(session), []).append(line)
 
 
