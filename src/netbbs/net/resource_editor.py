@@ -276,12 +276,14 @@ class DetailState:
     """What a resource's screen shows besides its fields, fresh from the
     database: `draft` (the stored values), `header` (the read-only rows
     above the fields), `after_fields` (a section after them, the NetBBS
-    Link details), and `actions`."""
+    Link details), `actions`, and `title` (the resource's stored name,
+    which a save in place may have changed; `None` keeps the one given)."""
 
     draft: Draft
     header: str = ""
     after_fields: str = ""
     actions: Sequence[DetailAction] = ()
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -689,7 +691,7 @@ async def edit_resource_draft(
     while True:
         width, height = session.terminal_width, session.terminal_height
         title_text = screen_title(
-            title,
+            detail_state.title if detail_state is not None and detail_state.title is not None else title,
             breadcrumb=(session.node_display_name,), subtitle=subtitle, width=width,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient,
