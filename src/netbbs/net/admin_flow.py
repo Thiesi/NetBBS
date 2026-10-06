@@ -614,7 +614,7 @@ from netbbs.net.resource_editor import (
     text_field,
 )
 from netbbs.net.session import (
-    Session, physical_terminal_width, post_body_width, write_art_text, write_preformatted_line, write_prompt,
+    Session, physical_terminal_width, post_body_width, write_preformatted_line, write_prompt,
 )
 from netbbs.rendering.charset import ASCII, ellipsis_for
 from netbbs.net.session_activity import records_activity
@@ -694,7 +694,15 @@ from netbbs.update_apply import (
     PIP_TIMEOUT_SECONDS,
 )
 from netbbs.net.ansi_editor import edit_ansi_art
-from netbbs.net.art_pacing import ART_SPEEDS, MAIN_MENU_ART, WELCOME_ART, art_speed, set_art_speed
+from netbbs.net.art_pacing import (
+    ART_SPEEDS,
+    MAIN_MENU_ART,
+    WELCOME_ART,
+    art_speed,
+    set_art_speed,
+    write_preview_art,
+    write_preview_art_text,
+)
 from netbbs.net.banner_fields import banner_fields, count_callers_online
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
@@ -14221,13 +14229,15 @@ async def _preview_welcome_banner_screen(
         banner_text, fields, ellipsis=ellipsis_for(session), width=physical_terminal_width(session),
     )
     await session.write_line(colored("\r\nPreviewing the welcome banner callers see when they connect:", fg_color=MUTED_COLOR))
+    # At the speed callers get it (issue #1083 finding 9).
+    speed = await lane.run(art_speed, WELCOME_ART)
     if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
-        await write_preformatted_line(session, banner_text)
+        await write_preview_art(session, banner_text, speed=speed)
         await session.write_line(colored("(Your banner, as callers see it.)", fg_color=MUTED_COLOR))
         await _write_banner_slot_notes(session, raw_text)
     elif not await _write_banner_not_live(session, status, callers_see="the default NetBBS banner"):
         # Nothing of the SysOp's own to show: show what callers do see.
-        await write_preformatted_line(session, banner_text)
+        await write_preview_art(session, banner_text, speed=speed)
     # Dogfood report: this screen used to fall straight through to the
     # menu's own immediate redraw, which -- with redraw_in_place on
     # (the default for new accounts, issue #160's own follow-up)
@@ -14866,7 +14876,7 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     if not masthead:
         await _write_banner_not_live(session, status, callers_see="no masthead")
     else:
-        await write_preformatted_line(session, masthead)
+        await write_preview_art(session, masthead, speed=await lane.run(art_speed, MAIN_MENU_ART))
         await session.write_line(
             colored("(the main menu itself renders live, unchanged, immediately below this)", fg_color=MUTED_COLOR)
         )
@@ -14988,7 +14998,7 @@ async def _write_slot_art_preview(
             colored(f"Callers like this get the generated menu instead: {plan.reason}.", fg_color=WARNING_COLOR)
         )
         return
-    await write_art_text(session, plan.text)
+    await write_preview_art_text(session, plan.text, speed=await lane.run(art_speed, MAIN_MENU_ART))
     await session.write(move_cursor(art.height + 1, 1))
 
 
@@ -15004,14 +15014,19 @@ async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, acto
     # [D]isable leaves the mode alone, so a switched-off banner still lands
     # here: say under each draw that callers get the plain menu meanwhile.
     enabled = await lane.run(is_main_menu_banner_enabled)
-    for intro, level in (("as you see it", None), ("as a level-0 caller sees it", 0)):
+    views = (("as you see it", None), ("as a level-0 caller sees it", 0))
+    for number, (intro, level) in enumerate(views, start=1):
         # The art clears the screen, so what is being shown is said below it.
         await _write_slot_art_preview(session, lane, actor, art, level=level)
         if not enabled:
             await session.write_line(colored(
                 "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
             ))
-        await session.write_line(colored(f"(the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR))
+        # Which of the two this is (issue #1083 finding 10): the first
+        # screen ending in a plain prompt read like the end of the preview.
+        await session.write_line(colored(
+            f"({number} of {len(views)}: the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR
+        ))
         await session.read_any_key()
 
 
@@ -16370,7 +16385,7 @@ async def _preview_list_slot_art(session: Session, lane: DatabaseLane, actor: Us
                 fg_color=WARNING_COLOR,
             ))
         else:
-            await write_art_text(session, drawn)
+            await write_preview_art_text(session, drawn, speed=await lane.run(art_speed, kind))
             await session.write(move_cursor(art.height + 1, 1))
             if kind == CHAT_CHANNEL_PICKER:
                 await session.write_line(colored("(people online are filled in on a running node)", fg_color=MUTED_COLOR))
@@ -16498,7 +16513,7 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
     status, masthead_text = await lane.run(lambda db: (board_list_banner_status(db), load_board_list_banner(db)))
     await session.write_line(colored("\r\nPreviewing board list masthead as shown above the board list:", fg_color=MUTED_COLOR))
     if masthead_text:
-        await write_preformatted_line(session, masthead_text)
+        await write_preview_art(session, masthead_text, speed=await lane.run(art_speed, BOARD_LIST))
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
@@ -16798,7 +16813,7 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
     status, masthead_text = await lane.run(lambda db: (file_area_banner_status(db), load_file_area_banner(db)))
     await session.write_line(colored("\r\nPreviewing file area masthead as shown above the file-area list:", fg_color=MUTED_COLOR))
     if masthead_text:
-        await write_preformatted_line(session, masthead_text)
+        await write_preview_art(session, masthead_text, speed=await lane.run(art_speed, FILE_AREA))
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
@@ -17100,7 +17115,7 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
         colored("\r\nPreviewing chat channel picker masthead as shown above the channel picker:", fg_color=MUTED_COLOR)
     )
     if masthead_text:
-        await write_preformatted_line(session, masthead_text)
+        await write_preview_art(session, masthead_text, speed=await lane.run(art_speed, CHAT_CHANNEL_PICKER))
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))

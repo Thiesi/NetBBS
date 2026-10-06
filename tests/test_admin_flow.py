@@ -5283,7 +5283,7 @@ def test_slot_preview_shows_blanking_and_adds_no_rows_below_the_art(db, lane, sy
     # Check reports blanking in words; Preview only draws it, so nothing
     # but its own prompt lands in the one row budgeted below the art.
     assert "Blanked, as this caller" not in text
-    assert text.count("(the main menu as a level-0 caller sees it)") == 1
+    assert text.count("(2 of 2: the main menu as a level-0 caller sees it)") == 1
 
 
 def test_check_counts_a_run_with_any_menu_key_as_a_menu_item(db, lane, sysop):
@@ -5435,8 +5435,8 @@ def test_masthead_preview_in_slots_mode_shows_both_menus(db, lane, sysop):
     session = FakeSession(["s", "m", "m", "m", "p", " ", " ", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "(the main menu as you see it)" in text
-    assert "(the main menu as a level-0 caller sees it)" in text
+    assert "(1 of 2: the main menu as you see it)" in text
+    assert "(2 of 2: the main menu as a level-0 caller sees it)" in text
     assert text.count("Signed in as") == 2
 
 
