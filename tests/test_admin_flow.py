@@ -5438,6 +5438,11 @@ def test_masthead_preview_in_slots_mode_shows_both_menus(db, lane, sysop):
     assert "(the main menu as you see it, 1 of 2)" in text
     assert "(the main menu as a level-0 caller sees it, 2 of 2)" in text
     assert text.count("Signed in as") == 2
+    # One row even on a terminal that lays out 79 columns (Claude review of
+    # #1091): a second row would scroll the art off the top.
+    for line in text.splitlines():
+        if "of 2)" in line:
+            assert len(line.strip()) <= 78, line
 
 
 # -- masthead filesystem picker (issue #170) ---------------------------------
