@@ -1510,6 +1510,10 @@ saves, and **Ctrl+X** quits.
 
 The welcome gallery ends with three quiet designs for clubs that don't want
 neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
+Every bundled design uses only characters CP437 has, so it looks the same in
+SyncTERM, PuTTY's default font and a browser. Your own art can use anything;
+on a classic terminal, a character CP437 lacks is drawn as the nearest
+shape it has.
 
 Art from scene tools such as PabloDraw or Moebius works as it is:
 
