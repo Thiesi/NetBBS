@@ -32,7 +32,7 @@ from netbbs.activity import (
     unread_post_ids,
     unfollow,
 )
-from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
+from netbbs.attestation import format_name_for_resource, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards import (
     MAX_BODY_BYTES,
@@ -59,12 +59,16 @@ from netbbs.boards.categories import get_category_by_id as get_board_category_by
 from netbbs.boards.posts import count_pending_posts, sweep_expired_posts
 from netbbs.communities import (
     get_community,
-    get_effective_min_age,
     get_effective_min_write_level,
     get_effective_name_requirement,
     meets_read_gate,
+    meets_resource_age,
     meets_write_gate,
+    resource_age_gate,
+    resource_age_visible,
+    resource_needs_verification,
 )
+from netbbs.age_requirement import age_verification_refusal
 from netbbs.link.node_profiles import identity_for_fingerprint, present_link_author_label
 from netbbs.link.remote_attestation import format_remote_name_for_resource
 from netbbs.link.trust import TrustSubject
@@ -214,7 +218,7 @@ def visible_boards(db: Database, user: User, *, community_id: int | None, commun
     #838)."""
     boards = [
         b for b in list_boards(db)
-        if meets_read_gate(db, user, b) and meets_age(db, user, get_effective_min_age(db, b))
+        if meets_read_gate(db, user, b) and resource_age_visible(db, user, b)
     ]
     if community_scoped:
         boards = [b for b in boards if b.community_id == community_id]
@@ -313,7 +317,7 @@ async def _browse_boards_in_category(
         all_boards = [
             b for b in list_boards(db, order_by=order_by)
             if meets_read_gate(db, user, b)
-            and meets_age(db, user, get_effective_min_age(db, b))
+            and resource_age_visible(db, user, b)
         ]
         if community_scoped:
             all_boards = [b for b in all_boards if b.community_id == community_id]
@@ -394,7 +398,7 @@ async def _browse_boards_in_category(
         parts = []
         if is_board_linked(db, item):
             parts.append("[LINK]")
-        if not meets_name_requirement(db, user, get_effective_name_requirement(db, item)):
+        if resource_needs_verification(db, user, item):
             parts.append(NAME_GATE_NOTE)
         if item.description:
             parts.append(item.description)
@@ -412,7 +416,7 @@ async def _browse_boards_in_category(
     def _read_slot_values(boards: list[Board]) -> None:
         board_slot_values.clear()
         for board in boards:
-            if not meets_name_requirement(db, user, get_effective_name_requirement(db, board)):
+            if resource_needs_verification(db, user, board):
                 board_slot_values[board.id] = NAME_GATE_NOTE
             else:
                 board_slot_values[board.id] = _activity(board)[0]
@@ -661,7 +665,7 @@ def _read_only_reason(db: Database, user: User, board: Board, *, closed: bool) -
         return f"Read only: posting needs level {write_level}."
     if not meets_name_requirement(db, user, get_effective_name_requirement(db, board)):
         return f"Read only: posting {NAME_GATE_NOTE}."
-    if not meets_age(db, user, get_effective_min_age(db, board)):
+    if not meets_resource_age(db, user, board):
         return "Read only: posting has an age requirement you do not meet."
     return None
 
@@ -971,6 +975,14 @@ async def _show_board(
     site) simply means a new post here never propagates over Link,
     same degrade-gracefully shape every other optional context uses.
     """
+    # A board that wants a verified age is listed for a caller old enough
+    # by their own birthdate, marked "needs verification" (issue #1082),
+    # so entering it is where they are told what to do. Checked here, on
+    # the way in, so every list, scan, search and jump that opens a board
+    # refuses the same way.
+    if resource_age_gate(db, user, board) == "unverified":
+        announce(session, age_verification_refusal("This message board"), tone="error")
+        return
     board_name = sanitize_text(board.name)
     # A closed Linked board refuses every new post (`create_post`, design
     # doc §9.5), so [P]ost is not offered on one: the caller would write a
@@ -979,7 +991,7 @@ async def _show_board(
     may_write = (
         not closed
         and meets_write_gate(db, user, board)
-        and meets_age(db, user, get_effective_min_age(db, board))
+        and meets_resource_age(db, user, board)
         and meets_name_requirement(db, user, get_effective_name_requirement(db, board))
     )
     # Issue #993: the board's origin may have kept new threads, or all

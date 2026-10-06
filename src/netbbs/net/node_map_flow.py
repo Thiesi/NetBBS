@@ -16,10 +16,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.boards.boards import list_boards
-from netbbs.communities import get_effective_min_age, meets_read_gate
+from netbbs.communities import meets_read_gate, meets_resource_age
 from netbbs.config import get_node_display_name, get_node_map_min_level
 from netbbs.files.areas import list_file_areas
 from netbbs.link.boards import LinkContext
@@ -226,13 +225,13 @@ def openable_carried_names(db: Database, user: User, fingerprint: str) -> Carrie
         board.name for board in list_boards(db, order_by="alphabetical")
         if board.board_id in carried["boards"]
         and meets_read_gate(db, user, board)
-        and meets_age(db, user, get_effective_min_age(db, board))
+        and meets_resource_age(db, user, board)
     )
     areas = tuple(
         area.name for area in list_file_areas(db, order_by="alphabetical")
         if area.area_id in carried["file_areas"]
         and meets_read_gate(db, user, area)
-        and meets_age(db, user, get_effective_min_age(db, area))
+        and meets_resource_age(db, user, area)
     )
     channels = tuple(
         channel.name for channel in _visible_channels_for(db, user)

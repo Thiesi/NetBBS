@@ -27,12 +27,15 @@ from netbbs.chat.channels import list_channels
 from netbbs.communities import (
     Community,
     get_community,
+    get_effective_age_requirement,
     get_effective_min_age,
     get_effective_min_read_level,
     get_effective_min_write_level,
     get_effective_name_requirement,
     list_communities,
+    meets_resource_age,
 )
+from netbbs.age_requirement import describe_age_gate
 from netbbs.config import get_mail_min_level, get_node_map_min_level
 from netbbs.doors.registry import list_doors
 from netbbs.files.areas import FileArea, list_file_areas
@@ -105,8 +108,13 @@ class LevelChange:
     lost: tuple[Gate, ...]
 
 
-def _age_condition(min_age: int | None) -> tuple[str, ...]:
-    return (f"age {min_age}+",) if min_age else ()
+def _age_condition(min_age: int | None, requirement: str | None = None) -> tuple[str, ...]:
+    described = describe_age_gate(min_age, requirement)
+    return (described,) if described else ()
+
+
+def _resource_age_condition(db: Database, resource) -> tuple[str, ...]:
+    return _age_condition(get_effective_min_age(db, resource), get_effective_age_requirement(db, resource))
 
 
 def _name_condition(requirement: str | None) -> tuple[str, ...]:
@@ -136,7 +144,7 @@ def _board_gates(db: Database) -> list[Gate]:
     for board in list_boards(db):
         read_level = get_effective_min_read_level(db, board)
         write_level = get_effective_min_write_level(db, board)
-        age = _age_condition(get_effective_min_age(db, board))
+        age = _resource_age_condition(db, board)
         read_source, community = _level_source(db, board, board.min_read_level, "default_min_read_level")
         write_source, _ = _level_source(db, board, board.min_write_level, "default_min_write_level")
         linked = is_board_linked(db, board)
@@ -172,7 +180,7 @@ def _area_gates(db: Database) -> list[Gate]:
     for area in list_file_areas(db):
         read_level = get_effective_min_read_level(db, area)
         write_level = get_effective_min_write_level(db, area)
-        age = _age_condition(get_effective_min_age(db, area))
+        age = _resource_age_condition(db, area)
         read_source, community = _level_source(db, area, area.min_read_level, "default_min_read_level")
         write_source, _ = _level_source(db, area, area.min_write_level, "default_min_write_level")
         gates.append(Gate(
@@ -192,7 +200,7 @@ def _channel_gates(db: Database) -> list[Gate]:
     for channel in list_channels(db):
         community = get_community(db, channel.community_id)
         conditions = (
-            _age_condition(get_effective_min_age(db, channel))
+            _resource_age_condition(db, channel)
             + _name_condition(get_effective_name_requirement(db, channel))
             + (("members only",) if channel.members_only else ())
         )
@@ -243,7 +251,8 @@ def _node_gates(db: Database) -> list[Gate]:
         ),
         Gate(
             GateKind.MRC_OPEN_ROOM, None, "Open MRC rooms", rooms.min_level, LevelSource.SETTING, rooms.min_level,
-            conditions=_age_condition(rooms.min_age) + _name_condition(rooms.name_requirement), off=rooms_off,
+            conditions=_age_condition(rooms.min_age, rooms.age_requirement) + _name_condition(rooms.name_requirement),
+            off=rooms_off,
         ),
         Gate(GateKind.SYSOP, None, "SysOp console", SYSOP_LEVEL, LevelSource.FIXED, SYSOP_LEVEL),
     ]
@@ -339,9 +348,7 @@ def account_level_change(db: Database, user: User, new_level: int) -> AccountCha
     def unmet(gate: Gate, account: User) -> tuple[str, ...]:
         if gate.kind in _GRANT_KINDS:
             resource = resources[_GRANT_KINDS[gate.kind][0]][gate.object_id]
-            fails = () if meets_age(db, account, get_effective_min_age(db, resource)) else _age_condition(
-                get_effective_min_age(db, resource)
-            )
+            fails = () if meets_resource_age(db, account, resource) else _resource_age_condition(db, resource)
             if gate.kind in _READ_GATE_OF and not meets_name_requirement(
                 db, account, get_effective_name_requirement(db, resource)
             ):
@@ -349,9 +356,7 @@ def account_level_change(db: Database, user: User, new_level: int) -> AccountCha
             return fails
         if gate.kind is GateKind.CHANNEL:
             channel = channels[gate.object_id]
-            fails = () if meets_age(db, account, get_effective_min_age(db, channel)) else _age_condition(
-                get_effective_min_age(db, channel)
-            )
+            fails = () if meets_resource_age(db, account, channel) else _resource_age_condition(db, channel)
             if not meets_name_requirement(db, account, get_effective_name_requirement(db, channel)):
                 fails += _name_condition(get_effective_name_requirement(db, channel))
             if channel.members_only and not (
@@ -361,7 +366,9 @@ def account_level_change(db: Database, user: User, new_level: int) -> AccountCha
             return fails
         if gate.kind is GateKind.MRC_OPEN_ROOM:
             rooms = load_open_room_settings(db)
-            fails = () if meets_age(db, account, rooms.min_age) else _age_condition(rooms.min_age)
+            fails = () if meets_age(db, account, rooms.min_age, rooms.age_requirement) else _age_condition(
+                rooms.min_age, rooms.age_requirement
+            )
             if not meets_name_requirement(db, account, rooms.name_requirement):
                 fails += _name_condition(rooms.name_requirement)
             return fails
