@@ -38,6 +38,7 @@ import math
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 
+from netbbs.net.art_prompt import clear_prompt_in_art, end_choice_line, mark_prompt_in_art
 from netbbs.digits import is_ascii_number
 from netbbs.net.art_pacing import write_paced_art, write_paced_art_text
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
@@ -954,6 +955,7 @@ async def pick_item(
 
     async def _render(*, keep_generation: bool = False) -> Sequence[T]:
         nonlocal page_start, frozen, render_generation
+        clear_prompt_in_art(session)
         # Freeze for the duration of this render; see `_dimensions`.
         frozen = (session.terminal_width, session.terminal_height)
         # A new render is a new read of `sort_label`; see its cache.
@@ -1114,7 +1116,11 @@ async def pick_item(
                 # bright backgrounds and the pictographs for a CP437 terminal.
                 await _write_list_art(drawn, laid_out=True)
                 await session.write(move_cursor(slot_art.height + 1, 1))
-                for line in _slot_nav_lines(
+                notice_rows = sum(
+                    wrap_terminal_text(line, max(1, session.terminal_width)).count("\r\n") + 1
+                    for line in notice_lines
+                )
+                nav_lines = _slot_nav_lines(
                     include_next=page_start + len(page_items) < len(working_set),
                     include_prev=page_start > 0,
                     shapes=(
@@ -1122,11 +1128,15 @@ async def pick_item(
                         else _SHAPES_TWO_PAGES if total_pages == 2
                         else _SHAPES_MANY_PAGES
                     ),
-                ):
+                )
+                for line in nav_lines:
                     await session.write_line(line)
                 await _write_notices()
                 if _slot_prompt_at_art():
+                    # Where whatever answers a choice starts (issue #1083).
+                    free_row = slot_art.height + 1 + len(nav_lines) + notice_rows
                     await session.write(move_cursor(slot_art.prompt.row + 1, slot_art.prompt.col + 1))
+                    mark_prompt_in_art(session, free_row)
                 await session.write("Choice: ")
                 return page_items
 
@@ -1416,7 +1426,7 @@ async def pick_item(
         if key.kind == EditorKeyKind.CTRL and key.char == "c":
             # Issue #157: Ctrl-C as an incremental alias for [B]ack --
             # this screen's own "leave without selecting" action.
-            await session.write_line("")
+            await end_choice_line(session)
             return None
 
         if key.kind == EditorKeyKind.DOWN:
@@ -1459,7 +1469,7 @@ async def pick_item(
                 await session.write("\a")
                 continue
             selected_item = page_items[highlighted]
-            await session.write_line("")
+            await end_choice_line(session)
             return selected_item
 
         if key.kind == EditorKeyKind.ESCAPE:
@@ -1493,12 +1503,12 @@ async def pick_item(
         char_lower = char.lower()
 
         if char_lower == "b":
-            await session.write_line("")
+            await end_choice_line(session)
             return None
 
         if char_lower == "n":
             if page_end < len(working_set):
-                await session.write_line("")
+                await end_choice_line(session)
                 page_history.append(page_start)
                 page_start = page_end
                 highlighted = None
@@ -1509,7 +1519,7 @@ async def pick_item(
 
         if char_lower == "p":
             if page_start > 0:
-                await session.write_line("")
+                await end_choice_line(session)
                 # The start this page was reached from, not a
                 # subtraction: the size may have changed since, and the
                 # arithmetic then lands between two pages rather than on
@@ -1538,7 +1548,7 @@ async def pick_item(
                 # emptiness the trailer's own message is about.
                 await session.write(reject_keystroke())
                 continue
-            await session.write_line("")
+            await end_choice_line(session)
             await session.write("Find: ")
             # From `items`, not `working_set` (Codex review): the query
             # below searches the full set, so completing only from the
@@ -1638,7 +1648,7 @@ async def pick_item(
                 if not numbered:
                     await session.write(reject_keystroke())
                     continue
-                await session.write_line("")
+                await end_choice_line(session)
                 await write_prompt(session, f"Which one (01-{numbered:02d}): ")
                 raw = (await session.read_line()).strip()
                 target = _numbered(page_items, int(raw)) if is_ascii_number(raw) else None
@@ -1672,7 +1682,7 @@ async def pick_item(
             if created is None:
                 page_items = await _render()
                 continue
-            await session.write_line("")
+            await end_choice_line(session)
             return created
 
         if is_ascii_number(char):
@@ -1686,7 +1696,7 @@ async def pick_item(
                 # wanted, and nothing happened, not even an error.
                 chosen = _numbered(page_items, int(char))
                 if chosen is not None:
-                    await session.write_line("")
+                    await end_choice_line(session)
                     return chosen
                 await session.write(reject_keystroke(1))
                 continue
@@ -1712,7 +1722,7 @@ async def pick_item(
                 # next prompt (e.g. "Disconnect 'x'? [y/N]: ") landed
                 # directly after the echoed "02" with no separation at
                 # all, on the same line.
-                await session.write_line("")
+                await end_choice_line(session)
                 return chosen
             await session.write(reject_keystroke(2))
             continue
