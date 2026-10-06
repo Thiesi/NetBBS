@@ -1435,7 +1435,7 @@ async def pick_item(
                 unicode_style=unicode_style, has_create=on_create is not None,
                 live_nav=live_nav, has_unpickable=any(not _pickable(item) for item in items),
                 has_linked=linked_of is not None and any(linked_of(item) for item in items),
-                linked_marker_only=getattr(session, "output_charset", None) == ASCII or slot_art is not None,
+                linked_marker_only=getattr(session, "output_charset", None) == ASCII or _slot_active(),
             )
             page_items = await _render()
             continue

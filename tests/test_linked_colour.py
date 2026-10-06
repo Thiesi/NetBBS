@@ -27,8 +27,8 @@ ITEMS = ["Local", "Shared"]
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _pick(keys, *, charset="utf-8", columns=False, slot=False, linked=True):
-    session = SlotSession(keys, charset=charset)
+def _pick(keys, *, charset="utf-8", columns=False, slot=False, linked=True, width=80):
+    session = SlotSession(keys, charset=charset, width=width)
     kwargs = {}
     if columns:
         kwargs.update(
@@ -133,3 +133,13 @@ def test_the_linked_id_helpers_read_every_genesis_in_one_query(tmp_path):
         assert local_area.id not in linked_area_ids(db) and local_channel.id not in linked_channel_ids(db)
     finally:
         db.close()
+
+
+def test_help_names_the_colour_when_list_art_falls_back_to_the_generated_list():
+    """Review on #1108: art too wide for the terminal isn't drawn, so the
+    rows are the generated list's, in colour -- help must say colour, not
+    point at a marker that never appears."""
+    help_key = EditorKey(EditorKeyKind.CTRL, char="h")
+    narrow = _SGR.sub("", _pick([help_key, "b"], slot=True, width=40))
+    assert "A name in this colour is Linked" in narrow
+    assert "ending in" not in narrow
