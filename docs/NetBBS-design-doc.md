@@ -1175,6 +1175,12 @@ it was a deliberate trade and not an oversight:
 
 ### 3.6 Resource lists (issue #528)
 
+Every list searches with `[/] Find`, the main menu's key and word (issue
+#1083): one key for searching wherever a caller is. A list's Find narrows it to
+the names containing the text typed, and a blank answer shows the whole list
+again. It replaced `[S]earch` outright, with no hidden `S` alias: a silent
+second key would keep `S` taken on every list for nothing a caller can see.
+
 A list row's secondary text is either prose or a record, and the two render
 differently.
 

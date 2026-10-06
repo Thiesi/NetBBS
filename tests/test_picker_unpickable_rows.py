@@ -80,7 +80,7 @@ def test_the_highlight_steps_over_rows_that_cannot_be_picked():
 
 
 def test_a_search_whose_one_match_cannot_be_picked_shows_it():
-    picked, session = _pick(["s", "b"], lines=["ben"])
+    picked, session = _pick(["/", "b"], lines=["ben"])
 
     assert picked is None
     assert _visible_text(session).count("   -  ben (no)\n") == 2
@@ -92,3 +92,16 @@ def test_help_explains_the_dash_only_where_there_is_one():
     assert line in " ".join(_visible_text(session).split())
     _, session = _pick([HELP, "b"], items=["ann", "cat"])
     assert line not in " ".join(_visible_text(session).split())
+
+
+def test_find_is_the_slash_key_and_s_no_longer_searches():
+    """Issue #1083: lists search with [/] Find, as the main menu does, and
+    S is not kept as a hidden second key."""
+    picked, session = _pick(["s", "b"], lines=["ben"])
+    text = _visible_text(session)
+    assert picked is None
+    assert "[/] Find" in text and "[S]earch" not in text
+    assert "Find:" not in text
+
+    _, session = _pick(["/", "b"], lines=["ben"])
+    assert "Find:" in _visible_text(session)
