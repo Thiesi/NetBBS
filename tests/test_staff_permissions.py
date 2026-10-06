@@ -372,7 +372,7 @@ def test_the_account_detail_shows_staff_and_moderator_grants(db, lane, sysop):
     grant_permissions(
         db, carol, object_type="board", object_id=board.id, permissions=BoardPermission.APPROVE, granted_by=sysop
     )
-    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "Staff" in text and "none" in text
@@ -383,7 +383,7 @@ def test_the_account_detail_shows_staff_and_moderator_grants(db, lane, sysop):
 def test_the_co_sysop_preset_is_one_confirmed_step(db, lane, sysop):
     create_user(db, "carol", password="hunter2pw")
     # carol sorts before sysop -- item 01.
-    session = FakeSession(["u", "u", "0", "1", "s", "c", "y", "b", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "s", "c", "y", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     carol = get_user_by_username(db, "carol")
     assert carol.staff_permissions == int(CO_SYSOP_PRESET)
@@ -392,7 +392,7 @@ def test_the_co_sysop_preset_is_one_confirmed_step(db, lane, sysop):
 
 def test_a_declined_confirmation_changes_nothing(db, lane, sysop):
     carol = create_user(db, "carol", password="hunter2pw")
-    session = FakeSession(["u", "u", "0", "1", "s", "a", "n", "b", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "s", "a", "n", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert get_user_by_id(db, carol.id).staff_permissions == 0
 

@@ -92,6 +92,7 @@ async def _browse_directory(
     known to <board>", on a node with Link enabled, for anyone at or above
     the SysOp's node map level. Otherwise the key is not offered at all.
     """
+    last_id: int | None = None
     while True:
         users = list_users(db)
         live_keys = None
@@ -108,6 +109,8 @@ async def _browse_directory(
             users,
             name_of=lambda u: u.username,
             stable_id_of=lambda u: u.id,
+            # Back from a vcard lands on the row it was opened from (issue #1109).
+            start_stable_id=last_id,
             description_of=lambda u: _directory_description(db, u),
             title="User directory",
             empty_message="No registered users yet.",
@@ -121,6 +124,7 @@ async def _browse_directory(
         )
         if selected is None:
             return
+        last_id = selected.id
         await _show_vcard(session, db, selected, user, lane=lane, link_context=link_context)
 
 

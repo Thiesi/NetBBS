@@ -228,3 +228,35 @@ def test_toggling_maintenance_mode_confirms_on_the_redrawn_node_menu(db, lane, s
     screen = " ".join(" ".join(session.on_terminal()).split())
     assert "Maintenance mode: ON" in screen  # the panel's own state
     assert "Maintenance mode is now ON. New non-SysOp logins are blocked" in screen  # and the outcome
+
+
+def test_back_from_an_account_returns_to_the_list_it_was_picked_from(db, lane, sysop):
+    # Issue #1109: Back from an account landed on the Users menu, so a SysOp
+    # working down the roster had to open the list again for every account.
+    create_user(db, "alice", password="hunter2")
+    create_user(db, "bob", password="hunter2")
+    rows = _screen(lane, sysop, ["u", "u", "/", "bob", "b"])
+    assert rows[0].endswith("Registered users")
+    assert any("bob" in row for row in rows) and any("alice" in row for row in rows)
+
+
+def test_back_from_a_directory_vcard_lands_on_the_row_it_was_opened_from(db, sysop, monkeypatch):
+    # Issue #1109, same class: the directory went back to its list, but to
+    # the top of it rather than to the caller just looked at.
+    from netbbs.net import directory_flow
+
+    alice = create_user(db, "alice", password="hunter2")
+    starts: list[object] = []
+    picks = iter([alice, None])
+
+    async def fake_pick(session, items, **kwargs):
+        starts.append(kwargs.get("start_stable_id"))
+        return next(picks)
+
+    async def fake_vcard(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(directory_flow, "pick_item", fake_pick)
+    monkeypatch.setattr(directory_flow, "_show_vcard", fake_vcard)
+    asyncio.run(directory_flow._browse_directory(ScriptedSession([]), db, sysop))
+    assert starts == [None, alice.id]
