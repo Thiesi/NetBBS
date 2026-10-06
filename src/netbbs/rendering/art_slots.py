@@ -52,7 +52,7 @@ from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer, full_render_ansi
 from netbbs.rendering.theme import MENU_KEY_COLOR
-from netbbs.rendering.width import char_width, display_width, truncate_to_width
+from netbbs.rendering.width import char_width, cut_to_width, display_width, truncate_to_width
 
 #: The live values a field token can name. Kept small on purpose: each is
 #: something every caller has, and none reveals anything the generated
@@ -409,7 +409,7 @@ def render_slot_art(
         # Field values are live text (a name, a node name) -- sanitized
         # here, the one place they enter the screen, like every other
         # caller-visible string.
-        value = truncate_to_width(sanitize_text(fields.get(slot.name, "")), slot.width, ellipsis=ellipsis)
+        value = fit_slot_text(sanitize_text(fields.get(slot.name, "")), slot.width, ellipsis)
         _fill(buffer, slot, [value], highlight_keys=False)
     if art.menu is not None and menu_rows is not None:
         _fill(buffer, art.menu, menu_rows, highlight_keys=True)
@@ -443,6 +443,19 @@ def _fill(buffer: ScreenBuffer, slot: Slot, rows: list[str], *, highlight_keys: 
             col += 1
 
 
+def fit_slot_text(text: str, width: int, ellipsis: str) -> str:
+    """`text` cut to a slot `width` columns wide (issue #1083 finding 8).
+    A slot with room for the ellipsis and at least two columns of text
+    gets the ellipsis; a narrower one keeps as much of the text as fits
+    with none, so a 3-wide count on a CP437 session shows `123`, not
+    `...`. Never wider than `width`."""
+    if display_width(text) <= width:
+        return text
+    if width < display_width(ellipsis) + 2:
+        return cut_to_width(text, width)
+    return truncate_to_width(text, width, ellipsis=ellipsis)
+
+
 def fill_field_slots(text: str, fields: dict[str, str], *, ellipsis: str = "...", width: int = 80) -> str:
     """Banner art (the welcome and log-off screens) with its field slots
     filled in, returned as rows of ANSI text the art's own width, for
@@ -466,7 +479,7 @@ def fill_field_slots(text: str, fields: dict[str, str], *, ellipsis: str = "..."
         for col in range(art.width):
             buffer.put_cell(row, col, art.buffer.get_cell(row, col))
     for slot in art.fields:
-        value = truncate_to_width(sanitize_text(fields.get(slot.name, "")), slot.width, ellipsis=ellipsis)
+        value = fit_slot_text(sanitize_text(fields.get(slot.name, "")), slot.width, ellipsis)
         _fill(buffer, slot, [value], highlight_keys=False)
     return "\r\n".join(_render_row(buffer, row) for row in range(art.height)) + RESET
 
@@ -593,7 +606,7 @@ def render_list_slot_art(
         for col in range(art.width):
             buffer.put_cell(row, col, art.buffer.get_cell(row, col))
     for field in art.fields:
-        value = truncate_to_width(sanitize_text(fields.get(field.name, "")), field.width, ellipsis=ellipsis)
+        value = fit_slot_text(sanitize_text(fields.get(field.name, "")), field.width, ellipsis)
         _fill(buffer, field, [value], highlight_keys=False)
     name_width = list_name_width(slot, column_width)
     base = replace(slot.cell, char=" ")
@@ -610,11 +623,11 @@ def render_list_slot_art(
             number_style = replace(base, fg=MENU_KEY_COLOR, bold=True)
         pieces: list[tuple[str, Cell]] = []
         if entry is not None:
-            name = truncate_to_width(sanitize_text(entry.name), name_width, ellipsis=ellipsis)
+            name = fit_slot_text(sanitize_text(entry.name), name_width, ellipsis)
             name += " " * (name_width - display_width(name))
             pieces = [((entry.number or " - ").ljust(3) + " ", number_style), (name, style)]
             if column_width:
-                value = truncate_to_width(sanitize_text(entry.column), column_width, ellipsis=ellipsis)
+                value = fit_slot_text(sanitize_text(entry.column), column_width, ellipsis)
                 pieces.append((" " + " " * (column_width - display_width(value)) + value, style))
         col = slot.col
         end = min(slot.col + slot.width, buffer.width)

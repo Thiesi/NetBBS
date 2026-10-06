@@ -466,7 +466,10 @@ that NetBBS fills in per caller. Tokens drawn in the art mark where: `{menu
 WxH}` for the caller's live item list, `{user N}`, `{mail N}` and the other
 fields for live values, and `{prompt}` for the prompt. A token's top-left cell
 is its position, its size is written in the token, and the colour it is drawn
-in is the style of what fills it. Tokens are plain ASCII so they survive
+in is the style of what fills it. Counts and levels (`{mail}`, `{online}`,
+`{level}`, `{count}`) are bare numbers and the art supplies the words, and a
+value is cut to its field, without an ellipsis when the field is too narrow
+for one plus two characters (issue #1083). Tokens are plain ASCII so they survive
 CP437, UTF-8 and every art editor. Art only decorates: the items are the ones
 the caller may use, computed as for the generated menu, so a token can never
 show an item a caller cannot use or hide one they can. When the caller's

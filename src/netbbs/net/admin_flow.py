@@ -16358,7 +16358,7 @@ async def _preview_list_slot_art(session: Session, lane: DatabaseLane, actor: Us
         reason = _list_art_fits(session, art, column_width)
         page = rows[:art.list.height]
         pages = max(1, -(-len(rows) // art.list.height))
-        fields.update(title=what.capitalize(), page=f"1/{pages}", count=f"{len(rows)} total")
+        fields.update(title=what.capitalize(), page=f"1/{pages}", count=str(len(rows)))
         drawn = None if reason is not None else render_list_slot_art(
             art, fields=fields,
             rows=[ListSlotRow(f"{number:02d}.", name, value) for number, (name, value) in enumerate(page, start=1)],

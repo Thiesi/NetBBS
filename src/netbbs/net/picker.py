@@ -1103,7 +1103,7 @@ async def pick_item(
                 ))
             fields = dict(slot_fields or {})
             fields.update(
-                title=title, page=f"{page_index + 1}/{total_pages}", count=f"{len(working_set)} total",
+                title=title, page=f"{page_index + 1}/{total_pages}", count=str(len(working_set)),
             )
             drawn = render_list_slot_art(
                 slot_art, fields=fields, rows=slot_rows, highlighted=highlighted,
