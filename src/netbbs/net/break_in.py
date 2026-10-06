@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 from netbbs.auth.users import User
 from netbbs.net.char_input import EditorKey, EditorKeyKind
-from netbbs.net.live_screen import KeyOutcome, fill_row, paint_text, run_live_screen
+from netbbs.net.live_screen import KeyOutcome, fill_row, paint_keyed_text, paint_text, run_live_screen
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.rendering.ansi import CSI, strip_ansi
@@ -118,7 +118,7 @@ def paint_chat(buffer: ScreenBuffer, state: ChatState, *, for_sysop: bool) -> No
             title = f"{state.caller_name} has disconnected - [Enter] Back"
     else:
         title = f"The SysOp ({state.sysop_name}) has opened a chat with you"
-    paint_text(buffer, 0, 0, title, fg=ERROR_COLOR if state.caller_gone else HEADER_COLOR, bold=True)
+    paint_keyed_text(buffer, 0, 0, title, fg=ERROR_COLOR if state.caller_gone else HEADER_COLOR, bold=True)
     body = buffer.height - 1
     upper = body // 2
     _paint_pane(buffer, 1, upper, f"SysOp: {state.sysop_name}", PRIVILEGE_COLOR, state.sysop)

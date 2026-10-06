@@ -49,3 +49,18 @@ def test_no_screen_asks_to_press_any_key():
             if re.search(r"\bany key (?:to|returns|stops)", value, re.I):
                 offenders.append(f"{path.relative_to(SRC)}:{number}: {value.strip()}")
     assert offenders == []
+
+
+def test_a_painted_key_takes_the_menu_key_colour():
+    """The Monitor and break-in paint cell by cell; their "[Enter] Stop"
+    colours the key as continue_prompt does (review on #1088)."""
+    from netbbs.net.live_screen import paint_keyed_text
+    from netbbs.rendering.screen_buffer import ScreenBuffer
+
+    buffer = ScreenBuffer(40, 1)
+    end = paint_keyed_text(buffer, 0, 0, "Watching bob - [Enter] Stop", fg=MUTED_COLOR)
+    cells = [buffer.get_cell(0, c) for c in range(end)]
+    assert "".join(cell.char for cell in cells) == "Watching bob - [Enter] Stop"
+    start = "Watching bob - [".__len__()
+    assert all(cell.fg == MENU_KEY_COLOR and cell.bold for cell in cells[start:start + 5])
+    assert cells[start - 1].fg == MUTED_COLOR and cells[start + 5].fg == MUTED_COLOR

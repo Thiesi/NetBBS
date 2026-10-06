@@ -1089,8 +1089,10 @@ rather than fields of one form, and the settings screens already open straight
 into their editors.
 
 A pause that waits for a key before going on reads `[Enter] Continue` (issue
-#1083), or `[Enter] Back`, `[Enter] Stop` where that says more; every one
-comes from `netbbs.rendering.continue_prompt`. Any key still goes on. The
+#1083), or `[Enter] Back`, `[Enter] Stop` where that says more. Written
+text gets it from `netbbs.rendering.continue_prompt`; the live screens that
+paint cell by cell (the Monitor, break-in) from `live_screen.paint_keyed_text`,
+which colours the key the same way. Any key still goes on. The
 bracketed `[Enter]` is what a click in the browser terminal sends, so a
 caller using only a mouse is never stuck behind a pause; the old wording,
 "Press any key to continue", had nothing to click.
