@@ -594,6 +594,8 @@ change this setting. If colors are poor, change the color preference. **Ctrl+L**
 Games may use different controls.
 
 Some resources require an account level, verified age, or verified name.
+When you open one, a **Requires:** line under its title says what it asks,
+for example `Requires: age 18+ verified · level 20+ to post`.
 A name requirement may also disclose the verified name beside contributions
 in that resource. Ask the SysOp what is required before sharing identity
 information. You cannot grant yourself access by editing your profile.

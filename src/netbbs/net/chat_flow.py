@@ -239,6 +239,8 @@ from netbbs.rendering import (
     wrap_to_width,
 )
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.charset import ellipsis_for
+from netbbs.gate_summary import gates_line, resource_gates
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -5133,6 +5135,13 @@ async def _chat_loop(
             header_color=await lane.run(effective_header_color_256),
         node_name_gradient=session.node_name_gradient)
         await session.write_line(f"\r\n{heading}")
+        # The gates this channel applies, named under its title (issue #1105).
+        gates_note = gates_line(
+            await lane.run(resource_gates, channel), width=session.terminal_width, unicode_style=unicode_style,
+            ellipsis=ellipsis_for(session, unicode_style=unicode_style),
+        )
+        if gates_note:
+            await session.write_line(gates_note)
 
         scrollback = await lane.run(get_scrollback, channel)
         if scrollback:
