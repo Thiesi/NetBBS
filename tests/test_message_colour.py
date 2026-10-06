@@ -206,12 +206,14 @@ def test_news_in_the_good_news_green_is_not_marked_as_an_outcome():
     # green's own index. Queued as news it keeps its colour, unmarked.
     session = _Session()
     news = colored("Mail: 2 unread (1 new).", fg_color=NEW_MAIL_COLOR)
-    notices.announce_styled(session, news, news=True)
+    notices.announce_styled(session, news, mark=False)
     assert notices.take_notices(session) == [news]
 
 
-def test_new_scan_with_nothing_new_keeps_its_mail_line_as_news():
-    from netbbs.net import scan_and_find
-
-    source = Path(scan_and_find.__file__).read_text(encoding="utf-8")
-    assert "announce_styled(session, line, news=True)" in source
+def test_a_bold_one_colour_outcome_is_marked_too():
+    # #1109 re-review: bold comes before the colour, which the match
+    # missed, so a bold failure stayed one red line by accident.
+    session = _Session()
+    notices.announce_styled(session, colored("Backup failed.", fg_color=ERROR_COLOR, bold=True))
+    (line,) = notices.take_notices(session)
+    assert line.startswith(status_mark("error")) and strip_ansi(line) == "\u2717 Backup failed."

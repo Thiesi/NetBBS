@@ -400,7 +400,7 @@ async def _new_scan_screen(
         # The summary is news (waiting mail, replies), not the outcome of
         # anything the caller did, so it keeps its colours unmarked (#1109).
         for line in (await _replies_summary()).split("\r\n"):
-            announce_styled(session, line, news=True)
+            announce_styled(session, line, mark=False)
     async def _open(item: _ScanItem) -> None:
         if item.kind == "board":
             cursor = await lane.run(board_read_cursor, user, item.board)

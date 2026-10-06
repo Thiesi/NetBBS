@@ -204,6 +204,32 @@ def test_the_eviction_count_stays_a_warning(node, monkeypatch):
 # -- New scan -----------------------------------------------------------------
 
 
+def test_new_scan_with_nothing_to_list_keeps_its_mail_line_as_news(node):
+    # #1109 review: with nothing to list, New scan queues its summary for
+    # the screen it returns to. The mail line is news in the good-news
+    # green -- the success green's own index -- and must not be taken for
+    # an outcome and given a check mark.
+    from netbbs.net.notices import take_notices
+
+    db, lane, alice, bob = node
+    _letter(db, bob, alice, "New", LATE)
+    _call(db, alice, LAST_CALL)
+    current = _call(db, alice, NOW)
+
+    async def scenario():
+        session = Session([])
+        await scan_and_find._new_scan_screen(
+            session, db, lane, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice,
+            current_history_id=current,
+        )
+        return take_notices(session)
+
+    queued = asyncio.run(scenario())
+    mail = next(line for line in queued if "Mail:" in line)
+    assert not mail.startswith(status_mark("success"))
+    assert mail.startswith(f"\x1b[38;5;{GOOD_NEWS_COLOR}m")
+
+
 def test_new_scan_shows_the_same_two_counts_in_the_good_news_colour(node):
     db, lane, alice, bob = node
     _letter(db, bob, alice, "Old", EARLY)
