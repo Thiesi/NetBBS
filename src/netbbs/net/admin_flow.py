@@ -18696,7 +18696,9 @@ async def _community_screen(
             actions.append(DetailAction("d", menu_key("D", "own"), _move(1), brief="Later in the callers' list"))
         actions.append(DetailAction("r", menu_key("R", "emove"), _remove, brief="Permanently remove it"))
         header = colored(f"Place {place + 1} of {len(order)} in the callers' Communities list", fg_color=MUTED_COLOR)
-        return DetailState(draft=_draft_of(community), header=header, actions=actions)
+        return DetailState(
+            draft=_draft_of(community), header=header, actions=actions, title=sanitize_text(community.name),
+        )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
     return await edit_resource_draft(
@@ -24336,7 +24338,7 @@ async def _category_screen(
         actions.append(DetailAction("r", menu_key("R", "emove"), _remove, brief="Permanently remove it"))
         return DetailState(
             draft={"name": found.name, "description": found.description, "parent": parent},
-            header=colored(header, fg_color=MUTED_COLOR), actions=actions,
+            header=colored(header, fg_color=MUTED_COLOR), actions=actions, title=sanitize_text(found.name),
         )
 
     await _create_category_screen(

@@ -58,3 +58,19 @@ def test_a_categorys_screen_opens_on_its_fields_with_its_actions(db, lane, sysop
     assert "Place 1 of 2" in screen and "Sub-categories: none" in screen
     assert "> Name:" in screen
     assert "[D]own" in screen and "[R]emove" in screen and "[E]dit" not in screen
+
+
+def test_a_renamed_community_and_category_are_titled_by_their_new_name(db, lane, sysop):
+    create_community(db, "Politics", creator=sysop)
+    session = FakeSession(["m", "o", "l", "0", "1", "ENTER", "Civics", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    saved = _screen_with(_visible(_written_text(session)), "Updated 'Civics'")
+    assert "› Civics" in saved and "Politics" not in saved
+
+    board_categories.create_category(db, "Retro", created_by=sysop)
+    session = FakeSession(["m", "c", "m", "l", "0", "1", "ENTER", "Vintage", "s", "b", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    # The last redraw showing the new name is the one after the save (the one
+    # before it shows the unsaved draft under the stored name).
+    saved = [s for s in _visible(_written_text(session)).split("Choice:") if re.search(r"Name:\s+Vintage", s)][-1]
+    assert "› Vintage" in saved and "Retro" not in saved
