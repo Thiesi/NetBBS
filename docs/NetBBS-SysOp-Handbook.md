@@ -737,6 +737,13 @@ draft and save it explicitly.
   the others in the same category and Community; pinned ones stay first and
   move among themselves. **Remove** deletes it. A caller can still sort a list by
   activity with **[O]rder**.
+- **A board's or file area's screen** opens on its fields, the way a
+  Community's does: a line above them gives its posts or files and latest
+  activity, its place in the list and whether it is Linked, and for a Linked
+  one a **NetBBS Link** section follows the fields (on the last page when the
+  screen is paged with PgUp/PgDn). **Pending posts**/**Pending files**,
+  **Expired files**, **History**, **Link** and the origin actions are on the
+  same screen, offered while no change waits to be saved.
 - **Chat channels:** set join gates, visibility, invitations, and moderation.
   Hidden or invite-only channels need more than a sufficient account level.
 - **Communities:** group related resources and provide inherited defaults.

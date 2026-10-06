@@ -261,7 +261,7 @@ def test_the_console_moves_a_board_with_up_and_down(db, lane, sysop):
     screen = " ".join(" ".join(row.split()) for row in rows)
 
     assert _names(list_boards(db)) == ["Alpha", "Gamma", "Beta"]
-    assert "Place: 2 of 3" in screen
+    assert "place 2 of 3" in screen
     assert "[U]p" in screen and "[D]own" in screen and "[R]emove" in screen
 
 
@@ -282,7 +282,7 @@ def test_the_last_board_offers_no_down(db, lane, sysop):
     screen = " ".join(" ".join(row.split()) for row in rows)
 
     assert _names(list_boards(db)) == ["Alpha", "Beta"]
-    assert "[D]own" not in screen and "Place: 2 of 2" in screen
+    assert "[D]own" not in screen and "place 2 of 2" in screen
 
 
 def test_the_console_moves_a_file_area(db, lane, sysop):

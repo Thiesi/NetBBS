@@ -19008,50 +19008,113 @@ def _board_field_specs(
     ]
 
 
-async def _board_screen(
-    session: Session, lane: DatabaseLane, actor: User, *, existing: Board | None = None
-) -> Board | None:
-    """Unified create/edit screen (design doc, dogfood feature request):
-    creating a board is editing a fresh draft of defaults, then [S]ave
-    inserts instead of updates -- every field addressable independently,
-    in any order, and [B]ack discards the whole draft with nothing ever
-    written to the database, directly answering the "no way to cancel
-    mid-creation" complaint. Editing an existing board no longer walks
-    the same linear step-by-step wizard creating one does -- both are
-    now this one screen. See `netbbs.net.resource_editor`'s own module
-    docstring for the general shape."""
-    if existing is not None:
-        draft = {
-            "name": existing.name, "description": existing.description,
-            "min_read_level": existing.min_read_level, "min_write_level": existing.min_write_level,
-            "community_id": existing.community_id, "category_id": existing.category_id,
-            "pinned": existing.pinned, "moderated": existing.moderated,
-            "max_post_age_days": existing.max_post_age_days, "min_age": existing.min_age,
-            "name_requirement": existing.name_requirement, "allow_color": existing.allow_color,
-            "age_requirement": existing.age_requirement,
-        }
-        draft["community_id_label"] = (
-            (await lane.run(get_community, existing.community_id)).name
-            if existing.community_id is not None else None
-        )
-        draft["category_id_label"] = (
-            (await lane.run(get_board_category_by_id, existing.category_id)).name
-            if existing.category_id is not None else None
-        )
-    else:
-        draft = {
+def _sections_text(sections: Sequence[Section], *, width: int, unicode_style: bool) -> str:
+    """Detail sections as one block of text, for a resource's own screen
+    to show after its fields (issue #1081): the same rendering
+    `_write_sections` writes, a blank row before each group."""
+    lines: list[str] = []
+    for block in render_sections(sections, width=width, unicode_style=unicode_style):
+        lines.append("")
+        lines.extend(block.lines)
+    return "\r\n".join(lines)
+
+
+def _board_draft(board: Board | None) -> dict:
+    if board is None:
+        return {
             "name": "", "description": None, "min_read_level": 0, "min_write_level": 0,
             "community_id": None, "category_id": None, "pinned": False, "moderated": False,
             "max_post_age_days": None, "min_age": None, "name_requirement": None,
             "community_id_label": None, "category_id_label": None, "allow_color": False,
             "age_requirement": None,
         }
+    return {
+        "name": board.name, "description": board.description,
+        "min_read_level": board.min_read_level, "min_write_level": board.min_write_level,
+        "community_id": board.community_id, "category_id": board.category_id,
+        "pinned": board.pinned, "moderated": board.moderated,
+        "max_post_age_days": board.max_post_age_days, "min_age": board.min_age,
+        "name_requirement": board.name_requirement, "allow_color": board.allow_color,
+        "age_requirement": board.age_requirement,
+    }
+
+
+async def _board_link_rows(
+    lane: DatabaseLane, board: Board, link_context: LinkContext, *, linked: bool
+) -> tuple[list[Field | Note], bool, bool, bool]:
+    """The NetBBS Link section of a board's screen, and `(is_origin,
+    has_incoming_offer, is_closed)` (design doc §13/§9.5, issues #53/#88):
+    whether this node is the board's origin (gates `[T]ransfer origin`,
+    `[C]lose` and `[W]ho posts`), whether a pending origin transfer names
+    this node (gates `[A]ccept transfer`), and whether the board is closed
+    (closure is terminal, so it suppresses the origin actions)."""
+    is_origin = has_incoming_offer = is_closed = False
+    rows: list[Field | Note] = [Field("Linked", _yes_no(linked))]
+    if linked:
+        is_closed = await lane.run(is_board_closed, board)
+        if is_closed:
+            rows.append(Field("Closed", "yes -- no longer accepts new posts", color=WARNING_COLOR))
+            # The reason is part of the signed closure; without this the one
+            # place a SysOp looks at a closed board never showed it (#680).
+            closure = link_context.link_node.board_closures.get(board.board_id)
+            closure_reason = closure.payload.get("reason") if closure is not None else None
+            if closure_reason:
+                rows.append(Field("Closure reason", sanitize_text(closure_reason)))
+        origin_fingerprint = await lane.run(board_origin_fingerprint, board)
+        is_origin = origin_fingerprint == link_context.node_identity.fingerprint
+        rows.append(Field("Origin", "this node" if is_origin else _linked_node_label(link_context, origin_fingerprint)))
+        # Issue #993: who may post, as the origin set it.
+        rows.append(Field("Who posts", _POSTING_LABELS[await lane.run(board_posting_mode, board)]))
+        if not is_origin:
+            peer = link_context.link_node.peers.get(origin_fingerprint)
+            if peer is not None and is_board_origin_orphaned(peer):
+                rows.append(Note(
+                    "ORPHANED -- origin's signing key was revoked, no replacement on file", color=WARNING_COLOR,
+                ))
+        offer = link_context.link_node.pending_origin_transfers.get(board.board_id)
+        if offer is not None:
+            if offer.payload.get("new_origin_fingerprint") == link_context.node_identity.fingerprint:
+                has_incoming_offer = True
+                rows.append(Field(
+                    "Pending",
+                    "an incoming origin-transfer offer from "
+                    + _linked_node_label(link_context, offer.payload.get("old_origin_fingerprint")),
+                    color=WARNING_COLOR,
+                ))
+            elif is_origin:
+                rows.append(Field(
+                    "Pending",
+                    "your own outstanding transfer offer to "
+                    + _linked_node_label(link_context, offer.payload.get("new_origin_fingerprint")),
+                    color=WARNING_COLOR,
+                ))
+    if linked and is_origin:
+        rows.extend(await _peer_reach_rows(lane, link_context, link_context.link_node.boards.get(board.board_id)))
+    return rows, is_origin, has_incoming_offer, is_closed
+
+
+async def _board_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, existing: Board | None = None,
+    link_context: LinkContext | None = None,
+) -> Board | None:
+    """A message board's one screen (issue #1081, design doc §3.5), and the
+    screen that creates one. Above the fields: its posts and latest
+    activity, its place in the callers' list and whether it is Linked.
+    After them, for a Linked board, the NetBBS Link section. The fields
+    are chosen by the cursor; the actions -- [U]p, [D]own, [R]emove,
+    [P]ending posts, [H]istory, and the Link ones -- are offered while
+    nothing waits to be saved. Creating uses the same screen with an empty
+    draft and no actions, and returns the board it created; nothing is
+    written before [S]ave either way."""
+    current: dict[str, Board | None] = {"board": existing}
+    own_fingerprint = link_context.node_identity.fingerprint if link_context is not None else None
 
     async def save(draft: dict) -> Board:
         if not draft["name"]:
             raise BoardError("name cannot be blank")
-        if existing is None:
-            return await lane.run(
+        board = current["board"]
+        if board is None:
+            created = await lane.run(
                 create_board,
                 draft["name"], description=draft["description"], min_read_level=draft["min_read_level"],
                 min_write_level=draft["min_write_level"], category_id=draft["category_id"],
@@ -19060,28 +19123,162 @@ async def _board_screen(
                 name_requirement=draft["name_requirement"], community_id=draft["community_id"],
                 allow_color=draft["allow_color"], age_requirement=draft["age_requirement"], creator=actor,
             )
-        return await lane.run(
+            _announce_line(session, f"Created message board {created.name!r}.")
+            return created
+        updated = await lane.run(
             update_board,
-            existing, name=draft["name"], description=draft["description"],
+            board, name=draft["name"], description=draft["description"],
             min_read_level=draft["min_read_level"], min_write_level=draft["min_write_level"],
             category_id=draft["category_id"], pinned=draft["pinned"], moderated=draft["moderated"],
             max_post_age_days=draft["max_post_age_days"], min_age=draft["min_age"],
             name_requirement=draft["name_requirement"], community_id=draft["community_id"],
             allow_color=draft["allow_color"], age_requirement=draft["age_requirement"], changed_by=actor,
         )
+        _announce_line(session, f"Updated {updated.name!r}.")
+        return updated
+
+    def _act(run: Callable[[Board], Awaitable[bool | None]]):
+        async def action(session: Session, lane: DatabaseLane) -> bool:
+            await session.write_line("")
+            return bool(await run(current["board"]))
+        return action
+
+    async def _move(board: Board, offset: int) -> bool:
+        # The first cannot go up nor the last down; the bar never offers them.
+        await lane.run(move_board, board, offset, moved_by=actor)
+        return False
+
+    async def _remove(board: Board) -> bool:
+        return await _delete_board_screen(session, lane, actor, board, own_fingerprint=own_fingerprint)
+
+    async def _pending(board: Board) -> bool:
+        await _pending_posts_screen(session, lane, actor, board, link_context=link_context)
+        return False
+
+    async def _history(board: Board) -> bool:
+        await _audit_log_screen(
+            session, lane, actor, object_type="board", object_id=board.id,
+            moderators=await lane.run(_moderator_lines, "board", board.id),
+            # A carried board's name is its origin's: sanitized before it
+            # reaches a title (Codex review on #797).
+            title=f"History of {sanitize_text(board.name)}", breadcrumb=("SysOp", "Message boards"),
+        )
+        return False
+
+    async def _link(board: Board) -> bool:
+        await _link_board_screen(session, lane, actor, board, link_context)
+        return False
+
+    async def _transfer(board: Board) -> bool:
+        await _transfer_board_origin_screen(session, lane, board, link_context)
+        return False
+
+    async def _close(board: Board) -> bool:
+        await _close_board_screen(session, lane, board, link_context)
+        return False
+
+    async def _accept(board: Board) -> bool:
+        await _accept_board_origin_transfer_screen(session, lane, board, link_context)
+        return False
+
+    async def _who_posts(board: Board) -> bool:
+        # A toggle steps (design doc §3.5): anyone, then this node starts
+        # threads, then only this node posts. Only the latest setting is
+        # pushed, at the next sync pass.
+        current_mode = await lane.run(board_posting_mode, board)
+        following = BOARD_POSTING_MODES[(BOARD_POSTING_MODES.index(current_mode) + 1) % len(BOARD_POSTING_MODES)]
+        try:
+            posting = await lane.run(set_board_posting, board, following, node_identity=link_context.node_identity)
+        except LinkBoardsError as exc:
+            _announce_line(session, colored(f"Could not change who posts: {exc}", fg_color=MUTED_COLOR))
+        else:
+            link_context.link_node.known_event_ids.add(posting.content_id)
+            link_context.link_node.events[posting.content_id] = posting.to_dict()
+            _announce_line(
+                session, f"Who posts on {board.name!r}: {_POSTING_LABELS[following]}. Sent on the next sync pass.",
+            )
+        return False
+
+    async def refresh() -> DetailState:
+        board = current["board"]
+        if board is None:
+            return DetailState(draft=_board_draft(None))
+
+        def _load(db: Database):
+            fresh = next((b for b in list_boards(db) if b.id == board.id), board)
+            count, last_post_at = count_visible_posts(db, fresh)
+            order = [b.id for b in board_siblings(db, fresh)]
+            community = get_community(db, fresh.community_id) if fresh.community_id is not None else None
+            category = get_board_category_by_id(db, fresh.category_id) if fresh.category_id is not None else None
+            labels = {
+                "community_id_label": community.name if community is not None else None,
+                "category_id_label": category.name if category is not None else None,
+            }
+            return fresh, count, last_post_at, order, labels
+
+        board, post_count, last_post_at, order, labels = await lane.run(_load)
+        current["board"] = board
+        place, total = (order.index(board.id) if board.id in order else 0), len(order)
+        if last_post_at is None:
+            activity = "no posts yet"
+        else:
+            display_format, display_timezone = await lane.run(resolve_display_preferences)
+            activity = "last post " + format_for_display(
+                last_post_at, override_format=display_format, override_timezone=display_timezone,
+            )
+        linked = await lane.run(is_board_linked, board) if link_context is not None else False
+        header_bits = [f"{post_count} posts ({activity})", f"place {_place_label(place, total, pinned=board.pinned)}"]
+        after = ""
+        is_origin = has_incoming_offer = is_closed = False
+        if link_context is not None:
+            rows, is_origin, has_incoming_offer, is_closed = await _board_link_rows(
+                lane, board, link_context, linked=linked,
+            )
+            header_bits.append(("Linked, origin here" if is_origin else "Linked") if linked else "not Linked")
+            after = _sections_text(
+                [Section("NetBBS Link", rows)], width=session.terminal_width,
+                unicode_style=await lane.run(unicode_style_enabled, actor),
+            )
+        actions = []
+        if place > 0:
+            actions.append(DetailAction("u", menu_key("U", "p"), _act(lambda b: _move(b, -1)), brief="Earlier in the callers' list"))
+        if place < total - 1:
+            actions.append(DetailAction("d", menu_key("D", "own"), _act(lambda b: _move(b, 1)), brief="Later in the callers' list"))
+        actions += [
+            DetailAction("r", menu_key("R", "emove"), _act(_remove), brief="Permanently remove this board"),
+            DetailAction("p", menu_key("P", "ending posts"), _act(_pending), brief="Review posts awaiting approval"),
+            DetailAction("h", menu_key("H", "istory"), _act(_history), brief="Its moderators and what they did"),
+        ]
+        if link_context is not None and not linked:
+            actions.append(DetailAction("l", menu_key("L", "ink this message board"), _act(_link), brief="Share it via NetBBS Link"))
+        if (
+            link_context is not None and linked and is_origin and not is_closed
+            and board.board_id not in link_context.link_node.pending_origin_transfers
+        ):
+            actions.append(DetailAction("t", menu_key("T", "ransfer origin"), _act(_transfer), brief="Hand off origin to a peer"))
+            actions.append(DetailAction("c", menu_key("C", "lose message board"), _act(_close), brief="Stop accepting new posts"))
+        if link_context is not None and linked and is_origin and not is_closed:
+            actions.append(DetailAction("w", menu_key("W", "ho posts"), _act(_who_posts), brief="Who may post, network-wide"))
+        if has_incoming_offer:
+            actions.append(DetailAction("a", menu_key("A", "ccept transfer"), _act(_accept), brief="Accept incoming origin transfer"))
+        return DetailState(
+            draft={**_board_draft(board), **labels},
+            header=colored(" · ".join(header_bits), fg_color=MUTED_COLOR),
+            after_fields=after, actions=actions,
+        )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    board = await edit_resource_draft(
+    return await edit_resource_draft(
         session, lane,
-        title="Edit message board" if existing is not None else "Create message board",
+        title=sanitize_text(existing.name) if existing is not None else "Create message board",
         fields=_board_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
             levels=await lane.run(level_context),
         ),
-        draft=draft, save=save, error_type=BoardError,
+        draft={}, save=save, error_type=BoardError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
@@ -19089,11 +19286,8 @@ async def _board_screen(
         collapsed=collapsed,
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
+        detail=DetailMode(refresh=refresh, stay_after_save=existing is not None),
     )
-    if board is not None:
-        verb = "Updated" if existing is not None else "Created message board"
-        _announce_line(session, f"{verb} {board.name!r}.")
-    return board
 
 
 async def _list_boards_screen(
@@ -19402,136 +19596,10 @@ def _move_entries(place: int, total: int) -> list[MenuEntry]:
 async def _board_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
 ) -> None:
+    """A board's screen is its editor (issue #1081): see `_board_screen`."""
     # Looked at: a carried board is no longer news (issue #681).
     await lane.run(mark_carried_reviewed, "boards", board.board_id)
-    linked = await lane.run(is_board_linked, board) if link_context is not None else False
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-        session, lane, board, linked=linked, link_context=link_context, description_level=description_level,
-        redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-    )
-    while True:
-        choice = (await session.read_key()).lower()
-
-        if choice == "b":
-            await session.write_line("")
-            return
-        elif choice == "e":
-            await session.write_line("")
-            updated = await _board_screen(session, lane, actor, existing=board)
-            if updated is not None:
-                board = updated
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice in ("u", "d") and await lane.run(move_board, board, -1 if choice == "u" else 1, moved_by=actor):
-            # Moved within its category (issue #839); the first cannot go
-            # up nor the last down, and those keys fall through to the bell.
-            await session.write_line("")
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice == "r":
-            await session.write_line("")
-            deleted = await _delete_board_screen(
-                session, lane, actor, board,
-                own_fingerprint=link_context.node_identity.fingerprint if link_context is not None else None,
-            )
-            if deleted:
-                return
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice == "p":
-            await session.write_line("")
-            await _pending_posts_screen(session, lane, actor, board, link_context=link_context)
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice == "h":
-            await session.write_line("")
-            await _audit_log_screen(
-                session, lane, actor, object_type="board", object_id=board.id,
-                moderators=await lane.run(_moderator_lines, "board", board.id),
-                # A carried board's name is its origin's: sanitized before it
-                # reaches a title, as the detail heading does (Codex review
-                # on #797).
-                title=f"History of {sanitize_text(board.name)}", breadcrumb=("SysOp", "Message boards"),
-            )
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice == "l" and link_context is not None and not linked:
-            await session.write_line("")
-            await _link_board_screen(session, lane, actor, board, link_context)
-            linked = await lane.run(is_board_linked, board)
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice == "t" and link_context is not None and linked and is_origin and not is_closed:
-            await session.write_line("")
-            await _transfer_board_origin_screen(session, lane, board, link_context)
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice == "w" and link_context is not None and linked and is_origin and not is_closed:
-            # A toggle steps (design doc §3.5): anyone, then this node starts
-            # threads, then only this node posts. Only the latest setting is
-            # pushed, at the next sync pass.
-            current = await lane.run(board_posting_mode, board)
-            following = BOARD_POSTING_MODES[(BOARD_POSTING_MODES.index(current) + 1) % len(BOARD_POSTING_MODES)]
-            try:
-                posting = await lane.run(
-                    set_board_posting, board, following, node_identity=link_context.node_identity,
-                )
-            except LinkBoardsError as exc:
-                _announce_line(session, colored(f"Could not change who posts: {exc}", fg_color=MUTED_COLOR))
-            else:
-                link_context.link_node.known_event_ids.add(posting.content_id)
-                link_context.link_node.events[posting.content_id] = posting.to_dict()
-                _announce_line(
-                    session, f"Who posts on {board.name!r}: {_POSTING_LABELS[following]}. Sent on the next sync pass.",
-                )
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice == "c" and link_context is not None and linked and is_origin and not is_closed:
-            await session.write_line("")
-            await _close_board_screen(session, lane, board, link_context)
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        elif choice == "a" and has_incoming_offer:
-            await session.write_line("")
-            await _accept_board_origin_transfer_screen(session, lane, board, link_context)
-            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
-                session, lane, board, linked=linked, link_context=link_context,
-                description_level=description_level, redraw_in_place=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-            )
-        else:
-            await session.write(reject_unhandled_key(choice))
+    await _board_screen(session, lane, actor, existing=board, link_context=link_context)
 
 
 def _forked_from_field(
@@ -19850,7 +19918,7 @@ async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board
     """
     `[C]lose board` (design doc §9.5, issue #88): the current origin's
     terminal board_closure, stopping new posts network-wide. Only
-    reachable when `_draw_board_detail` already confirmed this node is
+    reachable when `_board_screen` already confirmed this node is
     the current origin and `board` isn't already closed, re-checked here
     too like every other admin mutation in this file, since closure
     can't be undone in this slice -- confirmed explicitly before acting.
@@ -19891,7 +19959,7 @@ async def _accept_board_origin_transfer_screen(
     `[A]ccept transfer` (design doc §13, issue #53): the
     consent-completing half -- accepts the single pending incoming
     origin-transfer offer for `board` that names this node as the
-    proposed new origin. Only reachable when `_draw_board_detail`
+    proposed new origin. Only reachable when `_board_screen`
     already confirmed such an offer exists (`has_incoming_offer`), but
     re-checked here too rather than trusted blindly, the same
     defense-in-depth every other admin mutation in this file already
@@ -19952,151 +20020,6 @@ def _linked_node_label(link_context, fingerprint) -> str:
     if isinstance(fingerprint, str) and fingerprint:
         return fingerprint
     return "an unknown linked node"
-
-
-async def _draw_board_detail(
-    session: Session,
-    lane: DatabaseLane,
-    board: Board,
-    *,
-    linked: bool = False,
-    link_context: LinkContext | None = None,
-    description_level: str = "off",
-    redraw_in_place: bool = False,
-    unicode_style: bool = False,
-    collapsed: bool = False,
-) -> tuple[bool, bool, bool]:
-    """
-    Returns `(is_origin, has_incoming_offer, is_closed)` (design doc
-    §13/§9.5, issues #53/#88) -- whether this node is currently
-    `board`'s own origin (gates `[T]ransfer origin`/`[C]lose`), whether a
-    pending incoming origin-transfer offer names this node as the
-    proposed new origin (gates `[A]ccept transfer`), and whether `board`
-    has already been closed (suppresses both `[T]ransfer origin` and
-    `[C]lose` -- closure is terminal, design doc §9.5).
-    `_board_detail_screen`'s own dispatch loop needs all three every time
-    it redraws, so returning them here avoids a second, separately-timed
-    recomputation immediately after.
-    """
-    await session.write_line(
-        "\r\n" + screen_title(sanitize_text(board.name),
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
-    )
-    # Dogfood follow-up: nothing on this screen (or the board-list picker)
-    # ever showed how many posts actually exist or when the last one was
-    # made -- a SysOp trying to spot a dead board versus an active one had
-    # no way to tell without leaving admin and browsing it as an ordinary
-    # reader.
-    post_count, last_post_at = await lane.run(count_visible_posts, board)
-    order = [b.id for b in await lane.run(board_siblings, board)]
-    place, total = (order.index(board.id) if board.id in order else 0), len(order)
-    if last_post_at is None:
-        activity = "no posts yet"
-    else:
-        display_format, display_timezone = await lane.run(resolve_display_preferences)
-        activity = f"last post {format_for_display(last_post_at, override_format=display_format, override_timezone=display_timezone)}"
-    sections = [
-        Section("Message board", [
-            _description_field(board.description),
-            Field("Posts", f"{post_count} ({activity})"),
-            Field("Community", await lane.run(_community_label, board.community_id)),
-        ]),
-        Section("Access", [
-            Field("Read level", _inheritable(board.min_read_level)),
-            Field("Write level", _inheritable(board.min_write_level)),
-            _gate_field("Minimum age", _age_gate_value(board.min_age, board.age_requirement)),
-            _gate_field("Name requirement", board.name_requirement),
-        ], paired=True),
-        Section("Behavior", [
-            Field("Place", _place_label(place, total, pinned=board.pinned)),
-            Field("Moderated", _yes_no(board.moderated)),
-            Field(
-                "Max post age",
-                f"{board.max_post_age_days} days" if board.max_post_age_days is not None else "unlimited",
-            ),
-            Field("Color in posts", "allowed" if board.allow_color else "not allowed"),
-        ], paired=True),
-    ]
-    is_origin = False
-    has_incoming_offer = False
-    is_closed = False
-    if link_context is not None:
-        link_rows: list[Field | Note] = [Field("Linked", _yes_no(linked))]
-        if linked:
-            is_closed = await lane.run(is_board_closed, board)
-            if is_closed:
-                link_rows.append(Field("Closed", "yes -- no longer accepts new posts", color=WARNING_COLOR))
-                # The reason is part of the signed closure; without this the
-                # one place a SysOp looks at a closed board never showed it
-                # (issue #680).
-                closure = link_context.link_node.board_closures.get(board.board_id)
-                closure_reason = closure.payload.get("reason") if closure is not None else None
-                if closure_reason:
-                    link_rows.append(Field("Closure reason", sanitize_text(closure_reason)))
-            origin_fingerprint = await lane.run(board_origin_fingerprint, board)
-            is_origin = origin_fingerprint == link_context.node_identity.fingerprint
-            origin_label = (
-                "this node" if is_origin
-                else _linked_node_label(link_context, origin_fingerprint)
-            )
-            link_rows.append(Field("Origin", origin_label))
-            # Issue #993: who may post, as the origin set it.
-            link_rows.append(Field("Who posts", _POSTING_LABELS[await lane.run(board_posting_mode, board)]))
-            if not is_origin:
-                peer = link_context.link_node.peers.get(origin_fingerprint)
-                if peer is not None and is_board_origin_orphaned(peer):
-                    link_rows.append(Note(
-                        "ORPHANED -- origin's signing key was revoked, no replacement on file",
-                        color=WARNING_COLOR,
-                    ))
-
-            offer = link_context.link_node.pending_origin_transfers.get(board.board_id)
-            if offer is not None:
-                if offer.payload.get("new_origin_fingerprint") == link_context.node_identity.fingerprint:
-                    has_incoming_offer = True
-                    link_rows.append(Field(
-                        "Pending",
-                        "an incoming origin-transfer offer from "
-                        + _linked_node_label(link_context, offer.payload.get("old_origin_fingerprint")),
-                        color=WARNING_COLOR,
-                    ))
-                elif is_origin:
-                    link_rows.append(Field(
-                        "Pending",
-                        "your own outstanding transfer offer to "
-                        + _linked_node_label(link_context, offer.payload.get("new_origin_fingerprint")),
-                        color=WARNING_COLOR,
-                    ))
-        if linked and is_origin:
-            link_rows.extend(await _peer_reach_rows(lane, link_context, link_context.link_node.boards.get(board.board_id)))
-        sections.append(Section("NetBBS Link", link_rows))
-    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
-    options = [
-        MenuEntry(label=menu_key("E", "dit"), brief="Change this board's settings"),
-        *_move_entries(place, total),
-        MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove this board"),
-        MenuEntry(label=menu_key("P", "ending posts"), brief="Review posts awaiting approval"),
-        MenuEntry(label=menu_key("H", "istory"), brief="Its moderators and what they did"),
-    ]
-    if link_context is not None and not linked:
-        options.append(MenuEntry(label=menu_key("L", "ink this message board"), brief="Share it via NetBBS Link"))
-    if (
-        link_context is not None and linked and is_origin and not is_closed
-        and board.board_id not in link_context.link_node.pending_origin_transfers
-    ):
-        options.append(MenuEntry(label=menu_key("T", "ransfer origin"), brief="Hand off origin to a peer"))
-        options.append(MenuEntry(label=menu_key("C", "lose message board"), brief="Stop accepting new posts"))
-    if link_context is not None and linked and is_origin and not is_closed:
-        options.append(MenuEntry(label=menu_key("W", "ho posts"), brief="Who may post, network-wide"))
-    if has_incoming_offer:
-        options.append(MenuEntry(label=menu_key("A", "ccept transfer"), brief="Accept incoming origin transfer"))
-    options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
-    await session.write_line(
-        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 4)
-    )
-    await _choice_prompt(session)
-    return is_origin, has_incoming_offer, is_closed
 
 
 # How many moderators the moderation screen names; the rest are counted.
@@ -20894,41 +20817,43 @@ def _area_field_specs(
     ]
 
 
-async def _area_screen(
-    session: Session, lane: DatabaseLane, actor: User, *, existing: FileArea | None = None
-) -> FileArea | None:
-    """Unified create/edit screen -- see `_board_screen`'s own
-    docstring for the general shape and reasoning, identical here."""
-    if existing is not None:
-        draft = {
-            "name": existing.name, "description": existing.description,
-            "min_read_level": existing.min_read_level, "min_write_level": existing.min_write_level,
-            "community_id": existing.community_id, "category_id": existing.category_id,
-            "pinned": existing.pinned, "moderated": existing.moderated,
-            "max_file_age_days": existing.max_file_age_days, "min_age": existing.min_age,
-            "name_requirement": existing.name_requirement, "age_requirement": existing.age_requirement,
-        }
-        draft["community_id_label"] = (
-            (await lane.run(get_community, existing.community_id)).name
-            if existing.community_id is not None else None
-        )
-        draft["category_id_label"] = (
-            (await lane.run(get_file_area_category_by_id, existing.category_id)).name
-            if existing.category_id is not None else None
-        )
-    else:
-        draft = {
+def _area_draft(area: FileArea | None) -> dict:
+    if area is None:
+        return {
             "name": "", "description": None, "min_read_level": 0, "min_write_level": 0,
             "community_id": None, "category_id": None, "pinned": False, "moderated": False,
             "max_file_age_days": None, "min_age": None, "name_requirement": None,
             "community_id_label": None, "category_id_label": None, "age_requirement": None,
         }
+    return {
+        "name": area.name, "description": area.description,
+        "min_read_level": area.min_read_level, "min_write_level": area.min_write_level,
+        "community_id": area.community_id, "category_id": area.category_id,
+        "pinned": area.pinned, "moderated": area.moderated,
+        "max_file_age_days": area.max_file_age_days, "min_age": area.min_age,
+        "name_requirement": area.name_requirement, "age_requirement": area.age_requirement,
+    }
+
+
+async def _area_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, existing: FileArea | None = None,
+    link_context: LinkContext | None = None, transfers: Any = None,
+) -> FileArea | None:
+    """A file area's one screen (issue #1081, design doc §3.5), and the
+    screen that creates one -- the same shape as `_board_screen`: its
+    files and latest upload, its place and whether it is Linked above the
+    fields; the NetBBS Link section after them; [U]p, [D]own, [R]emove,
+    [P]ending files, E[x]pired files, [H]istory and [L]ink while nothing
+    waits to be saved."""
+    current: dict[str, FileArea | None] = {"area": existing}
+    own_fingerprint = link_context.node_identity.fingerprint if link_context is not None else None
 
     async def save(draft: dict) -> FileArea:
         if not draft["name"]:
             raise FileAreaError("name cannot be blank")
-        if existing is None:
-            return await lane.run(
+        area = current["area"]
+        if area is None:
+            created = await lane.run(
                 create_file_area,
                 draft["name"], description=draft["description"], min_read_level=draft["min_read_level"],
                 min_write_level=draft["min_write_level"], category_id=draft["category_id"],
@@ -20937,28 +20862,126 @@ async def _area_screen(
                 name_requirement=draft["name_requirement"], community_id=draft["community_id"],
                 age_requirement=draft["age_requirement"], creator=actor,
             )
-        return await lane.run(
+            _announce_line(session, f"Created file area {created.name!r}.")
+            return created
+        updated = await lane.run(
             update_file_area,
-            existing, name=draft["name"], description=draft["description"],
+            area, name=draft["name"], description=draft["description"],
             min_read_level=draft["min_read_level"], min_write_level=draft["min_write_level"],
             category_id=draft["category_id"], pinned=draft["pinned"], moderated=draft["moderated"],
             max_file_age_days=draft["max_file_age_days"], min_age=draft["min_age"],
             name_requirement=draft["name_requirement"], community_id=draft["community_id"],
             age_requirement=draft["age_requirement"], changed_by=actor,
         )
+        _announce_line(session, f"Updated {updated.name!r}.")
+        return updated
+
+    def _act(run: Callable[[FileArea], Awaitable[bool | None]]):
+        async def action(session: Session, lane: DatabaseLane) -> bool:
+            await session.write_line("")
+            return bool(await run(current["area"]))
+        return action
+
+    async def _move(area: FileArea, offset: int) -> bool:
+        # Moved within its category (issue #839), as a board moves.
+        await lane.run(move_file_area, area, offset, moved_by=actor)
+        return False
+
+    async def _remove(area: FileArea) -> bool:
+        return await _delete_area_screen(session, lane, actor, area, own_fingerprint=own_fingerprint)
+
+    async def _pending(area: FileArea) -> bool:
+        await _pending_files_screen(session, lane, actor, area, link_context=link_context, transfers=transfers)
+        return False
+
+    async def _expired(area: FileArea) -> bool:
+        await _expired_files_screen(session, lane, actor, area, transfers=transfers)
+        return False
+
+    async def _history(area: FileArea) -> bool:
+        await _audit_log_screen(
+            session, lane, actor, object_type="file_area", object_id=area.id,
+            moderators=await lane.run(_moderator_lines, "file_area", area.id),
+            title=f"History of {sanitize_text(area.name)}", breadcrumb=("SysOp", "File areas"),
+        )
+        return False
+
+    async def _link(area: FileArea) -> bool:
+        await _link_area_screen(session, lane, actor, area, link_context)
+        return False
+
+    async def refresh() -> DetailState:
+        area = current["area"]
+        if area is None:
+            return DetailState(draft=_area_draft(None))
+
+        def _load(db: Database):
+            fresh = next((a for a in list_file_areas(db) if a.id == area.id), area)
+            count, last_file_at = count_visible_files(db, fresh)
+            order = [a.id for a in file_area_siblings(db, fresh)]
+            community = get_community(db, fresh.community_id) if fresh.community_id is not None else None
+            category = (
+                get_file_area_category_by_id(db, fresh.category_id) if fresh.category_id is not None else None
+            )
+            labels = {
+                "community_id_label": community.name if community is not None else None,
+                "category_id_label": category.name if category is not None else None,
+            }
+            return fresh, count, last_file_at, order, labels
+
+        area, file_count, last_file_at, order, labels = await lane.run(_load)
+        current["area"] = area
+        place, total = (order.index(area.id) if area.id in order else 0), len(order)
+        if last_file_at is None:
+            activity = "no files yet"
+        else:
+            display_format, display_timezone = await lane.run(resolve_display_preferences)
+            activity = "last upload " + format_for_display(
+                last_file_at, override_format=display_format, override_timezone=display_timezone,
+            )
+        linked = await lane.run(is_area_linked, area) if link_context is not None else False
+        header_bits = [f"{file_count} files ({activity})", f"place {_place_label(place, total, pinned=area.pinned)}"]
+        after = ""
+        if link_context is not None:
+            header_bits.append("Linked" if linked else "not Linked")
+            rows: list[Field | Note] = [Field("Linked", _yes_no(linked))]
+            if linked:
+                rows.extend(await _peer_reach_rows(lane, link_context, link_context.link_node.file_areas.get(area.area_id)))
+            after = _sections_text(
+                [Section("NetBBS Link", rows)], width=session.terminal_width,
+                unicode_style=await lane.run(unicode_style_enabled, actor),
+            )
+        actions = []
+        if place > 0:
+            actions.append(DetailAction("u", menu_key("U", "p"), _act(lambda a: _move(a, -1)), brief="Earlier in the callers' list"))
+        if place < total - 1:
+            actions.append(DetailAction("d", menu_key("D", "own"), _act(lambda a: _move(a, 1)), brief="Later in the callers' list"))
+        actions += [
+            DetailAction("r", menu_key("R", "emove"), _act(_remove), brief="Permanently remove this area"),
+            DetailAction("p", menu_key("P", "ending files"), _act(_pending), brief="Review uploads awaiting approval"),
+            DetailAction("x", menu_key("x", "pired files", prefix="E"), _act(_expired), brief="Recover before they are purged"),
+            DetailAction("h", menu_key("H", "istory"), _act(_history), brief="Its moderators and what they did"),
+        ]
+        if link_context is not None and not linked:
+            actions.append(DetailAction("l", menu_key("L", "ink this file area"), _act(_link), brief="Share it via NetBBS Link"))
+        return DetailState(
+            draft={**_area_draft(area), **labels},
+            header=colored(" · ".join(header_bits), fg_color=MUTED_COLOR),
+            after_fields=after, actions=actions,
+        )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    area = await edit_resource_draft(
+    return await edit_resource_draft(
         session, lane,
-        title="Edit file area" if existing is not None else "Create file area",
+        title=sanitize_text(existing.name) if existing is not None else "Create file area",
         fields=_area_field_specs(
             actor=actor, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed,
             levels=await lane.run(level_context),
         ),
-        draft=draft, save=save, error_type=FileAreaError,
+        draft={}, save=save, error_type=FileAreaError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
@@ -20966,11 +20989,8 @@ async def _area_screen(
         collapsed=collapsed,
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
+        detail=DetailMode(refresh=refresh, stay_after_save=existing is not None),
     )
-    if area is not None:
-        verb = "Updated" if existing is not None else "Created file area"
-        _announce_line(session, f"{verb} {area.name!r}.")
-    return area
 
 
 async def _list_areas_screen(
@@ -21027,134 +21047,9 @@ async def _area_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, area: FileArea, *,
     link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
+    """A file area's screen is its editor (issue #1081): see `_area_screen`."""
     await lane.run(mark_carried_reviewed, "file_areas", area.area_id)
-    linked = await lane.run(is_area_linked, area) if link_context is not None else False
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-    while True:
-        choice = (await session.read_key()).lower()
-
-        if choice == "b":
-            await session.write_line("")
-            return
-        elif choice == "e":
-            await session.write_line("")
-            updated = await _area_screen(session, lane, actor, existing=area)
-            if updated is not None:
-                area = updated
-            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        elif choice in ("u", "d") and await lane.run(move_file_area, area, -1 if choice == "u" else 1, moved_by=actor):
-            # Moved within its category (issue #839), as a board moves.
-            await session.write_line("")
-            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        elif choice == "r":
-            await session.write_line("")
-            deleted = await _delete_area_screen(
-                session, lane, actor, area,
-                own_fingerprint=link_context.node_identity.fingerprint if link_context is not None else None,
-            )
-            if deleted:
-                return
-            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        elif choice == "p":
-            await session.write_line("")
-            await _pending_files_screen(
-                session, lane, actor, area, link_context=link_context, transfers=transfers,
-            )
-            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        elif choice == "h":
-            await session.write_line("")
-            await _audit_log_screen(
-                session, lane, actor, object_type="file_area", object_id=area.id,
-                moderators=await lane.run(_moderator_lines, "file_area", area.id),
-                title=f"History of {sanitize_text(area.name)}", breadcrumb=("SysOp", "File areas"),
-            )
-            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        elif choice == "x":
-            await session.write_line("")
-            await _expired_files_screen(session, lane, actor, area, transfers=transfers)
-            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        elif choice == "l" and link_context is not None and not linked:
-            await session.write_line("")
-            await _link_area_screen(session, lane, actor, area, link_context)
-            linked = await lane.run(is_area_linked, area)
-            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
-        else:
-            await session.write(reject_unhandled_key(choice))
-
-
-async def _draw_area_detail(
-    session: Session,
-    lane: DatabaseLane,
-    area: FileArea,
-    *,
-    linked: bool = False,
-    link_context: LinkContext | None = None,
-    description_level: str = "off",
-    redraw_in_place: bool = False,
-    unicode_style: bool = False,
-    collapsed: bool = False,
-) -> None:
-    await session.write_line(
-        "\r\n" + screen_title(sanitize_text(area.name),
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
-    )
-    file_count, last_file_at = await lane.run(count_visible_files, area)
-    order = [a.id for a in await lane.run(file_area_siblings, area)]
-    place, total = (order.index(area.id) if area.id in order else 0), len(order)
-    if last_file_at is None:
-        activity = "no files yet"
-    else:
-        display_format, display_timezone = await lane.run(resolve_display_preferences)
-        activity = f"last upload {format_for_display(last_file_at, override_format=display_format, override_timezone=display_timezone)}"
-    sections = [
-        Section("File area", [
-            _description_field(area.description),
-            Field("Files", f"{file_count} ({activity})"),
-            Field("Community", await lane.run(_community_label, area.community_id)),
-        ]),
-        Section("Access", [
-            Field("Read level", _inheritable(area.min_read_level)),
-            Field("Write level", _inheritable(area.min_write_level)),
-            _gate_field("Minimum age", _age_gate_value(area.min_age, area.age_requirement)),
-            _gate_field("Name requirement", area.name_requirement),
-        ], paired=True),
-        Section("Behavior", [
-            Field("Place", _place_label(place, total, pinned=area.pinned)),
-            Field("Moderated", _yes_no(area.moderated)),
-            Field(
-                "Max file age",
-                f"{area.max_file_age_days} days" if area.max_file_age_days is not None else "unlimited",
-            ),
-        ], paired=True),
-    ]
-    if link_context is not None:
-        area_link_rows: list[Field | Note] = [Field("Linked", _yes_no(linked))]
-        if linked:
-            area_link_rows.extend(
-                await _peer_reach_rows(lane, link_context, link_context.link_node.file_areas.get(area.area_id))
-            )
-        sections.append(Section("NetBBS Link", area_link_rows))
-    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
-    options = [
-        MenuEntry(label=menu_key("E", "dit"), brief="Change this area's settings"),
-        *_move_entries(place, total),
-        MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove this area"),
-        MenuEntry(label=menu_key("P", "ending files"), brief="Review uploads awaiting approval"),
-        MenuEntry(label=menu_key("x", "pired files", prefix="E"), brief="Recover before they are purged"),
-        MenuEntry(label=menu_key("H", "istory"), brief="Its moderators and what they did"),
-    ]
-    if link_context is not None and not linked:
-        options.append(MenuEntry(label=menu_key("L", "ink this file area"), brief="Share it via NetBBS Link"))
-    options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
-    await session.write_line(
-        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 4)
-    )
-    await _choice_prompt(session)
+    await _area_screen(session, lane, actor, existing=area, link_context=link_context, transfers=transfers)
 
 
 def _link_area_field_specs() -> list[FieldSpec]:

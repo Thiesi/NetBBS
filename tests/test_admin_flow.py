@@ -2633,17 +2633,16 @@ def test_lock_and_drain_screen_never_disables_maintenance_that_predates_it(db, l
 
 
 def test_create_board_flow(db, lane, sysop):
-    # m,m -> board menu; c -> the shared draft editor (design doc,
-    # dogfood feature request): n(ame)/d(escription)/m(oderated) select
-    # a field, then [S]ave -- every other field stays at its own
-    # sensible default (read/write level 0, not pinned, no age/name
-    # gate) without needing an explicit keystroke per field, unlike the
-    # old linear wizard this replaced.
+    # m,m -> board menu; c -> the board's own screen with an empty draft
+    # (issue #1081): the cursor starts on Name; Down to Description; Down
+    # eight more to Moderated, Enter toggles it; then [S]ave -- every
+    # other field stays at its own sensible default (read/write level 0,
+    # not pinned, no age/name gate) without a keystroke per field.
     inputs = [
         "m", "m", "c",
-        "n", "General",
-        "d", "A general board",
-        "m",
+        "ENTER", "General",
+        "DOWN", "ENTER", "A general board",
+        "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER",
         "s",
         "b", "b", "b",
     ]
@@ -2662,7 +2661,8 @@ def test_create_board_name_requirement_label_reads_as_words_not_a_field_name(db,
     # into a cycling toggle, but the on-screen label still showed the
     # raw stored value verbatim ("verified_and_displayed") instead of
     # words a SysOp would actually write.
-    inputs = ["m", "m", "c", "q", "q", "q", "b", "b", "b", "b"]
+    # The cursor to Name requirement (the sixth field), Right steps it thrice.
+    inputs = ["m", "m", "c", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -2714,7 +2714,7 @@ def test_create_board_declining_the_discard_confirmation_keeps_editing(db, lane,
     # Dogfood follow-up: a SysOp who'd already filled in fields could
     # lose all of it with one misplaced [B]ack keystroke. Declining the
     # new confirmation must return to the same draft, not lose it.
-    inputs = ["m", "m", "c", "n", "Abandoned", "b", "n", "s", "b", "b", "b"]
+    inputs = ["m", "m", "c", "ENTER", "Abandoned", "b", "n", "s", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.boards.boards import list_boards
@@ -2727,13 +2727,12 @@ def test_edit_and_delete_board_flow(db, lane, sysop):
 
     create_board(db, "General", creator=sysop)
 
-    # list -> pick(01) -> e(dit) -> rename via the field menu -> [S]ave
-    # -> back to detail -> r(emove) -> retype new name -> back x3.
-    # Every other field is left untouched (no keystroke needed to
-    # "keep" it, unlike the old linear wizard).
+    # list -> pick(01): its own screen (issue #1081), the cursor on Name ->
+    # rename -> [S]ave stays on it -> r(emove) -> retype new name -> back x3.
+    # Every other field is left untouched (no keystroke needed to "keep" it).
     inputs = [
-        "m", "m", "l", "0", "1", "e",
-        "n", "General2", "s",
+        "m", "m", "l", "0", "1",
+        "ENTER", "General2", "s",
         "r", "General2",
         "b", "b", "b",
     ]
@@ -2753,7 +2752,10 @@ def test_edit_board_field_menu_can_be_navigated_in_any_order(db, lane, sysop):
 
     create_board(db, "General", creator=sysop)
 
-    inputs = ["m", "m", "l", "0", "1", "e", "m", "n", "General2", "s", "b", "b", "b", "b", "b"]
+    inputs = [
+        "m", "m", "l", "0", "1", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "UP", "UP", "UP", "UP", "UP", "UP", "UP", "UP", "UP", "ENTER", "General2", "s",
+        "b", "b", "b", "b", "b",
+    ]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -2787,7 +2789,7 @@ def test_board_detail_shows_no_posts_yet_for_an_empty_board(db, lane, sysop):
     session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
-    assert "Posts: 0 (no posts yet)" in _normalized_visible(_written_text(session))
+    assert "0 posts (no posts yet)" in _normalized_visible(_written_text(session))
 
 
 def test_board_detail_shows_post_count_and_last_activity(db, lane, sysop):
@@ -2805,7 +2807,7 @@ def test_board_detail_shows_post_count_and_last_activity(db, lane, sysop):
     session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
-    assert "Posts: 2 (last post" in _normalized_visible(_written_text(session))
+    assert "2 posts (last post" in _normalized_visible(_written_text(session))
 
 
 def test_file_area_menu_explains_what_gc_means(db, lane, sysop):
@@ -2833,7 +2835,7 @@ def test_area_detail_shows_no_files_yet_for_an_empty_area(db, lane, sysop):
     session = FakeSession(["m", "f", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
-    assert "Files: 0 (no files yet)" in _normalized_visible(_written_text(session))
+    assert "0 files (no files yet)" in _normalized_visible(_written_text(session))
 
 
 def test_area_detail_shows_file_count_and_last_activity(db, lane, sysop):
@@ -2848,7 +2850,7 @@ def test_area_detail_shows_file_count_and_last_activity(db, lane, sysop):
     session = FakeSession(["m", "f", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
-    assert "Files: 2 (last upload" in _normalized_visible(_written_text(session))
+    assert "2 files (last upload" in _normalized_visible(_written_text(session))
 
 
 # -- linked boards ------------------------------------------------------------
@@ -3001,7 +3003,7 @@ def test_link_this_board_is_not_offered_once_already_linked(db, lane, sysop):
     link_context = _link_context()
     link_board(db, board, node_identity=link_context.node_identity)
 
-    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3091,7 +3093,7 @@ def test_link_this_file_area_is_not_offered_once_already_linked(db, lane, sysop)
     area = list_file_areas(db)[0]
     link_file_area(db, area, node_identity=link_context.node_identity)
 
-    inputs = ["m", "f", "l", "0", "1", "b", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3350,7 +3352,7 @@ def test_close_board_option_is_hidden_once_already_closed(db, lane, sysop):
     link_board(db, board, node_identity=link_context.node_identity)
     close_board_if_linked(db, board, node_identity=link_context.node_identity)
 
-    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3373,7 +3375,7 @@ def test_transfer_origin_is_not_offered_once_an_offer_is_outstanding(db, lane, s
     )
     link_context.link_node.pending_origin_transfers[board.board_id] = offer
 
-    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3400,7 +3402,7 @@ def test_board_detail_shows_the_origin_fingerprint_when_its_profile_is_unavailab
     )
     db.connection.commit()
 
-    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"]
+    inputs = ["m", "m", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3532,8 +3534,8 @@ def test_create_and_delete_area_flow(db, lane, sysop):
     # then [S]ave; every other field keeps its own default.
     inputs = [
         "m", "f", "c",
-        "n", "Docs",
-        "d", "Documents area",
+        "ENTER", "Docs",
+        "DOWN", "ENTER", "Documents area",
         "s",
         "l", "0", "1", "r", "Docs",
         "b", "b", "b",
@@ -3575,8 +3577,8 @@ def test_edit_file_area_flow(db, lane, sysop):
 
     create_file_area(db, "Docs", creator=sysop)
 
-    # list -> pick(01) -> e(dit) -> rename via the field menu -> [S]ave.
-    inputs = ["m", "f", "l", "0", "1", "e", "n", "Docs2", "s", "b", "b", "b", "b", "b"]
+    # list -> pick(01): its own screen, the cursor on Name -> rename -> [S]ave.
+    inputs = ["m", "f", "l", "0", "1", "ENTER", "Docs2", "s", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -4339,8 +4341,8 @@ def test_create_board_assigns_a_community(db, lane, sysop):
 
     inputs = [
         "m", "m", "c",
-        "n", "Amiga",
-        "u", "0", "1",  # Community field -> straight to the picker -> pick #01
+        "ENTER", "Amiga",
+        "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "0", "1",  # Community field -> straight to the picker -> pick #01
         "s",
         "b", "b", "b",
     ]
@@ -4368,9 +4370,9 @@ def test_admin_category_picker_leak_prevention(db, lane, sysop):
     # no categories exist for this Community rather than showing Hardware.
     inputs = [
         "m", "m", "c",
-        "n", "Amiga",
-        "u", "0", "2",
-        "c",
+        "ENTER", "Amiga",
+        "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "0", "2",  # Community: pick #02
+        "DOWN", "ENTER",  # Category: the picker
         # The picker no longer returns the instant it finds nothing to
         # offer (issue #530): an empty list is interactive, because
         # [C]reate is something to do there. Backing out of it is now
@@ -4409,9 +4411,9 @@ def test_creating_a_category_from_the_picker_keeps_the_community_scope(db, lane,
     # there either.
     inputs = [
         "m", "m", "c",
-        "n", "Amiga",
-        "u", "0", "2",
-        "c",            # category field
+        "ENTER", "Amiga",
+        "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "0", "2",  # Community: pick #02
+        "DOWN", "ENTER",  # category field
         "c",            # [C]reate a category from the picker
         "DOWN", "DOWN", "ENTER",  # its Parent field (cursor-chosen, issue #1081)
         "b",            # back out of the parent picker
@@ -4423,6 +4425,7 @@ def test_creating_a_category_from_the_picker_keeps_the_community_scope(db, lane,
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
+    assert "Parent category" in _written_text(session)  # the nested editor's Parent picker was reached
     assert "Hardware" not in _written_text(session)
 
 
@@ -11051,7 +11054,7 @@ def test_a_closed_boards_detail_shows_the_closure_reason(db, lane, sysop):
     closure = close_board_if_linked(db, board, node_identity=link_context.node_identity, reason="archived")
     link_context.link_node.board_closures[board.board_id] = closure
 
-    session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"])
+    session = FakeSession(["m", "m", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     assert "Closure reason: archived" in _normalized_visible(_written_text(session))
@@ -11079,7 +11082,8 @@ def test_color_in_posts_toggles_without_a_prompt(db, lane, sysop):
     from netbbs.boards.boards import get_board_by_name
     from netbbs.net.admin_flow import _board_screen
 
-    session = FakeSession(["n", "Colorful", "o", "s"])
+    # Name, then Down ten to "Color in posts" (the eleventh field), Enter toggles it.
+    session = FakeSession(["ENTER", "Colorful", *(["DOWN"] * 10), "ENTER", "s"])
     asyncio.run(_board_screen(session, lane, sysop, existing=None))
 
     assert get_board_by_name(db, "Colorful").allow_color is True

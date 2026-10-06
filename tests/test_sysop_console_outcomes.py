@@ -64,7 +64,7 @@ def _above_the_prompt(rows: list[str]) -> str:
 
 
 def test_creating_a_board_says_so_on_the_menu_it_returns_to(db, lane, sysop):
-    rows = _screen(lane, sysop, ["c", "m", "c", "n", "Retro", "s"])
+    rows = _screen(lane, sysop, ["c", "m", "c", "ENTER", "Retro", "s"])
     assert [board.name for board in list_boards(db)] == ["Retro"]
     assert rows[0].endswith("Message boards")
     assert _above_the_prompt(rows) == "Created message board 'Retro'."
