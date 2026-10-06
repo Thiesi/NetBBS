@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from netbbs.auth.users import User
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
+from netbbs.age_requirement import UNCHANGED, check_age_requirement, row_age_requirement, store_age_requirement
 from netbbs.timeutil import utc_now_iso
 
 
@@ -61,6 +62,10 @@ class Community:
     # The SysOp's order among Communities (issue #838); `list_communities`
     # follows it.
     position: int = 0
+    # How a member resource's minimum age accepts an age, unless the
+    # resource says (issue #1082): None keeps the self-entered birthdate
+    # rule, "verified" wants an age attestation.
+    default_age_requirement: str | None = None
 
 
 def create_community(
@@ -73,6 +78,7 @@ def create_community(
     default_min_write_level: int | None = None,
     default_min_age: int | None = None,
     default_name_requirement: str | None = None,
+    default_age_requirement: str | None = None,
     creator: User,
 ) -> Community:
     """
@@ -97,6 +103,7 @@ def create_community(
     """
     if default_name_requirement not in (None, "verified", "verified_and_displayed"):
         raise CommunityError(f"invalid default_name_requirement: {default_name_requirement!r}")
+    check_age_requirement(default_age_requirement, CommunityError, field="default_age_requirement")
     created_at = utc_now_iso()
     try:
         db.connection.execute(
@@ -117,6 +124,10 @@ def create_community(
                 created_at,
             ),
         )
+        if default_age_requirement is not None:
+            db.connection.execute(
+                "UPDATE communities SET default_age_requirement = ? WHERE name = ?", (default_age_requirement, name)
+            )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise CommunityError(f"could not create Community {name!r} — name already in use?") from exc
@@ -192,6 +203,7 @@ def update_community(
     default_min_write_level: int | None,
     default_min_age: int | None,
     default_name_requirement: str | None,
+    default_age_requirement=UNCHANGED,
     changed_by: User,
 ) -> Community:
     """Replace `community`'s editable settings with the given full
@@ -199,7 +211,11 @@ def update_community(
     required, not partial/PATCH-style" shape exactly."""
     if default_name_requirement not in (None, "verified", "verified_and_displayed"):
         raise CommunityError(f"invalid default_name_requirement: {default_name_requirement!r}")
+    if default_age_requirement is not UNCHANGED:
+        check_age_requirement(default_age_requirement, CommunityError, field="default_age_requirement")
     try:
+        if default_age_requirement is not UNCHANGED:
+            store_age_requirement(db, "communities", community.id, default_age_requirement)
         db.connection.execute(
             """
             UPDATE communities
@@ -394,6 +410,55 @@ def get_effective_name_requirement(db: Database, resource) -> str | None:
     return None
 
 
+def get_effective_age_requirement(db: Database, resource) -> str | None:
+    """How `resource`'s minimum age accepts an age (issue #1082): its own
+    `age_requirement`, else its Community's `default_age_requirement`,
+    else `None` -- the same cascade as `get_effective_name_requirement`."""
+    own = getattr(resource, "age_requirement", None)
+    if own is not None:
+        return own
+    community = get_community(db, resource.community_id)
+    if community is not None:
+        return community.default_age_requirement
+    return None
+
+
+def resource_age_gate(db: Database, user: User, resource) -> str:
+    """`resource`'s age gate for `user`, through the Community cascade:
+    `"pass"`, `"unverified"` (old enough by their own birthdate, but the
+    gate wants a verified age) or `"fail"`. See
+    `netbbs.attestation.age_gate`."""
+    from netbbs.attestation import age_gate
+
+    return age_gate(db, user, get_effective_min_age(db, resource), get_effective_age_requirement(db, resource))
+
+
+def meets_resource_age(db: Database, user: User, resource) -> bool:
+    """Whether `user` may enter `resource` as far as its age gate goes."""
+    return resource_age_gate(db, user, resource) == "pass"
+
+
+def resource_needs_verification(db: Database, user: User, resource) -> bool:
+    """Whether `resource` will ask `user` for a verification they have not
+    got: a verified name it requires, or a verified age it requires of a
+    caller who is old enough by their own birthdate (issue #1082). What
+    the lists' "needs verification" note says."""
+    from netbbs.attestation import meets_name_requirement
+
+    if not meets_name_requirement(db, user, get_effective_name_requirement(db, resource)):
+        return True
+    return resource_age_gate(db, user, resource) == "unverified"
+
+
+def resource_age_visible(db: Database, user: User, resource) -> bool:
+    """Whether `resource` is listed for `user` as far as its age gate goes.
+    An age gate hides a resource from a caller it refuses outright, but
+    one who is old enough by their own birthdate and only lacks a
+    verified age still sees it, marked "needs verification" (issue #1082):
+    that is something they can act on."""
+    return resource_age_gate(db, user, resource) != "fail"
+
+
 def _row_to_community(row: sqlite3.Row) -> Community:
     return Community(
         id=row["id"],
@@ -406,4 +471,5 @@ def _row_to_community(row: sqlite3.Row) -> Community:
         default_name_requirement=row["default_name_requirement"],
         created_at=row["created_at"],
         position=row["position"],
+        default_age_requirement=row_age_requirement(row, "default_age_requirement"),
     )

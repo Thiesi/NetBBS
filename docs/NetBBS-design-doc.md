@@ -1170,7 +1170,11 @@ Two rules follow from that, and are normative for any future list:
   a *participation* gate rather than a content restriction, unlike an age
   gate, which does hide the resource. The note is placed ahead of any
   free-form description, because the row is clipped to the terminal width
-  and whatever sits at the end is what a narrow terminal loses.
+  and whatever sits at the end is what a narrow terminal loses. The same
+  note marks a resource whose age gate wants a verified age from a caller
+  who is old enough only by the birthdate they entered (issue #1082): that
+  is the one age-gated resource a caller is shown before being refused,
+  because getting verified is something they can do.
 
   The rest of the gate set stays on the SysOp side for now. Level and age
   already decide visibility rather than needing to be displayed, so the
@@ -1993,6 +1997,30 @@ Users may provide nullable, independently visible:
 Age is computed from birthdate at check time. It is never stored as a derived
 current age. If a resource has an age gate and no usable birthdate or verified
 age attestation exists, access fails closed.
+
+A minimum age can also say how the age must be known (issue #1082). The age
+requirement is:
+
+- `none`, the default: a verified age attestation decides when the account
+  has one, and otherwise the birthdate the caller entered;
+- `verified`: only a verified age attestation counts.
+
+It is stored and inherited exactly like the name requirement: a nullable
+`age_requirement` on boards, file areas and channels, where `NULL` inherits the
+Community's `default_age_requirement`, and a node-wide setting for MRC open
+rooms. It means nothing without a minimum age. A verified attestation always
+decides when there is one, so a verified 15-year-old is not lifted past 18 by
+an older birthdate typed into the profile.
+
+Against a `verified` requirement a caller is in one of three states. With a
+verified age old enough, they pass. Old enough only by the birthdate they
+entered, they are **unverified**: the resource is still listed for them, marked
+"needs verification" as an unmet name requirement is, and entering it refuses
+with what to do ("Ask the SysOp to verify yours"; the Staff list names who).
+Too young, or with no usable birthdate, the gate hides the resource as any age
+gate does. Nobody bypasses it, level 255 included, the same as the name
+requirement. A remote author is always held to a verified age, since a remote
+node's self-entered birthdate never reaches this one.
 
 A `user_attestation` records:
 
@@ -15075,6 +15103,37 @@ affects nothing but the claiming node's own content. Rejecting a chain that
 claims a key another identity already holds was considered and not done: the
 receiver cannot know every identity's keys, so the rule could not be enforced
 consistently, and attributing by signer already makes the claim harmless.
+
+### Issue #1082 — a minimum age can require a verified age — decided
+
+A SysOp could not run an area that needs a verified age: every age gate
+accepted a self-entered birthdate when the account had no age attestation.
+Normative description: §5.5.
+
+**Decision 1 — shaped like the name requirement.** A nullable
+`age_requirement` (`NULL` or `verified`) on boards, file areas and channels,
+`default_age_requirement` on Communities, and an MRC open-room setting, with
+the same Community cascade. Rejected: a separate boolean, which would not
+inherit the way `NULL` does, and folding the flag into `min_age`, which would
+change the meaning of a stored number. Existing gates are `NULL` on upgrade, so
+none changes meaning.
+
+**Decision 2 — old enough by one's own birthdate is not hidden.** Such a
+caller sees the resource marked "needs verification" and is refused on entry
+with how to get verified, mirroring the name requirement. Too young, or no
+birthdate, still hides it: those callers have nothing to act on.
+
+**Decision 3 — no staff bypass.** Like the name requirement, level 255 does
+not stand in for a verified age.
+
+**Decision 4 — carried over Link as a recommendation.** A genesis carries
+`default_age_requirement` beside `default_name_requirement`, omitted when
+unset, so a genesis from a node that sets none is unchanged. A carrying node
+stores a known value and drops anything else.
+
+**Decision 5 — edited in the Min age field.** The editors show
+"18, verified only" and take `18v`, so no editor gains a row: the area and
+channel screens must still fit 80x24 whole.
 
 ### SFTP over the SSH transport — declined
 

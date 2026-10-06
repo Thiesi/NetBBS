@@ -77,9 +77,9 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
 from netbbs.activity import follow, is_following, record_channel_seen, unfollow
 from netbbs.attestation import (
+    age_gate,
     format_verified_name_unit,
     get_display_name,
-    meets_age,
     meets_name_requirement,
 )
 from netbbs.auth.users import (
@@ -142,7 +142,15 @@ from netbbs.chat import (
     unmute_user,
 )
 from netbbs.chat.categories import Category, get_category_by_id, list_subcategories, list_top_level_categories
-from netbbs.communities import get_community, get_effective_min_age, get_effective_name_requirement
+from netbbs.age_requirement import age_verification_refusal
+from netbbs.communities import (
+    get_community,
+    get_effective_name_requirement,
+    meets_resource_age,
+    resource_age_gate,
+    resource_age_visible,
+    resource_needs_verification,
+)
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import get_channel_by_channel_id, queue_channel_message_if_linked
@@ -426,7 +434,7 @@ def _visible_channels_for(db: Database, user: User, *, order_by: str = "alphabet
     """
     visible = []
     for channel in list_channels(db, order_by=order_by):
-        if not meets_level(user, channel.min_level) or not meets_age(db, user, get_effective_min_age(db, channel)):
+        if not meets_level(user, channel.min_level) or not resource_age_visible(db, user, channel):
             continue
         if channel.hidden and not (
             is_member(db, channel, user)
@@ -564,7 +572,7 @@ async def _pick_channel(
         # into something they can act on: go and get attested.
         needs_name = {
             channel.id for channel in channels_here
-            if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel))
+            if resource_needs_verification(db, user, channel)
         }
         return (
             channels_here, categories_here, category_name,
@@ -867,7 +875,7 @@ def _may_enter_quietly(db: Database, channel: Channel, user: User) -> bool:
     effect: level, age and name gates, and membership *as it stands*
     (a pending invitation is not accepted here). Used to list rooms in
     the MRC section; the real check runs when a room is entered."""
-    if not meets_level(user, channel.min_level) or not meets_age(db, user, get_effective_min_age(db, channel)):
+    if not meets_level(user, channel.min_level) or not meets_resource_age(db, user, channel):
         return False
     if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel)):
         return False
@@ -881,7 +889,12 @@ def _open_room_gate_denial(db: Database, user: User, open_settings: OpenRoomSett
     it can never enter (review of issue #300)."""
     if open_settings is None:
         return "Opening MRC rooms is switched off on this node."
-    if not meets_level(user, open_settings.min_level) or not meets_age(db, user, open_settings.min_age):
+    if not meets_level(user, open_settings.min_level):
+        return "You are not authorized to open MRC rooms on this node."
+    age = age_gate(db, user, open_settings.min_age, open_settings.age_requirement)
+    if age == "unverified":
+        return age_verification_refusal("Opening MRC rooms here")
+    if age != "pass":
         return "You are not authorized to open MRC rooms on this node."
     if not meets_name_requirement(db, user, open_settings.name_requirement):
         return "Opening MRC rooms here requires a verified real name."
@@ -1177,8 +1190,11 @@ def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tupl
     that), so entry itself is the one point where both age content-
     restriction and name-verification participation-requirement apply.
     """
-    if not meets_level(user, channel.min_level) or not meets_age(db, user, get_effective_min_age(db, channel)):
+    age = resource_age_gate(db, user, channel)
+    if not meets_level(user, channel.min_level) or age == "fail":
         return False, "You are not authorized to enter that channel."
+    if age == "unverified":
+        return False, age_verification_refusal("This channel")
     if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel)):
         return False, "This channel requires a verified real name to participate."
     if not channel.members_only:
@@ -1293,7 +1309,7 @@ def _meets_live_participation_requirements(db: Database, channel: Channel, user:
         # Issue #683: the channel was hidden (or deleted) while this session
         # sat in it. Nothing more is sent into it.
         return False
-    return meets_age(db, user, get_effective_min_age(db, current)) and meets_name_requirement(
+    return meets_resource_age(db, user, current) and meets_name_requirement(
         db, user, get_effective_name_requirement(db, current)
     )
 
@@ -1327,7 +1343,7 @@ def channel_name_gate_unmet(db: Database, user: User, channel: Channel) -> bool:
 
     Reads the *effective* requirement, which is what entry enforces.
     """
-    return not meets_name_requirement(db, user, get_effective_name_requirement(db, channel))
+    return resource_needs_verification(db, user, channel)
 
 
 def channel_name_segments(

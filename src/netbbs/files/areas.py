@@ -29,6 +29,7 @@ from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
 from netbbs.moderation.log import record_action, record_action_without_commit
 from netbbs.storage.database import Database
+from netbbs.age_requirement import UNCHANGED, check_age_requirement, row_age_requirement, store_age_requirement
 from netbbs.timeutil import utc_now_iso
 
 # Mirrors netbbs.boards.boards._VALID_SORT_ORDERS exactly — the same
@@ -79,6 +80,10 @@ class FileArea:
     community_id: int | None
     # The SysOp's order (issue #839), as `Board.position`.
     position: int = 0
+    # How `min_age` accepts an age (issue #1082, `netbbs.age_requirement`):
+    # None inherits the Community's default, "verified" wants an age
+    # attestation rather than a self-entered birthdate.
+    age_requirement: str | None = None
 
 
 def create_file_area(
@@ -95,6 +100,7 @@ def create_file_area(
     min_age: int | None = None,
     name_requirement: str | None = None,
     community_id: int | None = None,
+    age_requirement: str | None = None,
     creator: User,
 ) -> FileArea:
     """
@@ -125,6 +131,7 @@ def create_file_area(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise FileAreaError(f"invalid name_requirement: {name_requirement!r}")
+    check_age_requirement(age_requirement, FileAreaError)
     _check_max_file_age(max_file_age_days)
     created_at = utc_now_iso()
     area_id = compute_content_id(
@@ -161,6 +168,10 @@ def create_file_area(
                 community_id,
             ),
         )
+        if age_requirement is not None:
+            db.connection.execute(
+                "UPDATE file_areas SET age_requirement = ? WHERE area_id = ?", (age_requirement, area_id)
+            )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):
@@ -332,6 +343,7 @@ def update_file_area(
     min_age: int | None,
     name_requirement: str | None,
     community_id: int | None,
+    age_requirement=UNCHANGED,
     changed_by: User,
 ) -> FileArea:
     """Replace `area`'s editable settings with the given full state --
@@ -342,8 +354,12 @@ def update_file_area(
     §16."""
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise FileAreaError(f"invalid name_requirement: {name_requirement!r}")
+    if age_requirement is not UNCHANGED:
+        check_age_requirement(age_requirement, FileAreaError)
     _check_max_file_age(max_file_age_days)
     try:
+        if age_requirement is not UNCHANGED:
+            store_age_requirement(db, "file_areas", area.id, age_requirement)
         db.connection.execute(
             """
             UPDATE file_areas
@@ -498,4 +514,5 @@ def _row_to_file_area(row: sqlite3.Row) -> FileArea:
         community_id=row["community_id"],
         # Absent on a schema older than issue #839's migration.
         position=row["position"] if "position" in row.keys() else 0,
+        age_requirement=row_age_requirement(row),
     )

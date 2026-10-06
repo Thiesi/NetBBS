@@ -85,6 +85,7 @@ from netbbs.access_map import (
     level_ladder,
     list_gates,
 )
+from netbbs.age_requirement import VERIFIED as VERIFIED_AGE
 from netbbs.attestation import AttestationError, withdraw_link_visibility
 from netbbs.auth.users import (
     CO_SYSOP_PRESET,
@@ -215,6 +216,7 @@ from netbbs.communities import (
     delete_community,
     move_community,
     get_community,
+    get_effective_age_requirement,
     get_effective_min_age,
     get_effective_min_read_level,
     get_effective_min_write_level,
@@ -1475,6 +1477,16 @@ def _description_field(description: str | None) -> Field:
 
 def _inheritable(level: int | None) -> str:
     return str(level) if level is not None else "inherit"
+
+
+def _age_gate_value(min_age: int | None, age_requirement: str | None) -> int | str | None:
+    """A minimum age as a detail screen shows it, with how it is checked
+    (issue #1082): "18", or "18, verified only"."""
+    if min_age is not None and age_requirement == VERIFIED_AGE:
+        return f"{min_age}, verified only"
+    if min_age is None and age_requirement == VERIFIED_AGE:
+        return "inherit, verified only"
+    return min_age
 
 
 def _gate_field(label: str, value: int | str | None) -> Field:
@@ -10188,6 +10200,7 @@ async def _mrc_settings_screen(
         # lifecycle bounds.
         "open_rooms": open_current.enabled, "open_min_level": open_current.min_level,
         "open_min_age": open_current.min_age, "open_name_requirement": open_current.name_requirement,
+        "open_age_requirement": open_current.age_requirement,
         "open_cap": open_current.cap, "open_retention_days": open_current.retention_days,
         "open_blocklist": list(open_current.blocklist),
     }
@@ -10321,9 +10334,10 @@ async def _mrc_settings_screen(
         FieldSpec(
             key="open_min_age", hotkey="g", menu_text=menu_key("g", "e for open rooms", prefix="A"),
             label="Minimum age (open rooms)",
-            render=lambda d: "none" if d["open_min_age"] is None else str(d["open_min_age"]),
-            prompt=_optional_int_field("open_min_age", "Minimum age (blank = none)"),
+            render=lambda d: _min_age_label(d["open_min_age"], d["open_age_requirement"]),
+            prompt=_min_age_field("open_min_age", "open_age_requirement"),
             brief="Age gate on rooms callers open", section="Open rooms",
+            help="The minimum age to open a room." + _VERIFIED_AGE_HELP,
         ),
         FieldSpec(
             key="open_name_requirement", hotkey="q", menu_text=menu_key("q", "uired name (open rooms)", prefix="Re"),
@@ -10366,6 +10380,7 @@ async def _mrc_settings_screen(
         open_candidate = OpenRoomSettings(
             enabled=bool(draft["open_rooms"]), min_level=int(draft["open_min_level"]),
             min_age=draft["open_min_age"], name_requirement=draft["open_name_requirement"],
+            age_requirement=draft["open_age_requirement"],
             cap=int(draft["open_cap"]), retention_days=int(draft["open_retention_days"]),
             blocklist=tuple(draft["open_blocklist"]),
         )
@@ -17881,6 +17896,50 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
     return value, True
 
 
+async def _prompt_min_age_check(
+    session: Session, *, current: int | None, current_requirement: str | None,
+) -> tuple[int | None, str | None, bool]:
+    """`_prompt_min_age` that also asks how the age is checked (issue
+    #1082): a trailing `v` (`18v`) asks for a verified age. Returns
+    `(value, requirement, ok)`. Opens on what is set, `18v` included, so
+    Enter keeps both; an emptied line or `none` clears both."""
+    verified = current_requirement == VERIFIED_AGE
+    shown = "" if current is None else str(current)
+    if verified:
+        shown += "v"
+    await write_field_prompt(
+        session,
+        colored(
+            f"Minimum age ({_CLEAR_HINT}, {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}, add v for verified only):",
+            fg_color=MUTED_COLOR,
+        ),
+        hint=f"Age {MIN_AGE_FLOOR}-{MIN_AGE_CEILING}, 18v = verified only; Enter saves; Esc keeps",
+    )
+    try:
+        raw = (await _read_seeded_line(session, initial=shown)).strip()
+    except InputCancelled:
+        await session.write_line("")
+        return current, current_requirement, True
+    if not raw or raw.lower() == "none":
+        return None, None, True
+    wants_verified = raw[-1:].lower() == "v"
+    number = raw[:-1].strip() if wants_verified else raw
+    if not is_ascii_number(number):
+        await write_field_message(session, colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+        return current, current_requirement, False
+    value = int(number)
+    if not (MIN_AGE_FLOOR <= value <= MIN_AGE_CEILING):
+        await write_field_message(session,
+            colored(
+                f"A minimum age must be between {MIN_AGE_FLOOR} and {MIN_AGE_CEILING}, "
+                f"or 'none' for no gate -- cancelled.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return current, current_requirement, False
+    return value, VERIFIED_AGE if wants_verified else None, True
+
+
 async def _pick_optional_category(
     session: Session,
     lane: DatabaseLane,
@@ -18181,14 +18240,35 @@ def _int_field(key: str, label: str) -> Callable[[Session, DatabaseLane, dict], 
     return prompt
 
 
-def _min_age_field(key: str = "min_age") -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+def _min_age_field(
+    key: str = "min_age", requirement_key: str | None = None,
+) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    """The Min age field. With `requirement_key` (issue #1082) it also
+    edits whether the age must be verified: typed as `18v`, shown by
+    `_min_age_label` as "18, verified only"."""
     @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        value, ok = await _prompt_min_age(session, current=draft.get(key))
+        if requirement_key is None:
+            value, ok = await _prompt_min_age(session, current=draft.get(key))
+            if ok:
+                draft[key] = value
+            return
+        value, requirement, ok = await _prompt_min_age_check(
+            session, current=draft.get(key), current_requirement=draft.get(requirement_key),
+        )
         if ok:
             draft[key] = value
+            draft[requirement_key] = requirement
 
     return prompt
+
+
+def _min_age_label(value: int | None, requirement: str | None) -> str:
+    """A Min age field's value, with how it is checked (issue #1082). A
+    resource that inherits its age but asks for a verified one says so."""
+    if requirement == VERIFIED_AGE:
+        return f"{_optional_int_label(value)}, verified only"
+    return _optional_int_label(value)
 
 
 def _name_requirement_label(value: str | None) -> str:
@@ -18238,6 +18318,16 @@ def _resolve_redraw_preference(db: Database, actor: User) -> tuple[bool, bool]:
 # help text for every FieldSpec below that exposes this field. One
 # shared string so the four call sites (board/area/channel plus
 # Community's own cascading default) can never drift apart.
+#: Appended to a Min age field's help (issue #1082): how to ask for a
+#: verified age, which the field itself shows as "18, verified only".
+_VERIFIED_AGE_HELP = (
+    " Type the age with a v (18v) to accept only an age you, or staff who verify "
+    "identity, have verified: a caller old enough by the birthdate they entered sees "
+    "it marked 'needs verification' and is told to ask. A plain number accepts that "
+    "birthdate when there is no verified age."
+)
+
+
 _NAME_REQUIREMENT_HELP = (
     "Gates posting/joining on identity: 'none' has no gate. 'verified' requires "
     "attestation but shows nothing about it. 'verified_and_displayed' also shows the "
@@ -18439,13 +18529,13 @@ def _community_field_specs(
         FieldSpec(
             key="default_min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"),
             label="Default min age",
-            render=lambda d: _optional_int_label(d.get("default_min_age")),
-            prompt=_min_age_field("default_min_age"),
+            render=lambda d: _min_age_label(d.get("default_min_age"), d.get("default_age_requirement")),
+            prompt=_min_age_field("default_min_age", "default_age_requirement"),
             brief="Default min. age, inherited",
             help=(
                 "The minimum-age gate every board/area/channel in this Community inherits "
                 "unless it sets its own. 'none' means no inherited gate."
-            ),
+            ) + _VERIFIED_AGE_HELP,
         ),
         FieldSpec(
             key="default_name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
@@ -18483,12 +18573,14 @@ async def _community_screen(
             "default_min_write_level": existing.default_min_write_level,
             "default_min_age": existing.default_min_age,
             "default_name_requirement": existing.default_name_requirement,
+            "default_age_requirement": existing.default_age_requirement,
         }
     else:
         draft = {
             "name": "", "description": None, "hidden": False,
             "default_min_read_level": None, "default_min_write_level": None,
             "default_min_age": None, "default_name_requirement": None,
+            "default_age_requirement": None,
         }
 
     async def save(draft: dict) -> Community:
@@ -18501,7 +18593,8 @@ async def _community_screen(
                 default_min_read_level=draft["default_min_read_level"],
                 default_min_write_level=draft["default_min_write_level"],
                 default_min_age=draft["default_min_age"],
-                default_name_requirement=draft["default_name_requirement"], creator=actor,
+                default_name_requirement=draft["default_name_requirement"],
+                default_age_requirement=draft["default_age_requirement"], creator=actor,
             )
         return await lane.run(
             update_community,
@@ -18509,7 +18602,8 @@ async def _community_screen(
             default_min_read_level=draft["default_min_read_level"],
             default_min_write_level=draft["default_min_write_level"],
             default_min_age=draft["default_min_age"],
-            default_name_requirement=draft["default_name_requirement"], changed_by=actor,
+            default_name_requirement=draft["default_name_requirement"],
+            default_age_requirement=draft["default_age_requirement"], changed_by=actor,
         )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -18569,7 +18663,7 @@ def _community_description(community: Community) -> str:
     `default_*` values are already the effective ones -- nothing above
     it to resolve. Its gates still belong in the fallback text, for the
     same reason a leaf's do."""
-    gates, _ = _gate_cell(community.default_min_age, community.default_name_requirement)
+    gates, _ = _gate_cell(community.default_min_age, community.default_name_requirement, community.default_age_requirement)
     bits = [] if gates == "-" else [f"default {gates}"]  # leads; see `_describe_resource`
     # The level defaults belong here too (Codex review): they are shown
     # in the wide table and they set the floor for every inheriting
@@ -18653,7 +18747,7 @@ async def _draw_community_detail(
         Section("Defaults for its boards, areas and channels", [
             Field("Read level", _optional_int_label(community.default_min_read_level)),
             Field("Write level", _optional_int_label(community.default_min_write_level)),
-            _gate_field("Minimum age", community.default_min_age),
+            _gate_field("Minimum age", _age_gate_value(community.default_min_age, community.default_age_requirement)),
             _gate_field("Name requirement", community.default_name_requirement),
         ], paired=True),
     ], unicode_style=unicode_style)
@@ -18809,14 +18903,14 @@ def _board_field_specs(
         ),
         FieldSpec(
             key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
-            render=lambda d: _optional_int_label(d.get("min_age")),
-            prompt=_min_age_field(),
+            render=lambda d: _min_age_label(d.get("min_age"), d.get("age_requirement")),
+            prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
             help=(
                 "The minimum caller age required to read or post here, checked against a "
                 "caller's own birthdate (Your profile › Name & details) even if they've "
                 "chosen not to show it publicly. 'none' means no age gate."
-            ),
+            ) + _VERIFIED_AGE_HELP,
             section="Access",
         ),
         FieldSpec(
@@ -18928,6 +19022,7 @@ async def _board_screen(
             "pinned": existing.pinned, "moderated": existing.moderated,
             "max_post_age_days": existing.max_post_age_days, "min_age": existing.min_age,
             "name_requirement": existing.name_requirement, "allow_color": existing.allow_color,
+            "age_requirement": existing.age_requirement,
         }
         draft["community_id_label"] = (
             (await lane.run(get_community, existing.community_id)).name
@@ -18943,6 +19038,7 @@ async def _board_screen(
             "community_id": None, "category_id": None, "pinned": False, "moderated": False,
             "max_post_age_days": None, "min_age": None, "name_requirement": None,
             "community_id_label": None, "category_id_label": None, "allow_color": False,
+            "age_requirement": None,
         }
 
     async def save(draft: dict) -> Board:
@@ -18956,7 +19052,7 @@ async def _board_screen(
                 pinned=draft["pinned"], moderated=draft["moderated"],
                 max_post_age_days=draft["max_post_age_days"], min_age=draft["min_age"],
                 name_requirement=draft["name_requirement"], community_id=draft["community_id"],
-                allow_color=draft["allow_color"], creator=actor,
+                allow_color=draft["allow_color"], age_requirement=draft["age_requirement"], creator=actor,
             )
         return await lane.run(
             update_board,
@@ -18965,7 +19061,7 @@ async def _board_screen(
             category_id=draft["category_id"], pinned=draft["pinned"], moderated=draft["moderated"],
             max_post_age_days=draft["max_post_age_days"], min_age=draft["min_age"],
             name_requirement=draft["name_requirement"], community_id=draft["community_id"],
-            allow_color=draft["allow_color"], changed_by=actor,
+            allow_color=draft["allow_color"], age_requirement=draft["age_requirement"], changed_by=actor,
         )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -19065,6 +19161,8 @@ class _Effective:
     write: int | None
     min_age: int | None
     name_requirement: str | None
+    # Whether the age must be verified (issue #1082), after the cascade.
+    age_requirement: str | None = None
 
 
 def _effective_for(db: Database, resource, *, levels: bool = True) -> _Effective:
@@ -19073,6 +19171,7 @@ def _effective_for(db: Database, resource, *, levels: bool = True) -> _Effective
         write=get_effective_min_write_level(db, resource) if levels else None,
         min_age=get_effective_min_age(db, resource),
         name_requirement=get_effective_name_requirement(db, resource),
+        age_requirement=get_effective_age_requirement(db, resource),
     )
 
 
@@ -19110,7 +19209,7 @@ def _describe_resource(read, write, status: str, effective: _Effective) -> str:
     was filed about. Whoever can enter is the least recoverable fact in
     the row and the least guessable from context, so it goes first and
     the levels take the truncation instead."""
-    gates, _ = _gate_cell(effective.min_age, effective.name_requirement)
+    gates, _ = _gate_cell(effective.min_age, effective.name_requirement, effective.age_requirement)
     tail = f"read {read}/write {write}, {status}"
     return tail if gates == "-" else f"{gates}, {tail}"
 
@@ -19135,7 +19234,9 @@ def _level_cell(value: int | None) -> str:
     return str(value) if value is not None else "none"
 
 
-def _gate_cell(min_age: int | None, name_requirement: str | None) -> tuple[str, SegmentColor]:
+def _gate_cell(
+    min_age: int | None, name_requirement: str | None, age_requirement: str | None = None,
+) -> tuple[str, SegmentColor]:
     """The gates column, and the point of the exercise (issue #528).
 
     A resource can be gated on caller age, on identity attestation, or
@@ -19148,7 +19249,8 @@ def _gate_cell(min_age: int | None, name_requirement: str | None) -> tuple[str, 
 
     `name` is attestation required; `name+` additionally displays the
     attested real name alongside the caller's posts
-    ("verified_and_displayed").
+    ("verified_and_displayed"). An age that must be verified (issue
+    #1082) reads `18+ verified`.
     """
     tags: list[str] = []
     # Truthiness, not `is not None` (Codex review): `meets_age` opens
@@ -19158,7 +19260,7 @@ def _gate_cell(min_age: int | None, name_requirement: str | None) -> tuple[str, 
     # advertise a restriction enforcement does not apply, which is the
     # same class of lie as omitting a gate that it does.
     if min_age:
-        tags.append(f"{min_age}+")
+        tags.append(f"{min_age}+ verified" if age_requirement == VERIFIED_AGE else f"{min_age}+")
     if name_requirement == "verified_and_displayed":
         tags.append("name+")
     elif name_requirement:
@@ -19226,7 +19328,7 @@ def _board_columns(
         str(effective.write),
         _listing_status(board.moderated, board.pinned, to_review),
         _count_cell(*counts),
-        _gate_cell(effective.min_age, effective.name_requirement),
+        _gate_cell(effective.min_age, effective.name_requirement, effective.age_requirement),
     ]
 
 
@@ -19238,7 +19340,7 @@ def _area_columns(
         str(effective.write),
         _listing_status(area.moderated, area.pinned, to_review),
         _count_cell(*counts),
-        _gate_cell(effective.min_age, effective.name_requirement),
+        _gate_cell(effective.min_age, effective.name_requirement, effective.age_requirement),
     ]
 
 
@@ -19258,7 +19360,7 @@ def _channel_columns(
     return [
         str(channel.min_level),
         ("to review", WARNING_COLOR) if to_review else _channel_access(channel),
-        _gate_cell(effective.min_age, effective.name_requirement),
+        _gate_cell(effective.min_age, effective.name_requirement, effective.age_requirement),
     ]
 
 
@@ -19271,7 +19373,7 @@ def _community_columns(community: Community) -> list[str | tuple[str, SegmentCol
         _level_cell(community.default_min_read_level),
         _level_cell(community.default_min_write_level),
         "no" if community.hidden else "yes",
-        _gate_cell(community.default_min_age, community.default_name_requirement),
+        _gate_cell(community.default_min_age, community.default_name_requirement, community.default_age_requirement),
     ]
 
 
@@ -19585,6 +19687,7 @@ async def _link_board_screen(
             default_max_post_age_days=draft["default_max_post_age_days"],
             default_min_age=draft["default_min_age"],
             default_name_requirement=draft["default_name_requirement"],
+            default_age_requirement=board.age_requirement,
             forked_from=draft["forked_from"],
         )
         link_context.link_node.boards[board.board_id] = genesis
@@ -19896,7 +19999,7 @@ async def _draw_board_detail(
         Section("Access", [
             Field("Read level", _inheritable(board.min_read_level)),
             Field("Write level", _inheritable(board.min_write_level)),
-            _gate_field("Minimum age", board.min_age),
+            _gate_field("Minimum age", _age_gate_value(board.min_age, board.age_requirement)),
             _gate_field("Name requirement", board.name_requirement),
         ], paired=True),
         Section("Behavior", [
@@ -20702,14 +20805,14 @@ def _area_field_specs(
         ),
         FieldSpec(
             key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
-            render=lambda d: _optional_int_label(d.get("min_age")),
-            prompt=_min_age_field(),
+            render=lambda d: _min_age_label(d.get("min_age"), d.get("age_requirement")),
+            prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
             help=(
                 "The minimum caller age required to browse or upload here, checked against "
                 "a caller's own birthdate (Your profile › Name & details) even if they've "
                 "chosen not to show it publicly. 'none' means no age gate."
-            ),
+            ) + _VERIFIED_AGE_HELP,
             section="Access",
         ),
         FieldSpec(
@@ -20797,7 +20900,7 @@ async def _area_screen(
             "community_id": existing.community_id, "category_id": existing.category_id,
             "pinned": existing.pinned, "moderated": existing.moderated,
             "max_file_age_days": existing.max_file_age_days, "min_age": existing.min_age,
-            "name_requirement": existing.name_requirement,
+            "name_requirement": existing.name_requirement, "age_requirement": existing.age_requirement,
         }
         draft["community_id_label"] = (
             (await lane.run(get_community, existing.community_id)).name
@@ -20812,7 +20915,7 @@ async def _area_screen(
             "name": "", "description": None, "min_read_level": 0, "min_write_level": 0,
             "community_id": None, "category_id": None, "pinned": False, "moderated": False,
             "max_file_age_days": None, "min_age": None, "name_requirement": None,
-            "community_id_label": None, "category_id_label": None,
+            "community_id_label": None, "category_id_label": None, "age_requirement": None,
         }
 
     async def save(draft: dict) -> FileArea:
@@ -20825,7 +20928,8 @@ async def _area_screen(
                 min_write_level=draft["min_write_level"], category_id=draft["category_id"],
                 pinned=draft["pinned"], moderated=draft["moderated"],
                 max_file_age_days=draft["max_file_age_days"], min_age=draft["min_age"],
-                name_requirement=draft["name_requirement"], community_id=draft["community_id"], creator=actor,
+                name_requirement=draft["name_requirement"], community_id=draft["community_id"],
+                age_requirement=draft["age_requirement"], creator=actor,
             )
         return await lane.run(
             update_file_area,
@@ -20833,7 +20937,8 @@ async def _area_screen(
             min_read_level=draft["min_read_level"], min_write_level=draft["min_write_level"],
             category_id=draft["category_id"], pinned=draft["pinned"], moderated=draft["moderated"],
             max_file_age_days=draft["max_file_age_days"], min_age=draft["min_age"],
-            name_requirement=draft["name_requirement"], community_id=draft["community_id"], changed_by=actor,
+            name_requirement=draft["name_requirement"], community_id=draft["community_id"],
+            age_requirement=draft["age_requirement"], changed_by=actor,
         )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -21009,7 +21114,7 @@ async def _draw_area_detail(
         Section("Access", [
             Field("Read level", _inheritable(area.min_read_level)),
             Field("Write level", _inheritable(area.min_write_level)),
-            _gate_field("Minimum age", area.min_age),
+            _gate_field("Minimum age", _age_gate_value(area.min_age, area.age_requirement)),
             _gate_field("Name requirement", area.name_requirement),
         ], paired=True),
         Section("Behavior", [
@@ -21140,6 +21245,7 @@ async def _link_area_screen(
             default_max_file_age_days=draft["default_max_file_age_days"],
             default_min_age=draft["default_min_age"],
             default_name_requirement=draft["default_name_requirement"],
+            default_age_requirement=area.age_requirement,
         )
         link_context.link_node.file_areas[area.area_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)
@@ -22985,14 +23091,14 @@ def _channel_field_specs(
         ),
         FieldSpec(
             key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
-            render=lambda d: _optional_int_label(d.get("min_age")),
-            prompt=_min_age_field(),
+            render=lambda d: _min_age_label(d.get("min_age"), d.get("age_requirement")),
+            prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
             help=(
                 "The minimum caller age required to join this channel, checked against a "
                 "caller's own birthdate (Your profile › Name & details) even if they've "
                 "chosen not to show it publicly. 'none' means no age gate."
-            ),
+            ) + _VERIFIED_AGE_HELP,
             section="Access",
         ),
         FieldSpec(
@@ -23101,6 +23207,7 @@ async def _channel_screen(
             "pinned": existing.pinned, "hidden": existing.hidden, "members_only": existing.members_only,
             "allow_member_invites": existing.allow_member_invites,
             "min_age": existing.min_age, "name_requirement": existing.name_requirement,
+            "age_requirement": existing.age_requirement,
         }
         draft["community_id_label"] = (
             (await lane.run(get_community, existing.community_id)).name
@@ -23116,7 +23223,7 @@ async def _channel_screen(
             "community_id": None, "category_id": None, "pinned": False, "hidden": False,
             "members_only": False, "allow_member_invites": False,
             "min_age": None, "name_requirement": None,
-            "community_id_label": None, "category_id_label": None,
+            "community_id_label": None, "category_id_label": None, "age_requirement": None,
         }
 
     async def save(draft: dict) -> Channel:
@@ -23139,7 +23246,7 @@ async def _channel_screen(
                 category_id=draft["category_id"], pinned=draft["pinned"], hidden=draft["hidden"],
                 members_only=draft["members_only"], allow_member_invites=draft["allow_member_invites"],
                 min_age=draft["min_age"], name_requirement=draft["name_requirement"],
-                community_id=draft["community_id"], creator=actor,
+                community_id=draft["community_id"], age_requirement=draft["age_requirement"], creator=actor,
             )
         return await lane.run(
             update_channel,
@@ -23147,7 +23254,7 @@ async def _channel_screen(
             category_id=draft["category_id"], pinned=draft["pinned"], hidden=draft["hidden"],
             members_only=draft["members_only"], allow_member_invites=draft["allow_member_invites"],
             min_age=draft["min_age"], name_requirement=draft["name_requirement"],
-            community_id=draft["community_id"], changed_by=actor,
+            community_id=draft["community_id"], age_requirement=draft["age_requirement"], changed_by=actor,
         )
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
@@ -23217,7 +23324,7 @@ async def _list_channels_screen(
 
 def _channel_description(channel: Channel, effective: _Effective, to_review: bool = False) -> str:
     """Narrow-terminal fallback; see `_board_description`."""
-    gates, _ = _gate_cell(effective.min_age, effective.name_requirement)
+    gates, _ = _gate_cell(effective.min_age, effective.name_requirement, effective.age_requirement)
     bits = ["to review"] if to_review else []
     bits += [] if gates == "-" else [gates]  # leads; see `_describe_resource`
     bits.append(f"level {channel.min_level}")
@@ -23344,7 +23451,7 @@ async def _draw_channel_detail(
         Section("Access", [
             Field("Minimum level", str(channel.min_level)),
             Field("Members-only", _yes_no(channel.members_only)),
-            _gate_field("Minimum age", channel.min_age),
+            _gate_field("Minimum age", _age_gate_value(channel.min_age, channel.age_requirement)),
             _gate_field("Name requirement", channel.name_requirement),
         ], paired=True),
         Section("Behavior", [
@@ -23732,6 +23839,7 @@ async def _link_channel_screen(
             default_min_level=draft["default_min_level"],
             default_min_age=draft["default_min_age"],
             default_name_requirement=draft["default_name_requirement"],
+            default_age_requirement=channel.age_requirement,
         )
         link_context.link_node.channels[channel.channel_id] = genesis
         link_context.link_node.known_event_ids.add(genesis.content_id)

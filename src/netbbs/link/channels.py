@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 
+from netbbs.age_requirement import carried_age_requirement, row_age_requirement
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX, Channel
 from netbbs.chat.scrollback import ChannelMessage as LocalChannelMessage, get_scrollback_limit
 from netbbs.link.events import (
@@ -94,6 +95,7 @@ def link_channel(
     default_min_level: int | None = None,
     default_min_age: int | None = None,
     default_name_requirement: str | None = None,
+    default_age_requirement: str | None = None,
 ) -> ChannelGenesis:
     """
     Put `channel` into Link scope: build and sign a `channel_genesis`
@@ -140,6 +142,7 @@ def link_channel(
         default_min_level=default_min_level,
         default_min_age=default_min_age,
         default_name_requirement=default_name_requirement,
+        default_age_requirement=default_age_requirement,
     )
 
     db.connection.execute(
@@ -161,6 +164,7 @@ def _channel_from_row(row) -> Channel:
         created_at=row["created_at"], topic=row["topic"], hidden=bool(row["hidden"]),
         members_only=bool(row["members_only"]), allow_member_invites=bool(row["allow_member_invites"]),
         min_age=row["min_age"], name_requirement=row["name_requirement"], community_id=row["community_id"],
+        age_requirement=row_age_requirement(row),
     )
 
 
@@ -289,6 +293,13 @@ def materialize_carried_channel(
             json.dumps(genesis.to_dict()),
         ),
     )
+    # Issue #1082: written apart from the INSERT, which stays valid on every
+    # schema a carried row can be written on.
+    if carried_age_requirement(payload) is not None:
+        db.connection.execute(
+            "UPDATE channels SET age_requirement = ? WHERE channel_id = ?",
+            (carried_age_requirement(payload), payload["channel_id"]),
+        )
     # Issue #683: `commit=False` lets `netbbs.link.carry` write this and the
     # carry decision it belongs with in one transaction.
     if commit:

@@ -595,6 +595,11 @@ A name requirement may also disclose the verified name beside contributions
 in that resource. Ask the SysOp what is required before sharing identity
 information. You cannot grant yourself access by editing your profile.
 
+An entry marked **needs verification** asks for a verified name, or for a
+verified age when the birthdate in your profile is old enough but nobody has
+verified it. Opening it tells you which; the SysOp, or someone on the **Staff
+list** who verifies identity, can verify it for you.
+
 A SysOp-verified age or name stays on this BBS unless you switch on sharing
 over Link for it under **Profile**. Shared, it goes only to the other BBSes
 your SysOp has chosen, and the number shown beside "on" is how many that is
