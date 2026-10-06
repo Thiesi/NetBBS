@@ -7320,14 +7320,16 @@ async def _draw_user_detail(
             ),
             # Issue #1110: the caller's own name and birthdate, which a SysOp
             # or account manager can correct. In this section, not one of
-            # their own: the screen has to fit 24 rows.
-            *_detail_fields(
+            # their own: the screen has to fit 24 rows. Shown only to whoever
+            # may edit them (review on #1112): a birthdate is private, and an
+            # approver reviewing a signup has no need for it.
+            *(_detail_fields(
                 await lane.run(get_display_name, target),
                 await lane.run(get_birthdate, target),
                 age_verified=await lane.run(get_attestation, target, "age") is not None,
                 name_verified=await lane.run(get_attestation, target, "name") is not None,
                 field=_editable,
-            ),
+            ) if allowed is None or "e" in allowed else ()),
             # The list itself is a screen of its own (`[H]istory`): ten rows of
             # it here pushed the account's own fields off a 24-row terminal.
             Field(

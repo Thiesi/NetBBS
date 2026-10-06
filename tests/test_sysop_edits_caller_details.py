@@ -221,3 +221,14 @@ def test_a_staff_member_without_manage_accounts_is_not_offered_the_edits(db, lan
     text = _detail(FakeSession(["n", "b"]), lane, helper, carol)
     assert "Display [n]ame" not in text
     assert get_display_name(db, carol) is None
+
+
+def test_an_approver_reviewing_a_signup_sees_no_birthdate(db, lane, sysop):
+    # Review on #1112: the fields are shown only to whoever may edit them.
+    helper = _staff(db, sysop, "helper", APPROVE)
+    pending = create_user(db, "dana", password="hunter2pw", pending_approval=True)
+    set_birthdate(db, pending, date(1977, 3, 4))
+    set_display_name(db, pending, "Dana D.")
+    text = _detail(FakeSession(["b"]), lane, helper, pending)
+    assert "1977-03-04" not in text and "Dana D." not in text
+    assert "Birthdate" not in text
