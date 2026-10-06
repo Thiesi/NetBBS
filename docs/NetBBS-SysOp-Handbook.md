@@ -690,8 +690,12 @@ job:
 ### Verified age and names
 
 A SysOp, or an account explicitly granted **Identity verification**, records
-attestations through **Verify** on the main menu. Granting this permission is
-separate from making someone a moderator. Establish your own verification
+attestations through **Verify** on the main menu. As SysOp you can always
+verify; the account screen's **Can verify identity** row says so. For anyone
+else, switch it on with **[i]** on their account. It is separate from making
+someone a moderator, and the **Co-SysOp** preset does not include it: vouching
+for someone's age or name is a separate trust you give on its own. Callers enter
+the birthdate you verify in **Your profile › Name & details**. Establish your own verification
 procedure outside NetBBS; the software records the attestation, not proof
 that a document or a person's claim is authentic.
 

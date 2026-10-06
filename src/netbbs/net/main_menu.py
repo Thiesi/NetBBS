@@ -157,6 +157,16 @@ _LABEL_KEY = re.compile(r"\[([^\]\s])\]")
 ROLE_KEYS = {"s": frozenset({"sysop", "staff"})}
 
 
+def offers_verify(user: User) -> bool:
+    """Whether `user` gets the main menu's [V]erify: a SysOp always
+    (issue #1103 -- verifying is part of running the node, as the gate
+    bypass of #1096 is), anyone else only with "Can verify identity"
+    granted on their account. Staff permissions, the Co-SysOp preset
+    included, never imply it. `netbbs.attestation` enforces the same rule
+    when an attestation is written."""
+    return user.can_verify_identity or meets_level(user, SYSOP_LEVEL)
+
+
 def key_word(text: str, key: str) -> str:
     """The word a bracketed `key` sits in within `text`, lowercased and
     without the brackets: `sysop` for `[S]ysOp console`, `moderation` for
@@ -265,7 +275,7 @@ def main_menu_entries(
         personal_options.append(
             MenuEntry(label=menu_key("I", "nvitations"), brief="Pending invitations for you")
         )
-    if user.can_verify_identity or meets_level(user, SYSOP_LEVEL):
+    if offers_verify(user):
         personal_options.append(
             MenuEntry(label=menu_key("V", "erify"), brief="Verify a caller's identity")
         )
@@ -1262,7 +1272,7 @@ async def _main_menu_loop(
                 await end_choice_line(session)
                 await _show_pending_invitations(session, db, user)
                 redraw = True
-            elif choice == "v" and (user.can_verify_identity or meets_level(user, SYSOP_LEVEL)):
+            elif choice == "v" and offers_verify(user):
                 await end_choice_line(session)
                 await _verify_identity_menu(session, db, user)
                 redraw = True

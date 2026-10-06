@@ -24,7 +24,13 @@ from netbbs.rendering import (
 )
 from netbbs.rendering.sauce import Sauce
 
-KEY_P = colored("P", fg_color=MENU_KEY_COLOR, bold=True)
+# In a green success line the menu key's own green (46 beside 82) does not
+# stand out, which is how the pre-release re-check (#1103) still saw
+# "Use [P]review" as one flat green line: there the key is drawn in the
+# emphasis colour instead.
+KEY_P = colored("P", fg_color=EMPHASIS_COLOR, bold=True)
+KEY_P_MENU = colored("P", fg_color=MENU_KEY_COLOR, bold=True)
+VALUE_SGR = colored("x", fg_color=VALUE_COLOR).split("x")[0]
 
 
 class _Session:
@@ -54,6 +60,55 @@ def test_a_saved_outcome_shows_the_path_as_a_value():
     assert colored(str(path), fg_color=VALUE_COLOR) in line
     assert KEY_P in line
     assert strip_ansi(line) == f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right."
+
+
+def test_a_key_in_a_green_result_does_not_disappear_into_it():
+    session = _Session()
+    notices.announce(session, "Saved. Use [P]review to verify it looks right.")
+    (line,) = notices.take_notices(session)
+    assert KEY_P in line and KEY_P_MENU not in line
+
+
+def test_a_key_in_a_muted_or_error_line_keeps_the_menu_key_colour():
+    session = _Session()
+    notices.announce(session, "Nothing changed. Use [P]review.", tone="muted")
+    notices.announce(session, "Could not save. Use [P]review.", tone="error")
+    for line in notices.take_notices(session):
+        assert KEY_P_MENU in line
+
+
+def test_an_uploaded_outcome_shows_its_path_and_keys():
+    # The exact notice the re-check found still all green (#1103).
+    session = _Session()
+    path = "/var/lib/netbbs/netbbs_welcome_banner.ans"
+    text = f"Uploaded 839 bytes to {path}. Use [P]review, then [E]nable if it is not on yet."
+    notices.announce(session, text)
+    (line,) = notices.take_notices(session)
+    assert colored(path, fg_color=VALUE_COLOR) in line
+    assert KEY_P in line and colored("E", fg_color=EMPHASIS_COLOR, bold=True) in line
+    assert strip_ansi(line) == text
+
+
+def test_a_plain_console_outcome_shows_its_path_too():
+    session = _Session()
+    _announce_line(session, "Logoff banner disabled. Your file at /var/lib/netbbs/x.ans was left in place.")
+    (line,) = notices.take_notices(session)
+    assert colored("/var/lib/netbbs/x.ans", fg_color=VALUE_COLOR) in line
+
+
+def test_only_real_paths_are_coloured_as_paths():
+    session = _Session()
+    for text in ("Use [/] Find to search.", "Page 1/2 of the list.", "See https://www.netbbs.org/ for more."):
+        notices.announce(session, text)
+    lines = notices.take_notices(session)
+    assert len(lines) == 3
+    for line in lines:
+        # Nothing in these lines is a path, so nothing takes the value colour.
+        assert VALUE_SGR not in line
+    # The guard bites: the same kind of line with a real path does.
+    notices.announce(session, "Saved to /var/lib/netbbs/x.ans.")
+    (line,) = notices.take_notices(session)
+    assert VALUE_SGR in line
 
 
 def test_a_report_line_emphasises_its_numbers_and_keys():

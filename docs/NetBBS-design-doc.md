@@ -2116,6 +2116,19 @@ verifier. Verified values take precedence over self-reported values.
 `can_verify_identity` is a separate SysOp-granted boolean, not another content
 moderator tier.
 
+**A local SysOp verifies identity without the flag; staff need it granted.**
+An account at level 255 records age and name attestations and gets the main
+menu's **Verify** whether or not `can_verify_identity` is set, as it passes the
+gates above. Staff permissions, the Co-SysOp preset included, never imply it:
+vouching for a caller's age or name opens adult areas and can travel to nodes
+that trust this one, so a SysOp grants it to a helper on its own, and the
+Co-SysOp question says so. One rule, `main_menu.offers_verify`, decides the
+menu entry, and `attestation._require_verifier` the same when an attestation is
+written. The refusals for a verified age or name say where a caller sets a
+birthdate (Your profile › Name & details) and who to ask (the Staff list), and
+the gate editors' help says who verifies. (Maintainer decision 2026-10-06,
+issue #1103.)
+
 Name requirements are:
 
 - `none`;

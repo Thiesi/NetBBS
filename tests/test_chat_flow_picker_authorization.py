@@ -277,7 +277,7 @@ def test_name_requirement_denies_entry_without_attestation(db, lane, hub, presen
     # entry itself is refused with a specific message.
     session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "b"]))
 
-    assert "requires a verified real name" in _written_text(session)
+    assert "needs a verified real name" in _written_text(session)
     assert is_member(db, channel, bob) is False
 
 
@@ -291,5 +291,5 @@ def test_name_requirement_allows_entry_once_attested(db, lane, hub, presence, al
 
     session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "/quit"]))
 
-    assert "requires a verified real name" not in _written_text(session)
+    assert "needs a verified real name" not in _written_text(session)
     assert "Joined" in _written_text(session)
