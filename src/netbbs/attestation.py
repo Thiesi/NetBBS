@@ -194,23 +194,38 @@ def compute_age(birthdate: date, *, today: date | None = None) -> int:
     return age
 
 
-def meets_age(db: Database, user: User, min_age: int | None) -> bool:
+def age_gate(db: Database, user: User, min_age: int | None, requirement: str | None = None) -> str:
     """
+    `user` against an age gate: `"pass"`, `"unverified"` or `"fail"`.
+
     `min_age` unset/0 → always passes (no gate) — matches level-gating's
-    permissive resource-side default. Otherwise: prefer a verified
-    attested birthdate over the self-reported one, else **fail closed**
-    — a user with no usable birthdate does not pass a gate that's
-    actually set, since treating "unknown" as "old enough" would defeat
-    the gate's purpose. This is the one place age-gating and level-
-    gating genuinely differ in shape, not just in name (design doc §18).
+    permissive resource-side default. Otherwise a verified attested
+    birthdate decides when there is one. Without one, `requirement`
+    (issue #1082, `netbbs.age_requirement`) says what else counts:
+    `None` accepts the self-reported birthdate, `"verified"` does not, and
+    a caller that self-reported old enough is `"unverified"` -- refused,
+    but told what would let them in. With no usable birthdate at all the
+    gate **fails closed**, since treating "unknown" as "old enough" would
+    defeat the gate's purpose. This is the one place age-gating and
+    level-gating genuinely differ in shape, not just in name (design
+    doc §18).
     """
     if not min_age:
-        return True
+        return "pass"
     attestation = get_attestation(db, user, "age")
-    birthdate = date.fromisoformat(attestation.attested_value) if attestation is not None else get_birthdate(db, user)
-    if birthdate is None:
-        return False
-    return compute_age(birthdate) >= min_age
+    if attestation is not None:
+        return "pass" if compute_age(date.fromisoformat(attestation.attested_value)) >= min_age else "fail"
+    birthdate = get_birthdate(db, user)
+    if birthdate is None or compute_age(birthdate) < min_age:
+        return "fail"
+    return "unverified" if requirement == "verified" else "pass"
+
+
+def meets_age(db: Database, user: User, min_age: int | None, requirement: str | None = None) -> bool:
+    """Whether `user` passes an age gate of `min_age` -- see `age_gate`.
+    A resource's own gate goes through the Community cascade:
+    `netbbs.communities.meets_resource_age`."""
+    return age_gate(db, user, min_age, requirement) == "pass"
 
 
 def meets_name_requirement(db: Database, user: User, requirement: str | None) -> bool:

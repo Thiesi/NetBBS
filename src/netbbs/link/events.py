@@ -173,6 +173,7 @@ RELAY_CONSENT_RESPONSE_OBJECT_TYPE = "relay_consent_response"
 _VALID_PURPOSES = ("signing", "transport")
 _VALID_ACTIONS = ("authorize", "revoke")
 _VALID_NAME_REQUIREMENTS = ("verified", "verified_and_displayed")
+_VALID_AGE_REQUIREMENTS = ("verified",)
 
 # The only `board_post` author tag with a real build/verify
 # path — see `build_board_post`'s docstring for why
@@ -629,6 +630,7 @@ def build_board_genesis(
     default_max_post_age_days: int | None = None,
     default_min_age: int | None = None,
     default_name_requirement: str | None = None,
+    default_age_requirement: str | None = None,
     forked_from: str | None = None,
 ) -> BoardGenesis:
     """
@@ -667,6 +669,8 @@ def build_board_genesis(
     """
     if default_name_requirement is not None and default_name_requirement not in _VALID_NAME_REQUIREMENTS:
         raise EventError(f"invalid default_name_requirement: {default_name_requirement!r}")
+    if default_age_requirement is not None and default_age_requirement not in _VALID_AGE_REQUIREMENTS:
+        raise EventError(f"invalid default_age_requirement: {default_age_requirement!r}")
 
     payload = {
         "origin_fingerprint": origin_fingerprint,
@@ -688,6 +692,10 @@ def build_board_genesis(
         payload["default_min_age"] = default_min_age
     if default_name_requirement is not None:
         payload["default_name_requirement"] = default_name_requirement
+    # Issue #1082: omitted when None, like every other default here, so a
+    # genesis from a node that sets none is byte-for-byte what it was.
+    if default_age_requirement is not None:
+        payload["default_age_requirement"] = default_age_requirement
     if forked_from is not None:
         payload["forked_from"] = forked_from
 
@@ -1164,6 +1172,7 @@ def build_channel_genesis(
     default_min_level: int | None = None,
     default_min_age: int | None = None,
     default_name_requirement: str | None = None,
+    default_age_requirement: str | None = None,
 ) -> ChannelGenesis:
     """
     Build and sign one `channel_genesis` event, per design doc §9.6.
@@ -1181,6 +1190,8 @@ def build_channel_genesis(
     """
     if default_name_requirement is not None and default_name_requirement not in _VALID_NAME_REQUIREMENTS:
         raise EventError(f"invalid default_name_requirement: {default_name_requirement!r}")
+    if default_age_requirement is not None and default_age_requirement not in _VALID_AGE_REQUIREMENTS:
+        raise EventError(f"invalid default_age_requirement: {default_age_requirement!r}")
 
     payload = {
         "origin_fingerprint": origin_fingerprint,
@@ -1196,6 +1207,10 @@ def build_channel_genesis(
         payload["default_min_age"] = default_min_age
     if default_name_requirement is not None:
         payload["default_name_requirement"] = default_name_requirement
+    # Issue #1082: omitted when None, like every other default here, so a
+    # genesis from a node that sets none is byte-for-byte what it was.
+    if default_age_requirement is not None:
+        payload["default_age_requirement"] = default_age_requirement
 
     envelope = build_envelope(CHANNEL_GENESIS_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))
@@ -1341,6 +1356,7 @@ def build_file_area_genesis(
     default_max_file_age_days: int | None = None,
     default_min_age: int | None = None,
     default_name_requirement: str | None = None,
+    default_age_requirement: str | None = None,
 ) -> FileAreaGenesis:
     """
     Build and sign one `file_area_genesis` event, per design doc §11.
@@ -1355,6 +1371,8 @@ def build_file_area_genesis(
     """
     if default_name_requirement is not None and default_name_requirement not in _VALID_NAME_REQUIREMENTS:
         raise EventError(f"invalid default_name_requirement: {default_name_requirement!r}")
+    if default_age_requirement is not None and default_age_requirement not in _VALID_AGE_REQUIREMENTS:
+        raise EventError(f"invalid default_age_requirement: {default_age_requirement!r}")
 
     payload = {
         "origin_fingerprint": origin_fingerprint,
@@ -1376,6 +1394,10 @@ def build_file_area_genesis(
         payload["default_min_age"] = default_min_age
     if default_name_requirement is not None:
         payload["default_name_requirement"] = default_name_requirement
+    # Issue #1082: omitted when None, like every other default here, so a
+    # genesis from a node that sets none is byte-for-byte what it was.
+    if default_age_requirement is not None:
+        payload["default_age_requirement"] = default_age_requirement
 
     envelope = build_envelope(FILE_AREA_GENESIS_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))

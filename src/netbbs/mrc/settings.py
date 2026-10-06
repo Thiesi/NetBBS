@@ -29,6 +29,7 @@ import secrets
 import sqlite3
 from dataclasses import dataclass
 
+from netbbs.age_requirement import AGE_REQUIREMENTS
 from netbbs.boards.content_id import compute_content_id
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX, Channel, _row_to_channel, purge_channel_rows
 from netbbs.config import get_config, get_node_display_name, set_config
@@ -282,6 +283,7 @@ OPEN_ROOMS_ENABLED_KEY = "mrc_open_rooms"
 OPEN_ROOMS_MIN_LEVEL_KEY = "mrc_open_rooms_min_level"
 OPEN_ROOMS_MIN_AGE_KEY = "mrc_open_rooms_min_age"
 OPEN_ROOMS_NAME_REQUIREMENT_KEY = "mrc_open_rooms_name_requirement"
+OPEN_ROOMS_AGE_REQUIREMENT_KEY = "mrc_open_rooms_age_requirement"
 OPEN_ROOMS_CAP_KEY = "mrc_open_rooms_cap"
 OPEN_ROOMS_RETENTION_DAYS_KEY = "mrc_open_rooms_retention_days"
 OPEN_ROOMS_BLOCKLIST_KEY = "mrc_open_rooms_blocklist"
@@ -302,6 +304,9 @@ class OpenRoomSettings:
     cap: int = DEFAULT_OPEN_ROOM_CAP
     retention_days: int = DEFAULT_OPEN_ROOM_RETENTION_DAYS
     blocklist: tuple[str, ...] = ()
+    # How `min_age` accepts an age (issue #1082): None keeps the
+    # self-entered birthdate rule, "verified" wants an age attestation.
+    age_requirement: str | None = None
 
     def blocks(self, room: str) -> bool:
         return room.lower() in {entry.lower() for entry in self.blocklist}
@@ -324,6 +329,9 @@ def load_open_room_settings(db: Database) -> OpenRoomSettings:
     name_requirement = get_config(db, OPEN_ROOMS_NAME_REQUIREMENT_KEY) or None
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         name_requirement = None
+    age_requirement = get_config(db, OPEN_ROOMS_AGE_REQUIREMENT_KEY) or None
+    if age_requirement not in AGE_REQUIREMENTS:
+        age_requirement = None
     return OpenRoomSettings(
         enabled=get_config(db, OPEN_ROOMS_ENABLED_KEY) == "1",
         min_level=_int_config(db, OPEN_ROOMS_MIN_LEVEL_KEY, 0),
@@ -332,6 +340,7 @@ def load_open_room_settings(db: Database) -> OpenRoomSettings:
         cap=_int_config(db, OPEN_ROOMS_CAP_KEY, DEFAULT_OPEN_ROOM_CAP),
         retention_days=_int_config(db, OPEN_ROOMS_RETENTION_DAYS_KEY, DEFAULT_OPEN_ROOM_RETENTION_DAYS),
         blocklist=_load_blocklist(db),
+        age_requirement=age_requirement,
     )
 
 
@@ -374,6 +383,8 @@ def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
         raise MrcSettingsError("Minimum age for open rooms must be between 0 and 150, or none.")
     if settings.name_requirement not in (None, "verified", "verified_and_displayed"):
         raise MrcSettingsError("Name requirement must be none, verified, or verified_and_displayed.")
+    if settings.age_requirement not in AGE_REQUIREMENTS:
+        raise MrcSettingsError("Age requirement must be none or verified.")
     if not (1 <= settings.cap <= MAX_OPEN_ROOM_CAP):
         raise MrcSettingsError(f"The open-room cap must be between 1 and {MAX_OPEN_ROOM_CAP}.")
     if not (1 <= settings.retention_days <= MAX_OPEN_ROOM_RETENTION_DAYS):
@@ -390,6 +401,7 @@ def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
         enabled=settings.enabled, min_level=settings.min_level, min_age=settings.min_age,
         name_requirement=settings.name_requirement, cap=settings.cap,
         retention_days=settings.retention_days, blocklist=tuple(seen.values()),
+        age_requirement=settings.age_requirement,
     )
 
 
@@ -399,6 +411,7 @@ def save_open_room_settings(db: Database, settings: OpenRoomSettings) -> OpenRoo
     set_config(db, OPEN_ROOMS_MIN_LEVEL_KEY, str(validated.min_level))
     set_config(db, OPEN_ROOMS_MIN_AGE_KEY, "" if validated.min_age is None else str(validated.min_age))
     set_config(db, OPEN_ROOMS_NAME_REQUIREMENT_KEY, validated.name_requirement or "")
+    set_config(db, OPEN_ROOMS_AGE_REQUIREMENT_KEY, validated.age_requirement or "")
     set_config(db, OPEN_ROOMS_CAP_KEY, str(validated.cap))
     set_config(db, OPEN_ROOMS_RETENTION_DAYS_KEY, str(validated.retention_days))
     set_config(db, OPEN_ROOMS_BLOCKLIST_KEY, json.dumps(list(validated.blocklist)))
@@ -506,6 +519,13 @@ def materialize_open_room(db: Database, room: str, *, open_settings: OpenRoomSet
                 normalized, OPEN_ROOM_ORIGIN, now,
             ),
         )
+        # Issue #1082: apart from the INSERT, which stays valid on every
+        # schema a room can be opened on.
+        if open_settings.age_requirement is not None:
+            db.connection.execute(
+                "UPDATE channels SET age_requirement = ? WHERE channel_id = ?",
+                (open_settings.age_requirement, channel_id),
+            )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise MrcSettingsError(f"MRC room #{normalized} cannot be opened here: {exc}") from exc

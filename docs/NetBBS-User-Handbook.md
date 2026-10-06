@@ -30,8 +30,10 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 Press a highlighted letter such as **[M]** for **Message boards**. Most menus react
 immediately, without Enter. In the browser you can also click an entry or a
 numbered row. In a list, type a row's number: two digits (**03**) or one digit
-and Enter (**3** Enter). **[?] Help** on the main menu sums up how the board
-works and who runs it. To write to the SysOp, send E-mail **To: sysop**.
+and Enter (**3** Enter). A pause that waits for you reads **[Enter] Continue**:
+any key goes on, and in the browser so does a click on it. **[?] Help** on the
+main menu sums up how the board works and who runs it. To write to the SysOp,
+send E-mail **To: sysop**.
 When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.
@@ -595,6 +597,11 @@ Some resources require an account level, verified age, or verified name.
 A name requirement may also disclose the verified name beside contributions
 in that resource. Ask the SysOp what is required before sharing identity
 information. You cannot grant yourself access by editing your profile.
+
+An entry marked **needs verification** asks for a verified name, or for a
+verified age when the birthdate in your profile is old enough but nobody has
+verified it. Opening it tells you which; the SysOp, or someone on the **Staff
+list** who verifies identity, can verify it for you.
 
 A SysOp-verified age or name stays on this BBS unless you switch on sharing
 over Link for it under **Profile**. Shared, it goes only to the other BBSes

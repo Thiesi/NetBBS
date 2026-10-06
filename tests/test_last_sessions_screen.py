@@ -201,7 +201,7 @@ def test_previous_callers_screen_is_truecolor_fancy_and_excludes_current_session
     assert "alice" not in _visible(session)
     truecolor_sequences = set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", output))
     assert len(truecolor_sequences) >= 10
-    assert "Press any key to continue..." in output
+    assert "Continue" in output and "Enter" in output
     database.close()
 
 

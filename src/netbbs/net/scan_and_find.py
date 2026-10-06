@@ -28,13 +28,12 @@ from netbbs.activity import (
     unread_post_count,
     unread_replies_to,
 )
-from netbbs.attestation import meets_age
 from netbbs.auth.users import User
 from netbbs.boards import Board, Post, list_boards
 from netbbs.boards.posts import count_listed_posts
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import Channel
-from netbbs.communities import get_effective_min_age, meets_read_gate
+from netbbs.communities import meets_read_gate, meets_resource_age
 from netbbs.files.areas import FileArea, list_file_areas
 from netbbs.files.entries import count_listed_files
 from netbbs.link.boards import LinkContext
@@ -194,7 +193,7 @@ async def _new_scan_screen(
             boards_by_id[board.id] = board
             if not (
                 meets_read_gate(db, user, board)
-                and meets_age(db, user, get_effective_min_age(db, board))
+                and meets_resource_age(db, user, board)
             ):
                 continue
             unread = unread_post_count(db, user, board)
@@ -218,7 +217,7 @@ async def _new_scan_screen(
         for area in list_file_areas(db):
             if not (
                 meets_read_gate(db, user, area)
-                and meets_age(db, user, get_effective_min_age(db, area))
+                and meets_resource_age(db, user, area)
             ):
                 continue
             unread = unread_file_count(db, user, area)
