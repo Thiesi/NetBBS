@@ -190,3 +190,50 @@ def test_a_locked_fields_own_hotkey_does_not_open_it_on_an_ordinary_editor():
     ))
     assert draft["name"] == "Pen Repair"
     assert "Name: set by origin, so it can't be changed here." in _visible(_written_text(session))
+
+
+def test_creating_offers_save_even_for_an_untouched_prefilled_draft():
+    """A gallery prefill is complete as it is: creating has nothing stored to
+    match, so Save is on offer from the first draw."""
+    store = Store()
+    store.values = {"name": "From the gallery", "pinned": True}
+
+    async def prefilled() -> DetailState:
+        return DetailState(draft=dict(store.values))
+
+    session = NavigableFakeSession(["s"])
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Create", fields=_fields(), draft={},
+        save=store.save, error_type=SaveError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        detail=DetailMode(refresh=prefilled, stay_after_save=False),
+    ))
+    assert result == {"name": "From the gallery", "pinned": True}
+    assert "[S]ave" in _visible(_written_text(session))
+
+
+def test_an_outcome_shows_on_the_next_redraw_only():
+    """The screen stays up after a save, so the console's queued outcome
+    ("Updated ...") must not come back on every later redraw."""
+    store = Store()
+    queued: list[str] = []
+
+    async def save(draft: dict) -> dict:
+        result = await store.save(draft)
+        queued.append(f"Updated {result['name']!r}.")
+        return result
+
+    def take() -> list[str]:
+        taken = list(queued)
+        queued.clear()
+        return taken
+
+    session = NavigableFakeSession(["DOWN", "RIGHT", "s", "UP", "DOWN", "b"])
+    asyncio.run(edit_resource_draft(
+        session, None, title="Pen Repair", fields=_fields(), draft={},
+        save=save, error_type=SaveError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        detail=DetailMode(refresh=store.refresh), notices=take,
+    ))
+    screens = _screens(session)
+    assert [s.count("Updated 'Pen Repair'.") for s in screens] == [0, 0, 0, 1, 0, 0]

@@ -64,7 +64,7 @@ def _above_the_prompt(rows: list[str]) -> str:
 
 
 def test_creating_a_board_says_so_on_the_menu_it_returns_to(db, lane, sysop):
-    rows = _screen(lane, sysop, ["c", "m", "c", "n", "Retro", "s"])
+    rows = _screen(lane, sysop, ["c", "m", "c", "ENTER", "Retro", "s"])
     assert [board.name for board in list_boards(db)] == ["Retro"]
     assert rows[0].endswith("Message boards")
     assert _above_the_prompt(rows) == "Created message board 'Retro'."
@@ -119,7 +119,7 @@ def test_a_field_prompts_refusal_is_shown_by_the_editor_it_returns_to(db, lane, 
 
 
 def test_an_outcome_is_shown_once(db, lane, sysop):
-    rows = _screen(lane, sysop, ["c", "m", "c", "n", "Retro", "s", "z"])  # "z": a key the menu rejects
+    rows = _screen(lane, sysop, ["c", "m", "c", "ENTER", "Retro", "s", "z"])  # "z": a key the menu rejects
     assert "Created message board 'Retro'." in rows
     rows = _screen(lane, sysop, ["c", "m", "l", "b", "b", "m"])  # leave, and come back to the menu
     assert not any("Created" in row for row in rows)

@@ -742,6 +742,13 @@ draft and save it explicitly.
   the others in the same category and Community; pinned ones stay first and
   move among themselves. **Remove** deletes it. A caller can still sort a list by
   activity with **[O]rder**.
+- **A board's or file area's screen** opens on its fields, the way a
+  Community's does: a line above them gives its posts or files and latest
+  activity, its place in the list and whether it is Linked, and for a Linked
+  one a **NetBBS Link** section follows the fields (on the last page when the
+  screen is paged with PgUp/PgDn). **Pending posts**/**Pending files**,
+  **Expired files**, **History**, **Link** and the origin actions are on the
+  same screen, offered while no change waits to be saved.
 - **Chat channels:** set join gates, visibility, invitations, and moderation.
   Hidden or invite-only channels need more than a sufficient account level.
 - **Communities:** group related resources and provide inherited defaults.
@@ -749,7 +756,11 @@ draft and save it explicitly.
   A Community is not an automatic grant to every resource inside it.
   Callers see Communities in your order: a new one goes last, and **Up** and
   **Down** on its screen move it. **Remove** deletes it; its resources stay,
-  without a Community.
+  without a Community. A Community's screen, and a category's, opens on its
+  fields: move the cursor to one and press Enter (or Space) to change it,
+  Left and Right step a choice, and **Save** stores the changes. While a
+  change waits to be saved, only **Save** and **Back** are offered; **Back**
+  then asks before discarding it.
 - **Doors:** attach registered games to a Community, or to none.
 
 **Where callers find it.** The main menu's **Message boards**, **Chat** and

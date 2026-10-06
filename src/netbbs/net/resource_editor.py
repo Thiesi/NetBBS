@@ -276,12 +276,14 @@ class DetailState:
     """What a resource's screen shows besides its fields, fresh from the
     database: `draft` (the stored values), `header` (the read-only rows
     above the fields), `after_fields` (a section after them, the NetBBS
-    Link details), and `actions`."""
+    Link details), `actions`, and `title` (the resource's stored name,
+    which a save in place may have changed; `None` keeps the one given)."""
 
     draft: Draft
     header: str = ""
     after_fields: str = ""
     actions: Sequence[DetailAction] = ()
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -307,10 +309,15 @@ _SAVE_BRIEF_DETAIL = "Store the changed fields"
 _DISCARD_BRIEF_DETAIL = "Leave, discarding the changes"
 
 
-def _detail_hint(unicode_style: bool) -> str:
+def _detail_hint(unicode_style: bool, *, with_help: bool) -> str:
+    """The keys of a resource's own screen, on one row. It takes the place
+    of the "(Ctrl-H for help on these fields)" row, so a resource's screen
+    is no taller than the editor it replaced."""
     if unicode_style:
-        return "↑↓ choose · Enter change · ←→ step"
-    return "Up/Down choose, Enter change, Left/Right step"
+        hint = "↑↓ choose · Enter change · ←→ step"
+        return hint + " · Ctrl-H help" if with_help else hint
+    hint = "Up/Down choose, Enter change, Left/Right step"
+    return hint + ", Ctrl-H help" if with_help else hint
 
 
 def _field_value_lines(
@@ -674,11 +681,17 @@ async def edit_resource_draft(
     # order sections first appear in `fields`, the same order the value
     # list and menu row already group by.
     section_names: list[str] = list(dict.fromkeys(f.section for f in fields if f.section is not None))
+
+    def help_selected() -> int | None:
+        # On a resource's own screen the cursor never leaves the fields, so
+        # narrowing Ctrl-H to the highlighted one would make the help for
+        # every other field unreachable; it shows them all (issue #1081).
+        return None if detail_state is not None else selected
     current_page: str | None = section_names[0] if section_names else None
     while True:
         width, height = session.terminal_width, session.terminal_height
         title_text = screen_title(
-            title,
+            detail_state.title if detail_state is not None and detail_state.title is not None else title,
             breadcrumb=(session.node_display_name,), subtitle=subtitle, width=width,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient,
@@ -718,7 +731,9 @@ async def edit_resource_draft(
         save_brief = _SAVE_BRIEF
         after_text = ""
         if detail_state is not None:
-            dirty = draft != initial_draft
+            # Creating (stay_after_save=False) has nothing stored to match, so
+            # Save is always offered -- a gallery prefill is savable as it is.
+            dirty = draft != initial_draft or not detail.stay_after_save
             menu_fields = []
             menu_save = save if dirty else None
             save_brief = _SAVE_BRIEF_DETAIL
@@ -727,6 +742,8 @@ async def edit_resource_draft(
                 extra_entries = [MenuEntry(label=a.menu_text, brief=a.brief) for a in detail_state.actions]
             after_text = detail_state.after_fields
         hint_lines = 1 if detail_state is not None and fields else 0
+        # On a resource's own screen the key hint carries Ctrl-H too.
+        help_row = 0 if hint_lines else (1 if any(f.help for f in fields) else 0)
         # Everything on screen except the field values and the menu row
         # itself -- both vary depending on whether this redraw ends up
         # paginated, everything here doesn't. The Ctrl-H hint is gated
@@ -742,17 +759,21 @@ async def edit_resource_draft(
         # name" -- is shown on this redraw, where `field_message` goes, instead
         # of having been written above a screen this very redraw clears. Taken
         # here, before the fit-check, so the rows it needs are budgeted for.
+        # Shown on this redraw only: a resource's own screen (`detail`) stays
+        # up after a save or an action, and its next redraw must not repeat
+        # an outcome already read.
+        shown_message = field_message
         if notices is not None:
             announced = list(notices())
             if announced:
-                field_message = "\r\n".join([*announced, *([field_message] if field_message else [])])
+                shown_message = "\r\n".join([*announced, *([field_message] if field_message else [])])
         base_fixed_lines = (
             header_lines
             + 1  # blank line before the menu row
-            + (1 if any(f.help for f in fields) else 0)  # "(Ctrl-H for help...)" hint
+            + help_row  # "(Ctrl-H for help...)" hint
             + 1  # "Choice: " prompt line
-            + (1 if redraw_hint and redraw_count >= 1 else 0)
-            + (wrap_terminal_text(field_message, width).count("\r\n") + 1 if field_message else 0)
+            + (1 if redraw_hint and redraw_count >= 1 and detail_state is None else 0)
+            + (wrap_terminal_text(shown_message, width).count("\r\n") + 1 if shown_message else 0)
             + hint_lines
         )
         after_lines = wrap_terminal_text(after_text, width).count("\r\n") + 1 if after_text else 0
@@ -822,10 +843,12 @@ async def edit_resource_draft(
             value_lines = [*value_lines, *shown_after.split("\r\n")]
         tail_blocks = [f"\r\n{menu_line}"]
         if hint_lines:
-            tail_blocks.append(colored(_detail_hint(unicode_style), fg_color=MUTED_COLOR))
-        if field_message:
-            tail_blocks.append(field_message)
-        if any(f.help for f in fields):
+            tail_blocks.append(colored(
+                _detail_hint(unicode_style, with_help=any(f.help for f in fields)), fg_color=MUTED_COLOR,
+            ))
+        if shown_message:
+            tail_blocks.append(shown_message)
+        if help_row:
             # Only hinted when at least one field actually has help
             # authored -- otherwise Ctrl-H would be an undiscoverable
             # dead end advertised on every screen (issue #150's own
@@ -834,7 +857,11 @@ async def edit_resource_draft(
             tail_blocks.append(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
         if page_hint is not None:
             tail_blocks.append(colored(page_hint, fg_color=MUTED_COLOR))
-        if redraw_hint and redraw_count >= 1:
+        # On a resource's own screen the tip is shown only where it fits below
+        # the rest (issue #1081): a row for it must not page a screen that
+        # otherwise fits, and it adds nothing to a fresh draw.
+        tip_wanted = redraw_hint and redraw_count >= 1
+        if tip_wanted and detail_state is None:
             tail_blocks.append(
                 colored(
                     "(Tip: enable in-place redraw in Your profile to stop this scrolling)", fg_color=MUTED_COLOR
@@ -848,6 +875,12 @@ async def edit_resource_draft(
         header_rows = physical(header_blocks)
         field_rows = physical(value_lines)
         tail_rows = physical(tail_blocks)
+        if tip_wanted and detail_state is not None:
+            tip_rows = physical([colored(
+                "(Tip: enable in-place redraw in Your profile to stop this scrolling)", fg_color=MUTED_COLOR,
+            )])
+            if len(header_rows) + len(field_rows) + len(tail_rows) + len(tip_rows) + 1 <= height:
+                tail_rows.extend(tip_rows)
         field_position = None
         if pending_edit is not None and redraw_in_place:
             field = fields[pending_edit]
@@ -934,7 +967,7 @@ async def edit_resource_draft(
             continue
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_field_help(
-                session, fields, selected=selected, header_color=header_color, unicode_style=unicode_style,
+                session, fields, selected=help_selected(), header_color=header_color, unicode_style=unicode_style,
             )
             continue
         if key.kind == EditorKeyKind.CTRL and key.char == "c":
@@ -1000,7 +1033,7 @@ async def edit_resource_draft(
         # for a session that can't decode arrows at all.
         if choice == HELP_KEY:
             await _show_field_help(
-                session, fields, selected=selected, header_color=header_color, unicode_style=unicode_style,
+                session, fields, selected=help_selected(), header_color=header_color, unicode_style=unicode_style,
             )
             continue
         if choice == back_hotkey or choice == CANCEL_KEY:
@@ -1009,7 +1042,7 @@ async def edit_resource_draft(
                 if not await prompt_yes_no(session, "Discard unsaved changes?", default=False):
                     continue
             return None
-        dirty = draft != initial_draft
+        dirty = draft != initial_draft or (detail is not None and not detail.stay_after_save)
         if save is not None and choice == save_hotkey and (detail_state is None or dirty):
             await session.write_line("")
             try:

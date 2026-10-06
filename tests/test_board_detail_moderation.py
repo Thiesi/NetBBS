@@ -125,8 +125,12 @@ def test_a_reused_board_id_does_not_inherit_the_deleted_boards_history(db, sysop
 def test_the_history_title_is_sanitized(db, lane, sysop):
     import dataclasses
 
-    # As a carried board's name, supplied by its origin, could be.
-    board = dataclasses.replace(create_board(db, "general", creator=sysop), name="evil\x1b[2Jname")
+    # As a carried board's name, supplied by its origin, could be. Stored,
+    # since the board's screen reloads it (issue #1081).
+    board = create_board(db, "general", creator=sysop)
+    db.connection.execute("UPDATE boards SET name = ? WHERE id = ?", ("evil\x1b[2Jname", board.id))
+    db.connection.commit()
+    board = dataclasses.replace(board, name="evil\x1b[2Jname")
 
     session = FakeSession(["h", "b", "b"])
     asyncio.run(_board_detail_screen(session, lane, sysop, board))

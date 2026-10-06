@@ -93,6 +93,6 @@ def test_back_from_a_board_returns_to_the_list(db, lane, sysop):
     # Content, Message boards, List, board 01, Back: the list again.
     session = FakeSession(["c", "m", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
-    after_detail = _visible(_written_text(session)).rsplit("Return to the list", 1)[1]
+    after_detail = _visible(_written_text(session)).rsplit("place 1 of 1", 1)[1]  # the board's own screen
 
     assert "page 1/1" in after_detail  # the picker, not the Message boards menu
