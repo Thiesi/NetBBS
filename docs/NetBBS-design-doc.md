@@ -2076,9 +2076,20 @@ entered, they are **unverified**: the resource is still listed for them, marked
 "needs verification" as an unmet name requirement is, and entering it refuses
 with what to do ("Ask the SysOp to verify yours"; the Staff list names who).
 Too young, or with no usable birthdate, the gate hides the resource as any age
-gate does. Nobody bypasses it, level 255 included, the same as the name
-requirement. A remote author is always held to a verified age, since a remote
+gate does. A remote author is always held to a verified age, since a remote
 node's self-entered birthdate never reaches this one.
+
+**A local SysOp passes every name and age gate.** An account at level 255 on
+this node passes a minimum age, a verified-age requirement and a name
+requirement without a birthdate or an attestation, the way it already overrides
+every level gate and moderator grant. It is never marked "needs verification".
+Staff permissions and level 254 do not count. The one rule is
+`attestation.bypasses_identity_gates`, applied inside `age_gate` and
+`meets_name_requirement`, so every list, entry, posting, search, transfer link,
+MRC open room, access map and level-change preview follows it. A remote author
+is judged by `link.remote_attestation` on their own attestations and never
+reaches it. (Maintainer decision 2026-10-06; it replaces #1082's original "no
+bypass".)
 
 A `user_attestation` records:
 
@@ -15214,8 +15225,15 @@ caller sees the resource marked "needs verification" and is refused on entry
 with how to get verified, mirroring the name requirement. Too young, or no
 birthdate, still hides it: those callers have nothing to act on.
 
-**Decision 3 — no staff bypass.** Like the name requirement, level 255 does
-not stand in for a verified age.
+**Decision 3 — a local SysOp passes; nobody else does.** *Amended
+2026-10-06.* The issue first decided that nobody bypasses the gate, level 255
+included, matching the name requirement. The maintainer reversed that for both
+gates: a SysOp could otherwise be locked out of an area on their own node, and
+level 255 already overrides every level gate and moderator grant. Level 255
+now passes the minimum age, the verified-age requirement and the name
+requirement (§5.5); staff permissions and level 254 still do not, and remote
+authors are still held to their own attestations. Rejected: a bypass for staff
+too, which would let a delegated role skip a legal gate the SysOp set.
 
 **Decision 4 — carried over Link as a recommendation.** A genesis carries
 `default_age_requirement` beside `default_name_requirement`, omitted when

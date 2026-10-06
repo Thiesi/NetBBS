@@ -713,8 +713,13 @@ a **v** in the **Min age** field (`18v`); the field then reads
 `18, verified only`. A Community's default works the same way and is inherited.
 A caller who is old enough by their own birthdate still sees the board, area or
 channel, marked `needs verification`, and is told to ask you when they open it.
-Too young, or no birthdate at all, and it stays hidden. Nobody skips the check,
-level 255 included, so verify your own age if you want in.
+Too young, or no birthdate at all, and it stays hidden.
+
+As a SysOp (level 255) you pass every minimum age, verified-age and
+verified-name requirement on your own node without verifying yourself, the same
+way you pass every level. Staff and other accounts do not: a helper you gave
+staff permissions still needs the age or name the resource asks for. Callers
+from other nodes are always held to their own verified age and name.
 
 ## Content and Communities
 
