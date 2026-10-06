@@ -500,7 +500,7 @@ def test_trust_history_screen_pauses_before_returning(db, lane, sysop):
     held = visible[visible.index("No configuration history."):]
     assert "[B]ack\r\nChoice: " in held
     assert held.index("\a") < held.index("Inspect policy, explain restrictions")
-    assert "Press any key to continue..." not in held
+    assert "[Enter] Continue" not in held
 
 
 def test_trust_subjects_screen_stays_interactive_when_the_list_is_empty(db, lane, sysop):
@@ -4570,7 +4570,7 @@ def test_welcome_preview_in_ascii_shows_the_ascii_default_callers_get(db, lane, 
     _run(session, lane, sysop)
     text = _written_text(session)
     start = text.index("Previewing the welcome banner")
-    preview = text[start:text.index("Press any key", start)]
+    preview = text[start:text.index(" Continue", start)]
     assert "+====" in preview
     assert "╔" not in preview
 
@@ -5281,7 +5281,7 @@ def test_slot_preview_shows_blanking_and_adds_no_rows_below_the_art(db, lane, sy
     # Check reports blanking in words; Preview only draws it, so nothing
     # but its own prompt lands in the one row budgeted below the art.
     assert "Blanked, as this caller" not in text
-    assert text.count("(the main menu as a level-0 caller sees it)") == 1
+    assert text.count("(the main menu as a level-0 caller sees it, 2 of 2)") == 1
 
 
 def test_check_counts_a_run_with_any_menu_key_as_a_menu_item(db, lane, sysop):
@@ -5433,9 +5433,14 @@ def test_masthead_preview_in_slots_mode_shows_both_menus(db, lane, sysop):
     session = FakeSession(["s", "m", "m", "m", "p", " ", " ", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "(the main menu as you see it)" in text
-    assert "(the main menu as a level-0 caller sees it)" in text
+    assert "(the main menu as you see it, 1 of 2)" in text
+    assert "(the main menu as a level-0 caller sees it, 2 of 2)" in text
     assert text.count("Signed in as") == 2
+    # One row even on a terminal that lays out 79 columns (Claude review of
+    # #1091): a second row would scroll the art off the top.
+    for line in text.splitlines():
+        if "of 2)" in line:
+            assert len(line.strip()) <= 78, line
 
 
 # -- masthead filesystem picker (issue #170) ---------------------------------

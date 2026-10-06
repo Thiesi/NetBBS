@@ -19,6 +19,7 @@ from netbbs.boards.content_id import compute_content_id
 from netbbs.file_refs import forget_orphaned_post_refs_without_commit
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
+from netbbs.age_requirement import UNCHANGED, check_age_requirement, row_age_requirement, store_age_requirement
 from netbbs.timeutil import utc_now_iso
 
 # Supported list_boards() sort orders. "sysop" -- the SysOp's own order,
@@ -105,6 +106,10 @@ class Board:
     # follows it, and `move_board` changes it. A new board goes last (a
     # trigger sets it, for carried boards too).
     position: int = 0
+    # How `min_age` accepts an age (issue #1082, `netbbs.age_requirement`):
+    # None inherits the Community's default, "verified" wants an age
+    # attestation rather than a self-entered birthdate.
+    age_requirement: str | None = None
 
 
 def create_board(
@@ -122,6 +127,7 @@ def create_board(
     name_requirement: str | None = None,
     community_id: int | None = None,
     allow_color: bool = False,
+    age_requirement: str | None = None,
     creator: User,
 ) -> Board:
     """
@@ -170,6 +176,7 @@ def create_board(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise BoardError(f"invalid name_requirement: {name_requirement!r}")
+    check_age_requirement(age_requirement, BoardError)
     _check_max_post_age(max_post_age_days)
     created_at = utc_now_iso()
     board_id = compute_content_id(
@@ -210,6 +217,8 @@ def create_board(
             # Set apart from the INSERT, which stays valid on every schema
             # a board can be created on.
             db.connection.execute("UPDATE boards SET allow_color = 1 WHERE board_id = ?", (board_id,))
+        if age_requirement is not None:
+            db.connection.execute("UPDATE boards SET age_requirement = ? WHERE board_id = ?", (age_requirement, board_id))
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):
@@ -387,6 +396,7 @@ def update_board(
     name_requirement: str | None,
     community_id: int | None,
     allow_color: bool,
+    age_requirement=UNCHANGED,
     changed_by: User,
 ) -> Board:
     """
@@ -403,6 +413,8 @@ def update_board(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise BoardError(f"invalid name_requirement: {name_requirement!r}")
+    if age_requirement is not UNCHANGED:
+        check_age_requirement(age_requirement, BoardError)
     _check_max_post_age(max_post_age_days)
     try:
         db.connection.execute(
@@ -419,6 +431,8 @@ def update_board(
                 min_age, name_requirement, community_id, int(allow_color), board.id,
             ),
         )
+        if age_requirement is not UNCHANGED:
+            store_age_requirement(db, "boards", board.id, age_requirement)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):
@@ -529,4 +543,5 @@ def _row_to_board(row: sqlite3.Row) -> Board:
         allow_color=bool(row["allow_color"]) if "allow_color" in row.keys() else False,
         # Absent on a schema older than issue #839's migration.
         position=row["position"] if "position" in row.keys() else 0,
+        age_requirement=row_age_requirement(row),
     )

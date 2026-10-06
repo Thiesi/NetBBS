@@ -44,13 +44,13 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
-from netbbs.attestation import meets_age, meets_name_requirement
+from netbbs.attestation import meets_name_requirement
 from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id
 from netbbs.communities import (
-    get_effective_min_age,
     get_effective_name_requirement,
     meets_read_gate,
     meets_write_gate,
+    resource_age_gate,
 )
 from netbbs.config import get_max_upload_bytes
 from netbbs.files.areas import FileArea, get_file_area_by_area_id
@@ -352,7 +352,10 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
         # outstanding link must not quietly outlive it (Codex review).
         raise TransferError("this account can no longer transfer files")
 
-    if not meets_age(db, user, get_effective_min_age(db, area)):
+    age = resource_age_gate(db, user, area)
+    if age == "unverified":
+        raise TransferError("this file area needs a verified age")
+    if age != "pass":
         raise TransferError("this file area has an age requirement your account no longer meets")
 
     # Reading the area is required either way: a link is issued from

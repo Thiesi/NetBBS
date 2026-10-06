@@ -751,8 +751,9 @@ def test_migration_drops_the_pull_cursors_and_resets_pull_routes(tmp_path, monke
     import netbbs.storage.database as database_module
     from netbbs.storage.migrations import MIGRATIONS
 
+    # Built up to just before #1046's migration; opening it runs that one and
+    # any added since (issue #1082's came next).
     index = next(i for i, m in enumerate(MIGRATIONS) if "Issue #1046" in m.description)
-    assert index == len(MIGRATIONS) - 1
     monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
     path = tmp_path / "node.db"
     old = Database(path)

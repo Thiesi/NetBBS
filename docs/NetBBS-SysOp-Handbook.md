@@ -707,6 +707,15 @@ A verified name does not replace the account's chosen display name. Tell callers
 about disclosure before requiring it. Age and name verification are separate;
 review the available attributes and expiry on the attestation screen.
 
+A minimum age accepts the birthdate a caller entered in their profile when
+nobody has verified their age. To accept only a verified age, type the age with
+a **v** in the **Min age** field (`18v`); the field then reads
+`18, verified only`. A Community's default works the same way and is inherited.
+A caller who is old enough by their own birthdate still sees the board, area or
+channel, marked `needs verification`, and is told to ask you when they open it.
+Too young, or no birthdate at all, and it stays hidden. Nobody skips the check,
+level 255 included, so verify your own age if you want in.
+
 ## Content and Communities
 
 Create resources under **Content**, or use **Create** in a resource picker.
@@ -1650,7 +1659,9 @@ being paced after 5 seconds. Each piece plays once per connection: the welcome
 banner when a caller connects, the masthead on their first main menu, a list's
 art on the first visit to that list, never on a redraw, a page change or a
 cursor move. Callers who read plain ASCII, and callers who set **Profile → [Q]uick
-or animated banners** to quick, get the art at once.
+or animated banners** to quick, get the art at once. The piece's **Preview**
+plays it at its speed every time you use it, so you can see the animation
+without signing in as a caller.
 
 Every caller gets text in the character set their terminal reads:
 

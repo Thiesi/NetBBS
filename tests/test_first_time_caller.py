@@ -278,3 +278,15 @@ def test_sysop_typed_at_the_review_screens_to_reaches_the_sysop(tmp_path):
     finally:
         lane.close()
         db.close()
+
+
+def test_a_clicked_enter_prompt_arrives_as_enter():
+    """Issue #1083: a click on "[Enter] Continue" sends a carriage return,
+    which dismisses the pause the prompt belongs to."""
+    results = []
+
+    async def handler(session):
+        results.append(await session.read_any_key())
+
+    _web_scenario(handler, [{"type": "click", "data": "\r"}])
+    assert results == ["\r"]

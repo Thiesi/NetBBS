@@ -37,6 +37,7 @@ from netbbs.net.live_screen import (
     SHOW_CURSOR,
     KeyOutcome,
     fill_row,
+    paint_keyed_text,
     paint_text,
     run_live_screen,
     write_quietly,
@@ -525,21 +526,21 @@ def paint_snoop(
     live = any(e.session is entry.session for e in controls.session_registry.list_entries())
     if not live:
         fill_row(buffer, 0, bg=_SELECTED_BG)
-        paint_text(buffer, 0, 0, f"{name} has disconnected. Any key returns.", fg=ERROR_COLOR, bg=_SELECTED_BG)
+        paint_keyed_text(buffer, 0, 0, f"{name} has disconnected. [Enter] Back", fg=ERROR_COLOR, bg=_SELECTED_BG)
         return
     copy = entry.session.screen_copy()
     cropped = copy.width > buffer.width or copy.height > buffer.height - 1
     header = f"Watching {name}{glyphs.dot}{copy.width}x{copy.height}"
     if cropped:
         header += " (cropped)"
-    header += f"{glyphs.dot}any key stops"
+    header += f"{glyphs.dot}[Enter] Stop"
     fill_row(buffer, 0, bg=_SELECTED_BG)
     if notice:
         # A message or broadcast for the SysOp takes the header row: it
         # matters more than the caption.
         paint_text(buffer, 0, 0, notice, fg=ALERT_COLOR, bg=_SELECTED_BG, bold=True)
     else:
-        paint_text(buffer, 0, 0, header, fg=EMPHASIS_COLOR, bg=_SELECTED_BG, bold=True)
+        paint_keyed_text(buffer, 0, 0, header, fg=EMPHASIS_COLOR, bg=_SELECTED_BG, bold=True)
     snapshot = copy.snapshot()
     rows = min(copy.height, buffer.height - 1)
     cols = min(copy.width, buffer.width)

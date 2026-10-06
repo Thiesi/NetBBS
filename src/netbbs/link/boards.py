@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards.boards import Board, usable_max_age_days
 from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, Post
+from netbbs.age_requirement import carried_age_requirement, row_age_requirement
 from netbbs.communities import get_effective_min_age, get_effective_name_requirement
 from netbbs.file_refs import body_with_link_text, post_refs
 from netbbs.link.enforcement import decide_event_authorship, ensure_event_author_subject
@@ -222,6 +223,7 @@ def link_board(
     default_max_post_age_days: int | None = None,
     default_min_age: int | None = None,
     default_name_requirement: str | None = None,
+    default_age_requirement: str | None = None,
     forked_from: str | None = None,
 ) -> BoardGenesis:
     """
@@ -275,6 +277,7 @@ def link_board(
         default_max_post_age_days=default_max_post_age_days,
         default_min_age=default_min_age,
         default_name_requirement=default_name_requirement,
+        default_age_requirement=default_age_requirement,
         forked_from=forked_from,
     )
 
@@ -301,6 +304,7 @@ def _board_from_row(row) -> Board:
         category_id=row["category_id"], pinned=bool(row["pinned"]), created_at=row["created_at"],
         moderated=bool(row["moderated"]), max_post_age_days=row["max_post_age_days"],
         min_age=row["min_age"], name_requirement=row["name_requirement"], community_id=row["community_id"],
+        age_requirement=row_age_requirement(row),
         allow_color=bool(row["allow_color"]) if "allow_color" in row.keys() else False,
     )
 
@@ -419,6 +423,13 @@ def materialize_carried_board(
             json.dumps(genesis.to_dict()),
         ),
     )
+    # Issue #1082: written apart from the INSERT, which stays valid on every
+    # schema a carried row can be written on.
+    if carried_age_requirement(payload) is not None:
+        db.connection.execute(
+            "UPDATE boards SET age_requirement = ? WHERE board_id = ?",
+            (carried_age_requirement(payload), payload["board_id"]),
+        )
     # Issue #683: `commit=False` lets `netbbs.link.carry` write this and the
     # carry decision it belongs with in one transaction.
     if commit:

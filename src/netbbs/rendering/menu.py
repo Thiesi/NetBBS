@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 
 from netbbs.rendering.ansi import colored
-from netbbs.rendering.theme import MENU_KEY_COLOR
+from netbbs.rendering.theme import MENU_KEY_COLOR, MUTED_COLOR
 
 Color = int | tuple[int, int, int]
 
@@ -60,7 +60,8 @@ def menu_key(key: str, rest: str = "", *, prefix: str = "", capitalize: bool = F
 
 
 # One key in brackets, not a word or a number: `[S]`, never `[10]` or `[ok]`.
-_BRACKETED_KEY = re.compile(r"\[([A-Za-z0-9])\]")
+# `[Enter]` is the one named key (issue #1083): the pause prompt's.
+_BRACKETED_KEY = re.compile(r"\[([A-Za-z0-9]|Enter)\]")
 
 
 def highlight_hotkeys(text: str, *, color: Color | None = None) -> str:
@@ -92,3 +93,12 @@ def highlight_hotkeys(text: str, *, color: Color | None = None) -> str:
 
 def _in_color(text: str, color: Color | None) -> str:
     return colored(text, fg_color=color) if color is not None and text else text
+
+
+def continue_prompt(action: str = "Continue") -> str:
+    """The pause that waits for a key before going on (issue #1083), in
+    place of "Press any key to continue...": `[Enter] Continue`, or
+    `[Enter] Back to the door list` with `action`. Any key still goes on;
+    the bracketed key is what a click in the browser terminal sends, so a
+    caller with only a mouse is not stuck behind the pause."""
+    return highlight_hotkeys(f"[Enter] {action}", color=MUTED_COLOR)

@@ -447,7 +447,11 @@ Everything below happens each time the file is read:
 - iCE colours: classic art uses the blink attribute to mean a bright
   background. Art that sets blink together with a background colour is shown
   with the bright background and no blink, for every session, whether or not
-  SAUCE sets the iCE flag.
+  SAUCE sets the iCE flag. CTerm (SyncTERM) only shows bright backgrounds
+  (100-107) with DECSET mode 33 on, and keeps them as the blink attribute,
+  which blinks until mode 35 is on too. A CP437 session gets both modes before
+  every art that needs them and never their reset: switching them off after
+  the art made the cells already drawn blink (issue #1083).
 - SAUCE width (TInfo1): art wider than the caller's `physical_width` is not
   drawn -- the screen falls back to what it shows without art (the default
   welcome banner, no masthead) instead of wrapping every row.
@@ -478,7 +482,11 @@ node logs it once; the console's check warns when a level-255 SysOp's menu
 would not fit. ASCII callers, a terminal smaller than the art, and art that
 fails the check get the generated menu too. Art narrower than the screen is
 drawn left-aligned, and the prompt goes below the art unless a `{prompt}`
-token places it. The main menu, the welcome and logoff banners and the three
+token places it. A prompt placed in the art leaves the cursor mid-screen, so
+whatever answers a choice there ("Log off?", "Search:") starts on the first
+free row below the art, its notices and its navigation lines, never on the row
+under the prompt, which it would overwrite (issue #1083,
+`netbbs.net.art_prompt`). The main menu, the welcome and logoff banners and the three
 lists below use slots, and the main menu also takes hand-drawn items. Pacing
 works for the welcome banner, the main menu's art and the three lists' art.
 
@@ -1011,7 +1019,7 @@ session that holds what it wrote after its last question and announces that.
 ### 3.5 Interaction model for screens (issue #282)
 
 Every screen reached by a hotkey shows its content first and can be left with
-`[B]ack` (or a "Press any key" pause) without answering a question or
+`[B]ack` (or a pause, `[Enter] Continue`) without answering a question or
 changing any stored value. Actions are hotkeys on an action bar, a field on a
 draft editor, or a picker entry; a yes/no prompt is only ever the last
 keystroke immediately before an irreversible, destructive, or network-touching
@@ -1090,6 +1098,15 @@ screens and caller-side editing (a post, a file description, the Profile) are
 unchanged: an account's keys are separate, individually confirmed operations
 rather than fields of one form, and the settings screens already open straight
 into their editors.
+
+A pause that waits for a key before going on reads `[Enter] Continue` (issue
+#1083), or `[Enter] Back`, `[Enter] Stop` where that says more. Written
+text gets it from `netbbs.rendering.continue_prompt`; the live screens that
+paint cell by cell (the Monitor, break-in) from `live_screen.paint_keyed_text`,
+which colours the key the same way. Any key still goes on. The
+bracketed `[Enter]` is what a click in the browser terminal sends, so a
+caller using only a mouse is never stuck behind a pause; the old wording,
+"Press any key to continue", had nothing to click.
 
 **An action's outcome is shown on the screen the caller lands on** (issue
 #680). With redraw-in-place on, a line written just before a screen redraws
@@ -1214,7 +1231,11 @@ Two rules follow from that, and are normative for any future list:
   a *participation* gate rather than a content restriction, unlike an age
   gate, which does hide the resource. The note is placed ahead of any
   free-form description, because the row is clipped to the terminal width
-  and whatever sits at the end is what a narrow terminal loses.
+  and whatever sits at the end is what a narrow terminal loses. The same
+  note marks a resource whose age gate wants a verified age from a caller
+  who is old enough only by the birthdate they entered (issue #1082): that
+  is the one age-gated resource a caller is shown before being refused,
+  because getting verified is something they can do.
 
   The rest of the gate set stays on the SysOp side for now. Level and age
   already decide visibility rather than needing to be displayed, so the
@@ -2038,6 +2059,30 @@ Users may provide nullable, independently visible:
 Age is computed from birthdate at check time. It is never stored as a derived
 current age. If a resource has an age gate and no usable birthdate or verified
 age attestation exists, access fails closed.
+
+A minimum age can also say how the age must be known (issue #1082). The age
+requirement is:
+
+- `none`, the default: a verified age attestation decides when the account
+  has one, and otherwise the birthdate the caller entered;
+- `verified`: only a verified age attestation counts.
+
+It is stored and inherited exactly like the name requirement: a nullable
+`age_requirement` on boards, file areas and channels, where `NULL` inherits the
+Community's `default_age_requirement`, and a node-wide setting for MRC open
+rooms. It means nothing without a minimum age. A verified attestation always
+decides when there is one, so a verified 15-year-old is not lifted past 18 by
+an older birthdate typed into the profile.
+
+Against a `verified` requirement a caller is in one of three states. With a
+verified age old enough, they pass. Old enough only by the birthdate they
+entered, they are **unverified**: the resource is still listed for them, marked
+"needs verification" as an unmet name requirement is, and entering it refuses
+with what to do ("Ask the SysOp to verify yours"; the Staff list names who).
+Too young, or with no usable birthdate, the gate hides the resource as any age
+gate does. Nobody bypasses it, level 255 included, the same as the name
+requirement. A remote author is always held to a verified age, since a remote
+node's self-entered birthdate never reaches this one.
 
 A `user_attestation` records:
 
@@ -15153,6 +15198,37 @@ there is a separate, confirmed operation with its own log entry, not a field
 of one form. The settings screens already open into their editors, and the
 network and login limits screen is a hub of six groups that would not fit
 80x24 as one form.
+
+### Issue #1082 — a minimum age can require a verified age — decided
+
+A SysOp could not run an area that needs a verified age: every age gate
+accepted a self-entered birthdate when the account had no age attestation.
+Normative description: §5.5.
+
+**Decision 1 — shaped like the name requirement.** A nullable
+`age_requirement` (`NULL` or `verified`) on boards, file areas and channels,
+`default_age_requirement` on Communities, and an MRC open-room setting, with
+the same Community cascade. Rejected: a separate boolean, which would not
+inherit the way `NULL` does, and folding the flag into `min_age`, which would
+change the meaning of a stored number. Existing gates are `NULL` on upgrade, so
+none changes meaning.
+
+**Decision 2 — old enough by one's own birthdate is not hidden.** Such a
+caller sees the resource marked "needs verification" and is refused on entry
+with how to get verified, mirroring the name requirement. Too young, or no
+birthdate, still hides it: those callers have nothing to act on.
+
+**Decision 3 — no staff bypass.** Like the name requirement, level 255 does
+not stand in for a verified age.
+
+**Decision 4 — carried over Link as a recommendation.** A genesis carries
+`default_age_requirement` beside `default_name_requirement`, omitted when
+unset, so a genesis from a node that sets none is unchanged. A carrying node
+stores a known value and drops anything else.
+
+**Decision 5 — edited in the Min age field.** The editors show
+"18, verified only" and take `18v`, so no editor gains a row: the area and
+channel screens must still fit 80x24 whole.
 
 ### SFTP over the SSH transport — declined
 

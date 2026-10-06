@@ -143,3 +143,48 @@ def test_the_prompt_states_the_convention_it_uses():
     assert "blank clears" in session.output
     assert "Esc keeps" in session.output
     assert "blank = keep" not in session.output
+
+
+# -- The age check, typed into the same field (issue #1082) -----------
+
+
+def _ask_check(answer: str, *, current: int | None = None, requirement: str | None = None):
+    from netbbs.net.admin_flow import _prompt_min_age_check
+
+    session = FakeSession(answer)
+    return asyncio.run(_prompt_min_age_check(session, current=current, current_requirement=requirement))
+
+
+def test_a_trailing_v_asks_for_a_verified_age():
+    assert _ask_check("18v") == (18, "verified", True)
+    assert _ask_check("18 V") == (18, "verified", True)
+
+
+def test_a_plain_number_accepts_a_self_entered_birthdate_again():
+    assert _ask_check("18", current=18, requirement="verified") == (18, None, True)
+
+
+def test_clearing_the_field_clears_both():
+    assert _ask_check("", current=18, requirement="verified") == (None, None, True)
+    assert _ask_check("none", current=18, requirement="verified") == (None, None, True)
+
+
+def test_a_bad_entry_keeps_what_was_set():
+    assert _ask_check("v", current=18, requirement="verified") == (18, "verified", False)
+    assert _ask_check("188v", current=18, requirement="verified") == (18, "verified", False)
+
+
+def test_escape_keeps_both():
+    from netbbs.net.admin_flow import _prompt_min_age_check
+
+    session = CancellingSession("")
+    assert asyncio.run(_prompt_min_age_check(session, current=21, current_requirement="verified")) == (
+        21, "verified", True,
+    )
+
+
+def test_the_field_shows_how_the_age_is_checked():
+    from netbbs.net.admin_flow import _min_age_label
+
+    assert _min_age_label(18, "verified") == "18, verified only"
+    assert _min_age_label(18, None) == "18"

@@ -226,7 +226,7 @@ def test_paced_art_is_prepared_once_so_no_chunk_loses_its_colours() -> None:
     _run(write_paced_art_text(session, art, speed=2400, once="main_menu"))
     sent = "".join(session.writes)
     assert len(session.writes) > 1
-    assert sent.startswith(f"{ESC}[?33h") and sent.endswith(f"{ESC}[?33l")
+    assert sent.startswith(f"{ESC}[?33h{ESC}[?35h") and "?33l" not in sent
     assert sent.count(f"{ESC}[?33h") == 1
 
 
@@ -276,3 +276,34 @@ def test_a_real_session_in_a_break_in_is_not_paced():
     session = _RealSession()
     session._break_in_input = asyncio.Queue()
     assert not will_pace(session, 9600, "welcome")
+
+
+# -- Preview (issue #1083 finding 9) -----------------------------------------
+
+
+def test_preview_plays_at_the_set_speed_every_time() -> None:
+    """A SysOp previewing art sees it at the speed callers will, as often
+    as they preview: the once-per-session rule is for callers."""
+    from netbbs.net.art_pacing import write_preview_art
+
+    session = _Stub()
+    _run(write_preview_art(session, "x" * 100, speed=2400))
+    first = len(session.writes)
+    _run(write_preview_art(session, "x" * 100, speed=2400))
+    assert first > 1 and len(session.writes) - first > 1
+
+
+def test_preview_without_a_speed_draws_at_once() -> None:
+    from netbbs.net.art_pacing import write_preview_art
+
+    session = _Stub()
+    _run(write_preview_art(session, "x" * 100, speed=0))
+    assert len(session.writes) == 1
+
+
+def test_preview_does_not_use_up_a_callers_once_per_session_play() -> None:
+    from netbbs.net.art_pacing import WELCOME_ART, write_preview_art
+
+    session = _Stub()
+    _run(write_preview_art(session, "x" * 100, speed=2400))
+    assert will_pace(session, 2400, WELCOME_ART)

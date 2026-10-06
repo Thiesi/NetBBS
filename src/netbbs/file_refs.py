@@ -44,9 +44,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from netbbs.attestation import meets_age
 from netbbs.auth.users import User
-from netbbs.communities import get_effective_min_age, get_effective_min_read_level, meets_read_gate
+from netbbs.age_requirement import VERIFIED
+from netbbs.communities import (
+    get_effective_age_requirement,
+    get_effective_min_age,
+    get_effective_min_read_level,
+    meets_read_gate,
+    meets_resource_age,
+)
 from netbbs.config import get_node_display_name
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.storage.database import Database
@@ -130,7 +136,7 @@ def _past_its_age(entry: FileEntry, area: FileArea) -> bool:
 def may_read_area(db: Database, user: User, area: FileArea) -> bool:
     """Whether `user` may read `area`: the file areas' own read gate --
     level or grant, and the age requirement."""
-    return meets_read_gate(db, user, area) and meets_age(db, user, get_effective_min_age(db, area))
+    return meets_read_gate(db, user, area) and meets_resource_age(db, user, area)
 
 
 def open_ref(db: Database, user: User, ref: FileRef) -> OpenedRef:
@@ -339,17 +345,27 @@ def forget_orphaned_post_refs_without_commit(db: Database) -> None:
 def refs_some_readers_cannot_open(db: Database, refs: list[FileRef], resource) -> list[FileRef]:
     """Those of `refs` in a file area with a stricter read gate than
     `resource` -- a board a post is written to (issue #842): its effective
-    read level is higher, or it asks an age the board does not. Some who
-    can read the post will see only that a file is there. A file gone
-    already is left out; its row says so."""
+    read level is higher, or it asks an age the board does not, or asks for
+    a verified age where the board accepts a self-entered one (issue #1082).
+    Some who can read the post will see only that a file is there. A file
+    gone already is left out; its row says so."""
     read_level = get_effective_min_read_level(db, resource)
     min_age = get_effective_min_age(db, resource) or 0
+    # Only with an age to check: without one a requirement has no effect,
+    # so it must not make the board count as strict as a gated area.
+    verified = bool(min_age) and get_effective_age_requirement(db, resource) == VERIFIED
     narrower = []
     for ref in refs:
         row = db.connection.execute("SELECT area_id FROM files WHERE file_id = ?", (ref.file_id,)).fetchone()
         area = _visible_area(db, row["area_id"]) if row is not None else None
         if area is None:
             continue
-        if get_effective_min_read_level(db, area) > read_level or (get_effective_min_age(db, area) or 0) > min_age:
+        area_age = get_effective_min_age(db, area) or 0
+        area_verified = bool(area_age) and get_effective_age_requirement(db, area) == VERIFIED
+        if (
+            get_effective_min_read_level(db, area) > read_level
+            or area_age > min_age
+            or (area_verified and not verified)
+        ):
             narrower.append(ref)
     return narrower
