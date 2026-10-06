@@ -79,8 +79,10 @@ def set_art_speed(db: Database, kind: str, speed: int) -> None:
     set_config(db, _speed_key(kind), str(speed))
 
 
-def will_pace(session: Session, speed: int, once: str) -> bool:
-    """Whether art drawn now at `speed` plays as an animation."""
+def will_pace(session: Session, speed: int, once: str | None) -> bool:
+    """Whether art drawn now at `speed` plays as an animation. `once` is
+    the play it counts as, once per session; `None` (a SysOp's preview)
+    plays every time and uses up no caller's play."""
     if speed <= 0 or not getattr(session, "paces_art", False):
         return False
     if not getattr(session, "animations_enabled", True):
@@ -89,7 +91,7 @@ def will_pace(session: Session, speed: int, once: str) -> bool:
         return False
     if getattr(session, "in_break_in", False):
         return False
-    return once not in _played(session)
+    return once is None or once not in _played(session)
 
 
 def _played(session: Session) -> set[str]:
@@ -116,19 +118,34 @@ async def write_paced_art_text(session: Session, text: str, *, speed: int, once:
     await _write_paced(session, prepared, speed=speed, once=once, write=lambda part: send_art_text(session, part))
 
 
+async def write_preview_art(session: Session, text: str, *, speed: int) -> None:
+    """A SysOp's `[P]review` of art (issue #1083 finding 9): laid out as
+    `write_paced_art` lays it out, and played at `speed` every time, so the
+    preview shows the animation callers will see. The skip key and the
+    five-second cap apply as for callers."""
+    await write_preview_art_text(session, preformatted_rows(session, text), speed=speed)
+
+
+async def write_preview_art_text(session: Session, text: str, *, speed: int) -> None:
+    """`write_preview_art` for laid-out art, such as slot art."""
+    prepared = prepare_art_text(session, text)
+    await _write_paced(session, prepared, speed=speed, once=None, write=lambda part: send_art_text(session, part))
+
+
 async def _write_paced(
     session: Session,
     text: str,
     *,
     speed: int,
-    once: str,
+    once: str | None,
     write: Callable[[str], Awaitable[None]],
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
     if not will_pace(session, speed, once):
         await write(text)
         return
-    _played(session).add(once)
+    if once is not None:
+        _played(session).add(once)
     await pace(session, text, speed=speed, write=write, clock=clock)
 
 

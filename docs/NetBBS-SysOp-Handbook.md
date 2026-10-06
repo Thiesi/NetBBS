@@ -1664,7 +1664,9 @@ being paced after 5 seconds. Each piece plays once per connection: the welcome
 banner when a caller connects, the masthead on their first main menu, a list's
 art on the first visit to that list, never on a redraw, a page change or a
 cursor move. Callers who read plain ASCII, and callers who set **Profile → [Q]uick
-or animated banners** to quick, get the art at once.
+or animated banners** to quick, get the art at once. The piece's **Preview**
+plays it at its speed every time you use it, so you can see the animation
+without signing in as a caller.
 
 Every caller gets text in the character set their terminal reads:
 
