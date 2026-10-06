@@ -194,7 +194,7 @@ def test_a_page_fills_the_region_and_the_prompt_goes_below_the_art():
     picked, session = _pick(["b"])
     assert picked is None
     screen = _last_screen(session)
-    assert screen[1].startswith("| Message boards") and "1/2" in screen[1] and "7 total" in screen[1]
+    assert screen[1].startswith("| Message boards") and "1/2" in screen[1] and " 7 " in screen[1]
     assert screen[2].startswith("| 01. General") and screen[2].endswith("7 new |")
     assert screen[6].startswith("| 05. Restoration")
     text = "".join(session.written)

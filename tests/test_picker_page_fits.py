@@ -179,7 +179,7 @@ def test_a_trailer_that_fits_beside_the_nav_costs_nothing():
     from netbbs.net.picker import _trailer_rows
 
     assert _trailer_rows(
-        "[S]earch  [B]ack", "Ctrl-H",
+        "[/] Find  [B]ack", "Ctrl-H",
         width=80, unicode_style=False, description_level="off",
     ) == 0
 
@@ -191,7 +191,7 @@ def test_a_trailer_on_its_own_line_costs_every_row_it_takes():
     from netbbs.net.picker import _trailer_rows, _trailer_text
 
     trailer = _trailer_text("", False)
-    nav = "[N]ext  [P]rev  [S]earch  [G]oto #  [B]ack"
+    nav = "[N]ext  [P]rev  [/] Find  [G]oto #  [B]ack"
     assert _trailer_rows(nav, trailer, width=80, unicode_style=False, description_level="off") == 1
     assert _trailer_rows(nav, trailer, width=50, unicode_style=False, description_level="off") == 2
 

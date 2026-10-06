@@ -242,6 +242,15 @@ a hotkey must not answer twice. Desktop browsers are left as they were: a
 desktop input method composes a spelling that is then converted (romaji,
 pinyin), and only the converted text is meant to be sent.
 
+The browser terminal draws box-drawing and block characters so they join
+between rows, as a classic terminal does (issue #1083). Rows are exactly one
+font height tall (`lineHeight` 1), and xterm.js's WebGL renderer draws those
+characters itself rather than taking them from the font, so a frame's
+vertical lines and block art stay unbroken whatever font the browser picked.
+Without WebGL (an old browser, a blocked GPU, a lost context) xterm.js keeps
+its DOM renderer, where the line height of 1 keeps most fonts' own glyphs
+touching.
+
 ### 3.2 Rendering model
 
 Use hybrid terminal rendering:
@@ -438,7 +447,11 @@ Everything below happens each time the file is read:
 - iCE colours: classic art uses the blink attribute to mean a bright
   background. Art that sets blink together with a background colour is shown
   with the bright background and no blink, for every session, whether or not
-  SAUCE sets the iCE flag.
+  SAUCE sets the iCE flag. CTerm (SyncTERM) only shows bright backgrounds
+  (100-107) with DECSET mode 33 on, and keeps them as the blink attribute,
+  which blinks until mode 35 is on too. A CP437 session gets both modes before
+  every art that needs them and never their reset: switching them off after
+  the art made the cells already drawn blink (issue #1083).
 - SAUCE width (TInfo1): art wider than the caller's `physical_width` is not
   drawn -- the screen falls back to what it shows without art (the default
   welcome banner, no masthead) instead of wrapping every row.
@@ -457,7 +470,10 @@ that NetBBS fills in per caller. Tokens drawn in the art mark where: `{menu
 WxH}` for the caller's live item list, `{user N}`, `{mail N}` and the other
 fields for live values, and `{prompt}` for the prompt. A token's top-left cell
 is its position, its size is written in the token, and the colour it is drawn
-in is the style of what fills it. Tokens are plain ASCII so they survive
+in is the style of what fills it. Counts and levels (`{mail}`, `{online}`,
+`{level}`, `{count}`) are bare numbers and the art supplies the words, and a
+value is cut to its field, without an ellipsis when the field is too narrow
+for one plus two characters (issue #1083). Tokens are plain ASCII so they survive
 CP437, UTF-8 and every art editor. Art only decorates: the items are the ones
 the caller may use, computed as for the generated menu, so a token can never
 show an item a caller cannot use or hide one they can. When the caller's
@@ -1057,6 +1073,32 @@ itself, and a draft editor would have to hold the plaintext across redraws to
 offer anything more. Each prompt cancels on a blank line and nothing is
 written before the last one.
 
+**A console resource opens on its own fields** (issue #1081). The six resource
+screens of the SysOp console -- a Community, a category, a message board, a
+file area, a chat channel and a door -- are one screen each, not an overview
+with an `[E]dit` key in front of the draft editor. The screen shows what can't
+be edited first, in a compact header of one or two rows (counts, place in the
+callers' list, Link status), then the editable fields with the cursor already
+on the first one, then the actions. Long Link details (origin, closure, pending
+transfers, peer reach) form a "NetBBS Link" section after the fields. A field
+is chosen by the cursor only: ↑↓ to choose, Enter or Space to change it, ←→ to
+step a value. Fields have no letters on these screens, so the action keys
+(`[U]p`, `[R]emove`, `[P]ending posts`, `[L]ink`, `[S]tart service` and the
+rest) keep theirs. Changes go into a draft as on every other editor; nothing is
+stored before `[S]ave`. Once a field differs from what is stored, the action
+bar shows only `[S]ave` and `[B]ack`, so no action runs against values the
+screen no longer shows. `[B]ack` leaves at once while nothing has changed. With
+changes it discards typed work, which can't be undone, so it is the
+hotkey-chosen, destructive action the yes/no rule above allows a question for,
+the same "Discard unsaved changes?" every draft editor asks. On a Linked
+resource this node is not the origin of, a field the origin controls is shown
+in place, read-only, labelled "set by origin". Creating a resource uses the
+same screen with an empty draft and no actions. Account screens, settings
+screens and caller-side editing (a post, a file description, the Profile) are
+unchanged: an account's keys are separate, individually confirmed operations
+rather than fields of one form, and the settings screens already open straight
+into their editors.
+
 **An action's outcome is shown on the screen the caller lands on** (issue
 #680). With redraw-in-place on, a line written just before a screen redraws
 is erased by that redraw's clear. So an action does not write its outcome
@@ -1141,6 +1183,12 @@ it was a deliberate trade and not an oversight:
 
 ### 3.6 Resource lists (issue #528)
 
+Every list searches with `[/] Find`, the main menu's key and word (issue
+#1083): one key for searching wherever a caller is. A list's Find narrows it to
+the names containing the text typed, and a blank answer shows the whole list
+again. It replaced `[S]earch` outright, with no hidden `S` alias: a silent
+second key would keep `S` taken on every list for nothing a caller can see.
+
 A list row's secondary text is either prose or a record, and the two render
 differently.
 
@@ -1188,11 +1236,12 @@ Two rules follow from that, and are normative for any future list:
 
 A row shows what **applies** to a caller, resolved through the Community
 cascade (`get_effective_min_age` and friends), never the resource's own raw
-unset value. A board that sets no age gate but sits in a Community that does
-is gated, and enforcement says so; a list that printed the resource's own
-`None` would report it as open. The editor behind `[E]` is where a SysOp sees
-which values the resource itself sets. An explicit `0` minimum age is not a
-gate -- `meets_age` admits everyone -- and is not tagged as one.
+unset value. A board that sets no age gate but sits in a Community that does is
+gated, and enforcement says so; a list that printed the resource's own `None`
+would report it as open. The resource's own screen in the console (§3.5) is
+where a SysOp sees which values the resource itself sets. An explicit `0`
+minimum age is not a gate -- `meets_age` admits everyone -- and is not tagged
+as one.
 
 In the prose fallback the gates lead the string, because a narrow terminal is
 precisely where that string gets truncated: who may enter is the least
@@ -15079,6 +15128,39 @@ affects nothing but the claiming node's own content. Rejecting a chain that
 claims a key another identity already holds was considered and not done: the
 receiver cannot know every identity's keys, so the rule could not be enforced
 consistently, and attributing by signer already makes the claim harmless.
+
+### Issue #1081 — a console resource opens on its own fields — decided
+
+The first field test's SysOp had to press `[E]dit` on every board, area and
+channel before changing anything, one extra screen on the most common path.
+Normative description: §3.5.
+
+**Decision 1 — one screen, still a draft** (the maintainer's decision).
+Changes wait for `[S]ave`. Rejected: saving each field as it changes, the way
+the Profile does. A resource's fields are checked together (a blank name, a
+door's executable against its arguments), a Linked board's or area's name and
+description travel to its peers once per save, the moderation log keeps one
+entry per save, and with the cursor resting on a live field a stray Enter or
+arrow key would change a resource at once.
+
+**Decision 2 — fields by the cursor, actions by their keys.** On every one of
+these screens a field letter collided with an action letter (on a board, `D`
+was Description and Down, `R` Read level and Remove, `P` Pinned and Pending
+posts; on a door, `D` was Description and Delete). Rejected: keeping field
+letters and moving the actions to a second page, which adds a keystroke to
+every action instead of removing one from every edit.
+
+**Decision 3 — a changed draft hides the actions.** While the draft differs
+from what is stored only `[S]ave` and `[B]ack` are offered. Otherwise `[U]p`,
+`[L]ink` or `[S]tart service` would act on a resource whose screen shows
+values that are not stored yet. It also settles the one clash between two
+actions: on a door, `[S]ave` and `[S]tart service` are never offered together.
+
+**Decision 4 — six screens, no more.** Accounts keep their screen: each key
+there is a separate, confirmed operation with its own log entry, not a field
+of one form. The settings screens already open into their editors, and the
+network and login limits screen is a hub of six groups that would not fit
+80x24 as one form.
 
 ### SFTP over the SSH transport — declined
 

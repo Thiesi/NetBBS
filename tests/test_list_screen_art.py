@@ -306,3 +306,27 @@ def test_board_values_are_read_once_per_list_not_per_row(db, alice, monkeypatch)
     # isn't drawn. The picker asks for every row's value several times per
     # render, so a per-call read would be a multiple of three.
     assert len(calls) == 3
+
+
+def test_list_fields_are_bare_values(db, alice):
+    """Issue #1083 finding 8 (review of #1084): a list screen's `{level}` is
+    the bare number, as on the main menu and the banners."""
+    from netbbs.net.list_art import list_slot_fields
+
+    class _S:
+        node_display_name = "The Nib & Quill"
+
+    assert list_slot_fields(_S(), db, alice)["level"] == "10"
+
+
+def test_preview_fills_count_with_the_bare_number_callers_see(db, lane, sysop):
+    create_board(db, "General", creator=sysop)
+    art = ART.replace(b"{page 6} --", b"{count 3} -")
+    board_list_banner_path(db).write_bytes(art)
+    session = ConsoleSession()
+    asyncio.run(admin_flow._preview_list_slot_art(session, lane, sysop, BOARD_LIST))
+    text = _art_screen(session)
+    bottom = [row for row in text.splitlines() if row.startswith("+-----")][-1]
+    # Callers see the bare count (issue #1083); the preview showed "1 total",
+    # cut to "1 ..." in the 3-wide field.
+    assert "- 1 " in bottom and "…" not in bottom and "1 t" not in bottom, bottom

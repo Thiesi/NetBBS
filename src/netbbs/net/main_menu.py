@@ -504,15 +504,15 @@ def _slot_fields(
     fields = {
         "user": sanitize_text(user.username),
         "node": session.node_display_name,
-        "level": f"level {user.user_level}",
-        "mail": (f"{unread} unread" if unread else "mail caught up") if has_mail else "",
+        "level": str(user.user_level),
+        "mail": str(unread) if has_mail else "",
         "time": format_for_display(now, override_format="%H:%M", override_timezone=tz_name),
         "date": format_for_display(now, override_format="%Y-%m-%d", override_timezone=tz_name),
         "online": "",
     }
     if node_controls is not None:
         callers = sum(1 for entry in node_controls.session_registry.list_entries() if entry.username)
-        fields["online"] = f"{callers} online"
+        fields["online"] = str(callers)
     return fields
 
 

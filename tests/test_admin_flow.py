@@ -1071,7 +1071,7 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     # this same session, alongside review_composition) had no on-demand
     # help wired in at all until now.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "s", "alice", "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "alice", "CTRL+H", " ", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "moderator/sysop capability" in text.lower()
@@ -1080,7 +1080,7 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
 
 def test_user_detail_ctrl_h_narrows_to_the_highlighted_field(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "s", "alice", "DOWN", "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "alice", "DOWN", "CTRL+H", " ", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     # Down lands on "l" (Level, the first of _USER_DETAIL_FIELD_ORDER) --
@@ -1096,7 +1096,7 @@ def test_user_detail_arrow_nav_activates_the_highlighted_field(db, lane, sysop):
     # arrow-selectable fields (_USER_DETAIL_FIELD_ORDER = l, t, i, k, r);
     # Space then activates it exactly like pressing "t" directly would.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "s", "alice", "DOWN", "DOWN", " ", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "alice", "DOWN", "DOWN", " ", "y", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is not None
@@ -1265,7 +1265,7 @@ def test_user_picker_registration_toggle_shows_both_directions(db, lane, sysop):
 
 def test_user_picker_search_still_works(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "s", "alice", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "alice", "b", "b", "b"])
     _run(session, lane, sysop)
     # A single match auto-selects straight into the detail screen.
     assert "Level: 10" in _normalized_visible(_written_text(session))
@@ -1342,7 +1342,7 @@ def test_user_picker_visibility_filter_scopes_search(db, lane, sysop):
 
     # Active-only filter is on; searching for the hidden, disabled "bob"
     # finds nothing even though the account exists.
-    session = FakeSession(["u", "u", "v", "s", "bob", "b", "b", "b"])
+    session = FakeSession(["u", "u", "v", "/", "bob", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No matches." in _written_text(session)
 
@@ -4619,9 +4619,9 @@ def test_banner_previews_count_callers_online_as_callers_see_it(db, lane, sysop)
     from netbbs.net.logoff_banner import logoff_banner_path, set_logoff_banner_enabled
     from netbbs.net.welcome_banner import banner_path, set_welcome_banner_enabled
 
-    banner_path(db).write_bytes(b"Now: {online 12}")
+    banner_path(db).write_bytes(b"Now: {online 3} online")
     set_welcome_banner_enabled(db, True)
-    logoff_banner_path(db).write_bytes(b"Still here: {online 12}")
+    logoff_banner_path(db).write_bytes(b"Still here: {online 3} online")
     set_logoff_banner_enabled(db, True)
     node_controls = _node_controls()
     node_controls.session_registry.list_entries = lambda: [
@@ -7341,7 +7341,7 @@ def test_timestamp_settings_screen_can_set_a_new_timezone(db, lane, sysop):
     # other pick_item screen in this module already has.
     from netbbs.timeutil import resolve_display_preferences
 
-    session = FakeSession(["s", "t", "z", "s", "Europe/Berlin", "b", "b", "b"])
+    session = FakeSession(["s", "t", "z", "/", "Europe/Berlin", "b", "b", "b"])
     _run(session, lane, sysop)
     _, tz = resolve_display_preferences(db)
     assert tz == "Europe/Berlin"
@@ -7379,7 +7379,7 @@ def test_timestamp_settings_screen_timezone_search_with_no_matches_leaves_it_unc
     from netbbs.timeutil import resolve_display_preferences
 
     before = resolve_display_preferences(db)
-    session = FakeSession(["s", "t", "z", "s", "Not/A/Real/Zone", "b", "b", "b", "b"])
+    session = FakeSession(["s", "t", "z", "/", "Not/A/Real/Zone", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert resolve_display_preferences(db) == before  # cancelled -- nothing changed
     assert "No matches." in _written_text(session)
@@ -7406,7 +7406,7 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
     from netbbs.net.chat_flow import _render_chat_status_line
     from netbbs.timeutil import format_for_display, utc_now_iso
 
-    session = FakeSession(["s", "t", "z", "s", "Europe/Berlin", "b", "b", "b"])
+    session = FakeSession(["s", "t", "z", "/", "Europe/Berlin", "b", "b", "b"])
     _run(session, lane, sysop)
 
     channel = create_channel(db, "lobby", creator=sysop)
@@ -9944,7 +9944,7 @@ def test_user_picker_keeps_an_active_search_across_a_sort(db, lane, sysop):
         create_user(db, name, password="hunter2", user_level=10)
 
     # Search "ali" (matches alice and alina, not bob), then re-sort.
-    session = FakeSession(["u", "u", "s", "ali", "l", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "ali", "l", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -9991,7 +9991,7 @@ def test_user_picker_refresh_clears_a_remembered_search(db, lane, sysop):
 def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop):
     """A search followed by a visibility change can empty the page while
     the roster still has selectable accounts -- and the empty screen
-    advertised only the live keys and Back, though [S]earch (blank
+    advertised only the live keys and Back, though [/] Find (blank
     clears) and Ctrl-H still work. Hiding them made the way out
     undiscoverable rather than unavailable (issue #537, Codex review)."""
     from netbbs.auth.users import set_user_disabled
@@ -10002,7 +10002,7 @@ def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop
     set_user_disabled(db, bob, True, changed_by=sysop)
 
     # Narrow to ali*, then switch to disabled-only: no ali* is disabled.
-    session = FakeSession(["u", "u", "s", "ali", "v", "v", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "ali", "v", "v", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -10011,7 +10011,7 @@ def test_user_picker_filtered_to_empty_still_offers_the_way_back(db, lane, sysop
     # label the way a populated page's does.
     after = text[text.rindex("No users match that view."):]
     assert "Showing: Disabled users only" in after, "it says which filter emptied it"
-    assert "[S]earch" in after, "and offers the key that clears the search"
+    assert "[/] Find" in after, "and offers the key that clears the search"
     assert "[G]oto" not in after  # issue #838
 
 

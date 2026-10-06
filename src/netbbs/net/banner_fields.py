@@ -29,9 +29,9 @@ def banner_fields(
     }
     if user is not None:
         fields["user"] = user.username
-        fields["level"] = f"level {user.user_level}"
+        fields["level"] = str(user.user_level)
     if callers_online is not None:
-        fields["online"] = f"{callers_online} online"
+        fields["online"] = str(callers_online)
     return fields
 
 

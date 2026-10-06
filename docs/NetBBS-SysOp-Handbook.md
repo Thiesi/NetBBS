@@ -1510,6 +1510,10 @@ saves, and **Ctrl+X** quits.
 
 The welcome gallery ends with three quiet designs for clubs that don't want
 neon: **Paper & Ink**, **Library Card** and **Garden Gate**.
+Every bundled design uses only characters CP437 has, so it looks the same in
+SyncTERM, PuTTY's default font and a browser. Your own art can use anything;
+on a classic terminal, a character CP437 lacks is drawn as the nearest
+shape it has.
 
 Art from scene tools such as PabloDraw or Moebius works as it is:
 
@@ -1545,13 +1549,16 @@ drawing a token in plain text, in the colour its content should take:
 | `{prompt}` | The prompt. Without one, it goes below the art. |
 | `{user 16}` | The caller's name, cut to 16 columns |
 | `{node 30}` | Your node's name |
-| `{level 9}` | `level 20` |
-| `{mail 18}` | `3 unread` or `mail caught up` |
+| `{level 3}` | The caller's level, such as `20` |
+| `{mail 4}` | How many unread letters, such as `3` (`0` when caught up) |
 | `{time 5}`, `{date 10}` | The node's time and date, in its timezone |
-| `{online 12}` | `4 online` |
+| `{online 3}` | How many callers are signed in, such as `4` |
 
 Without a number, a field is as wide as its token. Brace text that is not one
-of these stays part of the art.
+of these stays part of the art. Counts and levels are bare numbers, so draw
+the words around them yourself (`mail {mail 4}`, `{online 3} online`). A value
+wider than its field is cut; a field too narrow for `...` plus two characters
+is cut without it, so a number keeps its digits.
 
 The art only decorates. Each caller sees exactly the items the normal menu
 would show them, with the same keys; the art can't add or hide any. A caller
@@ -1607,7 +1614,7 @@ page of the list is drawn into a region you mark:
 | `{list 74x12}` | One page of the list, one entry per row, in a region 74 columns wide and 12 rows tall. Required. |
 | `{title 40}` | The list's title, such as `Available message boards` |
 | `{page 6}` | The page, such as `2/5` |
-| `{count 14}` | How many entries, such as `14 total` |
+| `{count 5}` | How many entries, such as `14` |
 
 `{prompt}`, `{user}`, `{node}`, `{level}`, `{time}` and `{date}` work as on the
 main menu. Each row shows the number to press, the name, and one value: what is

@@ -184,3 +184,14 @@ def test_mixed_box_characters_keep_their_shape():
     assert map_text("\u2552\u2550\u2555\u255e\u256a\u2561", ASCII) == "+=++++"
     assert map_text("\u250f\u2501\u2533\u2501\u2513\u2521\u254d\u2529", CP437) == "\u250c\u2500\u252c\u2500\u2510\u251c\u2500\u2524"
     assert map_text("\u2502\u2551\u2500\u2550", ASCII) == "||-="
+
+
+@pytest.mark.parametrize("charset", [CP437, ASCII])
+def test_common_art_symbols_get_a_real_stand_in(charset):
+    """Issue #1083 finding 1: a preset's corner triangles reached SyncTERM
+    as "??". Symbols art commonly uses get a stand-in of the same width,
+    never a question mark."""
+    for ch in "⁝⁞□▶◉◢◣◤◥♡⚔⚙⛩✉✹❄❅❆⟨⟩⬡⬢【】":
+        out = map_text(ch, charset)
+        assert "?" not in out, (ch, out)
+        assert display_width(out) == display_width(ch), (ch, out)

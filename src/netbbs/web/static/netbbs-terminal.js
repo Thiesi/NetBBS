@@ -22,7 +22,9 @@
     fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", "Courier New", monospace',
     fontSize: 15,
     letterSpacing: 0,
-    lineHeight: 1.15,
+    // 1, not more: a taller row leaves a gap between a frame's vertical
+    // lines and between block characters (issue #1083).
+    lineHeight: 1,
     theme: {
       background: "#0c0d10",
       foreground: "#e2e8f0",
@@ -34,6 +36,20 @@
   var fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(document.getElementById("terminal"));
+  // Box-drawing and block characters (issue #1083): the WebGL renderer
+  // draws them itself (xterm's customGlyphs, on by default), so frames and
+  // ANSI art join between rows whatever font the browser picked. Without
+  // WebGL -- an old browser, a blocked GPU, a lost context -- xterm keeps
+  // its DOM renderer, where lineHeight 1 keeps most fonts' glyphs touching.
+  if (typeof WebglAddon !== "undefined") {
+    try {
+      var webgl = new WebglAddon.WebglAddon();
+      webgl.onContextLoss(function () { webgl.dispose(); });
+      term.loadAddon(webgl);
+    } catch (e) {
+      // Stays on the DOM renderer.
+    }
+  }
   fitAddon.fit();
 
   var scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
