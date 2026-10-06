@@ -854,6 +854,7 @@ from netbbs.rendering import (
     gradient_text,
     highlight_hotkeys,
     highlight_report,
+    highlight_result,
     menu_grid,
     menu_key,
     nearest_256,
@@ -1198,9 +1199,33 @@ def _announce_line(session: Session, line: str) -> None:
             color = MUTED_COLOR
         else:
             color = SUCCESS_COLOR
-        # A key the outcome mentions stands out as a menu key (issue #1083).
-        line = highlight_hotkeys(line, color=color)
+        # A key the outcome mentions stands out as a menu key (issue #1083),
+        # and a path it names reads as a value (issue #1103).
+        line = highlight_result(line, color=color)
     _notices.announce_styled(session, line)
+
+
+def _can_verify_label(target: User) -> str:
+    """The account's "Can verify identity" row. A SysOp verifies by level
+    (issue #1103), so the row says so rather than a bare "no" that reads as
+    if they could not."""
+    if meets_level(target, SYSOP_LEVEL):
+        return "yes, as SysOp (age/name attestation)"
+    return f"{_yes_no(target.can_verify_identity)} (age/name attestation)"
+
+
+def _co_sysop_question(username: str) -> str:
+    """The Co-SysOp preset's yes/no question. Verifying identity is not part
+    of the preset (maintainer decision, issue #1103): vouching for a
+    caller's age or name travels to other nodes and opens adult areas, so a
+    SysOp grants it to a helper on its own, with [i] on the account."""
+    return (
+        f"Make {username!r} a Co-SysOp -- approve accounts, manage accounts (disable, "
+        "password reset, levels up to 254) and moderate everything? They can't act on "
+        "SysOps or other staff, or reach Settings, Link, Node, DNS or backups, and members "
+        "see them on the Staff list. Verifying identity is granted separately, with [i] "
+        "on this account."
+    )
 
 
 def _announce_saved(session: Session, lead: str, path: object, tail: str) -> None:
@@ -7313,7 +7338,7 @@ async def _draw_user_detail(
                 "s", "Staff", describe_staff_permissions(target.staff_permissions),
                 color=VALUE_COLOR if target.staff_permissions else MUTED_COLOR,
             ),
-            _editable("i", "Can verify identity", f"{_yes_no(target.can_verify_identity)} (age/name attestation)"),
+            _editable("i", "Can verify identity", _can_verify_label(target)),
             # Issue #992: last, so the arrow order of the fields above holds.
             _editable("u", "Auto promotion", _auto_promotion_label(target, await lane.run(kept_from_rules, target))),
             _grants_field(await lane.run(_grant_summaries, target)),
@@ -7945,12 +7970,7 @@ async def _staff_permissions_screen(
             )
         elif choice == "c":
             new_mask = int(CO_SYSOP_PRESET)
-            question = (
-                f"Make {target.username!r} a Co-SysOp -- approve accounts, manage accounts (disable, "
-                "password reset, levels up to 254) and moderate everything? They can't act on "
-                "SysOps or other staff, or reach Settings, Link, Node, DNS or backups, and members "
-                "see them on the Staff list."
-            )
+            question = _co_sysop_question(target.username)
         elif choice == "n":
             new_mask = 0
             question = f"Remove every staff permission from {target.username!r}?"
@@ -18355,14 +18375,18 @@ _VERIFIED_AGE_HELP = (
     " Type the age with a v (18v) to accept only an age you, or staff who verify "
     "identity, have verified: a caller old enough by the birthdate they entered sees "
     "it marked 'needs verification' and is told to ask. A plain number accepts that "
-    "birthdate when there is no verified age."
+    "birthdate when there is no verified age. Callers set a birthdate in Your profile › "
+    "Name & details; you verify it from the main menu's [V]erify, and staff can once "
+    "you switch on Can verify identity for them (Users)."
 )
 
 
 _NAME_REQUIREMENT_HELP = (
     "Gates posting/joining on identity: 'none' has no gate. 'verified' requires "
     "attestation but shows nothing about it. 'verified_and_displayed' also shows the "
-    "caller's attested real name alongside their posts here."
+    "caller's attested real name alongside their posts here. You verify a caller's "
+    "name from the main menu's [V]erify; staff can once you switch on Can verify "
+    "identity for them (Users)."
 )
 
 

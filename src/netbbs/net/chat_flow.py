@@ -143,7 +143,7 @@ from netbbs.chat import (
     unmute_user,
 )
 from netbbs.chat.categories import Category, get_category_by_id, list_subcategories, list_top_level_categories
-from netbbs.age_requirement import age_verification_refusal
+from netbbs.age_requirement import age_verification_refusal, name_verification_refusal
 from netbbs.communities import (
     get_community,
     get_effective_name_requirement,
@@ -898,7 +898,7 @@ def _open_room_gate_denial(db: Database, user: User, open_settings: OpenRoomSett
     if age != "pass":
         return "You are not authorized to open MRC rooms on this node."
     if not meets_name_requirement(db, user, open_settings.name_requirement):
-        return "Opening MRC rooms here requires a verified real name."
+        return name_verification_refusal("Opening MRC rooms here")
     return None
 
 
@@ -1197,7 +1197,7 @@ def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tupl
     if age == "unverified":
         return False, age_verification_refusal("This channel")
     if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel)):
-        return False, "This channel requires a verified real name to participate."
+        return False, name_verification_refusal("This channel")
     if not channel.members_only:
         return True, None
     if is_member(db, channel, user):

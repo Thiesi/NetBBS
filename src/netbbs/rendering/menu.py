@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 
 from netbbs.rendering.ansi import colored
-from netbbs.rendering.theme import EMPHASIS_COLOR, MENU_KEY_COLOR, MUTED_COLOR
+from netbbs.rendering.theme import EMPHASIS_COLOR, MENU_KEY_COLOR, MUTED_COLOR, SUCCESS_COLOR, VALUE_COLOR
 
 Color = int | tuple[int, int, int]
 
@@ -83,13 +83,50 @@ def highlight_hotkeys(text: str, *, color: Color | None = None) -> str:
     for match in _BRACKETED_KEY.finditer(text):
         parts.append(_in_color(text[position:match.start()], color))
         # The brackets take the text's colour too; only the key is the menu's.
-        key = colored(match.group(1), fg_color=MENU_KEY_COLOR, bold=True)
+        key = colored(match.group(1), fg_color=_key_color(color), bold=True)
         parts.append(_in_color("[", color) + key + _in_color("]", color))
         position = match.end()
     if not parts:
         return _in_color(text, color)
     parts.append(_in_color(text[position:], color))
     return "".join(parts)
+
+
+# The menu key's own green (46) beside the success green (82) is the same
+# colour to the eye, so a key in a green result line vanished into it (the
+# pre-release re-check, #1103): on a green line the key is drawn in the
+# emphasis colour instead. Every other line keeps the menu key's colour.
+_KEY_COLOR_CLASHES = frozenset({MENU_KEY_COLOR, SUCCESS_COLOR})
+
+
+def _key_color(color: Color | None) -> Color:
+    return EMPHASIS_COLOR if color in _KEY_COLOR_CLASHES else MENU_KEY_COLOR
+
+
+# An absolute path a result names ("Saved to /var/lib/netbbs/x.ans."): a
+# slash that starts a word, then no spaces; a Windows drive path likewise.
+# Not "[/] Find", not "1/2", not the slashes inside a URL.
+_PATH = re.compile(r"(?<![\w./\]\[:])(?:/[\w.~+-][^\s,;'\"()\]]*|[A-Za-z]:\\[^\s,;'\"()]+)")
+
+
+def highlight_result(text: str, *, color: Color | None = None) -> str:
+    """A result or status line (an announced outcome) in `color`: the keys
+    it mentions highlighted as `highlight_hotkeys` does, and any absolute
+    path it names in the value colour, so "Uploaded 839 bytes to
+    /var/lib/netbbs/x.ans. Use [P]review." shows what was written and what
+    to press (issue #1103). A sentence's own full stop after the path
+    stays in the line's colour."""
+    parts: list[str] = []
+    position = 0
+    for match in _PATH.finditer(text):
+        path = match.group(0).rstrip(".:")
+        if not path or path == "/":
+            continue
+        parts.append(highlight_hotkeys(text[position:match.start()], color=color))
+        parts.append(colored(path, fg_color=VALUE_COLOR))
+        position = match.start() + len(path)
+    parts.append(highlight_hotkeys(text[position:], color=color))
+    return "".join(part for part in parts if part)
 
 
 def _in_color(text: str, color: Color | None) -> str:
@@ -119,7 +156,7 @@ def highlight_report(text: str, *, color: Color | None = None) -> str:
     for match in _REPORT_TOKEN.finditer(text):
         parts.append(_in_color(text[position:match.start()], color))
         if match.group(1) is not None:
-            key = colored(match.group(1), fg_color=MENU_KEY_COLOR, bold=True)
+            key = colored(match.group(1), fg_color=_key_color(color), bold=True)
             parts.append(_in_color("[", color) + key + _in_color("]", color))
         else:
             parts.append(colored(match.group(0), fg_color=EMPHASIS_COLOR, bold=True))

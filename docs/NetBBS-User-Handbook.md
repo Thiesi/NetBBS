@@ -601,7 +601,8 @@ information. You cannot grant yourself access by editing your profile.
 An entry marked **needs verification** asks for a verified name, or for a
 verified age when the birthdate in your profile is old enough but nobody has
 verified it. Opening it tells you which; the SysOp, or someone on the **Staff
-list** who verifies identity, can verify it for you.
+list** who verifies identity, can verify it for you. Your birthdate goes in
+**Your profile › Name & details**.
 
 A SysOp-verified age or name stays on this BBS unless you switch on sharing
 over Link for it under **Profile**. Shared, it goes only to the other BBSes
