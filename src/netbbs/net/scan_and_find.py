@@ -397,8 +397,10 @@ async def _new_scan_screen(
         # The picker has nothing to draw and returns at once, announcing its
         # empty message for the screen this returns to; the summary goes
         # with it rather than being lost (Codex review on #723).
+        # The summary is news (waiting mail, replies), not the outcome of
+        # anything the caller did, so it keeps its colours unmarked (#1109).
         for line in (await _replies_summary()).split("\r\n"):
-            announce_styled(session, line)
+            announce_styled(session, line, mark=False)
     async def _open(item: _ScanItem) -> None:
         if item.kind == "board":
             cursor = await lane.run(board_read_cursor, user, item.board)

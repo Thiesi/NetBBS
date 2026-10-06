@@ -959,7 +959,9 @@ async def _main_menu_loop(
                     # to a login question, queued before this menu, precede it.
                     drain_line = login_drain_notice(user, node_controls)
                     if drain_line is not None:
-                        announce_styled(session, drain_line)
+                        # The node's standing state, in the alert colour,
+                        # not the outcome of anything: no mark (#1109).
+                        announce_styled(session, drain_line, mark=False)
                 # What moderators decided on this caller's held posts, told
                 # once (issue #678) -- acknowledged only once the menu that
                 # shows them has been drawn.

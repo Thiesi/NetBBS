@@ -231,7 +231,7 @@ def test_a_flow_given_the_consoles_stand_in_announces_to_the_real_session(db, al
     real = FakeSession([])
     announce(_TrailingOutput(real), "Sent 'game.zip'.")
 
-    assert [_SGR.sub("", line) for line in _take_notices(real)] == ["Sent 'game.zip'."]
+    assert [_SGR.sub("", line) for line in _take_notices(real)] == ["✓ Sent 'game.zip'."]
 
 
 # -- file areas ----------------------------------------------------------------

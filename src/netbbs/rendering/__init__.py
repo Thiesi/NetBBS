@@ -58,7 +58,16 @@ from netbbs.rendering.layout import (
     telemetry_gauge,
     visible_width,
 )
-from netbbs.rendering.menu import continue_prompt, highlight_hotkeys, highlight_report, highlight_result, menu_key
+from netbbs.rendering.menu import (
+    STATUS_MARKS,
+    continue_prompt,
+    highlight_hotkeys,
+    highlight_report,
+    highlight_result,
+    menu_key,
+    status_mark,
+    status_result,
+)
 from netbbs.rendering.reflow import DEFAULT_WIDTH, SegmentColor, colored_truncate, reflow, truncate
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
@@ -144,6 +153,9 @@ __all__ = [
     "highlight_hotkeys",
     "highlight_report",
     "highlight_result",
+    "status_mark",
+    "status_result",
+    "STATUS_MARKS",
     "menu_key",
     "DEFAULT_WIDTH",
     "SegmentColor",

@@ -4,7 +4,9 @@
 #929 found "Applied and enabled. Saved to ... Use [P]review to verify it
 looks right." all one green, and the console's [C]heck reports one flat
 line. Keys in such messages are highlighted now, and their values stand
-out."""
+out. Since #1109 a result keeps NetBBS's usual colours -- keys green, text
+plain -- and says how it went with a leading mark, instead of a line all in
+green with white keys, which turned the scheme around."""
 
 from __future__ import annotations
 
@@ -15,22 +17,27 @@ from netbbs.net.admin_flow import _announce_line, _announce_saved, _banner_statu
 from netbbs.rendering import (
     AUTHOR_COLOR,
     EMPHASIS_COLOR,
+    ERROR_COLOR,
+    MUTED_COLOR,
+    WARNING_COLOR,
     MENU_KEY_COLOR,
     SUCCESS_COLOR,
     VALUE_COLOR,
     colored,
     highlight_report,
+    status_mark,
     strip_ansi,
 )
+from netbbs.net.mail_arrivals import NOTICE_COLOR as NEW_MAIL_COLOR
 from netbbs.rendering.sauce import Sauce
 
-# In a green success line the menu key's own green (46 beside 82) does not
-# stand out, which is how the pre-release re-check (#1103) still saw
-# "Use [P]review" as one flat green line: there the key is drawn in the
-# emphasis colour instead.
-KEY_P = colored("P", fg_color=EMPHASIS_COLOR, bold=True)
-KEY_P_MENU = colored("P", fg_color=MENU_KEY_COLOR, bold=True)
+# Keys keep the menu key's own colour in a result, as everywhere else (#1109).
+KEY_P = colored("P", fg_color=MENU_KEY_COLOR, bold=True)
+KEY_P_MENU = KEY_P
+SUCCESS_MARK = status_mark("success")
 VALUE_SGR = colored("x", fg_color=VALUE_COLOR).split("x")[0]
+SUCCESS_COLOR_SGR = colored("x", fg_color=SUCCESS_COLOR).split("x")[0]
+ERROR_SGR = colored("x", fg_color=ERROR_COLOR).split("x")[0]
 
 
 class _Session:
@@ -42,14 +49,17 @@ def test_an_announced_outcome_highlights_the_key_it_mentions():
     notices.announce(session, "Welcome banner enabled. Use [P]review to verify it looks right.")
     (line,) = notices.take_notices(session)
     assert KEY_P in line
-    assert strip_ansi(line) == "Welcome banner enabled. Use [P]review to verify it looks right."
+    assert line.startswith(SUCCESS_MARK)
+    assert strip_ansi(line) == "✓ Welcome banner enabled. Use [P]review to verify it looks right."
 
 
 def test_a_plain_console_outcome_highlights_its_key_too():
     session = _Session()
     _announce_line(session, "Main-menu masthead enabled. Use [P]review to verify it looks right.")
     (line,) = notices.take_notices(session)
-    assert KEY_P in line and colored("review to verify it looks right.", fg_color=SUCCESS_COLOR) in line
+    assert line.startswith(SUCCESS_MARK) and KEY_P in line
+    # The text itself is not green any more: only the mark is (#1109).
+    assert colored("review to verify it looks right.", fg_color=SUCCESS_COLOR) not in line
 
 
 def test_a_saved_outcome_shows_the_path_as_a_value():
@@ -59,14 +69,19 @@ def test_a_saved_outcome_shows_the_path_as_a_value():
     (line,) = notices.take_notices(session)
     assert colored(str(path), fg_color=VALUE_COLOR) in line
     assert KEY_P in line
-    assert strip_ansi(line) == f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right."
+    assert strip_ansi(line) == f"✓ Applied and enabled. Saved to {path}. Use [P]review to verify it looks right."
 
 
-def test_a_key_in_a_green_result_does_not_disappear_into_it():
+def test_a_result_keeps_the_usual_colours_and_marks_how_it_went():
+    # The re-check of #1106: keys green and labels white everywhere, except on
+    # confirmations, where it was the other way round. Now only the mark is
+    # green, and the key is the menu key's green like everywhere else.
     session = _Session()
     notices.announce(session, "Saved. Use [P]review to verify it looks right.")
     (line,) = notices.take_notices(session)
-    assert KEY_P in line and KEY_P_MENU not in line
+    assert line.startswith(SUCCESS_MARK)
+    assert KEY_P in line and colored("P", fg_color=EMPHASIS_COLOR, bold=True) not in line
+    assert SUCCESS_COLOR_SGR not in line[len(SUCCESS_MARK):]
 
 
 def test_a_key_in_a_muted_or_error_line_keeps_the_menu_key_colour():
@@ -85,8 +100,8 @@ def test_an_uploaded_outcome_shows_its_path_and_keys():
     notices.announce(session, text)
     (line,) = notices.take_notices(session)
     assert colored(path, fg_color=VALUE_COLOR) in line
-    assert KEY_P in line and colored("E", fg_color=EMPHASIS_COLOR, bold=True) in line
-    assert strip_ansi(line) == text
+    assert KEY_P in line and colored("E", fg_color=MENU_KEY_COLOR, bold=True) in line
+    assert strip_ansi(line) == "✓ " + text
 
 
 def test_a_plain_console_outcome_shows_its_path_too():
@@ -150,3 +165,55 @@ def test_a_sauce_credit_tells_title_and_artist_apart():
     assert not rows["Art"].styled and not rows["By"].styled
     assert "Art" not in _status_rows(_sauce(author="InkWell"))
     assert _status_rows(_sauce())["Art"].value == "(no credit in its SAUCE record)"
+
+
+def test_a_one_colour_outcome_gets_its_mark_too():
+    # The many outcomes written as colored("...", fg_color=ERROR_COLOR) and
+    # queued as they are (#1109).
+    session = _Session()
+    notices.announce_styled(session, colored("\r\nUpload failed: disk full.", fg_color=ERROR_COLOR))
+    notices.announce_styled(session, colored("Left out: bob (no such user).", fg_color=WARNING_COLOR))
+    notices.announce_styled(session, colored("Description unchanged.", fg_color=MUTED_COLOR))
+    failed, left_out, unchanged = notices.take_notices(session)
+    assert failed.startswith(status_mark("error")) and strip_ansi(failed) == "\u2717 Upload failed: disk full."
+    assert ERROR_SGR not in failed[len(status_mark("error")):]
+    assert left_out.startswith(status_mark("warning")) and strip_ansi(left_out) == "! Left out: bob (no such user)."
+    # Nothing changed: it stays a muted line, with no mark.
+    assert unchanged == colored("Description unchanged.", fg_color=MUTED_COLOR)
+
+
+def test_a_warning_colour_announce_is_marked_as_a_warning():
+    session = _Session()
+    notices.announce(session, "Shutdown sequence started.", color=WARNING_COLOR)
+    notices.announce(session, "3 new letters waiting.", color=NEW_MAIL_COLOR)
+    warning, mail = notices.take_notices(session)
+    assert warning.startswith(status_mark("warning"))
+    # A colour that is not a status (new mail's) keeps its line as it was.
+    assert not mail.startswith(("\x1b[1m",)) and strip_ansi(mail) == "3 new letters waiting."
+
+
+def test_the_marks_have_stand_ins_for_classic_and_ascii_terminals():
+    from netbbs.rendering.charset import map_text
+
+    assert map_text("\u2713 Saved.", "cp437") == "\u221a Saved."
+    assert map_text("\u2713 Saved.", "ascii") == "* Saved."
+    assert map_text("\u2717 Failed.", "cp437") == "x Failed."
+    assert map_text("\u2717 Failed.", "ascii") == "x Failed."
+
+
+def test_news_in_the_good_news_green_is_not_marked_as_an_outcome():
+    # #1109 review: waiting mail is in the good-news green, the success
+    # green's own index. Queued as news it keeps its colour, unmarked.
+    session = _Session()
+    news = colored("Mail: 2 unread (1 new).", fg_color=NEW_MAIL_COLOR)
+    notices.announce_styled(session, news, mark=False)
+    assert notices.take_notices(session) == [news]
+
+
+def test_a_bold_one_colour_outcome_is_marked_too():
+    # #1109 re-review: bold comes before the colour, which the match
+    # missed, so a bold failure stayed one red line by accident.
+    session = _Session()
+    notices.announce_styled(session, colored("Backup failed.", fg_color=ERROR_COLOR, bold=True))
+    (line,) = notices.take_notices(session)
+    assert line.startswith(status_mark("error")) and strip_ansi(line) == "\u2717 Backup failed."

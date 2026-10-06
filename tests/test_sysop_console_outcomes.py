@@ -67,14 +67,14 @@ def test_creating_a_board_says_so_on_the_menu_it_returns_to(db, lane, sysop):
     rows = _screen(lane, sysop, ["c", "m", "c", "ENTER", "Retro", "s"])
     assert [board.name for board in list_boards(db)] == ["Retro"]
     assert rows[0].endswith("Message boards")
-    assert _above_the_prompt(rows) == "Created message board 'Retro'."
+    assert _above_the_prompt(rows) == "✓ Created message board 'Retro'."
 
 
 def test_deleting_a_board_says_so_on_the_menu_it_returns_to(db, lane, sysop):
     create_board(db, "General", creator=sysop)
     rows = _screen(lane, sysop, ["c", "m", "l", "0", "1", "r", "General"])
     assert list_boards(db) == []
-    assert _above_the_prompt(rows) == "'General' deleted."
+    assert _above_the_prompt(rows) == "✓ 'General' deleted."
 
 
 def test_a_cancelled_delete_says_so_on_the_detail_screen_it_returns_to(db, lane, sysop):
@@ -89,7 +89,7 @@ def test_a_changed_user_level_is_confirmed_on_the_redrawn_user_screen(db, lane, 
     alice = create_user(db, "alice", password="hunter2")
     rows = _screen(lane, sysop, ["u", "u", "/", "alice", "l", "10"])
     assert rows[0].endswith("alice")
-    assert "'alice' is now level 10. That opens and closes nothing for them." in rows
+    assert "✓ 'alice' is now level 10. That opens and closes nothing for them." in rows
     assert any("Level: 10" in " ".join(row.split()) for row in rows)
 
 
@@ -120,7 +120,7 @@ def test_a_field_prompts_refusal_is_shown_by_the_editor_it_returns_to(db, lane, 
 
 def test_an_outcome_is_shown_once(db, lane, sysop):
     rows = _screen(lane, sysop, ["c", "m", "c", "ENTER", "Retro", "s", "z"])  # "z": a key the menu rejects
-    assert "Created message board 'Retro'." in rows
+    assert "✓ Created message board 'Retro'." in rows
     rows = _screen(lane, sysop, ["c", "m", "l", "b", "b", "m"])  # leave, and come back to the menu
     assert not any("Created" in row for row in rows)
 

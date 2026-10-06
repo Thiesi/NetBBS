@@ -1056,6 +1056,18 @@ its numbers in the emphasis colour (`highlight_report`). A saved file's path
 reads in the value colour, and a SAUCE credit shows its title and its artist
 (author/group) as separate fields. Only help pages still write keys plain. A
 test keeps prompts and menu labels from writing a bare `[X]word` again.
+An outcome says how it went with a mark in front and keeps the usual colours
+for the rest (issue #1109): a green `✓` for a success, a yellow `!` for a
+warning, a red `✗` for a failure, then the text in the normal colour, its keys
+in the menu key's green and a path in the value colour (`status_result`). A
+whole line in the success green had turned the scheme around on every
+confirmation (white keys on green labels, where everywhere else keys are green
+and labels white). An outcome that changed nothing stays a muted line with no
+mark, and good news (new mail) keeps its own colour. The notice helpers apply
+this to every queued line, including one already written all in a status
+colour (`colored("Upload failed: ...", fg_color=ERROR_COLOR)`). The marks have
+stand-ins on classic and ASCII terminals: `√` and `x` in CP437, `*` and `x` in
+ASCII.
 With redraw-in-place enabled, the selected text, optional-integer, age,
 integer, float or optional-text field is edited at its displayed value row.
 The existing Choice row carries the editing key hint; no typing prompt opens

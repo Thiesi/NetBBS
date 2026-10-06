@@ -27,7 +27,7 @@ from netbbs.net.mail_flow import browse_mail
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.node_theme import set_accent_color_override
 from netbbs.net.notices import pending_notices
-from netbbs.rendering import ACCENT_COLOR, GOOD_NEWS_COLOR, MENU_KEY_COLOR, WARNING_COLOR, nearest_256
+from netbbs.rendering import ACCENT_COLOR, GOOD_NEWS_COLOR, MENU_KEY_COLOR, WARNING_COLOR, nearest_256, status_mark
 from netbbs.session_history import previous_call_started_at, record_session_start
 from tests.test_mail_arrivals import Session, _scan, _stop, _until, _watching, node  # noqa: F401
 
@@ -196,11 +196,38 @@ def test_the_eviction_count_stays_a_warning(node, monkeypatch):
     monkeypatch.setattr(main_menu, "acknowledge_eviction_notice", lambda db, user, n: None)
 
     raw = _raw(_first_menu(db, lane, alice, current))
-    assert _color_of(raw, "EVICTED LINE") == f"38;5;{WARNING_COLOR}"
+    # A warning is marked as one (issue #1109); its text keeps the usual colour.
+    assert status_mark("warning") + "EVICTED LINE" in raw
     assert _color_of(raw, "You have 1 unread message") == f"38;5;{GOOD_NEWS_COLOR}"
 
 
 # -- New scan -----------------------------------------------------------------
+
+
+def test_new_scan_with_nothing_to_list_keeps_its_mail_line_as_news(node):
+    # #1109 review: with nothing to list, New scan queues its summary for
+    # the screen it returns to. The mail line is news in the good-news
+    # green -- the success green's own index -- and must not be taken for
+    # an outcome and given a check mark.
+    from netbbs.net.notices import take_notices
+
+    db, lane, alice, bob = node
+    _letter(db, bob, alice, "New", LATE)
+    _call(db, alice, LAST_CALL)
+    current = _call(db, alice, NOW)
+
+    async def scenario():
+        session = Session([])
+        await scan_and_find._new_scan_screen(
+            session, db, lane, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice,
+            current_history_id=current,
+        )
+        return take_notices(session)
+
+    queued = asyncio.run(scenario())
+    mail = next(line for line in queued if "Mail:" in line)
+    assert not mail.startswith(status_mark("success"))
+    assert mail.startswith(f"\x1b[38;5;{GOOD_NEWS_COLOR}m")
 
 
 def test_new_scan_shows_the_same_two_counts_in_the_good_news_colour(node):
