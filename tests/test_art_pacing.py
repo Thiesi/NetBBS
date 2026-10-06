@@ -226,7 +226,7 @@ def test_paced_art_is_prepared_once_so_no_chunk_loses_its_colours() -> None:
     _run(write_paced_art_text(session, art, speed=2400, once="main_menu"))
     sent = "".join(session.writes)
     assert len(session.writes) > 1
-    assert sent.startswith(f"{ESC}[?33h") and sent.endswith(f"{ESC}[?33l")
+    assert sent.startswith(f"{ESC}[?33h{ESC}[?35h") and "?33l" not in sent
     assert sent.count(f"{ESC}[?33h") == 1
 
 

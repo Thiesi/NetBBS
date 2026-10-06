@@ -145,7 +145,7 @@ def test_on_sort_replaces_items_and_working_set_and_resets_to_page_one():
     immediate redraw -- proven here by paging to page 2 first, then
     re-sorting, then searching for an item only present in the *new*
     list (a single match selects it)."""
-    session = FakeSession(["n", "o", "s", "zzz"])
+    session = FakeSession(["n", "o", "/", "zzz"])
     on_sort_calls = 0
 
     async def on_sort():

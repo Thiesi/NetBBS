@@ -447,7 +447,11 @@ Everything below happens each time the file is read:
 - iCE colours: classic art uses the blink attribute to mean a bright
   background. Art that sets blink together with a background colour is shown
   with the bright background and no blink, for every session, whether or not
-  SAUCE sets the iCE flag.
+  SAUCE sets the iCE flag. CTerm (SyncTERM) only shows bright backgrounds
+  (100-107) with DECSET mode 33 on, and keeps them as the blink attribute,
+  which blinks until mode 35 is on too. A CP437 session gets both modes before
+  every art that needs them and never their reset: switching them off after
+  the art made the cells already drawn blink (issue #1083).
 - SAUCE width (TInfo1): art wider than the caller's `physical_width` is not
   drawn -- the screen falls back to what it shows without art (the default
   welcome banner, no masthead) instead of wrapping every row.
@@ -466,7 +470,10 @@ that NetBBS fills in per caller. Tokens drawn in the art mark where: `{menu
 WxH}` for the caller's live item list, `{user N}`, `{mail N}` and the other
 fields for live values, and `{prompt}` for the prompt. A token's top-left cell
 is its position, its size is written in the token, and the colour it is drawn
-in is the style of what fills it. Tokens are plain ASCII so they survive
+in is the style of what fills it. Counts and levels (`{mail}`, `{online}`,
+`{level}`, `{count}`) are bare numbers and the art supplies the words, and a
+value is cut to its field, without an ellipsis when the field is too narrow
+for one plus two characters (issue #1083). Tokens are plain ASCII so they survive
 CP437, UTF-8 and every art editor. Art only decorates: the items are the ones
 the caller may use, computed as for the generated menu, so a token can never
 show an item a caller cannot use or hide one they can. When the caller's
@@ -1171,6 +1178,12 @@ it was a deliberate trade and not an oversight:
   Only areas that set a maximum file age have expired files at all.
 
 ### 3.6 Resource lists (issue #528)
+
+Every list searches with `[/] Find`, the main menu's key and word (issue
+#1083): one key for searching wherever a caller is. A list's Find narrows it to
+the names containing the text typed, and a blank answer shows the whole list
+again. It replaced `[S]earch` outright, with no hidden `S` alias: a silent
+second key would keep `S` taken on every list for nothing a caller can see.
 
 A list row's secondary text is either prose or a record, and the two render
 differently.

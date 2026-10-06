@@ -88,8 +88,9 @@ def test_banner_fields_before_and_after_sign_in(tmp_path):
     user = create_user(db, "OldNib", password="parker51", user_level=20)
     after = banner_fields(db, user=user, callers_online=3)
     assert after["user"] == "OldNib"
-    assert after["level"] == "level 20"
-    assert after["online"] == "3 online"
+    # Bare values: the art supplies the words (issue #1083 finding 8).
+    assert after["level"] == "20"
+    assert after["online"] == "3"
     db.close()
 
 
@@ -117,3 +118,23 @@ def test_a_field_overlapping_a_later_region_slot_is_not_called_drawn_over():
         notes = banner_slot_notes(art, width=80)
         assert not any("drawn over" in note for note in notes), (art, notes)
         assert any("menu" in note and "blank" in note for note in notes), (art, notes)
+
+
+def test_a_narrow_field_is_cut_without_an_ellipsis():
+    """Issue #1083 finding 8: a 3-wide field showed nothing but `...` on a
+    CP437 session. A slot too narrow for the ellipsis plus some text keeps
+    the text itself, cut to the slot."""
+    out = strip_ansi(fill_field_slots("[{online 3}]", {"online": "12345"}, ellipsis="..."))
+    assert out.startswith("[123 ") and "." not in out
+    out = strip_ansi(fill_field_slots("[{level 4}]", {"level": "255"}, ellipsis="..."))
+    assert out.startswith("[255 ")
+
+
+def test_a_field_never_runs_past_its_slot():
+    for width in range(1, 9):
+        for ellipsis in ("...", "\u2026"):
+            out = strip_ansi(fill_field_slots(f"[{{node {width}}}]|", {"node": "The Nib & Quill"}, ellipsis=ellipsis))
+            # The token's own cells beyond its width are blanked, so only
+            # the value's visible text is measured.
+            value = out.split("]")[0][1:].rstrip()
+            assert 0 < len(value) <= width, (width, ellipsis, out)

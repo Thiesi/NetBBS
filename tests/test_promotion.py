@@ -279,10 +279,10 @@ def test_deleting_a_rule_from_the_console(db, lane, sysop, rules):
 def test_the_account_screen_shows_and_toggles_auto_promotion(db, lane, sysop, rules):
     create_user(db, "alice", password="hunter2")
 
-    text = _screen(lane, sysop, ["u", "u", "s", "alice"], height=40)
+    text = _screen(lane, sysop, ["u", "u", "/", "alice"], height=40)
     assert "Auto promotion: on" in text
 
-    text = _screen(lane, sysop, ["u", "u", "s", "alice", "u"], height=40)
+    text = _screen(lane, sysop, ["u", "u", "/", "alice", "u"], height=40)
     assert "Auto promotion: off (level set by hand)" in text
     assert "Promotion rules no longer apply to 'alice'." in text
     assert get_user_by_username(db, "alice").level_set_by_hand
@@ -315,10 +315,10 @@ def test_the_switch_shows_and_flips_only_the_hand_set_mark(db, lane, sysop, rule
     back on rather than reading the skip as "off" (review of PR #1023)."""
     create_user(db, "waiting", password="hunter2", pending_approval=True)
 
-    text = _screen(lane, sysop, ["u", "u", "s", "waiting"], height=40)
+    text = _screen(lane, sysop, ["u", "u", "/", "waiting"], height=40)
     assert "Auto promotion: on, but skipped (awaiting approval)" in text
 
-    _screen(lane, sysop, ["u", "u", "s", "waiting", "u"], height=40)
+    _screen(lane, sysop, ["u", "u", "/", "waiting", "u"], height=40)
     assert get_user_by_username(db, "waiting").level_set_by_hand
-    _screen(lane, sysop, ["u", "u", "s", "waiting", "u"], height=40)
+    _screen(lane, sysop, ["u", "u", "/", "waiting", "u"], height=40)
     assert not get_user_by_username(db, "waiting").level_set_by_hand

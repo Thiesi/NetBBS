@@ -44,7 +44,7 @@ def list_slot_fields(session, db: Database, user) -> dict[str, str]:
     return {
         "user": sanitize_text(user.username),
         "node": session.node_display_name,
-        "level": f"level {user.user_level}",
+        "level": str(user.user_level),
         "time": format_for_display(now, override_format="%H:%M", override_timezone=tz_name),
         "date": format_for_display(now, override_format="%Y-%m-%d", override_timezone=tz_name),
     }
