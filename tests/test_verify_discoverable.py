@@ -54,8 +54,10 @@ def test_staff_need_the_flag_granted_separately(db):
 
 def test_the_co_sysop_question_says_verifying_is_separate():
     question = _co_sysop_question("Copperplate")
-    assert "Verifying identity is granted separately" in question
-    assert "[i]" in question
+    # Asked as its own question right after the preset (issue #1115), so
+    # the question no longer points at a key on another screen.
+    assert "Verifying identity is asked next" in question
+    assert "[i]" not in question
 
 
 def test_the_age_refusal_says_where_a_birthdate_goes_and_who_to_ask():

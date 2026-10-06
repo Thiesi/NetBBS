@@ -1233,14 +1233,23 @@ def _co_sysop_question(username: str) -> str:
     """The Co-SysOp preset's yes/no question. Verifying identity is not part
     of the preset (maintainer decision, issue #1103): vouching for a
     caller's age or name travels to other nodes and opens adult areas, so a
-    SysOp grants it to a helper on its own, with [i] on the account."""
+    SysOp grants it to a helper on its own -- asked as a second question
+    right after the preset is applied (issue #1115), not left to a hint
+    about a key on another screen."""
     return (
         f"Make {username!r} a Co-SysOp -- approve accounts, manage accounts (disable, "
         "password reset, display names and birthdates, levels up to 254) and moderate "
         "everything? They can't act on "
         "SysOps or other staff, or reach Settings, Link, Node, DNS or backups, and members "
-        "see them on the Staff list. Verifying identity is granted separately, with [i] "
-        "on this account."
+        "see them on the Staff list. Verifying identity is asked next, on its own."
+    )
+
+
+def _co_sysop_verify_question(username: str) -> str:
+    """The question that follows an applied Co-SysOp preset (issue #1115)."""
+    return (
+        f"Also let {username!r} verify identity? They could then vouch for callers' "
+        "ages and real names, which other nodes may trust."
     )
 
 
@@ -8016,7 +8025,8 @@ async def _user_detail_screen(
             blocked = await _redraw()
         elif choice == "s":
             target = await _staff_permissions_screen(
-                session, lane, actor, target, node_controls, description_level=description_level
+                session, lane, actor, target, node_controls, description_level=description_level,
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             )
             blocked = await _redraw()
         elif choice == "k":
@@ -8090,7 +8100,7 @@ _STAFF_TOGGLE_KEYS: dict[str, StaffPermission] = {
 
 async def _staff_permissions_screen(
     session: Session, lane: DatabaseLane, actor: User, target: User, node_controls: NodeControls | None,
-    *, description_level: str,
+    *, description_level: str, redraw_in_place: bool = False, unicode_style: bool = True, collapsed: bool = False,
 ) -> User:
     """
     Give or take `target`'s staff permissions (design doc §5.6, issue
@@ -8099,11 +8109,21 @@ async def _staff_permissions_screen(
     confirmed, audited by `set_staff_permissions`, and carried into the
     account's live sessions the way a level change is. Returns the account
     as it now stands.
+
+    A screen of its own (issue #1115): with redraw-in-place on it is drawn
+    from the top on every pass instead of scrolling a new copy under the
+    old one, and each outcome is carried into that redraw above the prompt.
     """
+    header_color = await lane.run(effective_header_color_256)
     while True:
-        await session.write_line("")
         await session.write_line(
-            colored(f"Staff permissions for {sanitize_text(target.username)}:", fg_color=LABEL_COLOR, bold=True)
+            ("" if redraw_in_place else "\r\n")
+            + screen_title(
+                "Staff permissions",
+                breadcrumb=(session.node_display_name, sanitize_text(target.username)),
+                width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style,
+                collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient,
+            )
         )
         options = [
             MenuEntry(label=menu_key("A", "pprove accounts"),
@@ -8154,7 +8174,28 @@ async def _staff_permissions_screen(
             session,
             f"{target.username!r} staff permissions: {describe_staff_permissions(target.staff_permissions)}.",
         )
+        if choice == "c" and not target.can_verify_identity:
+            # Verifying is not part of the preset (issue #1103), but the
+            # SysOp is asked here rather than told about a key on the
+            # account screen they are not looking at (issue #1115).
+            target = await _offer_verify_identity(session, lane, actor, target)
         _request_live_access_recheck(node_controls, target)
+
+
+async def _offer_verify_identity(session: Session, lane: DatabaseLane, actor: User, target: User) -> User:
+    """Ask, after an applied Co-SysOp preset, whether the new Co-SysOp may
+    also verify identity; on yes grant it exactly as `[i]` on the account
+    does (`set_can_verify_identity`, audited the same way). Returns the
+    account as it now stands."""
+    if not await prompt_yes_no(session, _co_sysop_verify_question(target.username), default=False):
+        return target
+    try:
+        target = await lane.run(set_can_verify_identity, target, True, changed_by=actor)
+    except UserManagementError as exc:
+        _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+        return target
+    _announce_line(session, f"{target.username!r} can now verify identity: yes.")
+    return target
 
 
 async def _delete_user_confirm(

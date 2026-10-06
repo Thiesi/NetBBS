@@ -188,7 +188,11 @@ def test_a_guest_session_cannot_change_the_password(db, lane, alice):
     session.authenticated_without_credential = True
     result = asyncio.run(manage_password_screen(session, lane, alice, changed_by=alice))
 
-    assert "signed in without a password" in _written_text(session)
+    # Carried to whatever screen is drawn next (issue #1115), not written
+    # where the next redraw would wipe it.
+    from netbbs.net.notices import pending_notices
+
+    assert "signed in without a password" in "".join(pending_notices(session))
     assert result is alice
     assert _logs_in(db, "alice", "hunter2")
 

@@ -227,8 +227,11 @@ def test_a_guest_session_cannot_manage_ssh_keys(db):
     result = asyncio.run(keys.manage_ssh_keys_screen(session, None, guest, changed_by=guest))
 
     # `FakeSession.read_key` raises, so reaching the screen's own menu
-    # at all would fail this rather than quietly picking `[B]ack`.
-    assert "without a password" in "".join(session.written)
+    # at all would fail this rather than quietly picking `[B]ack`. The
+    # refusal is carried to the screen drawn next (issue #1115).
+    from netbbs.net.notices import pending_notices
+
+    assert "without a password" in "".join(pending_notices(session))
     assert result is guest
 
 

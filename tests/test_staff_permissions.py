@@ -383,10 +383,12 @@ def test_the_account_detail_shows_staff_and_moderator_grants(db, lane, sysop):
 def test_the_co_sysop_preset_is_one_confirmed_step(db, lane, sysop):
     create_user(db, "carol", password="hunter2pw")
     # carol sorts before sysop -- item 01.
-    session = FakeSession(["u", "u", "0", "1", "s", "c", "y", "b", "b", "b", "b", "b"])
+    # "n": the follow-up verify question (issue #1115) is declined.
+    session = FakeSession(["u", "u", "0", "1", "s", "c", "y", "n", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     carol = get_user_by_username(db, "carol")
     assert carol.staff_permissions == int(CO_SYSOP_PRESET)
+    assert carol.can_verify_identity is False
     assert "approve accounts, manage accounts, moderate everything" in _visible(_written_text(session))
 
 
