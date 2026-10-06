@@ -194,6 +194,17 @@ def compute_age(birthdate: date, *, today: date | None = None) -> int:
     return age
 
 
+def bypasses_identity_gates(user: User) -> bool:
+    """Whether `user` passes every name and age gate on this node without
+    an attestation or a birthdate: a local SysOp (level 255), the same
+    account that already overrides every level gate and moderator grant.
+    Maintainer decision 2026-10-06, amending issue #1082's "no bypass"
+    (design doc §16). Staff permissions and level 254 do not count, and a
+    remote author is never a local `User` here -- `link.remote_attestation`
+    judges them on their own attestations alone."""
+    return user.user_level >= SYSOP_LEVEL
+
+
 def age_gate(db: Database, user: User, min_age: int | None, requirement: str | None = None) -> str:
     """
     `user` against an age gate: `"pass"`, `"unverified"` or `"fail"`.
@@ -210,7 +221,7 @@ def age_gate(db: Database, user: User, min_age: int | None, requirement: str | N
     level-gating genuinely differ in shape, not just in name (design
     doc §18).
     """
-    if not min_age:
+    if not min_age or bypasses_identity_gates(user):
         return "pass"
     attestation = get_attestation(db, user, "age")
     if attestation is not None:
@@ -238,7 +249,7 @@ def meets_name_requirement(db: Database, user: User, requirement: str | None) ->
     scope (`format_name_for_resource`), never in whether this gate
     passes.
     """
-    if requirement is None:
+    if requirement is None or bypasses_identity_gates(user):
         return True
     return get_attestation(db, user, "name") is not None
 
