@@ -62,6 +62,9 @@ remember for a board still picks it next time. **[O]rder** in a list sorts it
 another way, by activity, name, newest or size, just this once or from then
 on; **[S]ysOp's order** there puts it back. **[/] Find** in a list shows only
 the names containing what you type; a blank answer shows the whole list again.
+A board, file area or chat channel whose name is drawn in pale turquoise is
+**Linked**: shared with other nodes over NetBBS Link. If your terminal shows
+plain ASCII, or the SysOp drew the list as art, its name ends in ` ~` instead.
 
 Some choices appear only when they have something to show or you have
 permission to use them. Search covers content held by this node, including

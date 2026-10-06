@@ -77,6 +77,7 @@ from netbbs.link.boards import (
     board_origin_fingerprint,
     is_board_closed,
     is_board_linked,
+    linked_board_ids,
     posting_here,
     posting_refusal,
     queue_board_post_edit_if_linked,
@@ -396,9 +397,9 @@ async def _browse_boards_in_category(
     def _about(item: Category | Board) -> str:
         if isinstance(item, Category):
             return item.description or "(category)"
+        # Linked is said by the name's colour now (issue #1104), not a
+        # "[LINK]" word here that a narrow terminal or slot art dropped.
         parts = []
-        if is_board_linked(db, item):
-            parts.append("[LINK]")
         if resource_needs_verification(db, user, item):
             parts.append(NAME_GATE_NOTE)
         if item.description:
@@ -437,6 +438,11 @@ async def _browse_boards_in_category(
     reopen_at: int | None = None
     while True:
         boards_here, categories_here = _load(mode_box["mode"])
+        linked_boards = linked_board_ids(db)
+
+        def _linked(item: Category | Board, linked_boards: set[int] = linked_boards) -> bool:
+            return isinstance(item, Board) and item.id in linked_boards
+
         if board_slot_art is not None:
             _read_slot_values(boards_here)
         if not categories_here:
@@ -474,6 +480,7 @@ async def _browse_boards_in_category(
                 slot_fields=board_slot_fields,
                 art_speed=board_art_speed,
                 art_once=BOARD_LIST,
+                linked_of=_linked,
             )
             if board is None:
                 return
@@ -526,6 +533,7 @@ async def _browse_boards_in_category(
             slot_fields=board_slot_fields,
             art_speed=board_art_speed,
             art_once=BOARD_LIST,
+            linked_of=_linked,
         )
         if selected is None:
             return

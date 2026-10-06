@@ -110,6 +110,7 @@ from netbbs.link.files import (
     RemoteFile,
     has_queued_file_descriptor,
     is_area_linked,
+    linked_area_ids,
     list_remote_files,
     queue_file_descriptor_if_linked,
 )
@@ -393,6 +394,12 @@ async def _browse_areas_in_category(
             lambda db: {a.id for a in areas_here if resource_needs_verification(db, user, a)}
         )
 
+        linked_areas = await lane.run(linked_area_ids)
+
+        def _linked(item: FileAreaCategory | FileArea, linked_areas: set[int] = linked_areas) -> bool:
+            # Issue #1104: a Linked area's name takes the Linked colour.
+            return isinstance(item, FileArea) and item.id in linked_areas
+
         def _area_about(area: FileArea) -> str | None:
             parts = [NAME_GATE_NOTE] if area.id in needs_verification else []
             if area.description:
@@ -431,6 +438,7 @@ async def _browse_areas_in_category(
                 slot_fields=area_slot_fields,
                 art_speed=area_art_speed,
                 art_once=FILE_AREA,
+                linked_of=_linked,
             )
             if area is None:
                 return
@@ -483,6 +491,7 @@ async def _browse_areas_in_category(
             slot_fields=area_slot_fields,
             art_speed=area_art_speed,
             art_once=FILE_AREA,
+            linked_of=_linked,
         )
         if selected is None:
             return

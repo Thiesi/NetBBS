@@ -154,7 +154,7 @@ from netbbs.communities import (
 )
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
-from netbbs.link.channels import get_channel_by_channel_id, queue_channel_message_if_linked
+from netbbs.link.channels import get_channel_by_channel_id, linked_channel_ids, queue_channel_message_if_linked
 from netbbs.link.node_profiles import (
     identity_for_peer,
     is_node_fingerprint,
@@ -663,6 +663,12 @@ async def _pick_channel(
         else None
     )
 
+    linked_channels = await lane.run(linked_channel_ids)
+
+    def _linked(item: object, linked_channels: set[int] = linked_channels) -> bool:
+        # Issue #1104: a Linked channel's name takes the Linked colour.
+        return isinstance(item, Channel) and item.id in linked_channels
+
     if not categories_here and mrc_section is None:
         async def on_sort_flat() -> list[Channel] | None:
             new_mode = await _run_sort_prompt()
@@ -699,6 +705,7 @@ async def _pick_channel(
             slot_fields=channel_slot_fields,
             art_speed=channel_art_speed,
             art_once=CHAT_CHANNEL_PICKER,
+            linked_of=_linked,
         )
 
     leading: list[_MrcRoomsEntry] = [mrc_section] if mrc_section is not None else []
@@ -766,6 +773,7 @@ async def _pick_channel(
             slot_fields=channel_slot_fields,
             art_speed=channel_art_speed,
             art_once=CHAT_CHANNEL_PICKER,
+            linked_of=_linked,
         )
         if selected is None:
             return None

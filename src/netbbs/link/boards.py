@@ -211,6 +211,13 @@ def is_board_linked(db: Database, board: Board) -> bool:
     return row is not None and row["link_genesis_json"] is not None
 
 
+def linked_board_ids(db: Database) -> set[int]:
+    """Every board id with a genesis on file, in one query -- what a list
+    asks (issue #1104) instead of one `is_*_linked` query per row."""
+    rows = db.connection.execute("SELECT id FROM boards WHERE link_genesis_json IS NOT NULL")
+    return {row["id"] for row in rows}
+
+
 def link_board(
     db: Database,
     board: Board,
