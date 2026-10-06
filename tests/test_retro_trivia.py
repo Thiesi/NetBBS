@@ -18,7 +18,6 @@ import io
 import os
 import re
 import select
-import threading
 from pathlib import Path
 
 import pytest
@@ -410,20 +409,35 @@ def test_the_key_that_skips_is_spent_whole(use_select):
 
 
 @pytest.mark.parametrize("use_select", _poll_modes())
-def test_a_key_split_across_reads_is_still_spent_whole(use_select):
+def test_a_key_split_across_reads_is_still_spent_whole(use_select, monkeypatch):
     # Over a pipe or socket an arrow key often arrives as ESC in one read and
     # "[A" in the next. The rest of the unit must be waited for and spent, not
     # left to be read as keys by the round-length picker.
+    #
+    # The tail is written at the one moment that matters -- the first time the
+    # poll looks for the rest of the unit and finds nothing yet -- rather than
+    # from a timer racing the 30 ms settle window: on a loaded machine (a full
+    # parallel suite) the timer thread could fire after the window had closed
+    # (issue #1097). The window is widened too, so a slow scheduler between
+    # that empty read and the next one can't close it either.
+    monkeypatch.setattr(rt, "_SPLASH_UNIT_SECONDS", 0.5)
     reader, writer = os.pipe()
     try:
         poll = rt._KeyPoll(reader, use_select)
+        read_now = poll._read_now
+        reads: list[bytes | None] = []
+
+        def read_then_send_the_tail(size):
+            data = read_now(size)
+            reads.append(data)
+            if data is None and reads[:-1] == [b"\x1b"]:
+                os.write(writer, b"[A")  # the rest of the key, after an empty read
+            return data
+
+        poll._read_now = read_then_send_the_tail
         os.write(writer, b"\x1b")
-        late = threading.Timer(rt._SPLASH_UNIT_SECONDS / 3, os.write, (writer, b"[A"))
-        late.start()
-        try:
-            assert poll.take(0.2)
-        finally:
-            late.join()
+        assert poll.take(0.2)
+        assert reads[:3] == [b"\x1b", None, b"[A"], "the tail must arrive in a later read"
         assert not poll.waiting(0.05), "the tail of the key was left for the round-length picker"
     finally:
         os.close(reader)
