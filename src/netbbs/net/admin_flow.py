@@ -7070,8 +7070,23 @@ def _user_columns(user: User) -> list[str | tuple[str, SegmentColor]]:
     ]
 
 
+@dataclass
+class _UserListView:
+    """How the account list is sorted and filtered, kept while a SysOp
+    goes into an account and back out (issue #1109), so Back lands on the
+    list as it was left rather than on a freshly sorted one."""
+
+    mode: str = "a"
+    descending: bool = False
+    visibility: str = "all"
+    # The accounts the list showed last, in order: where Back lands when
+    # the account just viewed is gone (deleted from its own screen).
+    shown_ids: list[int] = dataclasses.field(default_factory=list)
+
+
 async def _pick_target_user(
-    session: Session, lane: DatabaseLane, actor: User, *, title: str, pending_only: bool = False
+    session: Session, lane: DatabaseLane, actor: User, *, title: str, pending_only: bool = False,
+    view: _UserListView | None = None, start_stable_id: int | None = None,
 ) -> User | None:
     """
     The single screen every `[U]sers` submenu entry reaches a target
@@ -7106,25 +7121,28 @@ async def _pick_target_user(
     point of hiding a class of accounts is to stop having to reach them
     until the SysOp widens the filter again.
     """
-    mode = "a"
-    descending = False
-    visibility = "all"
+    view = view if view is not None else _UserListView()
 
     def _load(db: Database) -> list[User]:
-        _, ascending_order, descending_order = _USER_SORT_MODES[mode]
-        users = list_users(db, order_by=descending_order if descending else ascending_order)
+        _, ascending_order, descending_order = _USER_SORT_MODES[view.mode]
+        users = list_users(db, order_by=descending_order if view.descending else ascending_order)
         if pending_only:
             # The Staff console's accounts waiting for approval (issue #836).
             users = [u for u in users if u.pending_approval]
-        if visibility == "active_only":
-            return [u for u in users if u.disabled_at is None]
-        if visibility == "disabled_only":
-            return [u for u in users if u.disabled_at is not None]
+        if view.visibility == "active_only":
+            users = [u for u in users if u.disabled_at is None]
+        elif view.visibility == "disabled_only":
+            users = [u for u in users if u.disabled_at is not None]
+        view.shown_ids = [u.id for u in users]
         return users
 
     unicode_style = await lane.run(unicode_style_enabled, actor)
     users = await lane.run(_load)
-    if not users:
+    # Nobody to list at all ends here. A filter kept from the last visit
+    # that now matches no one (the one disabled account was just
+    # re-enabled) stays on the list instead, which says "No users match
+    # that view." and lets [V] widen it again (#1109 review).
+    if not users and view.visibility == "all":
         _announce_line(session, "\r\nNo accounts are waiting for approval." if pending_only else "\r\nNo registered users yet.")
         return None
 
@@ -7133,41 +7151,39 @@ async def _pick_target_user(
         in the picker's trailer -- where `sort_label` already puts
         exactly this kind of standing state, and where truncation takes
         the boilerplate before it."""
-        label, _, _ = _USER_SORT_MODES[mode]
+        label, _, _ = _USER_SORT_MODES[view.mode]
         # The arrow, not the word: the direction is the thing a SysOp
         # is checking at a glance, and an arrow reads at a glance.
         # ASCII gets the word, as everywhere else this screen chooses
         # between the two.
         if unicode_style:
-            arrow = "↓" if descending else "↑"
+            arrow = "↓" if view.descending else "↑"
         else:
-            arrow = "desc" if descending else "asc"
+            arrow = "desc" if view.descending else "asc"
         return (
             f"Sorted by: {label} {arrow}"
-            f", Showing: {_USER_VISIBILITY_LABELS[visibility]}"
+            f", Showing: {_USER_VISIBILITY_LABELS[view.visibility]}"
         )
 
     def _sort_key(chosen: str):
         async def toggle() -> list[User]:
-            nonlocal mode, descending
             # Exactly what the top-level keys did before: the active
             # dimension pressed again reverses it, a different one
             # switches to it and starts ascending.
-            if chosen == mode:
-                descending = not descending
+            if chosen == view.mode:
+                view.descending = not view.descending
             else:
-                mode, descending = chosen, False
+                view.mode, view.descending = chosen, False
             return await lane.run(_load)
 
         return toggle
 
     async def _cycle_visibility() -> list[User]:
-        nonlocal visibility
         # One key, forward through a fixed cycle -- not a menu of every
         # value, matching how the sort keys only ever offer "toggle this
         # one" (the original screen's own reasoning, kept).
-        position = _USER_VISIBILITY_MODES.index(visibility)
-        visibility = _USER_VISIBILITY_MODES[(position + 1) % len(_USER_VISIBILITY_MODES)]
+        position = _USER_VISIBILITY_MODES.index(view.visibility)
+        view.visibility = _USER_VISIBILITY_MODES[(position + 1) % len(_USER_VISIBILITY_MODES)]
         return await lane.run(_load)
 
     async def _reload() -> list[User]:
@@ -7190,6 +7206,7 @@ async def _pick_target_user(
         session, users,
         name_of=lambda user: user.username,
         stable_id_of=lambda user: user.id,
+        start_stable_id=start_stable_id,
         description_of=_user_description,
         columns=_USER_COLUMNS,
         column_values_of=_user_columns,
@@ -7208,6 +7225,18 @@ async def _pick_target_user(
     )
 
 
+def _neighbour_id(ids: list[int], gone: int) -> int | None:
+    """The account after `gone` in `ids`, or the one before it when it was
+    the last; `None` when it was the only one."""
+    if gone not in ids:
+        return None
+    position = ids.index(gone)
+    rest = ids[:position] + ids[position + 1:]
+    if not rest:
+        return None
+    return rest[min(position, len(rest) - 1)]
+
+
 async def _pick_and_edit_user(
     session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls | None, *, title: str,
     pending_only: bool = False,
@@ -7224,9 +7253,25 @@ async def _pick_and_edit_user(
     SysOp who only meant to promote someone can still also disable them
     right there without leaving and re-picking them a second time.
     """
-    target = await _pick_target_user(session, lane, actor, title=title, pending_only=pending_only)
-    if target is not None:
+    # Back from an account returns to the list it was picked from, on the
+    # same row, sorted and filtered as it was left (issue #1109) -- not to
+    # the menu above the list, which made a SysOp working down the roster
+    # pick each account's list again from scratch.
+    view = _UserListView()
+    start_id: int | None = None
+    while True:
+        target = await _pick_target_user(
+            session, lane, actor, title=title, pending_only=pending_only, view=view, start_stable_id=start_id,
+        )
+        if target is None:
+            return
+        shown = list(view.shown_ids)
         await _user_detail_screen(session, lane, actor, target, node_controls)
+        start_id = target.id
+        if await lane.run(get_user_by_id, target.id) is None:
+            # Deleted from its own screen: land on the account that took
+            # its place in the list, not back at the top (#1109 review).
+            start_id = _neighbour_id(shown, target.id)
 
 
 def _status_label(user: User) -> str:
