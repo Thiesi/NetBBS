@@ -133,7 +133,7 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.gate_summary import gates_line, resource_gates
+from netbbs.gate_summary import gates_line, resource_gates, unmet_gates
 from netbbs.net.session import Session, physical_terminal_width, post_body_width, write_prompt
 from netbbs.net.shared_account import (
     authored_earlier_by_shared_account,
@@ -1022,20 +1022,26 @@ async def _show_board(
     # shows color (issue #711).
     can_draw = can_post and board.allow_color
     name_requirement = get_effective_name_requirement(db, board)
+    # The gates this board applies, named under its title (issue #1105),
+    # with the ones this caller does not meet marked (issue #1115).
+    board_gates = resource_gates(db, board)
+    board_unmet = unmet_gates(db, user, board)
     if can_post:
         read_only_reason = None
     elif may_write:
         read_only_reason = posting_refusal(db, board, own_fingerprint=own_fingerprint, is_reply=False)
+    elif board_unmet:
+        # The marked gate on the "Requires:" line already says why; a
+        # second "Read only: posting needs level N." repeated it (#1115).
+        read_only_reason = None
     else:
         read_only_reason = _read_only_reason(db, user, board, closed=closed)
     linked_note = _linked_note(db, board, link_context)
-    # The gates this board applies, named under its title (issue #1105).
-    board_gates = resource_gates(db, board)
 
     def _gates_note() -> str | None:
         return gates_line(
             board_gates, width=session.terminal_width, unicode_style=unicode_style,
-            ellipsis=ellipsis_for(session, unicode_style=unicode_style),
+            ellipsis=ellipsis_for(session, unicode_style=unicode_style), unmet=board_unmet,
         )
 
     # A first visit counts what is already here as read; from then on a
