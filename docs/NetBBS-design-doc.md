@@ -1049,9 +1049,9 @@ notice's "Use [P]review to verify it looks right." highlights its key too, in
 the notice helpers themselves (`notices.announce`, the console's
 `_announce_line`), and a report line (a `[C]heck` verdict, an art's size) puts
 its numbers in the emphasis colour (`highlight_report`). A saved file's path
-reads in the value colour, and a SAUCE credit tells title, author and group
-apart. Only help pages still write keys plain. A test keeps prompts and menu
-labels from writing a bare `[X]word` again.
+reads in the value colour, and a SAUCE credit shows its title and its artist
+(author/group) as separate fields. Only help pages still write keys plain. A
+test keeps prompts and menu labels from writing a bare `[X]word` again.
 With redraw-in-place enabled, the selected text, optional-integer, age,
 integer, float or optional-text field is edited at its displayed value row.
 The existing Choice row carries the editing key hint; no typing prompt opens

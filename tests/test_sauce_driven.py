@@ -216,8 +216,8 @@ def test_the_console_status_shows_credit_width_and_a_font_warning(db):
     text = _section_text(_banner_status_section(
         status, unicode_style=False, sauce=_banner_sauce(status), credit_line=False, too_wide="the default banner",
     ))
-    # Title and author are coloured apart now (issue #1083).
-    assert "Nib Logo" in text and " by " in text and "InkWell" in text
+    # Title and artist are separate fields now (issue #1083).
+    assert "Art:" in text and "Nib Logo" in text and "By:" in text and "InkWell" in text
     assert "80 columns; narrower terminals get the default banner" in text
     assert "made for IBM VGA 850" in text
     assert "Credit line" in text and "off" in text

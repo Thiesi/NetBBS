@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from netbbs.net import notices
-from netbbs.net.admin_flow import _announce_line, _announce_saved, _fits_line, _styled_credit
+from netbbs.net.admin_flow import _announce_line, _announce_saved, _banner_status_section, _fits_line
 from netbbs.rendering import (
     AUTHOR_COLOR,
     EMPHASIS_COLOR,
@@ -79,11 +79,19 @@ def _sauce(title="", author="", group=""):
     )
 
 
-def test_a_sauce_credit_tells_title_author_and_group_apart():
-    credit = _styled_credit(_sauce("Ink and Pictographs", "InkWell", "Nib and Quill"))
-    assert strip_ansi(credit) == "Ink and Pictographs by InkWell/Nib and Quill"
-    assert colored("Ink and Pictographs", fg_color=EMPHASIS_COLOR, bold=True) in credit
-    assert colored("InkWell", fg_color=AUTHOR_COLOR) in credit
-    assert colored("Nib and Quill", fg_color=AUTHOR_COLOR) in credit
-    assert strip_ansi(_styled_credit(_sauce(author="InkWell"))) == "InkWell"
-    assert _styled_credit(_sauce()) == ""
+def _status_rows(sauce):
+    from netbbs.net.welcome_banner import WelcomeBannerStatus
+
+    status = WelcomeBannerStatus(enabled=True, exists=True, path=Path("welcome.ans"), size_bytes=100)
+    section = _banner_status_section(status, unicode_style=False, sauce=sauce, too_wide="the default banner")
+    return {field.label: field for field in section.rows}
+
+
+def test_a_sauce_credit_tells_title_and_artist_apart():
+    rows = _status_rows(_sauce("Ink and Pictographs", "InkWell", "Nib and Quill"))
+    assert rows["Art"].value == "Ink and Pictographs" and rows["Art"].color == EMPHASIS_COLOR
+    assert rows["By"].value == "InkWell/Nib and Quill" and rows["By"].color == AUTHOR_COLOR
+    # Plain fields, so the panel wraps a long credit (review on #1095).
+    assert not rows["Art"].styled and not rows["By"].styled
+    assert "Art" not in _status_rows(_sauce(author="InkWell"))
+    assert _status_rows(_sauce())["Art"].value == "(no credit in its SAUCE record)"

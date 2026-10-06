@@ -1601,11 +1601,16 @@ def _banner_status_section(
         else Field("On disk", "missing", color=ERROR_COLOR if status.enabled else MUTED_COLOR),
     ]
     if sauce is not None:
-        credit = _styled_credit(sauce)
-        fields.append(
-            Field("Art", credit, styled=True) if credit
-            else Field("Art", "(no credit in its SAUCE record)", color=MUTED_COLOR)
-        )
+        # Title and artist apart (issue #1083), each a plain field so the
+        # panel wraps it: a styled field is never wrapped, and a SAUCE
+        # credit can run to 80 columns (review on #1095).
+        title, artist = _credit_parts(sauce)
+        if title:
+            fields.append(Field("Art", title, color=EMPHASIS_COLOR))
+        if artist:
+            fields.append(Field("By", artist, color=AUTHOR_COLOR))
+        if not (title or artist):
+            fields.append(Field("Art", "(no credit in its SAUCE record)", color=MUTED_COLOR))
         if sauce.width is not None:
             fields.append(Field("Drawn for", f"{sauce.width} columns; narrower terminals get {too_wide}", color=VALUE_COLOR))
         if not sauce.font_is_cp437:
@@ -1618,23 +1623,15 @@ def _banner_status_section(
     return Section("Status", fields)
 
 
-def _styled_credit(sauce: Sauce) -> str:
-    """A SAUCE credit for the console (issue #1083): the title in the
-    emphasis colour, the author and group in the colour for a credited
-    person, the joining words muted. Empty when the record names nobody."""
+def _credit_parts(sauce: Sauce) -> tuple[str, str]:
+    """A SAUCE record's title, and its author and group as one "artist"
+    ("InkWell/Nib and Quill"), each printable and sanitized; either may be
+    empty."""
     def clean(text: str) -> str:
         return sanitize_text("".join(ch for ch in text if ch.isprintable()))
 
-    title, author, group = clean(sauce.title), clean(sauce.author), clean(sauce.group)
-    who = [colored(part, fg_color=AUTHOR_COLOR) for part in (author, group) if part]
-    parts = []
-    if title:
-        parts.append(colored(title, fg_color=EMPHASIS_COLOR, bold=True))
-    if title and who:
-        parts.append(colored(" by ", fg_color=MUTED_COLOR))
-    parts.append(colored("/", fg_color=MUTED_COLOR).join(who))
-    return "".join(parts)
-
+    who = "/".join(part for part in (clean(sauce.author), clean(sauce.group)) if part)
+    return clean(sauce.title), who
 
 def _toggle_welcome_banner_credit(db: Database, actor: User) -> bool:
     """Flip whether callers see the art's credit under the welcome banner,
