@@ -456,6 +456,44 @@ def test_static_assets_are_served():
     asyncio.run(scenario())
 
 
+def test_box_drawing_glyphs_join_between_rows():
+    # Issue #1083: with a row taller than the font (lineHeight 1.15), a
+    # frame's vertical lines and block art showed gaps between rows in the
+    # browser. The WebGL renderer draws those glyphs itself; the DOM
+    # renderer it falls back to needs a line height of 1.
+    index = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    scripts = [
+        "/static/xterm.js",
+        "/static/xterm-addon-fit.js",
+        "/static/xterm-addon-webgl.js",
+        "/static/netbbs-terminal.js",
+    ]
+    positions = [index.index(f'<script src="{src}"></script>') for src in scripts]
+    assert positions == sorted(positions)
+    assert (_STATIC_DIR / "xterm-addon-webgl.js").stat().st_size > 0
+
+    shim = (_STATIC_DIR / "netbbs-terminal.js").read_text(encoding="utf-8")
+    assert "lineHeight: 1," in shim
+    assert "new WebglAddon.WebglAddon()" in shim
+    # A lost GPU context drops back to the DOM renderer instead of a blank page.
+    assert "onContextLoss" in shim
+    assert shim.index("term.loadAddon(webgl)") < shim.index("fitAddon.fit();")
+
+    async def handler(session: Session):
+        pass
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.get(f"http://127.0.0.1:{server.port}/static/xterm-addon-webgl.js") as resp:
+                    assert resp.status == 200
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
 def test_static_assets_reach_a_slow_reader_intact_without_os_sendfile(monkeypatch):
     # Issue #961: without `os.sendfile` (NetBSD), aiohttp's FileResponse
     # went through asyncio's sendfile fallback, which queues views of one
