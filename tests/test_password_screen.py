@@ -306,12 +306,12 @@ def test_user_detail_shows_the_password_line_and_help(db, lane, sysop, alice):
 
 
 def test_user_detail_arrow_nav_reaches_the_password_field(db, lane, sysop, alice):
-    # Down five times from nothing highlighted lands on "p", the fifth
-    # entry of _USER_DETAIL_FIELD_ORDER (l, t, i, k, p, r); Space then
-    # opens the password screen, whose [B]ack returns to the detail
+    # Down seven times from nothing highlighted lands on "p", the seventh
+    # entry of _USER_DETAIL_FIELD_ORDER (l, t, r, n, e, k, p, ...); Space
+    # then opens the password screen, whose [B]ack returns to the detail
     # screen.
     session = FakeSession(
-        ["u", "u", "/", "alice", "DOWN", "DOWN", "DOWN", "DOWN", "DOWN", " ", "b", "b", "b", "b", "b"]
+        ["u", "u", "/", "alice", *["DOWN"] * 7, " ", "b", "b", "b", "b", "b"]
     )
     asyncio.run(admin_menu(session, lane, sysop))
 

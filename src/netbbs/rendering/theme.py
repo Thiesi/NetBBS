@@ -91,6 +91,15 @@ NODE_COLOR = 116  # pale turquoise — the linked node after the `@` of a chat
                   # who is talking and where from. Paler than NICK_COLOR's
                   # saturated azure, which can sit on the next line, and not
                   # gold, which is the speaker's own name beside it
+LINKED_COLOR = NODE_COLOR  # pale turquoise -- the name of a Linked board, file
+                          # area or channel in a caller's list (issue #1104): shared
+                          # with other nodes over NetBBS Link. The same shade as a
+                          # linked node after a chat speaker's `@`, so "from the
+                          # wider network" reads one way everywhere, and distinct
+                          # from the gold accent every other name in the list takes.
+LINKED_MARKER = " ~"  # the same fact without colour (issue #1104): appended to a
+                     # Linked name for a plain-ASCII caller and inside SysOp list
+                     # art, where the row takes the art's own colour.
 MRC_SITE_COLOR = 146  # pale lavender — the BBS after the `@` of an MRC
                       # speaker, its own shade so an MRC site never reads
                       # as a linked node (NODE_COLOR) -- the two are

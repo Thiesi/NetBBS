@@ -1203,6 +1203,15 @@ the names containing the text typed, and a blank answer shows the whole list
 again. It replaced `[S]earch` outright, with no hidden `S` alias: a silent
 second key would keep `S` taken on every list for nothing a caller can see.
 
+A Linked board, file area or chat channel, one shared with other nodes over
+NetBBS Link, has its name drawn in `LINKED_COLOR` (issue #1104) instead of the
+accent every other name takes. It costs no column and no row. Where colour
+can't say it, the name ends in `LINKED_MARKER` (` ~`) instead, kept whole when
+the name is cut to fit: for a caller reading plain ASCII, and on a row inside
+SysOp list art, whose rows take the art's own colour. The list's Ctrl-H says
+what the colour or marker means, on a list that has a Linked entry. The
+SysOp's own resource lists use the same colour.
+
 A list row's secondary text is either prose or a record, and the two render
 differently.
 
@@ -2063,7 +2072,13 @@ Users may provide nullable, independently visible:
 
 Age is computed from birthdate at check time. It is never stored as a derived
 current age. If a resource has an age gate and no usable birthdate or verified
-age attestation exists, access fails closed.
+age attestation exists, access fails closed. A birthdate is neither in the
+future nor before 1900-01-01.
+
+The caller sets these. A SysOp, or a staff member with manage accounts within
+its reach (§5.6), can correct or clear the display name and birthdate from the
+account screen; each edit is in the account's admin history, the birthdate's
+without the date. Such an edit never touches an attestation (issue #1110).
 
 A minimum age can also say how the age must be known (issue #1082). The age
 requirement is:
@@ -2290,7 +2305,8 @@ below level 255, independent of its level:
 - **Approve accounts:** approve or decline registrations waiting under
   `approval_required` (§4.2).
 - **Manage accounts:** disable an account and enable it again, reset its
-  password, and set its level anywhere from 0 to 254. Raising an account to
+  password, correct or clear its display name and birthdate, and set its
+  level anywhere from 0 to 254. Raising an account to
   255, and deleting an account and so retiring its name (§4.3), stay with the
   SysOp.
 - **Moderate everything:** act as moderator on every board, file area and
@@ -2627,8 +2643,8 @@ parent, listed on the board like any other post. There is no threaded view.
   reader. Mail keeps its writer's lines (§6.4).
 
 The board picker adds an activity column ("N new", "caught up", "not visited
-yet", in §6.6's terms) and an "about" column that leads with `[LINK]` and a
-name-gate note before the description.
+yet", in §6.6's terms) and an "about" column that leads with a name-gate note
+before the description. A Linked board shows by its name's colour (§3.6).
 
 **Color in posts** (issue #711). A board's SysOp may allow color in its
 posts ("Color in posts", off by default). A carried board follows the
@@ -15265,6 +15281,57 @@ stores a known value and drops anything else.
 **Decision 5 — edited in the Min age field.** The editors show
 "18, verified only" and take `18v`, so no editor gains a row: the area and
 channel screens must still fit 80x24 whole.
+
+### Issue #1110 — a SysOp corrects a caller's display name and birthdate — decided
+
+Only the caller could set their display name and birthdate (Profile → Name &
+details), so a SysOp could not fix a typo or remove a display name that had to
+go. Normative description: §5.5 and §5.6.
+
+**Decision 1 — the same reach as a password reset.** A SysOp may edit any
+account, and a staff member with manage accounts may edit an account below 255
+that holds no staff permission, never their own. Both fields are details of
+the account the way its password is, so they follow that permission rather
+than a new one. Rejected: SysOp only, which would leave the helper who runs
+the node while the SysOp is away unable to remove an offending display name.
+
+**Decision 2 — the caller's own rules, and one more for both.** The same
+display-name rules as the caller's own edit apply (the reserved `=` marker,
+the byte cap, the look-alike and staff-title checks of issues #835 and #843).
+A birthdate may be neither in the future nor before 1900-01-01, for the caller
+too: a typo such as `0198` would otherwise make anyone old enough for every
+age gate. Blank clears either field, which the caller's own screen does not
+offer and a SysOp needs.
+
+**Decision 3 — audited, without the birthdate.** Each edit is recorded in the
+account's admin history with who made it. A display name is shown to everyone,
+so the record keeps the old and new name; a birthdate is private unless its
+owner shows it, and the history is read by every SysOp and manager, so the
+record says only that it was set, changed or cleared.
+
+**Decision 4 — verified values are separate.** An age or real-name
+attestation is not touched by these edits and still decides every gate; the
+account screen says so when one is on record. The caller's own visibility
+settings for both fields are left as they are. Display names do not travel
+over NetBBS Link, so nothing is carried.
+
+### Issue #1104 — Linked resources by colour — decided
+
+The pre-release check of the first field test's fixes asked to tell Linked
+boards, areas and channels apart without another column. Normative
+description: §3.6.
+
+**Decision 1 — the name's colour, not a word or a column.** Rejected: the
+`[LINK]` word the board list's "about" text led with, which a narrow terminal,
+a short description level and SysOp list art all dropped, and a column, which
+costs every other column width. The colour is the one a linked node already
+has after a chat speaker's `@`, so "from the wider network" reads one way
+everywhere.
+
+**Decision 2 — a marker where colour can't carry it.** A plain-ASCII caller
+and a row inside list art get ` ~` after the name. Rejected: a legend row
+above the list, which would cost a list row on every page of a full list;
+Ctrl-H carries the explanation instead.
 
 ### SFTP over the SSH transport — declined
 
