@@ -139,3 +139,48 @@ def test_a_doors_screen_opens_on_its_fields_and_a_changed_one_hides_delete(db, l
     assert "[S]ave" in changed and "[D]elete" not in changed
     assert "Type the door name" not in text
     assert list_doors(db)[0].pinned
+
+
+def test_a_renamed_community_and_category_are_titled_by_their_new_name(db, lane, sysop):
+    create_community(db, "Politics", creator=sysop)
+    session = FakeSession(["m", "o", "l", "0", "1", "ENTER", "Civics", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    saved = _screen_with(_visible(_written_text(session)), "Updated 'Civics'")
+    assert "› Civics" in saved and "Politics" not in saved
+
+    board_categories.create_category(db, "Retro", created_by=sysop)
+    session = FakeSession(["m", "c", "m", "l", "0", "1", "ENTER", "Vintage", "s", "b", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    # The last redraw showing the new name is the one after the save (the one
+    # before it shows the unsaved draft under the stored name).
+    saved = [s for s in _visible(_written_text(session)).split("Choice:") if re.search(r"Name:\s+Vintage", s)][-1]
+    assert "› Vintage" in saved and "Retro" not in saved
+
+
+def test_a_renamed_board_is_titled_by_its_new_name(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+
+    create_board(db, "Pen Repair", creator=sysop)
+    session = FakeSession(["m", "m", "l", "0", "1", "ENTER", "Nib Repair", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    saved = _screen_with(_visible(_written_text(session)), "Updated 'Nib Repair'")
+    assert "› Nib Repair" in saved and "Pen Repair" not in saved
+
+
+def test_a_renamed_channel_and_door_are_titled_by_their_new_names(db, lane, sysop):
+    import sys
+
+    from netbbs.chat.channels import create_channel
+    from netbbs.doors import create_door
+
+    create_channel(db, "Lobby", creator=sysop)
+    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lounge", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    saved = _screen_with(_visible(_written_text(session)), "Updated 'Lounge'")
+    assert "› Lounge" in saved and "Lobby" not in saved
+
+    create_door(db, "Lotto", sys.executable, creator=sysop)
+    session = FakeSession(["m", "d", "l", "0", "1", "ENTER", "Lotto2", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    saved = _screen_with(_visible(_written_text(session)), "Updated 'Lotto2'")
+    assert "› Lotto2" in saved and "› Lotto\r" not in saved
