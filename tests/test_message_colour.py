@@ -30,6 +30,7 @@ from netbbs.rendering.sauce import Sauce
 # emphasis colour instead.
 KEY_P = colored("P", fg_color=EMPHASIS_COLOR, bold=True)
 KEY_P_MENU = colored("P", fg_color=MENU_KEY_COLOR, bold=True)
+VALUE_SGR = colored("x", fg_color=VALUE_COLOR).split("x")[0]
 
 
 class _Session:
@@ -99,9 +100,15 @@ def test_only_real_paths_are_coloured_as_paths():
     session = _Session()
     for text in ("Use [/] Find to search.", "Page 1/2 of the list.", "See https://www.netbbs.org/ for more."):
         notices.announce(session, text)
-    for line in notices.take_notices(session):
-        assert colored("/", fg_color=VALUE_COLOR) not in line
-        assert f"[38;5;{VALUE_COLOR}m" not in line.encode("unicode_escape").decode()
+    lines = notices.take_notices(session)
+    assert len(lines) == 3
+    for line in lines:
+        # Nothing in these lines is a path, so nothing takes the value colour.
+        assert VALUE_SGR not in line
+    # The guard bites: the same kind of line with a real path does.
+    notices.announce(session, "Saved to /var/lib/netbbs/x.ans.")
+    (line,) = notices.take_notices(session)
+    assert VALUE_SGR in line
 
 
 def test_a_report_line_emphasises_its_numbers_and_keys():
