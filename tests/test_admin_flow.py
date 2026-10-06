@@ -4280,7 +4280,7 @@ def test_create_community_can_be_cancelled_without_creating_anything(db, lane, s
     whole draft, even after fields were already filled in. Confirms the
     discard once asked (dogfood follow-up: a changed draft now asks
     first)."""
-    inputs = ["m", "o", "c", "n", "Abandoned", "b", "y", "b", "b", "b"]
+    inputs = ["m", "o", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.communities import list_communities
