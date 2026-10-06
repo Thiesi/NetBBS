@@ -379,10 +379,24 @@ async def _browse_areas_in_category(
     # Back from an area or a category comes back to this list, on the row
     # left (issue #839), as the board list does.
     reopen_at: int | None = None
+    about_separator = " · " if unicode_style else " - "
     while True:
         areas_here, categories_here, _, _ = await lane.run(_load, mode_box["mode"])
         if area_slot_art is not None:
             area_slot_values.update(await lane.run(_slot_values, areas_here))
+        # Which areas will ask this caller for a verification they lack --
+        # a verified name to upload, or a verified age to enter (issue
+        # #1082) -- named in the row as the board list does (design doc
+        # §3.6), read once per list on the worker thread.
+        needs_verification = await lane.run(
+            lambda db: {a.id for a in areas_here if resource_needs_verification(db, user, a)}
+        )
+
+        def _area_about(area: FileArea) -> str | None:
+            parts = [NAME_GATE_NOTE] if area.id in needs_verification else []
+            if area.description:
+                parts.append(area.description)
+            return about_separator.join(parts) or None
         if not categories_here:
             async def on_sort_flat() -> list[FileArea] | None:
                 new_mode = await _run_sort_prompt()
@@ -397,7 +411,7 @@ async def _browse_areas_in_category(
                 areas_here,
                 name_of=lambda a: a.name,
                 stable_id_of=lambda a: a.id,
-                description_of=lambda a: a.description,
+                description_of=_area_about,
                 title=title,
                 breadcrumb=picker_breadcrumb,
                 empty_message="No file areas are available to you yet.",
@@ -431,7 +445,7 @@ async def _browse_areas_in_category(
         def render_description(item: FileAreaCategory | FileArea) -> str | None:
             if isinstance(item, FileAreaCategory):
                 return item.description or "(category)"
-            return item.description
+            return _area_about(item)
 
         def stable_id(item: FileAreaCategory | FileArea) -> int:
             return item.id if isinstance(item, FileArea) else -item.id

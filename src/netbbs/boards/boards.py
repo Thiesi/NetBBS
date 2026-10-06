@@ -417,8 +417,6 @@ def update_board(
         check_age_requirement(age_requirement, BoardError)
     _check_max_post_age(max_post_age_days)
     try:
-        if age_requirement is not UNCHANGED:
-            store_age_requirement(db, "boards", board.id, age_requirement)
         db.connection.execute(
             """
             UPDATE boards
@@ -433,6 +431,8 @@ def update_board(
                 min_age, name_requirement, community_id, int(allow_color), board.id,
             ),
         )
+        if age_requirement is not UNCHANGED:
+            store_age_requirement(db, "boards", board.id, age_requirement)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):

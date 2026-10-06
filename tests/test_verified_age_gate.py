@@ -162,6 +162,22 @@ def test_a_board_keeps_its_requirement_when_an_update_does_not_mention_it(db, sy
     assert cleared.age_requirement is None
 
 
+def test_a_refused_update_leaves_no_age_requirement_behind(db, sysop):
+    """A rename refused for a name in use writes nothing: the requirement
+    must not sit in the open transaction for the next commit to keep."""
+    board = create_board(db, "adults", min_age=18, creator=sysop)
+    create_board(db, "taken", creator=sysop)
+    with pytest.raises(BoardError):
+        update_board(
+            db, board, name="taken", description=None, min_read_level=0, min_write_level=0,
+            category_id=None, pinned=False, moderated=False, max_post_age_days=None, min_age=18,
+            name_requirement=None, community_id=None, allow_color=False, age_requirement=VERIFIED,
+            changed_by=sysop,
+        )
+    create_board(db, "later", creator=sysop)  # an unrelated commit
+    assert get_board_by_name(db, "adults").age_requirement is None
+
+
 def test_an_unknown_requirement_is_refused(db, sysop):
     with pytest.raises(BoardError):
         create_board(db, "adults", min_age=18, age_requirement="notarized", creator=sysop)
@@ -313,3 +329,37 @@ def test_a_bad_value_is_refused_when_built_and_dropped_when_carried(remote):
         _genesis(remote, default_age_requirement="notarized")
     assert carried_age_requirement({"default_age_requirement": "notarized"}) is None
     assert carried_age_requirement({}) is None
+
+
+class _ListScreen(_Screen):
+    """Answers the list's prompt with B (back) and keeps what was drawn."""
+
+    async def read_key(self, echo: bool = True) -> str:
+        return "b"
+
+    async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
+        return "b"
+
+    async def read_editor_key(self, *, distinguish_ctrl_h: bool = False):
+        from netbbs.net.char_input import EditorKey, EditorKeyKind
+
+        return EditorKey(EditorKeyKind.CHAR, char="b")
+
+    async def write_line(self, text: str = "") -> None:
+        self.written.append(text + "\n")
+
+
+def test_the_file_area_list_marks_an_area_that_wants_a_verified_age(db, sysop, adult):
+    from netbbs.net import file_flow
+    from netbbs.storage.execution import DatabaseLane
+
+    create_file_area(db, "adult files", description="After dark", min_age=18, age_requirement=VERIFIED, creator=sysop)
+    lane = DatabaseLane(db.path)
+    try:
+        session = _ListScreen()
+        asyncio.run(file_flow.browse_file_areas(session, lane, adult))
+    finally:
+        lane.close()
+    screen = "".join(session.written)
+    assert "adult files" in screen
+    assert "needs verification" in screen

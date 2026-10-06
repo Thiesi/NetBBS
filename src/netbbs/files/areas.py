@@ -358,8 +358,6 @@ def update_file_area(
         check_age_requirement(age_requirement, FileAreaError)
     _check_max_file_age(max_file_age_days)
     try:
-        if age_requirement is not UNCHANGED:
-            store_age_requirement(db, "file_areas", area.id, age_requirement)
         db.connection.execute(
             """
             UPDATE file_areas
@@ -374,6 +372,8 @@ def update_file_area(
                 min_age, name_requirement, community_id, area.id,
             ),
         )
+        if age_requirement is not UNCHANGED:
+            store_age_requirement(db, "file_areas", area.id, age_requirement)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):

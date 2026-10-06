@@ -282,8 +282,6 @@ def update_channel(
     if name != channel.name:
         _refuse_reserved_name(name)
     try:
-        if age_requirement is not UNCHANGED:
-            store_age_requirement(db, "channels", channel.id, age_requirement)
         db.connection.execute(
             """
             UPDATE channels
@@ -298,6 +296,8 @@ def update_channel(
                 min_age, name_requirement, community_id, channel.id,
             ),
         )
+        if age_requirement is not UNCHANGED:
+            store_age_requirement(db, "channels", channel.id, age_requirement)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):

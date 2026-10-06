@@ -214,8 +214,6 @@ def update_community(
     if default_age_requirement is not UNCHANGED:
         check_age_requirement(default_age_requirement, CommunityError, field="default_age_requirement")
     try:
-        if default_age_requirement is not UNCHANGED:
-            store_age_requirement(db, "communities", community.id, default_age_requirement)
         db.connection.execute(
             """
             UPDATE communities
@@ -228,6 +226,8 @@ def update_community(
                 default_min_write_level, default_min_age, default_name_requirement, community.id,
             ),
         )
+        if default_age_requirement is not UNCHANGED:
+            store_age_requirement(db, "communities", community.id, default_age_requirement)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise CommunityError(f"could not update Community {community.name!r} — name already in use?") from exc
