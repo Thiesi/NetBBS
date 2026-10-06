@@ -2692,7 +2692,7 @@ def test_create_board_can_be_cancelled_without_creating_anything(db, lane, sysop
     the discard once asked (dogfood follow-up: [B]ack on a changed
     draft now asks first -- see test_create_board_declining_the_discard_
     confirmation_keeps_editing below)."""
-    inputs = ["m", "m", "c", "n", "Abandoned", "b", "y", "b", "b", "b"]
+    inputs = ["m", "m", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.boards.boards import list_boards
@@ -3564,7 +3564,7 @@ def test_create_area_can_be_cancelled_without_creating_anything(db, lane, sysop)
     whole draft, even after fields were already filled in. Confirms the
     discard once asked (dogfood follow-up: a changed draft now asks
     first)."""
-    inputs = ["m", "f", "c", "n", "Abandoned", "b", "y", "b", "b", "b"]
+    inputs = ["m", "f", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.files.areas import list_file_areas
