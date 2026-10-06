@@ -1053,6 +1053,29 @@ itself, and a draft editor would have to hold the plaintext across redraws to
 offer anything more. Each prompt cancels on a blank line and nothing is
 written before the last one.
 
+**A console resource opens on its own fields** (issue #1081). The six
+resource screens of the SysOp console -- a Community, a category, a message
+board, a file area, a chat channel and a door -- are one screen each, not an
+overview with an `[E]dit` key in front of the draft editor. The screen shows
+what can't be edited first, in a compact header of one or two rows (counts,
+place in the callers' list, Link status), then the editable fields with the
+cursor already on the first one, then the actions. Long Link details (origin,
+closure, pending transfers, peer reach) form a "NetBBS Link" section after the
+fields. A field is chosen by the cursor only: ↑↓ to choose, Enter or Space to
+change it, ←→ to step a value. Fields have no letters on these screens, so the
+action keys (`[U]p`, `[R]emove`, `[P]ending posts`, `[L]ink`, `[S]tart
+service` and the rest) keep theirs. Changes go into a draft as on every other
+editor; nothing is stored before `[S]ave`. Once a field differs from what is
+stored, the action bar shows only `[S]ave` and `[B]ack` (which asks before
+discarding), so no action runs against values the screen no longer shows. On a
+Linked resource this node is not the origin of, a field the origin controls is
+shown in place, read-only, labelled "set by origin". Creating a resource uses
+the same screen with an empty draft and no actions. Account screens, settings
+screens and caller-side editing (a post, a file description, the Profile) are
+unchanged: an account's keys are separate, individually confirmed operations
+rather than fields of one form, and the settings screens already open straight
+into their editors.
+
 **An action's outcome is shown on the screen the caller lands on** (issue
 #680). With redraw-in-place on, a line written just before a screen redraws
 is erased by that redraw's clear. So an action does not write its outcome
@@ -15075,6 +15098,38 @@ affects nothing but the claiming node's own content. Rejecting a chain that
 claims a key another identity already holds was considered and not done: the
 receiver cannot know every identity's keys, so the rule could not be enforced
 consistently, and attributing by signer already makes the claim harmless.
+
+### Issue #1081 — a console resource opens on its own fields — decided
+
+The first field test's SysOp had to press `[E]dit` on every board, area and
+channel before changing anything, one extra screen on the most common path.
+Normative description: §3.5.
+
+**Decision 1 — one screen, still a draft** (the maintainer's decision).
+Changes wait for `[S]ave`. Rejected: saving each field as it changes, the way
+the Profile does. A resource's fields are checked together (a blank name, a
+door's executable against its arguments), a Linked board's or area's name and
+description travel to its peers once per save, the moderation log keeps one
+entry per save, and with the cursor resting on a live field a stray Enter or
+arrow key would change a resource at once.
+
+**Decision 2 — fields by the cursor, actions by their keys.** On every one of
+these screens a field letter collided with an action letter (on a board, `D`
+was Description and Down, `R` Read level and Remove, `P` Pinned and Pending
+posts; on a door `S` was Save and Start service). Rejected: keeping field
+letters and moving the actions to a second page, which adds a keystroke to
+every action instead of removing one from every edit.
+
+**Decision 3 — a changed draft hides the actions.** While the draft differs
+from what is stored only `[S]ave` and `[B]ack` are offered. Otherwise `[U]p`,
+`[L]ink` or `[S]tart service` would act on a resource whose screen shows
+values that are not stored yet, and on a door `[S]` would mean two things.
+
+**Decision 4 — six screens, no more.** Accounts keep their screen: each key
+there is a separate, confirmed operation with its own log entry, not a field
+of one form. The settings screens already open into their editors, and the
+network and login limits screen is a hub of six groups that would not fit
+80x24 as one form.
 
 ### SFTP over the SSH transport — declined
 
