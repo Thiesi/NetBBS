@@ -1466,6 +1466,9 @@ async def _show_area(
         describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
         queued = await _queue_count()
         await session.write_line(f"\r\n{heading}")
+        gates_note = _gates_note(session, area_gates, unicode_style=unicode_style)
+        if gates_note:
+            await session.write_line(gates_note)
         await session.write_line(f"\r\n{state}")
         await session.write_line(
             f"\r\n{_menu_row(_empty_hints(), width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"

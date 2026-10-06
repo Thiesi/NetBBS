@@ -192,3 +192,15 @@ def test_entering_a_gated_channel_shows_its_gates(db, lane, alice):
 def test_entering_an_open_channel_shows_no_gate_line(db, lane, alice):
     channel = create_channel(db, "general", creator=alice)
     assert "Requires:" not in _chat(db, lane, channel, alice)
+
+
+def test_a_redrawn_empty_gated_file_area_keeps_its_gates(db, lane, alice):
+    """Ctrl-L, an upload and a transfer link redraw the empty area in its
+    own loop (`_still_empty`); the gate line comes back with it (review
+    on #1107)."""
+    from netbbs.net.file_flow import REDRAW_KEY
+
+    area = create_file_area(db, "pens", creator=alice, min_write_level=30)
+    session = AreaSession([REDRAW_KEY, "b"])
+    asyncio.run(file_flow._show_area(session, lane, area, alice))
+    assert strip_ansi("".join(session.written)).count("Requires: level 30+ to upload") == 2
