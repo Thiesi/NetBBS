@@ -97,11 +97,26 @@ def test_a_utf8_terminal_gets_bright_backgrounds_not_blink():
     assert ";5;" not in out and "[5m" not in out
 
 
-def test_a_cp437_terminal_gets_ctermss_bright_background_mode_around_the_art():
+def test_a_cp437_terminal_gets_ctermss_ice_modes_and_keeps_them():
+    """Issue #1083 finding 6: SyncTERM blinked. CTerm stores a bright
+    background as the blink attribute, so mode 33 alone still blinks
+    (mode 35 turns blinking off), and switching the modes off after the art
+    turned the cells already drawn back into blinking ones. Both modes go
+    on once and stay on."""
     out = _sent(CP437, f"{ESC}[0;5;44mNIB{ESC}[0m")
-    assert out.startswith(f"{ESC}[?33h")
-    assert f"{ESC}[?33l" in out
+    assert out.startswith(f"{ESC}[?33h{ESC}[?35h")
+    assert "?33l" not in out and "?35l" not in out
     assert f"{ESC}[0;104m" in out
+
+
+def test_ctermss_ice_modes_are_sent_once_per_session():
+    from netbbs.net.session import write_art_text
+
+    session = _Session(CP437)
+    for _ in range(3):
+        asyncio.run(write_art_text(session, f"{ESC}[0;5;44mNIB{ESC}[0m"))
+    sent = "".join(session.sent)
+    assert sent.count(f"{ESC}[?33h") == 1 and sent.count(f"{ESC}[?35h") == 1
 
 
 def test_art_without_bright_backgrounds_gets_no_mode_switch():
