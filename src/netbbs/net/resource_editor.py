@@ -757,17 +757,21 @@ async def edit_resource_draft(
         # name" -- is shown on this redraw, where `field_message` goes, instead
         # of having been written above a screen this very redraw clears. Taken
         # here, before the fit-check, so the rows it needs are budgeted for.
+        # Shown on this redraw only: a resource's own screen (`detail`) stays
+        # up after a save or an action, and its next redraw must not repeat
+        # an outcome already read.
+        shown_message = field_message
         if notices is not None:
             announced = list(notices())
             if announced:
-                field_message = "\r\n".join([*announced, *([field_message] if field_message else [])])
+                shown_message = "\r\n".join([*announced, *([field_message] if field_message else [])])
         base_fixed_lines = (
             header_lines
             + 1  # blank line before the menu row
             + help_row  # "(Ctrl-H for help...)" hint
             + 1  # "Choice: " prompt line
             + (1 if redraw_hint and redraw_count >= 1 and detail_state is None else 0)
-            + (wrap_terminal_text(field_message, width).count("\r\n") + 1 if field_message else 0)
+            + (wrap_terminal_text(shown_message, width).count("\r\n") + 1 if shown_message else 0)
             + hint_lines
         )
         after_lines = wrap_terminal_text(after_text, width).count("\r\n") + 1 if after_text else 0
@@ -840,8 +844,8 @@ async def edit_resource_draft(
             tail_blocks.append(colored(
                 _detail_hint(unicode_style, with_help=any(f.help for f in fields)), fg_color=MUTED_COLOR,
             ))
-        if field_message:
-            tail_blocks.append(field_message)
+        if shown_message:
+            tail_blocks.append(shown_message)
         if help_row:
             # Only hinted when at least one field actually has help
             # authored -- otherwise Ctrl-H would be an undiscoverable
