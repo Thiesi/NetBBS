@@ -1496,34 +1496,6 @@ async def _write_banner_menu(
     await session.write_line(colored(help_text, fg_color=MUTED_COLOR))
 
 
-def _description_field(description: str | None) -> Field:
-    if description:
-        return Field("Description", description)
-    return Field("Description", "(none)", color=MUTED_COLOR)
-
-
-def _inheritable(level: int | None) -> str:
-    return str(level) if level is not None else "inherit"
-
-
-def _age_gate_value(min_age: int | None, age_requirement: str | None) -> int | str | None:
-    """A minimum age as a detail screen shows it, with how it is checked
-    (issue #1082): "18", or "18, verified only"."""
-    if min_age is not None and age_requirement == VERIFIED_AGE:
-        return f"{min_age}, verified only"
-    if min_age is None and age_requirement == VERIFIED_AGE:
-        return "inherit, verified only"
-    return min_age
-
-
-def _gate_field(label: str, value: int | str | None) -> Field:
-    """An access gate reads in `GATE_COLOR` when set -- the same orange the
-    resource pickers' own GATES column uses -- and muted when absent."""
-    if value is None or value == "":
-        return Field(label, "none", color=MUTED_COLOR)
-    return Field(label, str(value), color=GATE_COLOR)
-
-
 def _quarantine_distance_text(explanation: dict) -> str:
     """How far a dimension's remote reports are from the two-domain
     quarantine threshold, in words (issue #752): "1 of 2 domains, weight 1.0
@@ -19585,15 +19557,6 @@ def _place_label(place: int, total: int, *, pinned: bool) -> str:
     those in the same category and Community, pinned ones apart. It replaced
     the "Pinned" row, which it now says, so the screen gained no row."""
     return f"{place + 1} of {total}" + (", pinned first" if pinned else "")
-
-
-def _move_entries(place: int, total: int) -> list[MenuEntry]:
-    """`[U]p`/`[D]own` for a board or area (issue #839), each offered only
-    where it can move, as on a Community's screen."""
-    return [
-        *([MenuEntry(label=menu_key("U", "p"), brief="Earlier in the callers' list")] if place > 0 else []),
-        *([MenuEntry(label=menu_key("D", "own"), brief="Later in the callers' list")] if place < total - 1 else []),
-    ]
 
 
 async def _board_detail_screen(

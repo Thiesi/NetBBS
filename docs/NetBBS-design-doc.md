@@ -1096,7 +1096,8 @@ changes it discards typed work, which can't be undone, so it is the
 hotkey-chosen, destructive action the yes/no rule above allows a question for,
 the same "Discard unsaved changes?" every draft editor asks. On a Linked
 resource this node is not the origin of, a field the origin controls is shown
-in place, read-only, labelled "set by origin". Creating a resource uses the
+in place, read-only, labelled "set by origin" (today no field is: a node
+edits its own presentation of a carried resource). Creating a resource uses the
 same screen with an empty draft and no actions. Account screens, settings
 screens and caller-side editing (a post, a file description, the Profile) are
 unchanged: an account's keys are separate, individually confirmed operations
