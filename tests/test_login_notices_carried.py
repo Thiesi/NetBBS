@@ -16,6 +16,8 @@ import asyncio
 
 import pytest
 
+from netbbs.rendering import strip_ansi
+
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import create_channel
@@ -134,7 +136,7 @@ def test_invitations_survive_the_redraw_in_place_clear(db):
 
     session = _login(db, bob, FakeSession())
 
-    assert "You have 1 pending chat channel invitation -- [I]nvitations to see it." in session.first_menu()
+    assert "You have 1 pending chat channel invitation -- [I]nvitations to see it." in strip_ansi(session.first_menu())
     assert session.output.count(_INVITES) == 1
 
 
