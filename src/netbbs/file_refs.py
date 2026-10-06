@@ -351,7 +351,9 @@ def refs_some_readers_cannot_open(db: Database, refs: list[FileRef], resource) -
     gone already is left out; its row says so."""
     read_level = get_effective_min_read_level(db, resource)
     min_age = get_effective_min_age(db, resource) or 0
-    verified = get_effective_age_requirement(db, resource) == VERIFIED
+    # Only with an age to check: without one a requirement has no effect,
+    # so it must not make the board count as strict as a gated area.
+    verified = bool(min_age) and get_effective_age_requirement(db, resource) == VERIFIED
     narrower = []
     for ref in refs:
         row = db.connection.execute("SELECT area_id FROM files WHERE file_id = ?", (ref.file_id,)).fetchone()
