@@ -139,7 +139,7 @@ def test_logoff_and_welcome_banners_fill_their_field_slots(db):
 
     visible = _visible(session.output)
     assert "WELCOME TO Nib Quill   |" in visible
-    assert "BYE alice   FROM Nib Quill   AT level 10 |" in visible
+    assert "BYE alice   FROM Nib Quill   AT 10       |" in visible
     assert "{node" not in visible and "{user" not in visible
 
 

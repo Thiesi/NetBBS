@@ -4619,9 +4619,9 @@ def test_banner_previews_count_callers_online_as_callers_see_it(db, lane, sysop)
     from netbbs.net.logoff_banner import logoff_banner_path, set_logoff_banner_enabled
     from netbbs.net.welcome_banner import banner_path, set_welcome_banner_enabled
 
-    banner_path(db).write_bytes(b"Now: {online 12}")
+    banner_path(db).write_bytes(b"Now: {online 3} online")
     set_welcome_banner_enabled(db, True)
-    logoff_banner_path(db).write_bytes(b"Still here: {online 12}")
+    logoff_banner_path(db).write_bytes(b"Still here: {online 3} online")
     set_logoff_banner_enabled(db, True)
     node_controls = _node_controls()
     node_controls.session_registry.list_entries = lambda: [
