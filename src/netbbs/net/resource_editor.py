@@ -307,10 +307,15 @@ _SAVE_BRIEF_DETAIL = "Store the changed fields"
 _DISCARD_BRIEF_DETAIL = "Leave, discarding the changes"
 
 
-def _detail_hint(unicode_style: bool) -> str:
+def _detail_hint(unicode_style: bool, *, with_help: bool) -> str:
+    """The keys of a resource's own screen, on one row. It takes the place
+    of the "(Ctrl-H for help on these fields)" row, so a resource's screen
+    is no taller than the editor it replaced."""
     if unicode_style:
-        return "↑↓ choose · Enter change · ←→ step"
-    return "Up/Down choose, Enter change, Left/Right step"
+        hint = "↑↓ choose · Enter change · ←→ step"
+        return hint + " · Ctrl-H help" if with_help else hint
+    hint = "Up/Down choose, Enter change, Left/Right step"
+    return hint + ", Ctrl-H help" if with_help else hint
 
 
 def _field_value_lines(
@@ -733,6 +738,8 @@ async def edit_resource_draft(
                 extra_entries = [MenuEntry(label=a.menu_text, brief=a.brief) for a in detail_state.actions]
             after_text = detail_state.after_fields
         hint_lines = 1 if detail_state is not None and fields else 0
+        # On a resource's own screen the key hint carries Ctrl-H too.
+        help_row = 0 if hint_lines else (1 if any(f.help for f in fields) else 0)
         # Everything on screen except the field values and the menu row
         # itself -- both vary depending on whether this redraw ends up
         # paginated, everything here doesn't. The Ctrl-H hint is gated
@@ -755,7 +762,7 @@ async def edit_resource_draft(
         base_fixed_lines = (
             header_lines
             + 1  # blank line before the menu row
-            + (1 if any(f.help for f in fields) else 0)  # "(Ctrl-H for help...)" hint
+            + help_row  # "(Ctrl-H for help...)" hint
             + 1  # "Choice: " prompt line
             + (1 if redraw_hint and redraw_count >= 1 else 0)
             + (wrap_terminal_text(field_message, width).count("\r\n") + 1 if field_message else 0)
@@ -828,10 +835,12 @@ async def edit_resource_draft(
             value_lines = [*value_lines, *shown_after.split("\r\n")]
         tail_blocks = [f"\r\n{menu_line}"]
         if hint_lines:
-            tail_blocks.append(colored(_detail_hint(unicode_style), fg_color=MUTED_COLOR))
+            tail_blocks.append(colored(
+                _detail_hint(unicode_style, with_help=any(f.help for f in fields)), fg_color=MUTED_COLOR,
+            ))
         if field_message:
             tail_blocks.append(field_message)
-        if any(f.help for f in fields):
+        if help_row:
             # Only hinted when at least one field actually has help
             # authored -- otherwise Ctrl-H would be an undiscoverable
             # dead end advertised on every screen (issue #150's own
