@@ -19,6 +19,7 @@ both rather than two bespoke near-duplicates.
 
 from __future__ import annotations
 
+from netbbs.rendering.menu import continue_prompt
 from netbbs.net.session import Session
 from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, visible_width, wrap_to_width
 
@@ -56,7 +57,7 @@ async def show_help(
         await session.write_line(colored(title, fg_color=header_color, bold=True))
         for line in lines:
             await session.write_line(line)
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.write_line(continue_prompt())
         # HELP_KEY (Ctrl-H) is a real terminal control byte, not a synthesized
         # signal -- a client's own key-repeat can queue several of it before
         # this screen ever draws. Without discarding those first, the very
@@ -100,6 +101,6 @@ async def show_help(
             await session.write_line(f"{side_border}  {wrapped}{pad}{side_border}")
     footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)
     await session.write_line(footer)
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.discard_buffered_input()
     await session.read_any_key()

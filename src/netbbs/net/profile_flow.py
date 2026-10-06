@@ -16,6 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from netbbs.rendering.menu import continue_prompt
 from netbbs.attestation import (
     AttestationError,
     ProfileFieldError,
@@ -489,7 +490,7 @@ async def _show_previous_callers_screen(
     )
     await session.write_line("\r\n" + "\r\n".join(rendered))
     await session.write_line(
-        colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
+        "\r\n" + continue_prompt()
     )
     await session.read_any_key()
     return True
@@ -622,7 +623,7 @@ async def _previous_callers_screen(
         if bar is None:
             await write_notices(session)
             await session.write_line(
-                colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR)
+                "\r\n" + continue_prompt()
             )
             await session.read_any_key()
             return
@@ -905,7 +906,7 @@ async def _last_sessions_screen(session: Session, db: Database, user: User) -> N
                 await session.write_line(
                     "    " + colored(status, fg_color=status_color)
                 )
-    await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line("\r\n" + continue_prompt())
     await session.read_any_key()
 
 
@@ -2271,7 +2272,7 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
                     await session.write_line(colored(f"Could not attest age: {exc}", fg_color=MUTED_COLOR))
                 else:
                     await session.write_line("Age attested.")
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             await _draw()
         elif choice == "n":
@@ -2287,7 +2288,7 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
                     await session.write_line(colored(f"Could not attest name: {exc}", fg_color=MUTED_COLOR))
                 else:
                     await session.write_line("Real name attested.")
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             await _draw()
         else:

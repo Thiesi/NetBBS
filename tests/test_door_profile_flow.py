@@ -49,7 +49,7 @@ def test_check_setup_directory_error_preserves_draft(failure, db, lane, player, 
     assert not session._inputs
     output = "".join(session.written)
     assert "Static checks passed" not in output
-    assert "Press any key to return to the draft" in output
+    assert "Back to the draft" in output
     if failure == "listing_error":
         assert "Cannot inspect installation directory" in output
         assert listed

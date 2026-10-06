@@ -33,6 +33,7 @@ import logging
 import os
 from dataclasses import dataclass
 
+from netbbs.age_requirement import carried_age_requirement, row_age_requirement
 from netbbs.boards.boards import usable_max_age_days
 from netbbs.files.areas import FileArea
 from netbbs.files.diz import fit_description
@@ -110,6 +111,7 @@ def link_file_area(
     default_max_file_age_days: int | None = None,
     default_min_age: int | None = None,
     default_name_requirement: str | None = None,
+    default_age_requirement: str | None = None,
 ) -> FileAreaGenesis:
     """
     Put `area` into Link scope: build and sign a `file_area_genesis`
@@ -143,6 +145,7 @@ def link_file_area(
         default_max_file_age_days=default_max_file_age_days,
         default_min_age=default_min_age,
         default_name_requirement=default_name_requirement,
+        default_age_requirement=default_age_requirement,
     )
 
     db.connection.execute(
@@ -164,6 +167,7 @@ def _file_area_from_row(row) -> FileArea:
         category_id=row["category_id"], pinned=bool(row["pinned"]), created_at=row["created_at"],
         moderated=bool(row["moderated"]), max_file_age_days=row["max_file_age_days"],
         min_age=row["min_age"], name_requirement=row["name_requirement"], community_id=row["community_id"],
+        age_requirement=row_age_requirement(row),
     )
 
 
@@ -241,6 +245,13 @@ def materialize_carried_file_area(
             json.dumps(genesis.to_dict()),
         ),
     )
+    # Issue #1082: written apart from the INSERT, which stays valid on every
+    # schema a carried row can be written on.
+    if carried_age_requirement(payload) is not None:
+        db.connection.execute(
+            "UPDATE file_areas SET age_requirement = ? WHERE area_id = ?",
+            (carried_age_requirement(payload), payload["area_id"]),
+        )
     # Issue #683: `commit=False` lets `netbbs.link.carry` write this and the
     # carry decision it belongs with in one transaction.
     if commit:

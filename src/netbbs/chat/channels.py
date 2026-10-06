@@ -20,6 +20,7 @@ from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
 from netbbs.moderation import ChannelPermission, has_permission, record_action
 from netbbs.storage.database import Database
+from netbbs.age_requirement import UNCHANGED, check_age_requirement, row_age_requirement, store_age_requirement
 from netbbs.timeutil import utc_now_iso
 
 
@@ -78,6 +79,10 @@ class Channel:
     # note in netbbs.storage.migrations for why that field was left out
     # of scope rather than invented.
     community_id: int | None
+    # How `min_age` accepts an age (issue #1082, `netbbs.age_requirement`):
+    # None inherits the Community's default, "verified" wants an age
+    # attestation rather than a self-entered birthdate.
+    age_requirement: str | None = None
 
 
 def create_channel(
@@ -94,6 +99,7 @@ def create_channel(
     min_age: int | None = None,
     name_requirement: str | None = None,
     community_id: int | None = None,
+    age_requirement: str | None = None,
     creator: User,
 ) -> Channel:
     """Create a new local channel. No permission check on creation here —
@@ -124,6 +130,7 @@ def create_channel(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
+    check_age_requirement(age_requirement, ChannelError)
     _refuse_reserved_name(name)
     created_at = utc_now_iso()
     channel_id = compute_content_id(
@@ -149,6 +156,10 @@ def create_channel(
                 community_id,
             ),
         )
+        if age_requirement is not None:
+            db.connection.execute(
+                "UPDATE channels SET age_requirement = ? WHERE channel_id = ?", (age_requirement, channel_id)
+            )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):
@@ -246,6 +257,7 @@ def update_channel(
     min_age: int | None,
     name_requirement: str | None,
     community_id: int | None,
+    age_requirement=UNCHANGED,
     changed_by: User,
 ) -> Channel:
     """
@@ -265,6 +277,8 @@ def update_channel(
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
+    if age_requirement is not UNCHANGED:
+        check_age_requirement(age_requirement, ChannelError)
     if name != channel.name:
         _refuse_reserved_name(name)
     try:
@@ -282,6 +296,8 @@ def update_channel(
                 min_age, name_requirement, community_id, channel.id,
             ),
         )
+        if age_requirement is not UNCHANGED:
+            store_age_requirement(db, "channels", channel.id, age_requirement)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         if _name_held_by_hidden(db, name):
@@ -387,4 +403,5 @@ def _row_to_channel(row: sqlite3.Row) -> Channel:
         min_age=row["min_age"],
         name_requirement=row["name_requirement"],
         community_id=row["community_id"],
+        age_requirement=row_age_requirement(row),
     )

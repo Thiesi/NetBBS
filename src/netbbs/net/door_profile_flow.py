@@ -7,6 +7,7 @@ import shlex
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from netbbs.rendering.menu import continue_prompt
 from netbbs.doors.profiles import (ADAPTERS, DoorProfile, ProfileError, preflight, profile_advisories,
                                     read_profile_file)
 from netbbs.doors.registry import DoorError, update_door
@@ -40,9 +41,9 @@ async def _problem(session, text):
     await session.write_line(colored("  " + sanitize_text(text), fg_color=ERROR_COLOR))
 
 
-async def _pause(session, text="Press any key to return to the draft."):
+async def _pause(session, action="Back to the draft"):
     await session.write_line("")
-    await session.write_line(colored(text, fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt(action))
     await session.read_any_key()
 
 
@@ -290,4 +291,4 @@ async def show_door_diagnostic(session, lane, door):
         await session.write_line(colored(sanitize_text(text), fg_color=VALUE_COLOR))
     else:
         await session.write_line(colored("  No diagnostic output from the last run.", fg_color=MUTED_COLOR))
-    await _pause(session, "Press any key to return.")
+    await _pause(session, "Back")

@@ -4071,4 +4071,24 @@ MIGRATIONS = [
          WHERE route = 'pull';
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1082: a minimum age can require a verified age. `age_requirement` on "
+            "boards, channels and file areas, and `default_age_requirement` on Communities, "
+            "shaped like `name_requirement`: NULL inherits the Community's default and, with "
+            "nothing to inherit, keeps today's rule (a self-entered birthdate is accepted when "
+            "there is no age attestation); 'verified' accepts only an age attestation. Every "
+            "existing gate is NULL on upgrade, so none changes meaning."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN age_requirement TEXT
+            CHECK (age_requirement IN ('verified') OR age_requirement IS NULL);
+        ALTER TABLE channels ADD COLUMN age_requirement TEXT
+            CHECK (age_requirement IN ('verified') OR age_requirement IS NULL);
+        ALTER TABLE file_areas ADD COLUMN age_requirement TEXT
+            CHECK (age_requirement IN ('verified') OR age_requirement IS NULL);
+        ALTER TABLE communities ADD COLUMN default_age_requirement TEXT
+            CHECK (default_age_requirement IN ('verified') OR default_age_requirement IS NULL);
+        """,
+    ),
 ]
