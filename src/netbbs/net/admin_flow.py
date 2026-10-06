@@ -813,6 +813,7 @@ from netbbs.rendering import (
     AUTHOR_COLOR,
     CLOCK_COLOR,
     DATE_COLOR,
+    EMPHASIS_COLOR,
     ERROR_COLOR,
     GATE_COLOR,
     HEADER_COLOR,
@@ -837,6 +838,8 @@ from netbbs.rendering import (
     decode_banner_bytes,
     double_frame,
     gradient_text,
+    highlight_hotkeys,
+    highlight_report,
     menu_grid,
     menu_key,
     nearest_256,
@@ -1181,8 +1184,20 @@ def _announce_line(session: Session, line: str) -> None:
             color = MUTED_COLOR
         else:
             color = SUCCESS_COLOR
-        line = colored(line, fg_color=color)
+        # A key the outcome mentions stands out as a menu key (issue #1083).
+        line = highlight_hotkeys(line, color=color)
     _notices.announce_styled(session, line)
+
+
+def _announce_saved(session: Session, lead: str, path: object, tail: str) -> None:
+    """An outcome that names the file it saved: `lead` and `tail` in the
+    success colour, the path in the value colour so it reads as the thing
+    saved, and a key the tail mentions highlighted (issue #1083)."""
+    _notices.announce_styled(
+        session,
+        colored(lead, fg_color=SUCCESS_COLOR) + colored(str(path), fg_color=VALUE_COLOR)
+        + highlight_hotkeys(tail, color=SUCCESS_COLOR),
+    )
 
 
 def _announce_styled(session: Session, line: str) -> None:
@@ -1573,8 +1588,11 @@ def _banner_status_section(
         else Field("On disk", "missing", color=ERROR_COLOR if status.enabled else MUTED_COLOR),
     ]
     if sauce is not None:
-        credit = "".join(ch for ch in sauce.credit if ch.isprintable())
-        fields.append(Field("Art", credit or "(no credit in its SAUCE record)", color=VALUE_COLOR if credit else MUTED_COLOR))
+        credit = _styled_credit(sauce)
+        fields.append(
+            Field("Art", credit, styled=True) if credit
+            else Field("Art", "(no credit in its SAUCE record)", color=MUTED_COLOR)
+        )
         if sauce.width is not None:
             fields.append(Field("Drawn for", f"{sauce.width} columns; narrower terminals get {too_wide}", color=VALUE_COLOR))
         if not sauce.font_is_cp437:
@@ -1585,6 +1603,24 @@ def _banner_status_section(
     if credit_line is not None:
         fields.append(Field("Credit line", "shown under the banner" if credit_line else "off", color=VALUE_COLOR if credit_line else MUTED_COLOR))
     return Section("Status", fields)
+
+
+def _styled_credit(sauce: Sauce) -> str:
+    """A SAUCE credit for the console (issue #1083): the title in the
+    emphasis colour, the author and group in the colour for a credited
+    person, the joining words muted. Empty when the record names nobody."""
+    def clean(text: str) -> str:
+        return sanitize_text("".join(ch for ch in text if ch.isprintable()))
+
+    title, author, group = clean(sauce.title), clean(sauce.author), clean(sauce.group)
+    who = [colored(part, fg_color=AUTHOR_COLOR) for part in (author, group) if part]
+    parts = []
+    if title:
+        parts.append(colored(title, fg_color=EMPHASIS_COLOR, bold=True))
+    if title and who:
+        parts.append(colored(" by ", fg_color=MUTED_COLOR))
+    parts.append(colored("/", fg_color=MUTED_COLOR).join(who))
+    return "".join(parts)
 
 
 def _toggle_welcome_banner_credit(db: Database, actor: User) -> bool:
@@ -14305,7 +14341,7 @@ async def _edit_welcome_banner_screen(session: Session, lane: DatabaseLane, acto
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_welcome_banner", detail=str(path))
-    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_saved(session, "Saved ", path, ". Use [P]review to verify it looks right.")
 
 
 async def _preview_apply_choice(session: Session, label: str) -> bool:
@@ -14387,7 +14423,7 @@ async def _welcome_banner_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Applied and enabled. Saved to ", path, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -14722,7 +14758,7 @@ async def _welcome_banner_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Loaded and enabled. Saved to ", target, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -14920,20 +14956,20 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
     # Enabled and mode are separate switches: [D]isable leaves the mode
     # alone, so say plainly when callers won't see this art at all.
     if not enabled:
-        await session.write_line(colored(
-            "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+        await session.write_line(highlight_hotkeys(
+            "Callers don't see this art yet: it's switched off. Use [E]nable.", color=WARNING_COLOR
         ))
     if mode != SLOTS_MODE:
-        await session.write_line(colored(
+        await session.write_line(highlight_hotkeys(
             "Callers see this above the menu, not as it: [M]ode changes that.",
-            fg_color=WARNING_COLOR,
+            color=WARNING_COLOR,
         ))
     if art is None:
         await session.write_line("No usable art file. Apply a gallery sample, upload one, or draw one first.")
     else:
-        await session.write_line(f"Art: {art.width} columns, {art.height} rows.")
+        await session.write_line(highlight_report(f"Art: {art.width} columns, {art.height} rows.", color=VALUE_COLOR))
         for line in describe_slots(art) or ["No slots found."]:
-            await session.write_line(f"  {line}")
+            await session.write_line(highlight_report(f"  {line}", color=VALUE_COLOR))
         if art.items:
             await session.write_line("Drawn items:")
             for item, line in zip(art.items, describe_items(art)):
@@ -14953,7 +14989,7 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
             for label, level in (("Your menu", None), ("A level-0 caller's menu", 0)):
                 plan = await lane.run(lambda db, level=level: slot_menu_preview(session, db, actor, art, level=level))
                 if plan.text is not None:
-                    await session.write_line(colored(f"  {label}: fits.", fg_color=SUCCESS_COLOR))
+                    await session.write_line(_fits_line(label, ""))
                     for line in _drawn_item_outcome(plan):
                         await session.write_line(f"    {line}")
                 else:
@@ -14962,6 +14998,15 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
                     )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
+
+
+def _fits_line(label: str, details: str) -> str:
+    """A check's "fits" verdict (issue #1083): the verdict in the success
+    colour and the numbers after it emphasised, not one flat green line."""
+    return (
+        colored(f"  {label}: ", fg_color=VALUE_COLOR) + colored("fits", fg_color=SUCCESS_COLOR, bold=True)
+        + highlight_report(f"{details}.", color=VALUE_COLOR)
+    )
 
 
 def _drawn_item_outcome(plan) -> list[str]:
@@ -15008,8 +15053,8 @@ async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, acto
         # The art clears the screen, so what is being shown is said below it.
         await _write_slot_art_preview(session, lane, actor, art, level=level)
         if not enabled:
-            await session.write_line(colored(
-                "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+            await session.write_line(highlight_hotkeys(
+                "Callers don't see this art yet: it's switched off. Use [E]nable.", color=WARNING_COLOR
             ))
         await session.write_line(colored(f"(the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
@@ -15071,7 +15116,7 @@ async def _edit_main_menu_banner_screen(session: Session, lane: DatabaseLane, ac
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_main_menu_banner", detail=str(path))
-    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_saved(session, "Saved ", path, ". Use [P]review to verify it looks right.")
 
 
 async def _main_menu_banner_gallery_screen(
@@ -15123,7 +15168,7 @@ async def _main_menu_banner_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Applied and enabled. Saved to ", path, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -15196,7 +15241,7 @@ async def _main_menu_banner_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Loaded and enabled. Saved to ", target, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -15449,7 +15494,7 @@ async def _edit_logoff_banner_screen(session: Session, lane: DatabaseLane, actor
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_logoff_banner", detail=str(path))
-    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_saved(session, "Saved ", path, ". Use [P]review to verify it looks right.")
 
 
 async def _logoff_banner_gallery_screen(
@@ -15492,7 +15537,7 @@ async def _logoff_banner_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Applied and enabled. Saved to ", path, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -15563,7 +15608,7 @@ async def _logoff_banner_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Loaded and enabled. Saved to ", target, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -15723,7 +15768,7 @@ async def _edit_new_account_banner_before_screen(session: Session, lane: Databas
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_new_account_banner_before", detail=str(path))
-    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_saved(session, "Saved ", path, ". Use [P]review to verify it looks right.")
 
 
 async def _new_account_banner_before_gallery_screen(
@@ -15768,7 +15813,7 @@ async def _new_account_banner_before_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Applied and enabled. Saved to ", path, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -15841,7 +15886,7 @@ async def _new_account_banner_before_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Loaded and enabled. Saved to ", target, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -16001,7 +16046,7 @@ async def _edit_new_account_banner_after_screen(session: Session, lane: Database
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_new_account_banner_after", detail=str(path))
-    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_saved(session, "Saved ", path, ". Use [P]review to verify it looks right.")
 
 
 async def _new_account_banner_after_gallery_screen(
@@ -16046,7 +16091,7 @@ async def _new_account_banner_after_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Applied and enabled. Saved to ", path, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -16119,7 +16164,7 @@ async def _new_account_banner_after_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Loaded and enabled. Saved to ", target, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -16304,19 +16349,19 @@ async def _check_list_slot_art_screen(session: Session, lane: DatabaseLane, acto
     ))
     await session.write_line(colored(f"\r\nChecking the {what} art for slots:", fg_color=MUTED_COLOR))
     if not enabled:
-        await session.write_line(colored(
-            "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
+        await session.write_line(highlight_hotkeys(
+            "Callers don't see this art yet: it's switched off. Use [E]nable.", color=WARNING_COLOR
         ))
     if mode != LIST_SLOTS_MODE:
-        await session.write_line(colored(
-            "Callers see this above the list, not as it: [M]ode changes that.", fg_color=WARNING_COLOR
+        await session.write_line(highlight_hotkeys(
+            "Callers see this above the list, not as it: [M]ode changes that.", color=WARNING_COLOR
         ))
     if art is None:
         await session.write_line("No usable art file. Apply a gallery sample, upload one, or draw one first.")
     else:
-        await session.write_line(f"Art: {art.width} columns, {art.height} rows.")
+        await session.write_line(highlight_report(f"Art: {art.width} columns, {art.height} rows.", color=VALUE_COLOR))
         for line in describe_slots(art) or ["No slots found."]:
-            await session.write_line(f"  {line}")
+            await session.write_line(highlight_report(f"  {line}", color=VALUE_COLOR))
         if art.problems:
             for problem in art.problems:
                 await session.write_line(colored(f"  Problem: {problem}", fg_color=ERROR_COLOR))
@@ -16328,9 +16373,9 @@ async def _check_list_slot_art_screen(session: Session, lane: DatabaseLane, acto
             ):
                 reason = _list_art_fits(session, art, column_width)
                 if reason is None:
-                    await session.write_line(colored(
-                        f"  {label}: fits, {art.list.height} entries a page, names up to "
-                        f"{list_name_width(art.list, column_width)} columns.", fg_color=SUCCESS_COLOR,
+                    await session.write_line(_fits_line(
+                        label, f", {art.list.height} entries a page, names up to "
+                        f"{list_name_width(art.list, column_width)} columns",
                     ))
                 else:
                     await session.write_line(
@@ -16556,7 +16601,7 @@ async def _edit_board_list_masthead_screen(session: Session, lane: DatabaseLane,
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_board_list_banner", detail=str(path))
-    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_saved(session, "Saved ", path, ". Use [P]review to verify it looks right.")
 
 
 async def _board_list_masthead_gallery_screen(
@@ -16601,7 +16646,7 @@ async def _board_list_masthead_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Applied and enabled. Saved to ", path, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -16674,7 +16719,7 @@ async def _board_list_masthead_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Loaded and enabled. Saved to ", target, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -16856,7 +16901,7 @@ async def _edit_file_area_masthead_screen(session: Session, lane: DatabaseLane, 
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_file_area_banner", detail=str(path))
-    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_saved(session, "Saved ", path, ". Use [P]review to verify it looks right.")
 
 
 async def _file_area_masthead_gallery_screen(
@@ -16901,7 +16946,7 @@ async def _file_area_masthead_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Applied and enabled. Saved to ", path, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -16972,7 +17017,7 @@ async def _file_area_masthead_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Loaded and enabled. Saved to ", target, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -17158,7 +17203,7 @@ async def _edit_chat_channel_picker_masthead_screen(session: Session, lane: Data
 
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_chat_channel_picker_banner", detail=str(path))
-    _announce_line(session, f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+    _announce_saved(session, "Saved ", path, ". Use [P]review to verify it looks right.")
 
 
 async def _chat_channel_picker_masthead_gallery_screen(
@@ -17207,7 +17252,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
             return path
 
         path = await lane.run(_apply)
-        _announce_line(session, f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Applied and enabled. Saved to ", path, ". Use [P]review to verify it looks right.")
         return
 
 
@@ -17280,7 +17325,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
             return target
 
         target = await lane.run(_apply)
-        _announce_line(session, f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        _announce_saved(session, "Loaded and enabled. Saved to ", target, ". Use [P]review to verify it looks right.")
         return
 
 

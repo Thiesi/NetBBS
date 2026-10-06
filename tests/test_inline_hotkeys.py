@@ -5,11 +5,12 @@ choices in running text -- "[S]ave, [D]iscard, or [C]ancel?" -- used to
 write the brackets as plain text, so the keys to press did not stand out.
 `highlight_hotkeys` colours the bracketed keys of such text the same way.
 
-Keys *mentioned* in explanatory prose (a notice saying "Use [P]review to
-check it", a help page) stay plain, the way the help screens render them;
-only text that offers its keys as the answer to the prompt on screen is
-highlighted. The guard at the bottom keeps new prompts and key legends from
-writing bare hotkeys again.
+Issue #1083 widened this: a key *mentioned* in an outcome or a report ("Use
+[P]review to verify it looks right.") is highlighted too, by the notice
+helpers themselves (`netbbs.net.notices.announce`, the console's
+`_announce_line`) and `highlight_report`; see tests/test_message_colour.py.
+Help pages still write keys plain. The guard at the bottom keeps new prompts
+and key legends from writing bare hotkeys again.
 """
 
 from __future__ import annotations
@@ -107,9 +108,9 @@ _PROMPT_CALLS = {"write_prompt", "prompt_yes_no", "read_line", "read_line_with_c
 _LABEL_CALLS = {"MenuEntry"}
 _HIGHLIGHTERS = {"highlight_hotkeys", "menu_key"}
 
-# Category (b): text that *mentions* a key rather than offering it, or that
-# is not drawn on a caller's screen at all. The admin CLI prints to a plain
-# console and the managed-DNS updater writes to the log.
+# Text not drawn on a caller's screen at all: the admin CLI prints to a plain
+# console and the managed-DNS updater writes to the log. (Outcomes that mention
+# a key are highlighted by the notice helpers, issue #1083.)
 _PLAIN_BY_DESIGN = {"admin/__main__.py", "managed_dns/updater.py"}
 
 

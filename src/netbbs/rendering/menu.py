@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 
 from netbbs.rendering.ansi import colored
-from netbbs.rendering.theme import MENU_KEY_COLOR
+from netbbs.rendering.theme import EMPHASIS_COLOR, MENU_KEY_COLOR
 
 Color = int | tuple[int, int, int]
 
@@ -73,9 +73,10 @@ def highlight_hotkeys(text: str, *, color: Color | None = None) -> str:
     key's reset would otherwise drop the rest of the text back to the
     terminal's default.
 
-    Only for text whose keys answer what is on screen. A key merely
-    mentioned in prose ("use [P]review to check it") stays plain, the way
-    the help screens write keys."""
+    Also for a key a message mentions ("Use [P]review to verify it looks
+    right."): issue #1083 reversed #974's choice to leave those plain, so a
+    result or a report shows the key to press where the eye already is.
+    Help pages still write their keys plain."""
     parts: list[str] = []
     position = 0
     for match in _BRACKETED_KEY.finditer(text):
@@ -92,3 +93,26 @@ def highlight_hotkeys(text: str, *, color: Color | None = None) -> str:
 
 def _in_color(text: str, color: Color | None) -> str:
     return colored(text, fg_color=color) if color is not None and text else text
+
+
+# A key, or a number: "12", "3.5", "1,024", "38x10" (two numbers).
+_REPORT_TOKEN = re.compile(r"\[([A-Za-z0-9])\]|\d+(?:[.,]\d+)*")
+
+
+def highlight_report(text: str, *, color: Color | None = None) -> str:
+    """A report line (a check's verdict, a slot's size) in `color`, with
+    its keys highlighted as `highlight_hotkeys` does and every number in
+    the emphasis colour (issue #1083), so "fits, 12 entries a page, names
+    up to 60 columns" reads at a glance rather than as one flat line."""
+    parts: list[str] = []
+    position = 0
+    for match in _REPORT_TOKEN.finditer(text):
+        parts.append(_in_color(text[position:match.start()], color))
+        if match.group(1) is not None:
+            key = colored(match.group(1), fg_color=MENU_KEY_COLOR, bold=True)
+            parts.append(_in_color("[", color) + key + _in_color("]", color))
+        else:
+            parts.append(colored(match.group(0), fg_color=EMPHASIS_COLOR, bold=True))
+        position = match.end()
+    parts.append(_in_color(text[position:], color))
+    return "".join(parts)
