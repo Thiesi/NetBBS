@@ -674,6 +674,12 @@ async def edit_resource_draft(
     # order sections first appear in `fields`, the same order the value
     # list and menu row already group by.
     section_names: list[str] = list(dict.fromkeys(f.section for f in fields if f.section is not None))
+
+    def help_selected() -> int | None:
+        # On a resource's own screen the cursor never leaves the fields, so
+        # narrowing Ctrl-H to the highlighted one would make the help for
+        # every other field unreachable; it shows them all (issue #1081).
+        return None if detail_state is not None else selected
     current_page: str | None = section_names[0] if section_names else None
     while True:
         width, height = session.terminal_width, session.terminal_height
@@ -934,7 +940,7 @@ async def edit_resource_draft(
             continue
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_field_help(
-                session, fields, selected=selected, header_color=header_color, unicode_style=unicode_style,
+                session, fields, selected=help_selected(), header_color=header_color, unicode_style=unicode_style,
             )
             continue
         if key.kind == EditorKeyKind.CTRL and key.char == "c":
@@ -1000,7 +1006,7 @@ async def edit_resource_draft(
         # for a session that can't decode arrows at all.
         if choice == HELP_KEY:
             await _show_field_help(
-                session, fields, selected=selected, header_color=header_color, unicode_style=unicode_style,
+                session, fields, selected=help_selected(), header_color=header_color, unicode_style=unicode_style,
             )
             continue
         if choice == back_hotkey or choice == CANCEL_KEY:

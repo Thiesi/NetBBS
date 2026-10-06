@@ -3837,7 +3837,7 @@ def test_create_and_delete_board_category_flow(db, lane, sysop):
 
     inputs = [
         "m", "c", "m", "c",
-        "n", "Vintage", "d", "Old computers", "s",  # draft editor: name, description, save
+        "ENTER", "Vintage", "DOWN", "ENTER", "Old computers", "s",  # cursor: name, description, save
         "l", "0", "1", "r", "Vintage",  # the category's screen: [R]emove
         "b", "b", "b", "b",
     ]
@@ -3895,9 +3895,9 @@ def test_create_sub_category_via_the_parent_picker(db, lane, sysop):
 
     inputs = [
         "m", "c", "m",
-        "c", "n", "Vintage", "s",
-        # second create: [P]arent picker lists "(none)" first, Vintage second
-        "c", "n", "Amiga", "p", "0", "2", "s",
+        "c", "ENTER", "Vintage", "s",
+        # second create: the Parent picker lists "(none)" first, Vintage second
+        "c", "ENTER", "Amiga", "DOWN", "DOWN", "ENTER", "0", "2", "s",
         "b", "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -3917,7 +3917,7 @@ def test_create_category_blank_name_is_rejected_at_save_and_the_draft_survives(d
     # and saving again succeeds. Then a second create backs out.
     session = FakeSession([
         "m", "c", "m",
-        "c", "d", "Old computers", "s", "n", "Vintage", "s",
+        "c", "DOWN", "ENTER", "Old computers", "s", "UP", "ENTER", "Vintage", "s",
         "c", "b",
         "b", "b", "b", "b",
     ])
@@ -4188,7 +4188,7 @@ def test_create_and_delete_channel_category_flow(db, lane, sysop):
 
     inputs = [
         "m", "c", "c", "c",
-        "n", "Vintage", "d", "Old radios", "s",  # draft editor: name, description, save
+        "ENTER", "Vintage", "DOWN", "ENTER", "Old radios", "s",  # cursor: name, description, save
         "l", "0", "1", "r", "Vintage",  # the category's screen: [R]emove
         "b", "b", "b", "b",
     ]
@@ -4260,14 +4260,11 @@ def test_create_community_ctrl_h_shows_real_help_text_for_every_field(db, lane, 
 def test_create_community_flow(db, lane, sysop):
     from netbbs.communities import list_communities
 
-    # content menu -> Communities -> create -> the shared draft editor
-    # (design doc, dogfood feature request): n(ame)/d(escription)
-    # select a field, then [S]ave -- returns to the community menu,
-    # same as every other resource kind's own create flow (no longer
-    # auto-navigates into the detail screen, since creation is no
-    # longer "lean" -- every field is already available on this one
-    # screen). back x3.
-    inputs = ["m", "o", "c", "n", "Vintage Computing", "d", "Old iron", "s", "b", "b", "b"]
+    # content menu -> Communities -> create -> the Community's own screen
+    # with an empty draft (issue #1081): the cursor starts on Name, Enter
+    # changes it, Down then Enter changes Description, then [S]ave --
+    # returns to the community menu, as every create flow does. back x3.
+    inputs = ["m", "o", "c", "ENTER", "Vintage Computing", "DOWN", "ENTER", "Old iron", "s", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -4294,14 +4291,15 @@ def test_edit_and_delete_community_flow(db, lane, sysop):
 
     create_community(db, "Politics", creator=sysop)
 
-    # content menu -> Communities -> list -> pick(01) -> e(dit): toggle
-    # Hidden via the field menu -> [S]ave -> back to detail -> r(emove)
-    # -> retype name -> back to the (now empty) list, which says so and
-    # returns to the community menu -> back x3 (community menu, content
-    # menu, admin menu). Every other field is left untouched.
+    # content menu -> Communities -> list -> pick(01): its own screen
+    # (issue #1081), cursor on Name; Down twice to Hidden, Right steps it
+    # -> [S]ave stays on the screen -> r(emove) -> retype name -> back to
+    # the (now empty) list, which says so and returns to the community
+    # menu -> back x3 (community menu, content menu, admin menu). Every
+    # other field is left untouched.
     inputs = [
-        "m", "o", "l", "0", "1", "e",
-        "h", "s",
+        "m", "o", "l", "0", "1",
+        "DOWN", "DOWN", "RIGHT", "s",
         "r", "Politics",
         "b", "b", "b",
     ]
@@ -4415,7 +4413,7 @@ def test_creating_a_category_from_the_picker_keeps_the_community_scope(db, lane,
         "u", "0", "2",
         "c",            # category field
         "c",            # [C]reate a category from the picker
-        "p",            # its [P]arent picker
+        "DOWN", "DOWN", "ENTER",  # its Parent field (cursor-chosen, issue #1081)
         "b",            # back out of the parent picker
         "b",            # back out of the create editor
         "b",            # back out of the category picker

@@ -95,9 +95,10 @@ def test_the_console_renames_and_moves_a_category(db, lane, sysop):
     board_categories.create_category(db, "Alpha", created_by=sysop)
     board_categories.create_category(db, "Beta", created_by=sysop)
 
-    # Categories, Message board categories, List, 02 (Beta), Up, Edit, Name, save, back out.
+    # Categories, Message board categories, List, 02 (Beta), Up, then its Name
+    # (the cursor starts there, issue #1081), save, back out.
     session = FakeSession([
-        "m", "c", "m", "l", "0", "2", "u", "e", "n", "Bravo", "s", "b", "b", "b", "b", "b", "b",
+        "m", "c", "m", "l", "0", "2", "u", "ENTER", "Bravo", "s", "b", "b", "b", "b", "b", "b",
     ])
     _run(session, lane, sysop)
 
@@ -156,14 +157,16 @@ def test_the_category_screen_follows_a_category_moved_under_a_parent(db, lane, s
     board_categories.create_category(db, "Retro", created_by=sysop)
     board_categories.create_category(db, "Amiga", created_by=sysop)
 
-    # List, 02 (Amiga, made second), Edit, Parent, pick Retro, Save: still Amiga's screen.
-    session = FakeSession(["m", "c", "m", "l", "0", "2", "e", "p", "0", "2", "s", "b", "b", "b", "b", "b", "b"])
+    # List, 02 (Amiga, made second), its Parent field, pick Retro, Save: still Amiga's screen.
+    session = FakeSession([
+        "m", "c", "m", "l", "0", "2", "DOWN", "DOWN", "ENTER", "0", "2", "s", "b", "b", "b", "b", "b", "b",
+    ])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
 
     # The screen drawn with the save's outcome is still Amiga's, now under Retro.
-    screen = text.split("Saved category 'Amiga'.", 1)[0].rsplit("Categories › Amiga", 1)[1]
-    assert "Retro" in screen.split("Parent:", 1)[1].splitlines()[0]
+    screen = text.split("Saved category 'Amiga'.", 1)[0]
+    assert "Retro" in screen.rsplit("Parent:", 1)[1].splitlines()[0]
 
 
 

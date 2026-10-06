@@ -610,6 +610,9 @@ from netbbs.net.resource_editor import (
     bool_step,
     choice_field,
     choice_step,
+    DetailAction,
+    DetailMode,
+    DetailState,
     edit_resource_draft as _edit_resource_draft,
     text_field,
 )
@@ -18463,39 +18466,38 @@ def _community_field_specs(
 async def _community_screen(
     session: Session, lane: DatabaseLane, actor: User, *, existing: Community | None = None
 ) -> Community | None:
-    """Unified create/edit screen -- see `_board_screen`'s own
-    docstring for the general shape and reasoning, identical here.
+    """A Community's one screen (issue #1081, design doc §3.5), and the
+    screen that creates one: its place in the callers' list above the
+    fields, the fields chosen by the cursor, and [U]p, [D]own and [R]emove
+    while nothing is waiting to be saved. Creating uses the same screen
+    with an empty draft and no actions, and returns what it created.
 
-    Unlike the old separate `_create_community_screen`/
-    `_edit_community_screen` pair, creating no longer needs to stay
-    "lean" (name/description only, with a forced follow-up trip into
-    `_community_detail_screen` to configure the rest) -- every field is
-    available immediately, at its own sensible default, on this one
-    screen, the same as board/channel/file-area creation already
-    works. No longer auto-enters the detail screen after a successful
-    create; the caller's own menu redraw is enough, matching every
-    other resource kind's own create flow.
-    """
-    if existing is not None:
-        draft = {
-            "name": existing.name, "description": existing.description, "hidden": existing.hidden,
-            "default_min_read_level": existing.default_min_read_level,
-            "default_min_write_level": existing.default_min_write_level,
-            "default_min_age": existing.default_min_age,
-            "default_name_requirement": existing.default_name_requirement,
-        }
-    else:
-        draft = {
-            "name": "", "description": None, "hidden": False,
-            "default_min_read_level": None, "default_min_write_level": None,
-            "default_min_age": None, "default_name_requirement": None,
+    Creating needs no follow-up trip to configure the rest: every field is
+    on this one screen at its own sensible default, as for boards, channels
+    and file areas."""
+    current: dict[str, Community | None] = {"community": existing}
+
+    def _draft_of(community: Community | None) -> dict:
+        if community is None:
+            return {
+                "name": "", "description": None, "hidden": False,
+                "default_min_read_level": None, "default_min_write_level": None,
+                "default_min_age": None, "default_name_requirement": None,
+            }
+        return {
+            "name": community.name, "description": community.description, "hidden": community.hidden,
+            "default_min_read_level": community.default_min_read_level,
+            "default_min_write_level": community.default_min_write_level,
+            "default_min_age": community.default_min_age,
+            "default_name_requirement": community.default_name_requirement,
         }
 
     async def save(draft: dict) -> Community:
         if not draft["name"]:
             raise CommunityError("name cannot be blank")
-        if existing is None:
-            return await lane.run(
+        community = current["community"]
+        if community is None:
+            created = await lane.run(
                 create_community,
                 draft["name"], description=draft["description"], hidden=draft["hidden"],
                 default_min_read_level=draft["default_min_read_level"],
@@ -18503,23 +18505,57 @@ async def _community_screen(
                 default_min_age=draft["default_min_age"],
                 default_name_requirement=draft["default_name_requirement"], creator=actor,
             )
-        return await lane.run(
+            _announce_line(session, f"Created Community {created.name!r}.")
+            return created
+        updated = await lane.run(
             update_community,
-            existing, name=draft["name"], description=draft["description"], hidden=draft["hidden"],
+            community, name=draft["name"], description=draft["description"], hidden=draft["hidden"],
             default_min_read_level=draft["default_min_read_level"],
             default_min_write_level=draft["default_min_write_level"],
             default_min_age=draft["default_min_age"],
             default_name_requirement=draft["default_name_requirement"], changed_by=actor,
         )
+        _announce_line(session, f"Updated {updated.name!r}.")
+        return updated
+
+    def _move(offset: int) -> Callable[[Session, DatabaseLane], Awaitable[bool]]:
+        async def run(session: Session, lane: DatabaseLane) -> bool:
+            await lane.run(move_community, current["community"], offset, moved_by=actor)
+            return False
+        return run
+
+    async def _remove(session: Session, lane: DatabaseLane) -> bool:
+        return await _delete_community_screen(session, lane, actor, current["community"])
+
+    async def refresh() -> DetailState:
+        if current["community"] is None:
+            return DetailState(draft=_draft_of(None))
+
+        def _load(db: Database) -> tuple[Community | None, list[int]]:
+            return get_community(db, current["community"].id), [c.id for c in list_communities(db)]
+
+        community, order = await lane.run(_load)
+        if community is not None:
+            current["community"] = community
+        community = current["community"]
+        place = order.index(community.id) if community.id in order else 0
+        actions = []
+        if place > 0:
+            actions.append(DetailAction("u", menu_key("U", "p"), _move(-1), brief="Earlier in the callers' list"))
+        if place < len(order) - 1:
+            actions.append(DetailAction("d", menu_key("D", "own"), _move(1), brief="Later in the callers' list"))
+        actions.append(DetailAction("r", menu_key("R", "emove"), _remove, brief="Permanently remove it"))
+        header = colored(f"Place {place + 1} of {len(order)} in the callers' Communities list", fg_color=MUTED_COLOR)
+        return DetailState(draft=_draft_of(community), header=header, actions=actions)
 
     redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
-    community = await edit_resource_draft(
+    return await edit_resource_draft(
         session, lane,
-        title="Edit Community" if existing is not None else "Create Community",
+        title=sanitize_text(existing.name) if existing is not None else "Create Community",
         fields=_community_field_specs(
             levels=await lane.run(level_context), community_id=existing.id if existing is not None else None,
         ),
-        draft=draft, save=save, error_type=CommunityError,
+        draft={}, save=save, error_type=CommunityError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
@@ -18527,11 +18563,8 @@ async def _community_screen(
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
         accent_color=await lane.run(effective_accent_color_256),
         header_color=await lane.run(effective_header_color_256),
+        detail=DetailMode(refresh=refresh, stay_after_save=existing is not None),
     )
-    if community is not None:
-        verb = "Updated" if existing is not None else "Created Community"
-        _announce_line(session, f"{verb} {community.name!r}.")
-    return community
 
 
 async def _list_communities_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -18584,91 +18617,8 @@ def _community_description(community: Community) -> str:
 
 
 async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> None:
-    """No "pending" equivalent here, unlike boards/areas -- a Community
-    holds no content of its own (design doc §16). Move [U]p and [D]own
-    set where it sits in the callers' Communities list (issue #838);
-    [R]emove, as on a category's screen, deletes it."""
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
-
-    async def _redraw() -> tuple[int, int]:
-        order = [c.id for c in await lane.run(list_communities)]
-        place = order.index(community.id) if community.id in order else 0
-        await _draw_community_detail(
-            session, community, description_level, redraw_in_place, unicode_style, collapsed, header_color,
-            place=place, total=len(order),
-        )
-        return place, len(order)
-
-    place, total = await _redraw()
-    while True:
-        choice = (await session.read_key()).lower()
-
-        if choice == "b":
-            await session.write_line("")
-            return
-        elif choice == "e":
-            await session.write_line("")
-            updated = await _community_screen(session, lane, actor, existing=community)
-            if updated is not None:
-                community = updated
-            place, total = await _redraw()
-        elif (choice == "u" and place > 0) or (choice == "d" and place < total - 1):
-            await session.write_line("")
-            await lane.run(move_community, community, -1 if choice == "u" else 1, moved_by=actor)
-            place, total = await _redraw()
-        elif choice == "r":
-            await session.write_line("")
-            deleted = await _delete_community_screen(session, lane, actor, community)
-            if deleted:
-                return
-            place, total = await _redraw()
-        else:
-            await session.write(reject_unhandled_key(choice))
-
-
-async def _draw_community_detail(
-    session: Session, community: Community, description_level: str, redraw_in_place: bool,
-    unicode_style: bool,
-    collapsed: bool,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR,
-    *,
-    place: int = 0,
-    total: int = 1,
-) -> None:
-    await session.write_line(
-        "\r\n" + screen_title(sanitize_text(community.name),
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color, node_name_gradient=session.node_name_gradient)
-    )
-    panel_rows = await _write_sections(session, [
-        Section("Community", [
-            _description_field(community.description),
-            Field("Hidden", _yes_no(community.hidden)),
-            Field("Place", f"{place + 1} of {total}"),
-        ]),
-        Section("Defaults for its boards, areas and channels", [
-            Field("Read level", _optional_int_label(community.default_min_read_level)),
-            Field("Write level", _optional_int_label(community.default_min_write_level)),
-            _gate_field("Minimum age", community.default_min_age),
-            _gate_field("Name requirement", community.default_name_requirement),
-        ], paired=True),
-    ], unicode_style=unicode_style)
-    options = _fitted_menu(
-        [
-            MenuEntry(label=menu_key("E", "dit"), brief="Change this Community's settings"),
-            *([MenuEntry(label=menu_key("U", "p"), brief="Earlier in the callers' list")] if place > 0 else []),
-            *([MenuEntry(label=menu_key("D", "own"), brief="Later in the callers' list")] if place < total - 1 else []),
-            MenuEntry(label=menu_key("R", "emove"), brief="Permanently remove it"),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"),
-        ],
-        description_level, session=session, used_rows=panel_rows + 4,
-    )
-    await session.write_line(f"\r\n{options}")
-    await _choice_prompt(session)
+    """A Community's screen is its editor (issue #1081): see `_community_screen`."""
+    await _community_screen(session, lane, actor, existing=community)
 
 
 async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> bool:
@@ -23973,7 +23923,7 @@ async def _draw_generic_category_menu(
 
 async def _create_category_screen(
     session: Session, lane: DatabaseLane, actor: User, *, create, list_top_level, error_type,
-    existing=None, update=None,
+    existing=None, update=None, detail: DetailMode | None = None, current: dict | None = None,
 ):
     # Returns the category it created, or `None` if the SysOp backed
     # out -- `edit_resource_draft` already returns whatever `save`
@@ -24011,9 +23961,10 @@ async def _create_category_screen(
         # list so clearing a previously chosen parent is a pick like any
         # other, and backing out of the picker keeps the draft as-is.
         choices = [("(none -- a top-level category)", None)]
+        editing = current["category"] if current is not None else existing
         choices += [
             (category.name, category) for category in await lane.run(list_top_level)
-            if existing is None or category.id != existing.id
+            if editing is None or category.id != editing.id
         ]
         selected = await pick_item(
             session, choices,
@@ -24064,7 +24015,8 @@ async def _create_category_screen(
         parent = draft["parent"]
         if existing is not None:
             category = await lane.run(
-                update, existing, name=draft["name"], description=draft["description"],
+                update, current["category"] if current is not None else existing,
+                name=draft["name"], description=draft["description"],
                 parent_category_id=parent.id if parent is not None else None, changed_by=actor,
             )
             _announce_line(session, f"Saved category {category.name!r}.")
@@ -24076,15 +24028,23 @@ async def _create_category_screen(
         _announce_line(session, f"Created category {category.name!r}.")
         return category
 
+    if detail is None:
+        # Creating uses the same screen as a category's own, with an empty
+        # draft and no actions, and returns what it created (issue #1081).
+        async def _empty() -> DetailState:
+            return DetailState(draft=dict(draft))
+
+        detail = DetailMode(refresh=_empty, stay_after_save=False)
     return await edit_resource_draft(
         session, lane,
-        title="Edit category" if existing is not None else "Create category",
+        title=sanitize_text(existing.name) if existing is not None else "Create category",
         fields=fields, draft=draft, save=save, error_type=error_type,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
         unicode_style=unicode_style, collapsed=collapsed,
         accent_color=accent_color, header_color=header_color,
+        detail=detail,
     )
 
 
@@ -24140,87 +24100,86 @@ async def _category_screen(
     session: Session, lane: DatabaseLane, actor: User, category, *, list_top_level, list_subcategories,
     delete, update, move, create, error_type,
 ) -> None:
-    """One category: what it is, where it sits, and [E]dit, move [U]p or
-    [D]own among its siblings, and [R]emove (issue #681)."""
-    chrome = await _load_chrome(lane, actor)
+    """One category's screen, which is its editor (issue #1081, design doc
+    §3.5): its place among its siblings and its sub-categories above the
+    fields, the fields chosen by the cursor, and [U]p, [D]own and [R]emove
+    while nothing is waiting to be saved (issue #681)."""
+    current: dict = {"category": category}
 
     def _load(db: Database):
-        siblings = (
-            list_top_level(db) if category.parent_category_id is None
-            else list_subcategories(db, category.parent_category_id)
-        )
-        current = next((sibling for sibling in siblings if sibling.id == category.id), None)
-        parent = (
-            next((top for top in list_top_level(db) if top.id == category.parent_category_id), None)
-            if category.parent_category_id is not None else None
-        )
-        children = list_subcategories(db, category.id) if category.parent_category_id is None else []
-        return current, siblings, parent, children
+        # Found by id among every category, not through the parent it had
+        # when the screen opened: a save may have moved it under another
+        # (Codex review on #799).
+        tops = list_top_level(db)
+        for top in tops:
+            if top.id == current["category"].id:
+                return top, tops, None, list_subcategories(db, top.id)
+            subs = list_subcategories(db, top.id)
+            for sub in subs:
+                if sub.id == current["category"].id:
+                    return sub, subs, top, []
+        return None, [], None, []
 
-    while True:
-        current, siblings, parent, children = await lane.run(_load)
-        if current is None:
-            return
-        category = current
-        place = [sibling.id for sibling in siblings].index(category.id)
-        fields = [
-            Field("Description", sanitize_text(category.description) if category.description else "(none)"),
-            Field("Parent", sanitize_text(parent.name) if parent is not None else "(none -- top-level)"),
-            Field("Place", f"{place + 1} of {len(siblings)}"),
-        ]
-        if category.parent_category_id is None:
-            fields.append(Field("Sub-categories", ", ".join(sanitize_text(c.name) for c in children) or "none"))
-        actions = [("e", menu_key("E", "dit"))] if update is not None else []
-        if move is not None and place > 0:
-            actions.append(("u", menu_key("U", "p")))
-        if move is not None and place < len(siblings) - 1:
-            actions.append(("d", menu_key("D", "own")))
-        actions += [("r", menu_key("R", "emove")), _BACK_ACTION]
-        key, _page = await show_detail(
-            session,
-            title=_detail_title(session, chrome, sanitize_text(category.name), breadcrumb=("SysOp", "Categories")),
-            sections=[Section(None, fields)], actions=actions,
-            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
-        )
-        if key == "b":
-            return
-        if key == "e" and update is not None:
-            edited = await _create_category_screen(
-                session, lane, actor, create=create, list_top_level=list_top_level, error_type=error_type,
-                existing=category, update=update,
-            )
-            if edited is not None:
-                # Moved under another parent, it is found among its new
-                # siblings (Codex review on #799).
-                category = edited
-            continue
-        if key in ("u", "d") and move is not None:
+    def _move(offset: int):
+        async def run(session: Session, lane: DatabaseLane) -> bool:
             try:
-                await lane.run(move, category, -1 if key == "u" else 1, moved_by=actor)
+                await lane.run(move, current["category"], offset, moved_by=actor)
             except error_type as exc:
-                # Deleted meanwhile: said, and the screen reloads -- which
-                # returns to the list (Codex review on #799).
+                # Deleted meanwhile: said, and the screen reloads.
                 _announce(session, f"Error: {exc}", error=True)
-            continue
-        if key == "r":
-            await session.write_line(
-                colored(
-                    "\r\nDeleting this category sets any message boards/file areas/chat channels "
-                    "assigned to it (and any of its own sub-categories) back to uncategorized.",
-                    fg_color=MUTED_COLOR,
-                )
+            return False
+        return run
+
+    async def _remove(session: Session, lane: DatabaseLane) -> bool:
+        target = current["category"]
+        await session.write_line(
+            colored(
+                "\r\nDeleting this category sets any message boards/file areas/chat channels "
+                "assigned to it (and any of its own sub-categories) back to uncategorized.",
+                fg_color=MUTED_COLOR,
             )
-            await write_prompt(
-                session,
-                f"Type the category name {category.name!r} to confirm deletion, or anything else to cancel: ",
+        )
+        await write_prompt(
+            session,
+            f"Type the category name {target.name!r} to confirm deletion, or anything else to cancel: ",
+        )
+        confirmation = (await session.read_line()).strip()
+        if confirmation != target.name:
+            _announce_line(session, "Cancelled.")
+            return False
+        await lane.run(delete, target, deleted_by=actor)
+        _announce_line(session, f"{target.name!r} deleted.")
+        return True
+
+    async def refresh() -> DetailState:
+        found, siblings, parent, children = await lane.run(_load)
+        if found is None:
+            return DetailState(
+                draft={"name": current["category"].name, "description": current["category"].description,
+                       "parent": None},
+                header=colored("This category no longer exists.", fg_color=WARNING_COLOR),
             )
-            confirmation = (await session.read_line()).strip()
-            if confirmation != category.name:
-                _announce_line(session, "Cancelled.")
-                continue
-            await lane.run(delete, category, deleted_by=actor)
-            _announce_line(session, f"{category.name!r} deleted.")
-            return
+        current["category"] = found
+        place = [sibling.id for sibling in siblings].index(found.id)
+        header = f"Place {place + 1} of {len(siblings)} among its siblings"
+        if found.parent_category_id is None:
+            header += " · Sub-categories: " + (", ".join(sanitize_text(c.name) for c in children) or "none")
+        actions = []
+        if move is not None and place > 0:
+            actions.append(DetailAction("u", menu_key("U", "p"), _move(-1), brief="Earlier among its siblings"))
+        if move is not None and place < len(siblings) - 1:
+            actions.append(DetailAction("d", menu_key("D", "own"), _move(1), brief="Later among its siblings"))
+        actions.append(DetailAction("r", menu_key("R", "emove"), _remove, brief="Permanently remove it"))
+        return DetailState(
+            draft={"name": found.name, "description": found.description, "parent": parent},
+            header=colored(header, fg_color=MUTED_COLOR), actions=actions,
+        )
+
+    await _create_category_screen(
+        session, lane, actor, create=create, list_top_level=list_top_level, error_type=error_type,
+        existing=category, update=update, detail=DetailMode(refresh=refresh),
+        current=current,
+    )
 
 
 # -- moderator grants -----------------------------------------------------
