@@ -764,7 +764,7 @@ async def edit_resource_draft(
             + 1  # blank line before the menu row
             + help_row  # "(Ctrl-H for help...)" hint
             + 1  # "Choice: " prompt line
-            + (1 if redraw_hint and redraw_count >= 1 else 0)
+            + (1 if redraw_hint and redraw_count >= 1 and detail_state is None else 0)
             + (wrap_terminal_text(field_message, width).count("\r\n") + 1 if field_message else 0)
             + hint_lines
         )
@@ -849,7 +849,11 @@ async def edit_resource_draft(
             tail_blocks.append(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
         if page_hint is not None:
             tail_blocks.append(colored(page_hint, fg_color=MUTED_COLOR))
-        if redraw_hint and redraw_count >= 1:
+        # On a resource's own screen the tip is shown only where it fits below
+        # the rest (issue #1081): a row for it must not page a screen that
+        # otherwise fits, and it adds nothing to a fresh draw.
+        tip_wanted = redraw_hint and redraw_count >= 1
+        if tip_wanted and detail_state is None:
             tail_blocks.append(
                 colored(
                     "(Tip: enable in-place redraw in Your profile to stop this scrolling)", fg_color=MUTED_COLOR
@@ -863,6 +867,12 @@ async def edit_resource_draft(
         header_rows = physical(header_blocks)
         field_rows = physical(value_lines)
         tail_rows = physical(tail_blocks)
+        if tip_wanted and detail_state is not None:
+            tip_rows = physical([colored(
+                "(Tip: enable in-place redraw in Your profile to stop this scrolling)", fg_color=MUTED_COLOR,
+            )])
+            if len(header_rows) + len(field_rows) + len(tail_rows) + len(tip_rows) + 1 <= height:
+                tail_rows.extend(tip_rows)
         field_position = None
         if pending_edit is not None and redraw_in_place:
             field = fields[pending_edit]
