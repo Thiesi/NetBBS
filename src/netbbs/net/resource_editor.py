@@ -729,7 +729,9 @@ async def edit_resource_draft(
         save_brief = _SAVE_BRIEF
         after_text = ""
         if detail_state is not None:
-            dirty = draft != initial_draft
+            # Creating (stay_after_save=False) has nothing stored to match, so
+            # Save is always offered -- a gallery prefill is savable as it is.
+            dirty = draft != initial_draft or not detail.stay_after_save
             menu_fields = []
             menu_save = save if dirty else None
             save_brief = _SAVE_BRIEF_DETAIL
@@ -1034,7 +1036,7 @@ async def edit_resource_draft(
                 if not await prompt_yes_no(session, "Discard unsaved changes?", default=False):
                     continue
             return None
-        dirty = draft != initial_draft
+        dirty = draft != initial_draft or (detail is not None and not detail.stay_after_save)
         if save is not None and choice == save_hotkey and (detail_state is None or dirty):
             await session.write_line("")
             try:
