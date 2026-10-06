@@ -999,7 +999,7 @@ session that holds what it wrote after its last question and announces that.
 ### 3.5 Interaction model for screens (issue #282)
 
 Every screen reached by a hotkey shows its content first and can be left with
-`[B]ack` (or a "Press any key" pause) without answering a question or
+`[B]ack` (or a pause, `[Enter] Continue`) without answering a question or
 changing any stored value. Actions are hotkeys on an action bar, a field on a
 draft editor, or a picker entry; a yes/no prompt is only ever the last
 keystroke immediately before an irreversible, destructive, or network-touching
@@ -1052,6 +1052,13 @@ caller cannot see it, preceded by the current one where the account acts on
 itself, and a draft editor would have to hold the plaintext across redraws to
 offer anything more. Each prompt cancels on a blank line and nothing is
 written before the last one.
+
+A pause that waits for a key before going on reads `[Enter] Continue` (issue
+#1083), or `[Enter] Back`, `[Enter] Stop` where that says more; every one
+comes from `netbbs.rendering.continue_prompt`. Any key still goes on. The
+bracketed `[Enter]` is what a click in the browser terminal sends, so a
+caller using only a mouse is never stuck behind a pause; the old wording,
+"Press any key to continue", had nothing to click.
 
 **An action's outcome is shown on the screen the caller lands on** (issue
 #680). With redraw-in-place on, a line written just before a screen redraws

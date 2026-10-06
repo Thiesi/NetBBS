@@ -127,8 +127,9 @@ _MAX_LINE_LENGTH = 4096
 # unbounded buffer into aiohttp or the application task.
 _MAX_WS_MESSAGE_SIZE = 16 * 1024
 _MAX_KEY_EVENT_LENGTH = 4096
-# What a click may send (issue #840): one menu key or a two-digit row number.
-_CLICK_KEY = re.compile(r"[a-z0-9?/]|[0-9]{2}")
+# What a click may send (issue #840): one menu key or a two-digit row number,
+# or Enter from an "[Enter] Continue" pause (issue #1083).
+_CLICK_KEY = re.compile(r"[a-z0-9?/\r]|[0-9]{2}")
 _MAX_QUEUED_CHARS = 8192
 
 # Recognized escape sequences, mirroring netbbs.net.char_input's

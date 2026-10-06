@@ -115,7 +115,7 @@ def paint_chat(buffer: ScreenBuffer, state: ChatState, *, for_sysop: bool) -> No
             # Kept visible whatever else the title shows: lost input.
             title += f" - {state.dropped} keys dropped"
         if state.caller_gone:
-            title = f"{state.caller_name} has disconnected - any key returns"
+            title = f"{state.caller_name} has disconnected - [Enter] Back"
     else:
         title = f"The SysOp ({state.sysop_name}) has opened a chat with you"
     paint_text(buffer, 0, 0, title, fg=ERROR_COLOR if state.caller_gone else HEADER_COLOR, bold=True)

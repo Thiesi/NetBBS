@@ -296,7 +296,10 @@
     var start = col, end = col;
     while (start > 0 && !(text[start - 1] === " " && text[start - 2] === " ") && !frame(start - 1)) start--;
     while (end < text.length && !(text[end] === " " && text[end + 1] === " ") && !frame(end)) end++;
-    var entry = /\[([^\]\s])\]/.exec(text.slice(start, end));
+    var run = text.slice(start, end);
+    // A pause reads "[Enter] Continue" (issue #1083); a click on it goes on.
+    if (/\[Enter\]/.test(run)) return "\r";
+    var entry = /\[([^\]\s])\]/.exec(run);
     return entry ? entry[1].toLowerCase() : null;
   }
 
