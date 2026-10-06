@@ -1203,6 +1203,15 @@ the names containing the text typed, and a blank answer shows the whole list
 again. It replaced `[S]earch` outright, with no hidden `S` alias: a silent
 second key would keep `S` taken on every list for nothing a caller can see.
 
+A Linked board, file area or chat channel, one shared with other nodes over
+NetBBS Link, has its name drawn in `LINKED_COLOR` (issue #1104) instead of the
+accent every other name takes. It costs no column and no row. Where colour
+can't say it, the name ends in `LINKED_MARKER` (` ~`) instead, kept whole when
+the name is cut to fit: for a caller reading plain ASCII, and on a row inside
+SysOp list art, whose rows take the art's own colour. The list's Ctrl-H says
+what the colour or marker means, on a list that has a Linked entry. The
+SysOp's own resource lists use the same colour.
+
 A list row's secondary text is either prose or a record, and the two render
 differently.
 
@@ -2634,8 +2643,8 @@ parent, listed on the board like any other post. There is no threaded view.
   reader. Mail keeps its writer's lines (§6.4).
 
 The board picker adds an activity column ("N new", "caught up", "not visited
-yet", in §6.6's terms) and an "about" column that leads with `[LINK]` and a
-name-gate note before the description.
+yet", in §6.6's terms) and an "about" column that leads with a name-gate note
+before the description. A Linked board shows by its name's colour (§3.6).
 
 **Color in posts** (issue #711). A board's SysOp may allow color in its
 posts ("Color in posts", off by default). A carried board follows the
@@ -15305,6 +15314,24 @@ attestation is not touched by these edits and still decides every gate; the
 account screen says so when one is on record. The caller's own visibility
 settings for both fields are left as they are. Display names do not travel
 over NetBBS Link, so nothing is carried.
+
+### Issue #1104 — Linked resources by colour — decided
+
+The pre-release check of the first field test's fixes asked to tell Linked
+boards, areas and channels apart without another column. Normative
+description: §3.6.
+
+**Decision 1 — the name's colour, not a word or a column.** Rejected: the
+`[LINK]` word the board list's "about" text led with, which a narrow terminal,
+a short description level and SysOp list art all dropped, and a column, which
+costs every other column width. The colour is the one a linked node already
+has after a chat speaker's `@`, so "from the wider network" reads one way
+everywhere.
+
+**Decision 2 — a marker where colour can't carry it.** A plain-ASCII caller
+and a row inside list art get ` ~` after the name. Rejected: a legend row
+above the list, which would cost a list row on every page of a full list;
+Ctrl-H carries the explanation instead.
 
 ### SFTP over the SSH transport — declined
 

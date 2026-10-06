@@ -56,6 +56,8 @@ from netbbs.rendering import (
     ERROR_COLOR,
     HEADER_COLOR,
     LABEL_COLOR,
+    LINKED_COLOR,
+    LINKED_MARKER,
     MENU_KEY_COLOR,
     MUTED_COLOR,
     VALUE_COLOR,
@@ -302,6 +304,7 @@ async def pick_item(
     slot_fields: Mapping[str, str] | None = None,
     art_speed: int = 0,
     art_once: str = "",
+    linked_of: Callable[[T], bool] | None = None,
 ) -> T | None:
     """
     Let the user browse/search/jump through `items` and pick one, or
@@ -550,6 +553,14 @@ async def pick_item(
     (`art_pacing.will_pace` holds the other rules). Every later draw in
     this call -- a page, a cursor move, a search, a redraw -- sends the art
     at once. The defaults never pace.
+
+    `linked_of` (issue #1104) says which items are Linked -- shared with
+    other nodes over NetBBS Link. Their names take `LINKED_COLOR` instead
+    of the accent, with no extra column; a plain-ASCII caller, and a row
+    inside SysOp art (which takes the art's colour), get `LINKED_MARKER`
+    after the name instead, kept whole when the name is cut. Ctrl-H
+    explains both when the list has a Linked entry. A highlighted or
+    unpickable row keeps its own colouring, so the cursor still reads.
     """
     if (columns is None) != (column_values_of is None):
         raise ValueError("pick_item: columns and column_values_of must be given together")
@@ -1102,6 +1113,7 @@ async def pick_item(
                     f"{slot_number:02d}." if _pickable(item) else None,
                     name_of(item),
                     slot_column_of(item) if slot_column_of is not None else "",
+                    suffix=LINKED_MARKER if linked_of is not None and linked_of(item) else "",
                 ))
             fields = dict(slot_fields or {})
             fields.update(
@@ -1200,12 +1212,26 @@ async def pick_item(
                 key_color = MENU_KEY_COLOR
                 item_name_color = accent_color
                 desc_color = MUTED_COLOR
+            # Issue #1104: a Linked name is told apart by its colour alone,
+            # and by `LINKED_MARKER` where colour can't carry it (ASCII).
+            linked = linked_of is not None and linked_of(item)
+            if linked and pickable and not is_highlighted:
+                item_name_color = LINKED_COLOR
+            linked_suffix = LINKED_MARKER if linked and getattr(session, "output_charset", None) == ASCII else ""
 
             if name_width is not None:
                 # Columnar row (issue #528).
+                if linked_suffix:
+                    name_cell = _pad_cell(
+                        sanitize_text(name_of(item)), name_width - display_width(linked_suffix),
+                        align_right=False, ellipsis=cell_ellipsis,
+                    ).rstrip() + linked_suffix
+                    name_cell += " " * (name_width - display_width(name_cell))
+                else:
+                    name_cell = _pad_cell(sanitize_text(name_of(item)), name_width, align_right=False, ellipsis=cell_ellipsis)
                 segments: list[tuple[str, SegmentColor]] = [
                     (selector, key_color),
-                    (_pad_cell(sanitize_text(name_of(item)), name_width, align_right=False, ellipsis=cell_ellipsis), item_name_color),
+                    (name_cell, item_name_color),
                 ]
                 # Short-changed rows are padded rather than left to
                 # `zip`'s silent truncation: a caller that returns too
@@ -1241,9 +1267,15 @@ async def pick_item(
             ]
             if name_segments_of is not None:
                 for text, color in name_segments_of(item):
+                    if linked and color == accent_color:
+                        # The caller's name segment, in the accent it was
+                        # handed (issue #1104); its gate notes keep theirs.
+                        color = LINKED_COLOR
                     segments.append((
                         sanitize_text(text), item_name_color if is_highlighted or not pickable else color,
                     ))
+                if linked_suffix:
+                    segments.append((linked_suffix, item_name_color))
             elif columns is not None and description:
                 # A columnar picker that fell back to prose because the
                 # terminal is too narrow (Codex review). The whole row
@@ -1262,13 +1294,14 @@ async def pick_item(
                 fixed = display_width(selector)
                 room = render_width - fixed - display_width(f" - {description}")
                 name_text = sanitize_text(name_of(item))
+                room -= display_width(linked_suffix)
                 if room < display_width(name_text):
                     name_text = _pad_cell(
                         name_text, max(_MIN_FALLBACK_NAME_WIDTH, room), align_right=False, ellipsis=cell_ellipsis
                     ).rstrip()
-                segments.append((name_text, item_name_color))
+                segments.append((name_text + linked_suffix, item_name_color))
             else:
-                segments.append((sanitize_text(name_of(item)), item_name_color))
+                segments.append((sanitize_text(name_of(item)) + linked_suffix, item_name_color))
             if description:
                 segments.append((f" - {sanitize_text(description)}", desc_color))
             if is_highlighted:
@@ -1401,6 +1434,8 @@ async def pick_item(
                 session, on_sort=on_sort, has_refresh=refresh is not None, header_color=header_color,
                 unicode_style=unicode_style, has_create=on_create is not None,
                 live_nav=live_nav, has_unpickable=any(not _pickable(item) for item in items),
+                has_linked=linked_of is not None and any(linked_of(item) for item in items),
+                linked_marker_only=getattr(session, "output_charset", None) == ASCII or _slot_active(),
             )
             page_items = await _render()
             continue
@@ -1776,6 +1811,8 @@ async def _show_picker_help(
     has_create: bool = False,
     live_nav: Sequence[MenuEntry] = (),
     has_unpickable: bool = False,
+    has_linked: bool = False,
+    linked_marker_only: bool = False,
 ) -> None:
     """Ctrl-H's own content for this screen (dogfood feature request --
     the shared picker had no on-demand help at all, only the terse
@@ -1803,6 +1840,17 @@ async def _show_picker_help(
             # Issue #920: only said on a list that has such rows.
             ["  A row with - in place of a number can't be chosen; the words beside it say why."]
             if has_unpickable else []
+        ),
+        *(
+            # Issue #1104: what the Linked colour or marker means, on a
+            # list that has one.
+            [
+                f"  A name ending in{LINKED_MARKER} is Linked: shared with other nodes over NetBBS Link."
+                if linked_marker_only else
+                "  A name in " + colored("this colour", fg_color=LINKED_COLOR)
+                + " is Linked: shared with other nodes over NetBBS Link."
+            ]
+            if has_linked else []
         ),
         "",
         colored("[/] Find", fg_color=header_color, bold=True),

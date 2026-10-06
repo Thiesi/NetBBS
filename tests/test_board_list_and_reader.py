@@ -21,6 +21,7 @@ from netbbs.net import board_flow
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.redraw_preference import set_redraw_in_place_enabled
 from netbbs.net.session import Session
+from netbbs.rendering import LINKED_COLOR, fg
 from netbbs.storage.database import Database
 
 _SGR = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -318,7 +319,12 @@ def test_the_board_list_shows_activity_and_linked_and_gate_notes(db, alice):
 
     text = session.visible()
     assert "ACTIVITY" in text
-    assert re.search(r"Busy\s+2 new\s+\[LINK\]", text)
+    assert re.search(r"Busy\s+2 new", text)
+    # Linked is the name's colour now (issue #1104), not a "[LINK]" word.
+    assert "[LINK]" not in text
+    raw = "".join(session.written)
+    before_busy = raw[: raw.index("Busy")]
+    assert before_busy.rfind(fg(LINKED_COLOR)) > before_busy.rfind("\x1b[0m")
     assert re.search(r"Quiet\s+caught up", text)
     assert re.search(r"Unvisited\s+not visited yet\s+needs verification", text)
 

@@ -330,6 +330,7 @@ from netbbs.files.entries import (
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.link.events import BOARD_POSTING_MODES
 from netbbs.link.boards import (
+    linked_board_ids,
     LinkBoardsError,
     LinkContext,
     accept_board_origin_transfer,
@@ -346,13 +347,16 @@ from netbbs.link.boards import (
     rebuild_carried_post_materialization,
     set_board_posting,
 )
-from netbbs.link.channels import LinkChannelsError, carried_channel_count, is_channel_linked, link_channel
+from netbbs.link.channels import (
+    LinkChannelsError, carried_channel_count, is_channel_linked, link_channel, linked_channel_ids,
+)
 from netbbs.link.diagnostics import (
     DiagnosticLogEntry,
     list_diagnostic_log_entries,
     list_diagnostic_log_entries_since,
 )
 from netbbs.link.files import (
+    linked_area_ids,
     LinkFilesError,
     carried_file_area_count,
     is_area_linked,
@@ -19418,6 +19422,7 @@ async def _list_boards_screen(
     reopen_at: int | None = None
     while True:
         boards, effective, counts, to_review = await lane.run(_load_boards)
+        linked_boards = await lane.run(linked_board_ids)
         if not boards and reopen_at is not None:
             # The detail screen deleted the last board: its outcome is the
             # message, not an empty list's.
@@ -19432,6 +19437,7 @@ async def _list_boards_screen(
             title="Message boards",
             empty_message="No message boards yet.",
             start_stable_id=reopen_at,
+            linked_of=lambda b, linked=linked_boards: b.id in linked,  # issue #1104
             redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
             unicode_style=await lane.run(unicode_style_enabled, actor),
             collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
@@ -21112,6 +21118,7 @@ async def _list_areas_screen(
     reopen_at: int | None = None
     while True:
         areas, effective, counts, to_review = await lane.run(_load_areas)
+        linked_areas = await lane.run(linked_area_ids)
         if not areas and reopen_at is not None:
             return
         selected = await pick_item(
@@ -21124,6 +21131,7 @@ async def _list_areas_screen(
             title="File areas",
             empty_message="No file areas yet.",
             start_stable_id=reopen_at,
+            linked_of=lambda a, linked=linked_areas: a.id in linked,  # issue #1104
             redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
             unicode_style=await lane.run(unicode_style_enabled, actor),
             collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
@@ -23446,6 +23454,7 @@ async def _list_channels_screen(
         return channels, _effective_by_id(db, channels, levels=False), carried_to_review(db, "channels")
 
     channels, effective, to_review = await lane.run(_load_channels)
+    linked_channels = await lane.run(linked_channel_ids)
     selected = await pick_item(
         session, channels,
         name_of=lambda c: c.name,
@@ -23455,6 +23464,7 @@ async def _list_channels_screen(
         column_values_of=lambda c: _channel_columns(c, effective[c.id], c.channel_id in to_review),
         title="Chat channels",
         empty_message="No chat channels yet.",
+        linked_of=lambda c: c.id in linked_channels,  # issue #1104
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=await lane.run(unicode_style_enabled, actor),
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),

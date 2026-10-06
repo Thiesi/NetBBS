@@ -77,6 +77,13 @@ def is_channel_linked(db: Database, channel: Channel) -> bool:
     return row is not None and row["link_genesis_json"] is not None
 
 
+def linked_channel_ids(db: Database) -> set[int]:
+    """Every channel id with a genesis on file, in one query -- what a list
+    asks (issue #1104) instead of one `is_*_linked` query per row."""
+    rows = db.connection.execute("SELECT id FROM channels WHERE link_genesis_json IS NOT NULL")
+    return {row["id"] for row in rows}
+
+
 def is_open_mrc_room(db: Database, channel: Channel) -> bool:
     """Whether `channel` is an MRC room a caller opened (issue #300,
     `channels.mrc_origin = 'caller'`) -- read here with one query rather
