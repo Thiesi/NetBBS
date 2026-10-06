@@ -135,12 +135,13 @@ def test_no_minimum_age_means_no_gate_whatever_the_requirement(db, unknown):
     assert age_gate(db, unknown, 0, VERIFIED) == "pass"
 
 
-def test_a_sysop_gets_no_bypass(db, sysop):
-    """Like the name requirement and the age gate before it: level 255
-    does not stand in for a verified age."""
+def test_a_sysop_passes_without_a_verified_age(db, sysop):
+    """Level 255 passes the gate (maintainer decision 2026-10-06, which
+    replaced this issue's original "no bypass"); the rest of the bypass is
+    pinned in test_sysop_gate_bypass.py."""
     set_birthdate(db, sysop, _years_ago(50))
     board = create_board(db, "adults", min_age=18, age_requirement=VERIFIED, creator=sysop)
-    assert resource_age_gate(db, sysop, board) == "unverified"
+    assert resource_age_gate(db, sysop, board) == "pass"
 
 
 # -- storage and the Community cascade ---------------------------------------
