@@ -447,7 +447,11 @@ Everything below happens each time the file is read:
 - iCE colours: classic art uses the blink attribute to mean a bright
   background. Art that sets blink together with a background colour is shown
   with the bright background and no blink, for every session, whether or not
-  SAUCE sets the iCE flag.
+  SAUCE sets the iCE flag. CTerm (SyncTERM) only shows bright backgrounds
+  (100-107) with DECSET mode 33 on, and keeps them as the blink attribute,
+  which blinks until mode 35 is on too. A CP437 session gets both modes before
+  every art that needs them and never their reset: switching them off after
+  the art made the cells already drawn blink (issue #1083).
 - SAUCE width (TInfo1): art wider than the caller's `physical_width` is not
   drawn -- the screen falls back to what it shows without art (the default
   welcome banner, no masthead) instead of wrapping every row.
