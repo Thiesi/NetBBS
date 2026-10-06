@@ -3185,7 +3185,7 @@ def test_link_this_channel_is_not_offered_once_already_linked(db, lane, sysop):
     channel = list_channels(db)[0]
     link_channel(db, channel, node_identity=link_context.node_identity)
 
-    inputs = ["m", "n", "l", "0", "1", "b", "b", "b", "b"]
+    inputs = ["m", "n", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -4050,9 +4050,9 @@ def test_create_and_delete_door_flow(db, lane, sysop, tmp_path):
     # path) select fields, then [S]ave.
     inputs = [
         "m", "d", "c",
-        "n", "Lotto",
-        "e", sys.executable,
-        "a", str(script),
+        "ENTER", "Lotto",
+        "DOWN", "DOWN", "ENTER", sys.executable,
+        "DOWN", "ENTER", str(script),
         "s",
         "l", "0", "1", "d", "Lotto",
         "b", "b", "b",
@@ -4077,7 +4077,7 @@ def test_create_door_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
 
 
 def test_create_door_can_be_cancelled_without_registering_anything(db, lane, sysop):
-    inputs = ["m", "d", "c", "n", "Abandoned", "b", "y", "b", "b", "b"]
+    inputs = ["m", "d", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.doors import list_doors
@@ -4094,7 +4094,7 @@ def test_edit_door_flow(db, lane, sysop, tmp_path):
     create_door(db, "Lotto", sys.executable, args=(str(script),), creator=sysop)
 
     # list -> pick(01) -> e(dit) -> rename via the field menu -> [S]ave.
-    inputs = ["m", "d", "l", "0", "1", "e", "n", "Lotto2", "s", "b", "b", "b", "b"]
+    inputs = ["m", "d", "l", "0", "1", "ENTER", "Lotto2", "s", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -4108,7 +4108,7 @@ def test_door_requires_a_non_blank_executable_path(db, lane, sysop):
     # rather than register a door that can never actually launch. Save
     # failure loops back to the field editor (no extra dismissal
     # keystroke needed); 'b' then discards the now-changed draft.
-    inputs = ["m", "d", "c", "n", "Broken", "s", "b", "y", "b", "b", "b"]
+    inputs = ["m", "d", "c", "ENTER", "Broken", "s", "b", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.doors import list_doors
@@ -4136,8 +4136,8 @@ def test_create_channel_flow(db, lane, sysop):
     # then [S]ave; every other field keeps its own default.
     inputs = [
         "m", "n", "c",
-        "n", "Lobby",
-        "d", "A general channel",
+        "ENTER", "Lobby",
+        "DOWN", "ENTER", "A general channel",
         "s",
         "b", "b", "b",
     ]
@@ -4155,7 +4155,7 @@ def test_create_channel_can_be_cancelled_without_creating_anything(db, lane, sys
     whole draft, even after fields were already filled in. Confirms the
     discard once asked (dogfood follow-up: a changed draft now asks
     first)."""
-    inputs = ["m", "n", "c", "n", "Abandoned", "b", "y", "b", "b", "b"]
+    inputs = ["m", "n", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.chat.channels import list_channels
@@ -4172,8 +4172,8 @@ def test_edit_and_delete_channel_flow(db, lane, sysop):
     # -> back to detail -> d(elete) -> retype new name -> back x3.
     # Every other field is left untouched.
     inputs = [
-        "m", "n", "l", "0", "1", "e",
-        "n", "Lobby2", "s",
+        "m", "n", "l", "0", "1",
+        "ENTER", "Lobby2", "s",
         "d", "Lobby2",
         "b", "b", "b",
     ]
@@ -5651,7 +5651,7 @@ def test_door_gallery_reselecting_and_editing_opens_the_existing_doors_own_detai
     session = FakeSession(["c", "d", "g", "0", "1", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "Executable: /usr/bin/python3" in _normalized_visible(text)
+    assert "Executable path: /usr/bin/python3" in _normalized_visible(text)
 
 
 def test_door_gallery_reselecting_and_choosing_new_registers_a_second_instance(db, lane, sysop):
@@ -9562,9 +9562,9 @@ def test_renaming_an_occupied_channel_is_refused_until_it_empties(db, lane, syso
         shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0, chat_hub=hub,
     )
 
-    # list -> pick(01) -> e(dit) -> rename -> [S]ave is refused -> put the
-    # name back -> [S]ave succeeds without a rename -> back x3.
-    inputs = ["m", "n", "l", "0", "1", "e", "n", "Lobby2", "s", "n", "Lobby", "s", "b", "b", "b", "b"]
+    # list -> pick(01): its own screen, the cursor on Name -> rename -> [S]ave
+    # is refused -> put the name back (nothing left to save) -> back out.
+    inputs = ["m", "n", "l", "0", "1", "ENTER", "Lobby2", "s", "ENTER", "Lobby", "s", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
     text = _written_text(session)
@@ -9573,7 +9573,7 @@ def test_renaming_an_occupied_channel_is_refused_until_it_empties(db, lane, syso
     assert [c.name for c in list_channels(db)] == ["Lobby"]
 
     hub.leave("Lobby", ParticipantId("alice", 1))
-    session = FakeSession(["m", "n", "l", "0", "1", "e", "n", "Lobby2", "s", "b", "b", "b", "b"])
+    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lobby2", "s", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
     assert "Updated 'Lobby2'" in _written_text(session)
     assert [c.name for c in list_channels(db)] == ["Lobby2"]
@@ -9585,7 +9585,7 @@ def test_standalone_rename_says_what_happens_to_callers_inside(db, lane, sysop):
     from netbbs.chat.channels import create_channel
 
     create_channel(db, "Lobby", creator=sysop)
-    session = FakeSession(["m", "n", "l", "0", "1", "e", "n", "Lobby2", "s", "b", "b", "b", "b"])
+    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lobby2", "s", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Updated 'Lobby2'" in text
@@ -9609,7 +9609,7 @@ def test_rename_refusal_sanitizes_a_hostile_channel_name(db, lane, sysop):
         session_registry=ActiveSessionRegistry(), maintenance=MaintenanceMode(),
         shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0, chat_hub=hub,
     )
-    session = FakeSession(["m", "n", "l", "0", "1", "e", "n", "Lobby2", "s", "n", hostile, "s", "b", "b", "b", "b"])
+    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lobby2", "s", "ENTER", hostile, "s", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
     refusal = next(line for line in session.written if "cannot be renamed" in line)
     # The escape byte is gone (the styling wrapper adds its own, well-formed

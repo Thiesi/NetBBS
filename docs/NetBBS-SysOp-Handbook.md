@@ -757,6 +757,14 @@ draft and save it explicitly.
   change waits to be saved, only **Save** and **Back** are offered; **Back**
   then asks before discarding it.
 - **Doors:** attach registered games to a Community, or to none.
+- **A chat channel's or door's screen** opens on its fields too. A
+  channel's line above them says whether it is Linked and names its MRC room;
+  its **Sharing** section follows the fields, and **Restrictions**, **Link**
+  and the MRC room actions are on the screen. A door's line names its
+  compatibility; **Compatibility**, **Last diagnostic**, **Outbound**,
+  **World** and, for a door with a companion service, **Start**, **Halt**,
+  **Restart** and **View service log** are on the screen. As elsewhere, they
+  are offered while no change waits to be saved.
 
 **Where callers find it.** The main menu's **Message boards**, **Chat** and
 **Files** list everything of that kind on the node, whichever Community it
