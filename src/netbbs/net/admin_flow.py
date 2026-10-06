@@ -15024,8 +15024,10 @@ async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, acto
             ))
         # Which of the two this is (issue #1083 finding 10): the first
         # screen ending in a plain prompt read like the end of the preview.
+        # Kept short: it must fit one row of a terminal that lays out 79
+        # columns, or it scrolls the art (`PREVIEW_ROWS_BELOW`).
         await session.write_line(colored(
-            f"({number} of {len(views)}: the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR
+            f"({number} of {len(views)}: {intro}) Press any key to continue...", fg_color=MUTED_COLOR
         ))
         await session.read_any_key()
 

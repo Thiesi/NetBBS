@@ -205,6 +205,6 @@ def test_the_console_masthead_preview_explains_slots_mode(tmp_path):
     finally:
         lane.close()
     text = "".join(session.written)
-    assert "(1 of 2: the main menu as you see it)" in text
+    assert "(1 of 2: as you see it)" in text
     assert "no masthead" not in text
     db.close()
