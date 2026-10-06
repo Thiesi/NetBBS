@@ -929,9 +929,11 @@ async def write_preformatted_line(session: Session, text: str) -> None:
 
     iCE colours (blink meaning a bright background) are made explicit
     (`ice_to_bright_background`). CTerm, SyncTERM's terminal, ignores the
-    bright backgrounds 100-107 unless its DECSET mode 33 is on, so a CP437
-    terminal gets the art between ``CSI ? 33 h`` and ``CSI ? 33 l``; other
-    terminals ignore the private mode.
+    bright backgrounds 100-107 unless its DECSET mode 33 is on, and keeps a
+    bright background as the blink attribute, which still blinks until mode
+    35 turns blinking off. A CP437 terminal gets ``CSI ? 33 h`` and
+    ``CSI ? 35 h`` before such art and never their reset
+    (`prepare_art_text`); other terminals ignore the private modes.
     """
     await write_art_text(session, preformatted_rows(session, text))
 
@@ -947,12 +949,23 @@ async def write_art_text(session: Session, text: str) -> None:
 
 def prepare_art_text(session: Session, text: str) -> str:
     """What `write_art_text` sends for laid-out art, before `send_art_text`:
-    iCE colours made explicit, and CTerm's bright backgrounds switched on
-    around them for a CP437 terminal. Paced art (issue #929) prepares the
-    whole art once, then sends it in chunks."""
+    iCE colours made explicit, and for a CP437 terminal CTerm's iCE modes
+    switched on before the first art that needs them. Paced art (issue #929)
+    prepares the whole art once, then sends it in chunks.
+
+    The modes are switched on before every such art and never off (issue
+    #1083 finding 6). CTerm draws a bright background as the blink
+    attribute: mode 33 makes it a bright background, mode 35 stops it
+    blinking, and switching either off after the art would make the cells
+    already on screen blink. Sending them again is harmless, and sending them
+    each time means art held back during a break-in, whose bytes never reach
+    the terminal, can't leave them unsent for the rest of the session (Claude
+    review of #1087). See the CTerm manual, DECSET modes 33 and 35
+    (https://www.syncterm.net/cterm.html). Two sequences, which SyncTERM 1.0
+    needs."""
     text = ice_to_bright_background(text)
     if getattr(session, "output_charset", UTF8) == CP437 and _BRIGHT_BACKGROUND.search(text):
-        text = f"{_CTERM_BRIGHT_BACKGROUNDS_ON}{text}{_CTERM_BRIGHT_BACKGROUNDS_OFF}"
+        text = f"{_CTERM_ICE_MODES_ON}{text}"
     return text
 
 
@@ -971,8 +984,8 @@ async def send_art_text(session: Session, text: str) -> None:
 
 
 _BRIGHT_BACKGROUND = re.compile(r"\x1b\[(?:[0-9;]*;)?10[0-7](?:;[0-9;]*)?m")
-_CTERM_BRIGHT_BACKGROUNDS_ON = "\x1b[?33h"
-_CTERM_BRIGHT_BACKGROUNDS_OFF = "\x1b[?33l"
+# DECSET 33: blink means a bright background; DECSET 35: blink disabled.
+_CTERM_ICE_MODES_ON = "\x1b[?33h\x1b[?35h"
 
 
 async def write_laid_out_row(session: Session, row: str) -> None:

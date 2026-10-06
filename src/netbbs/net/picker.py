@@ -1,5 +1,5 @@
 """
-Generic paginated item picker: browse via [N]ext/[P]rev, [S]earch,
+Generic paginated item picker: browse via [N]ext/[P]rev, [/] Find,
 [B]ack, or a 2-digit number to select an item on the current
 page -- plus an Up/Down-highlight-then-Enter path (issue #171) purely
 additive alongside the numbered selection, not a replacement for it.
@@ -1001,11 +1001,11 @@ async def pick_item(
             if working_set is not items and items:
                 # The list is empty because a search or a filter made it
                 # so, not because there is nothing here (Codex review).
-                # [S]earch with a blank query clears back to everything,
+                # [/] Find with a blank query clears back to everything,
                 # and Ctrl-H explains it -- and the handlers accept both,
                 # so hiding them made the way out undiscoverable rather
                 # than unavailable.
-                keys.append(menu_key("S", "earch"))
+                keys.append(menu_key("/", " Find"))
             if on_create is not None:
                 # The whole point of staying here (issue #530): an empty
                 # list with a way out of being empty.
@@ -1422,7 +1422,7 @@ async def pick_item(
         if key.kind == EditorKeyKind.DOWN:
             # Issue #171. `not page_items` only reachable via the
             # refresh-enabled empty-list path (issue #112) -- nothing to
-            # highlight yet, same guard [S]earch/[G]oto already apply.
+            # highlight yet, same guard [/] Find/[G]oto already apply.
             # Only over the rows that can be picked (issue #920).
             reachable = _pickable_rows(page_items)
             later = [row for row in reachable if highlighted is None or row > highlighted]
@@ -1523,13 +1523,13 @@ async def pick_item(
                 await session.write(reject_keystroke())
             continue
 
-        if char_lower == "s":
+        if char == "/":
             if not items:
                 # Dogfood report, issue #155: reachable at all only
                 # because `refresh` (Who's Online's own use) keeps this
                 # loop interactive instead of the plain empty_message
                 # early-return above -- `_render`'s own empty-state
-                # trailer already omits [S]earch (there's nothing to
+                # trailer already omits [/] Find (there's nothing to
                 # search for), but without this the key still worked
                 # anyway, silently available despite not being
                 # advertised. Gated on `items` (the full unfiltered
@@ -1539,7 +1539,7 @@ async def pick_item(
                 await session.write(reject_keystroke())
                 continue
             await session.write_line("")
-            await session.write("Search: ")
+            await session.write("Find: ")
             # From `items`, not `working_set` (Codex review): the query
             # below searches the full set, so completing only from the
             # narrowed one meant Tab could not offer a name that Enter
@@ -1795,9 +1795,9 @@ async def _show_picker_help(
             if has_unpickable else []
         ),
         "",
-        colored("Search", fg_color=header_color, bold=True),
+        colored("[/] Find", fg_color=header_color, bold=True),
         "  Filters the list to items whose name contains the text you type. A single "
-        "match jumps straight to it. Blank search clears back to the full list.",
+        "match jumps straight to it. A blank answer clears back to the full list.",
     ]
     if has_create is not None and has_create:
         # Listed before Order and Refresh, and worth describing even
@@ -1903,7 +1903,9 @@ def _nav_entries(
         entries.append(MenuEntry(label=menu_key("N", "ext"), brief="Next page"))
     if include_prev:
         entries.append(MenuEntry(label=menu_key("P", "rev"), brief="Previous page"))
-    entries.append(MenuEntry(label=menu_key("S", "earch"), brief="Search by name"))
+    # `/` as on the main menu (issue #1083): one key and one word for
+    # searching everywhere. `S` is free again for a screen's own use.
+    entries.append(MenuEntry(label=menu_key("/", " Find"), brief="Find by name"))
     if on_sort is not None:
         entries.append(MenuEntry(label=menu_key("O", "rder"), brief="Change sort order"))
     # A caller's own keys, appended after this screen's (issue #537) --

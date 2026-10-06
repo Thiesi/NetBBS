@@ -160,7 +160,7 @@ def test_search_is_rejected_when_the_list_is_empty_but_refreshable():
     (Who's Online's own use, so Ctrl-R can revive a list that goes
     stale while you're looking at it) stays in the interactive loop
     instead of the plain early-return a refresh-less empty list gets --
-    [S]earch must not be silently functional there just because that
+    [/] Find must not be silently functional there just because that
     loop is still running, when it is not even shown on the empty-state
     prompt.
     """
@@ -183,13 +183,13 @@ def test_search_is_rejected_when_the_list_is_empty_but_refreshable():
             await skip_initial_negotiation(reader, writer)
             first = await _read_until_quiet(reader)
             assert b"No one else is online right now." in first
-            assert b"Search" not in first
+            assert b"Find" not in first
 
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             after_search = await _read_until_quiet(reader)
             assert b"\a" in after_search
-            assert b"Search:" not in after_search
+            assert b"Find:" not in after_search
 
             writer.write(b"b")
             await writer.drain()
@@ -497,7 +497,7 @@ def test_search_unique_match_auto_selects():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.write(b"gam\r\n")  # matches only "gamma"
@@ -560,7 +560,7 @@ def test_search_no_matches_reports_and_stays_in_picker():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.write(b"zzz\r\n")
@@ -595,7 +595,7 @@ def test_empty_search_clears_active_filter():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.write(b"\r\n")  # empty search -> back to full unfiltered list
@@ -629,7 +629,7 @@ def test_search_matches_name_case_insensitively():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.write(b"APPLE\r\n")
@@ -662,7 +662,7 @@ def test_search_tab_completes_a_single_matching_candidate():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.write(b"al\t\r\n")  # Tab-complete "al" to "alpha ", then Enter
@@ -692,7 +692,7 @@ def test_search_tab_with_no_matching_candidates_does_not_change_the_query():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.write(b"zz\t\r\n")  # no candidate starts with "zz"
@@ -719,7 +719,7 @@ def test_search_tab_completion_offers_what_the_search_will_actually_find():
     # something an earlier search filtered out. That reads well on its
     # own and contradicts the thing it is completing *for* (issue #537,
     # Codex review). A search always searches the full set -- the
-    # `[S]earch` key's own gate says so in as many words -- so scoping
+    # `[/] Find` key's own gate says so in as many words -- so scoping
     # only the completion meant Tab could not offer a name that Enter
     # would select: after narrowing to "al*", typing "amb" and pressing
     # Tab completed nothing, while Enter on it selected "amber".
@@ -740,7 +740,7 @@ def test_search_tab_completion_offers_what_the_search_will_actually_find():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             await _read_until_quiet(reader)
             # Narrow to alpha/alligator via a substring search that
@@ -748,7 +748,7 @@ def test_search_tab_completion_offers_what_the_search_will_actually_find():
             writer.write(b"al\r\n")
             await _read_until_quiet(reader)
 
-            writer.write(b"s")
+            writer.write(b"/")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.write(b"a\t")  # Tab, over everything a search can reach
@@ -835,7 +835,7 @@ def test_description_level_brief_shows_nav_descriptions():
 
     Only two items (a single page) deliberately, so [N]ext/[P]rev are
     both hidden (issue #169 dogfood report -- neither is usable with
-    nothing to page to) and only [S]earch/[G]oto/[B]ack remain to
+    nothing to page to) and only [/] Find/[G]oto/[B]ack remain to
     assert the descriptive rendering against."""
     result = {}
     items = ["item1", "item2"]
@@ -852,7 +852,7 @@ def test_description_level_brief_shows_nav_descriptions():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             text = (await _read_until_quiet(reader)).decode()
-            assert "Search by name" in text
+            assert "Find by name" in text
             assert "Return without picking" in text
             writer.write(b"b")
             await writer.drain()
@@ -1058,7 +1058,7 @@ def test_next_and_prev_are_hidden_on_a_single_page_list():
             text = (await _read_until_quiet(reader)).decode()
             assert "ext" not in text  # the "ext" tail of "[N]ext" -- see menu_key
             assert "rev" not in text  # the "rev" tail of "[P]rev"
-            assert "earch" in text  # [S]earch stays -- unaffected by paging state
+            assert "Find" in text  # [/] Find stays -- unaffected by paging state
             writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
