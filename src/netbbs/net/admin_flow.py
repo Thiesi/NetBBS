@@ -1633,6 +1633,7 @@ def _credit_parts(sauce: Sauce) -> tuple[str, str]:
     who = "/".join(part for part in (clean(sauce.author), clean(sauce.group)) if part)
     return clean(sauce.title), who
 
+
 def _toggle_welcome_banner_credit(db: Database, actor: User) -> bool:
     """Flip whether callers see the art's credit under the welcome banner,
     audited; returns the new setting."""
