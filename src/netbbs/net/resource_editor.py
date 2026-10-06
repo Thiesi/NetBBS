@@ -1077,6 +1077,13 @@ async def edit_resource_draft(
             # (`section_names[0]`) -- harmless when it stays unpaginated,
             # since `current_page` is never consulted in that branch.
             current_page = fields[field_index].section
+        if fields[field_index].locked:
+            # Same as the cursor's Enter: a locked field says why, it never edits.
+            field_message = colored(
+                f"{fields[field_index].label}: {fields[field_index].locked}, so it can't be changed here.",
+                fg_color=MUTED_COLOR,
+            )
+            continue
         if redraw_in_place and getattr(fields[field_index].prompt, "_inline_field", False):
             field_message = None
             pending_edit = field_index

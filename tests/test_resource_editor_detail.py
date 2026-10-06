@@ -175,3 +175,18 @@ def test_creating_returns_the_saved_resource_instead_of_staying():
     _, result = _run(store, ["DOWN", "RIGHT", "s"], stay_after_save=False)
     assert result == {"name": "Pen Repair", "pinned": True}
     assert store.refreshes == 1
+
+
+def test_a_locked_fields_own_hotkey_does_not_open_it_on_an_ordinary_editor():
+    """`locked` is a FieldSpec attribute, not a detail-mode one: an ordinary
+    editor that still offers field letters must refuse a locked field's too."""
+    store = Store()
+    session = NavigableFakeSession(["n", "b"])
+    draft = dict(store.values)
+    asyncio.run(edit_resource_draft(
+        session, None, title="Pen Repair", fields=_fields(lock_name=True), draft=draft,
+        save=store.save, error_type=SaveError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+    ))
+    assert draft["name"] == "Pen Repair"
+    assert "Name: set by origin, so it can't be changed here." in _visible(_written_text(session))
