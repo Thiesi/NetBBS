@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 
+from netbbs.rendering.menu import continue_prompt
 from netbbs.auth.users import User
 from netbbs.doors import Door, get_door, list_doors
 from netbbs.doors.profiles import is_remote
@@ -165,7 +166,7 @@ async def browse_doors(
         if door_services is not None:
             if problem := await door_services.ensure_running(door):
                 await session.write_line(colored(sanitize_text(problem), fg_color=MUTED_COLOR))
-                await session.write_line("Press any key to return to the door list.")
+                await session.write_line(continue_prompt("Back to the door list"))
                 await session.read_any_key()
                 continue
         await session.write_line(colored(f"\r\nLaunching {door.name}...", fg_color=MUTED_COLOR))
@@ -217,6 +218,6 @@ async def _report_door_result(session: Session, door: Door, result: DoorRunResul
     else:
         message = f"Left {door.name}."
     await session.write_line(colored(f"\r\n{message}", fg_color=MUTED_COLOR))
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
     return True

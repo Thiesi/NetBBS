@@ -90,7 +90,8 @@ def test_slot_art_replaces_the_generated_menu(tmp_path):
     menu = "\n".join(screen[2:8])
     for key in ("[M]essage boards", "[C]hat", "[F]iles", "[?] Help", "[P]rofile", "[L]ogoff"):
         assert key in menu
-    assert "mail caught up" in screen[8]
+    # Bare values (issue #1083): no unread mail is "0"; the art says "mail".
+    assert screen[8].startswith("* 0 ")
     assert "The Nib & Quill" in screen[8]
     db.close()
 
@@ -205,6 +206,6 @@ def test_the_console_masthead_preview_explains_slots_mode(tmp_path):
     finally:
         lane.close()
     text = "".join(session.written)
-    assert "(the main menu as you see it)" in text
+    assert "(the main menu as you see it, 1 of 2)" in text
     assert "no masthead" not in text
     db.close()

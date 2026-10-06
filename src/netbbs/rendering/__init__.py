@@ -58,7 +58,7 @@ from netbbs.rendering.layout import (
     telemetry_gauge,
     visible_width,
 )
-from netbbs.rendering.menu import highlight_hotkeys, highlight_report, menu_key
+from netbbs.rendering.menu import continue_prompt, highlight_hotkeys, highlight_report, menu_key
 from netbbs.rendering.reflow import DEFAULT_WIDTH, SegmentColor, colored_truncate, reflow, truncate
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
@@ -138,6 +138,7 @@ __all__ = [
     "save_cursor",
     "set_scroll_region",
     "strip_ansi",
+    "continue_prompt",
     "highlight_hotkeys",
     "highlight_report",
     "menu_key",

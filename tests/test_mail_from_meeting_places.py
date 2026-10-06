@@ -256,8 +256,8 @@ def test_who_is_online_mails_a_local_caller(db, lane, alice, bob):
     assert letter.subject == "Hi"
     text = _visible(session)
     assert "[E]-mail" in text
-    # No "Press any key": the list shows the outcome itself.
-    assert "Press any key" not in text
+    # No pause: the list shows the outcome itself.
+    assert "[Enter] Continue" not in text
     assert "Message sent." in _screens(session)[-1]
 
 
@@ -414,7 +414,7 @@ def test_previous_callers_without_mail_is_dismissed_with_any_key(db, lane, alice
 
     text = _visible(session)
     assert "[M]ail a caller" not in text
-    assert "Press any key to continue" in text
+    assert "[Enter] Continue" in text
 
 
 def test_previous_callers_mail_row_fits_the_40x12_floor(db, lane, alice, bob):

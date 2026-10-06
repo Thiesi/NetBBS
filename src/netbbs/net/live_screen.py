@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import re
 from typing import Awaitable, Callable
 
 from netbbs.net.char_input import REDRAW_KEY, EditorKey, EditorKeyKind
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.rendering.ansi import clear_screen
+from netbbs.rendering.theme import MENU_KEY_COLOR
 from netbbs.rendering.screen_buffer import ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
 from netbbs.rendering.width import char_width
 
@@ -100,6 +102,30 @@ def paint_text(
             buffer.write_cell(row, col, ch, fg=fg, bg=bg, bold=bold)
         col += cells
     return col
+
+
+_PAINTED_KEY = re.compile(r"\[([A-Za-z0-9]|Enter)\]")
+
+
+def paint_keyed_text(
+    buffer: ScreenBuffer,
+    row: int,
+    col: int,
+    text: str,
+    *,
+    fg: int | tuple[int, int, int] | None = None,
+    bg: int | tuple[int, int, int] | None = None,
+    bold: bool = False,
+) -> int:
+    """`paint_text` with each bracketed key (`[S]`, `[Enter]`) in the menu
+    key colour, as `highlight_hotkeys` draws it in running text (issue
+    #1083): a painted row has one colour per cell, not nested escapes."""
+    position = 0
+    for match in _PAINTED_KEY.finditer(text):
+        col = paint_text(buffer, row, col, text[position:match.start() + 1], fg=fg, bg=bg, bold=bold)
+        col = paint_text(buffer, row, col, match.group(1), fg=MENU_KEY_COLOR, bg=bg, bold=True)
+        position = match.end() - 1
+    return paint_text(buffer, row, col, text[position:], fg=fg, bg=bg, bold=bold)
 
 
 def fill_row(buffer: ScreenBuffer, row: int, *, bg: int | tuple[int, int, int] | None) -> None:

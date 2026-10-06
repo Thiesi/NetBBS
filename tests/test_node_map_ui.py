@@ -268,7 +268,7 @@ def test_search_matches_a_nodes_dns_name(rig):
     save_peer(db, _record(other, name="Other BBS", dns="other.example.net"))
     viewer = create_user(db, "alice", password="hunter2", user_level=10)
     # m: the map; s + "example.org": one match, whose detail opens; b, b, b.
-    session = FakeSession(["m", "s", "b", "b", "b"], lines=["example.org"])
+    session = FakeSession(["m", "/", "b", "b", "b"], lines=["example.org"])
 
     _browse(session, db, lane, viewer, link_context)
 

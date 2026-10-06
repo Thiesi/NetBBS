@@ -41,9 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from netbbs.attestation import meets_age
 from netbbs.auth.users import User
-from netbbs.communities import get_effective_min_age, meets_read_gate
+from netbbs.communities import meets_read_gate, meets_resource_age
 from netbbs.rendering.pipe_codes import strip_pipe_codes
 from netbbs.rendering.post_body import indexed_post_body, plain_post_body
 from netbbs.rendering.reflow import print_wrapped
@@ -175,7 +174,7 @@ def search_posts(db: Database, user: User, query: str, *, limit: int = 20) -> li
             continue
         if not (
             meets_read_gate(db, user, board)
-            and meets_age(db, user, get_effective_min_age(db, board))
+            and meets_resource_age(db, user, board)
         ):
             continue
         if not link_content_visible(db, row["root_post_id"]):
@@ -213,7 +212,7 @@ def search_files(db: Database, user: User, query: str, *, limit: int = 20) -> li
             continue
         if not (
             meets_read_gate(db, user, area)
-            and meets_age(db, user, get_effective_min_age(db, area))
+            and meets_resource_age(db, user, area)
         ):
             continue
         hits.append(

@@ -56,15 +56,19 @@ from pathlib import Path
 from typing import Callable
 
 from netbbs.activity import follow, is_following, record_file_area_seen, unfollow
-from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
+from netbbs.attestation import format_name_for_resource, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.communities import (
     get_community,
-    get_effective_min_age,
     get_effective_name_requirement,
     meets_read_gate,
+    meets_resource_age,
     meets_write_gate,
+    resource_age_gate,
+    resource_age_visible,
+    resource_needs_verification,
 )
+from netbbs.age_requirement import age_verification_refusal
 from netbbs.config import get_max_upload_bytes
 from netbbs.files import (
     FileArea,
@@ -240,7 +244,7 @@ def visible_areas(
     module's own docstring for why."""
     areas = [
         a for a in list_file_areas(db)
-        if meets_read_gate(db, user, a) and meets_age(db, user, get_effective_min_age(db, a))
+        if meets_read_gate(db, user, a) and resource_age_visible(db, user, a)
     ]
     if community_scoped:
         areas = [a for a in areas if a.community_id == community_id]
@@ -291,7 +295,7 @@ async def _browse_areas_in_category(
         all_areas = [
             a for a in list_file_areas(db, order_by=order_by)
             if meets_read_gate(db, user, a)
-            and meets_age(db, user, get_effective_min_age(db, a))
+            and resource_age_visible(db, user, a)
         ]
         if community_scoped:
             all_areas = [a for a in all_areas if a.community_id == community_id]
@@ -345,7 +349,7 @@ async def _browse_areas_in_category(
     def _slot_values(db: Database, areas: list[FileArea]) -> dict[int, str]:
         values = {}
         for area in areas:
-            if not meets_name_requirement(db, user, get_effective_name_requirement(db, area)):
+            if resource_needs_verification(db, user, area):
                 values[area.id] = NAME_GATE_NOTE
             else:
                 count, _ = count_listed_files(db, area)
@@ -375,10 +379,24 @@ async def _browse_areas_in_category(
     # Back from an area or a category comes back to this list, on the row
     # left (issue #839), as the board list does.
     reopen_at: int | None = None
+    about_separator = " · " if unicode_style else " - "
     while True:
         areas_here, categories_here, _, _ = await lane.run(_load, mode_box["mode"])
         if area_slot_art is not None:
             area_slot_values.update(await lane.run(_slot_values, areas_here))
+        # Which areas will ask this caller for a verification they lack --
+        # a verified name to upload, or a verified age to enter (issue
+        # #1082) -- named in the row as the board list does (design doc
+        # §3.6), read once per list on the worker thread.
+        needs_verification = await lane.run(
+            lambda db: {a.id for a in areas_here if resource_needs_verification(db, user, a)}
+        )
+
+        def _area_about(area: FileArea) -> str | None:
+            parts = [NAME_GATE_NOTE] if area.id in needs_verification else []
+            if area.description:
+                parts.append(area.description)
+            return about_separator.join(parts) or None
         if not categories_here:
             async def on_sort_flat() -> list[FileArea] | None:
                 new_mode = await _run_sort_prompt()
@@ -393,7 +411,7 @@ async def _browse_areas_in_category(
                 areas_here,
                 name_of=lambda a: a.name,
                 stable_id_of=lambda a: a.id,
-                description_of=lambda a: a.description,
+                description_of=_area_about,
                 title=title,
                 breadcrumb=picker_breadcrumb,
                 empty_message="No file areas are available to you yet.",
@@ -427,7 +445,7 @@ async def _browse_areas_in_category(
         def render_description(item: FileAreaCategory | FileArea) -> str | None:
             if isinstance(item, FileAreaCategory):
                 return item.description or "(category)"
-            return item.description
+            return _area_about(item)
 
         def stable_id(item: FileAreaCategory | FileArea) -> int:
             return item.id if isinstance(item, FileArea) else -item.id
@@ -931,6 +949,13 @@ async def _show_area(
     remote catalogue entry carries no additional moderation state of its
     own to re-check.
     """
+    # A file area that wants a verified age is listed for a caller old
+    # enough by their own birthdate, marked "needs verification" (issue
+    # #1082), so entering it is where they are told what to do -- on the
+    # way in, whichever list, scan or search opened it.
+    if await lane.run(resource_age_gate, user, area) == "unverified":
+        announce(session, age_verification_refusal("This file area"), tone="error")
+        return
     area_name = sanitize_text(area.name)
     # Where a jump's cursor starts, set by `_load` (issue #839).
     jump: dict[str, int | None] = {"highlight": None}
@@ -972,7 +997,7 @@ async def _show_area(
         effective_name_requirement = get_effective_name_requirement(db, area)
         can_write = (
             meets_write_gate(db, user, area)
-            and meets_age(db, user, get_effective_min_age(db, area))
+            and meets_resource_age(db, user, area)
             and meets_name_requirement(db, user, effective_name_requirement)
         )
         return (

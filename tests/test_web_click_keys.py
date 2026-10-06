@@ -57,3 +57,14 @@ def test_a_frame_character_ends_an_entry_as_two_spaces_do():
 
 def test_a_key_drawn_as_a_frame_character_is_still_one_entry():
     assert _key_at([("[─] Divider", 1), ("[─] Divider", 6)]) == ["─", "─"]
+
+
+def test_an_enter_prompt_gives_enter():
+    # Issue #1083: "Press any key" pauses read "[Enter] Continue" so a click
+    # dismisses them; the click sends a carriage return.
+    assert _key_at([
+        ("[Enter] Continue", 3),
+        ("[Enter] Continue", 12),
+        ("(the main menu as you see it, 1 of 2)  [Enter] Continue", 44),
+        ("Diagnostic log (live) -- [Enter] Stop", 30),
+    ]) == ["\r", "\r", "\r", "\r"]

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from netbbs.rendering.menu import continue_prompt
 from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
 from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
@@ -683,5 +684,5 @@ async def _caller_who_screen(
             return
         last_stable_id = _stable_id(selected)
         if await _act_on(selected):
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()

@@ -231,7 +231,7 @@ def test_kicked_target_can_read_the_notice_before_the_screen_clears(
     text = _written_text(target_session)
 
     kicked_index = text.index("kicked")
-    prompt_index = text.index("Press any key to continue")
+    prompt_index = text.index("Continue")
     clear_index = text.index(reset_scroll_region() + clear_screen())
 
     assert kicked_index < prompt_index < clear_index

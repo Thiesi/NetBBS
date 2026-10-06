@@ -21,13 +21,12 @@ import datetime
 import sqlite3
 from dataclasses import dataclass, replace
 
-from netbbs.attestation import meets_age
 from netbbs.auth.users import SYSOP_LEVEL, StaffPermission, User
 from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.boards.moderation_notices import record_moderation_outcome
-from netbbs.communities import get_effective_min_age, require_read_gate, require_write_gate
+from netbbs.communities import require_read_gate, require_write_gate, resource_age_gate
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.file_refs import (
     MAX_FILE_REFS,
@@ -728,7 +727,10 @@ def _require_board_readable(db: Database, board: Board, user: User) -> None:
     (The name requirement gates posting, not reading.) Checked by every
     listing of a board's posts, not only by the screens that lead to one."""
     require_read_gate(db, user, board)
-    if not meets_age(db, user, get_effective_min_age(db, board)):
+    gate = resource_age_gate(db, user, board)
+    if gate == "unverified":
+        raise PostError("this message board needs a verified age")
+    if gate != "pass":
         raise PostError("this message board has an age requirement you do not meet")
 
 
