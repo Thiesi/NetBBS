@@ -242,6 +242,15 @@ a hotkey must not answer twice. Desktop browsers are left as they were: a
 desktop input method composes a spelling that is then converted (romaji,
 pinyin), and only the converted text is meant to be sent.
 
+The browser terminal draws box-drawing and block characters so they join
+between rows, as a classic terminal does (issue #1083). Rows are exactly one
+font height tall (`lineHeight` 1), and xterm.js's WebGL renderer draws those
+characters itself rather than taking them from the font, so a frame's
+vertical lines and block art stay unbroken whatever font the browser picked.
+Without WebGL (an old browser, a blocked GPU, a lost context) xterm.js keeps
+its DOM renderer, where the line height of 1 keeps most fonts' own glyphs
+touching.
+
 ### 3.2 Rendering model
 
 Use hybrid terminal rendering:
