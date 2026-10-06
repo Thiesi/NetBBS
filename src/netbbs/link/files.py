@@ -100,6 +100,13 @@ def is_area_linked(db: Database, area: FileArea) -> bool:
     return row is not None and row["link_genesis_json"] is not None
 
 
+def linked_area_ids(db: Database) -> set[int]:
+    """Every file area id with a genesis on file, in one query -- what a list
+    asks (issue #1104) instead of one `is_*_linked` query per row."""
+    rows = db.connection.execute("SELECT id FROM file_areas WHERE link_genesis_json IS NOT NULL")
+    return {row["id"] for row in rows}
+
+
 def link_file_area(
     db: Database,
     area: FileArea,
