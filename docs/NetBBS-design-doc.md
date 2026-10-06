@@ -1053,28 +1053,27 @@ itself, and a draft editor would have to hold the plaintext across redraws to
 offer anything more. Each prompt cancels on a blank line and nothing is
 written before the last one.
 
-**A console resource opens on its own fields** (issue #1081). The six
-resource screens of the SysOp console -- a Community, a category, a message
-board, a file area, a chat channel and a door -- are one screen each, not an
-overview with an `[E]dit` key in front of the draft editor. The screen shows
-what can't be edited first, in a compact header of one or two rows (counts,
-place in the callers' list, Link status), then the editable fields with the
-cursor already on the first one, then the actions. Long Link details (origin,
-closure, pending transfers, peer reach) form a "NetBBS Link" section after the
-fields. A field is chosen by the cursor only: ↑↓ to choose, Enter or Space to
-change it, ←→ to step a value. Fields have no letters on these screens, so the
-action keys (`[U]p`, `[R]emove`, `[P]ending posts`, `[L]ink`, `[S]tart
-service` and the rest) keep theirs. Changes go into a draft as on every other
-editor; nothing is stored before `[S]ave`. Once a field differs from what is
-stored, the action bar shows only `[S]ave` and `[B]ack`, so no action runs
-against values the screen no longer shows. `[B]ack` leaves at once while
-nothing has changed. With changes it discards typed work, which can't be
-undone, so it is the hotkey-chosen, destructive action the yes/no rule above
-allows a question for, the same "Discard unsaved changes?" every draft editor
-asks. On a
-Linked resource this node is not the origin of, a field the origin controls is
-shown in place, read-only, labelled "set by origin". Creating a resource uses
-the same screen with an empty draft and no actions. Account screens, settings
+**A console resource opens on its own fields** (issue #1081). The six resource
+screens of the SysOp console -- a Community, a category, a message board, a
+file area, a chat channel and a door -- are one screen each, not an overview
+with an `[E]dit` key in front of the draft editor. The screen shows what can't
+be edited first, in a compact header of one or two rows (counts, place in the
+callers' list, Link status), then the editable fields with the cursor already
+on the first one, then the actions. Long Link details (origin, closure, pending
+transfers, peer reach) form a "NetBBS Link" section after the fields. A field
+is chosen by the cursor only: ↑↓ to choose, Enter or Space to change it, ←→ to
+step a value. Fields have no letters on these screens, so the action keys
+(`[U]p`, `[R]emove`, `[P]ending posts`, `[L]ink`, `[S]tart service` and the
+rest) keep theirs. Changes go into a draft as on every other editor; nothing is
+stored before `[S]ave`. Once a field differs from what is stored, the action
+bar shows only `[S]ave` and `[B]ack`, so no action runs against values the
+screen no longer shows. `[B]ack` leaves at once while nothing has changed. With
+changes it discards typed work, which can't be undone, so it is the
+hotkey-chosen, destructive action the yes/no rule above allows a question for,
+the same "Discard unsaved changes?" every draft editor asks. On a Linked
+resource this node is not the origin of, a field the origin controls is shown
+in place, read-only, labelled "set by origin". Creating a resource uses the
+same screen with an empty draft and no actions. Account screens, settings
 screens and caller-side editing (a post, a file description, the Profile) are
 unchanged: an account's keys are separate, individually confirmed operations
 rather than fields of one form, and the settings screens already open straight
@@ -1211,11 +1210,12 @@ Two rules follow from that, and are normative for any future list:
 
 A row shows what **applies** to a caller, resolved through the Community
 cascade (`get_effective_min_age` and friends), never the resource's own raw
-unset value. A board that sets no age gate but sits in a Community that does
-is gated, and enforcement says so; a list that printed the resource's own
-`None` would report it as open. The resource's own screen in the console
-(§3.5) is where a SysOp sees which values the resource itself sets. An explicit `0` minimum age is not a
-gate -- `meets_age` admits everyone -- and is not tagged as one.
+unset value. A board that sets no age gate but sits in a Community that does is
+gated, and enforcement says so; a list that printed the resource's own `None`
+would report it as open. The resource's own screen in the console (§3.5) is
+where a SysOp sees which values the resource itself sets. An explicit `0`
+minimum age is not a gate -- `meets_age` admits everyone -- and is not tagged
+as one.
 
 In the prose fallback the gates lead the string, because a narrow terminal is
 precisely where that string gets truncated: who may enter is the least
