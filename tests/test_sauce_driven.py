@@ -109,14 +109,18 @@ def test_a_cp437_terminal_gets_ctermss_ice_modes_and_keeps_them():
     assert f"{ESC}[0;104m" in out
 
 
-def test_ctermss_ice_modes_are_sent_once_per_session():
+def test_art_held_back_during_a_break_in_does_not_leave_the_modes_unsent():
+    """Claude review of #1087: with a one-shot flag, art written while a
+    break-in held output used up the modes without them reaching the
+    terminal. Every art that needs them sends them, and never their reset."""
     from netbbs.net.session import write_art_text
 
     session = _Session(CP437)
     for _ in range(3):
         asyncio.run(write_art_text(session, f"{ESC}[0;5;44mNIB{ESC}[0m"))
     sent = "".join(session.sent)
-    assert sent.count(f"{ESC}[?33h") == 1 and sent.count(f"{ESC}[?35h") == 1
+    assert sent.count(f"{ESC}[?33h{ESC}[?35h") == 3
+    assert "?33l" not in sent and "?35l" not in sent
 
 
 def test_art_without_bright_backgrounds_gets_no_mode_switch():

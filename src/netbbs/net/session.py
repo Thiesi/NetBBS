@@ -932,8 +932,8 @@ async def write_preformatted_line(session: Session, text: str) -> None:
     bright backgrounds 100-107 unless its DECSET mode 33 is on, and keeps a
     bright background as the blink attribute, which still blinks until mode
     35 turns blinking off. A CP437 terminal gets ``CSI ? 33 h`` and
-    ``CSI ? 35 h`` once and keeps them (`prepare_art_text`); other terminals
-    ignore the private modes.
+    ``CSI ? 35 h`` before such art and never their reset
+    (`prepare_art_text`); other terminals ignore the private modes.
     """
     await write_art_text(session, preformatted_rows(session, text))
 
@@ -953,23 +953,19 @@ def prepare_art_text(session: Session, text: str) -> str:
     switched on before the first art that needs them. Paced art (issue #929)
     prepares the whole art once, then sends it in chunks.
 
-    The modes stay on for the rest of the session (issue #1083 finding 6).
-    CTerm draws a bright background as the blink attribute: mode 33 makes
-    it a bright background, mode 35 stops it blinking, and switching either
-    off after the art would make the cells already on screen blink. See the
-    CTerm manual, DECSET modes 33 and 35 (https://www.syncterm.net/cterm.html).
-    Sent as two sequences, which SyncTERM 1.0 needs."""
+    The modes are switched on before every such art and never off (issue
+    #1083 finding 6). CTerm draws a bright background as the blink
+    attribute: mode 33 makes it a bright background, mode 35 stops it
+    blinking, and switching either off after the art would make the cells
+    already on screen blink. Sending them again is harmless, and sending them
+    each time means art held back during a break-in, whose bytes never reach
+    the terminal, can't leave them unsent for the rest of the session (Claude
+    review of #1087). See the CTerm manual, DECSET modes 33 and 35
+    (https://www.syncterm.net/cterm.html). Two sequences, which SyncTERM 1.0
+    needs."""
     text = ice_to_bright_background(text)
-    if (
-        getattr(session, "output_charset", UTF8) == CP437
-        and not getattr(session, "_cterm_ice_modes_on", False)
-        and _BRIGHT_BACKGROUND.search(text)
-    ):
+    if getattr(session, "output_charset", UTF8) == CP437 and _BRIGHT_BACKGROUND.search(text):
         text = f"{_CTERM_ICE_MODES_ON}{text}"
-        try:
-            session._cterm_ice_modes_on = True
-        except AttributeError:
-            pass
     return text
 
 
