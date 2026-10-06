@@ -744,7 +744,11 @@ draft and save it explicitly.
   A Community is not an automatic grant to every resource inside it.
   Callers see Communities in your order: a new one goes last, and **Up** and
   **Down** on its screen move it. **Remove** deletes it; its resources stay,
-  without a Community.
+  without a Community. A Community's screen, and a category's, opens on its
+  fields: move the cursor to one and press Enter (or Space) to change it,
+  Left and Right step a choice, and **Save** stores the changes. While a
+  change waits to be saved, only **Save** and **Back** are offered; **Back**
+  then asks before discarding it.
 - **Doors:** attach registered games to a Community, or to none.
 
 **Where callers find it.** The main menu's **Message boards**, **Chat** and
