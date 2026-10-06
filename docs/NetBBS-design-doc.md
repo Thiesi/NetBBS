@@ -2063,7 +2063,13 @@ Users may provide nullable, independently visible:
 
 Age is computed from birthdate at check time. It is never stored as a derived
 current age. If a resource has an age gate and no usable birthdate or verified
-age attestation exists, access fails closed.
+age attestation exists, access fails closed. A birthdate is neither in the
+future nor before 1900-01-01.
+
+The caller sets these. A SysOp, or a staff member with manage accounts within
+its reach (§5.6), can correct or clear the display name and birthdate from the
+account screen; each edit is in the account's admin history, the birthdate's
+without the date. Such an edit never touches an attestation (issue #1110).
 
 A minimum age can also say how the age must be known (issue #1082). The age
 requirement is:
@@ -2290,7 +2296,8 @@ below level 255, independent of its level:
 - **Approve accounts:** approve or decline registrations waiting under
   `approval_required` (§4.2).
 - **Manage accounts:** disable an account and enable it again, reset its
-  password, and set its level anywhere from 0 to 254. Raising an account to
+  password, correct or clear its display name and birthdate, and set its
+  level anywhere from 0 to 254. Raising an account to
   255, and deleting an account and so retiring its name (§4.3), stay with the
   SysOp.
 - **Moderate everything:** act as moderator on every board, file area and
@@ -15265,6 +15272,39 @@ stores a known value and drops anything else.
 **Decision 5 — edited in the Min age field.** The editors show
 "18, verified only" and take `18v`, so no editor gains a row: the area and
 channel screens must still fit 80x24 whole.
+
+### Issue #1110 — a SysOp corrects a caller's display name and birthdate — decided
+
+Only the caller could set their display name and birthdate (Profile → Name &
+details), so a SysOp could not fix a typo or remove a display name that had to
+go. Normative description: §5.5 and §5.6.
+
+**Decision 1 — the same reach as a password reset.** A SysOp may edit any
+account, and a staff member with manage accounts may edit an account below 255
+that holds no staff permission, never their own. Both fields are details of
+the account the way its password is, so they follow that permission rather
+than a new one. Rejected: SysOp only, which would leave the helper who runs
+the node while the SysOp is away unable to remove an offending display name.
+
+**Decision 2 — the caller's own rules, and one more for both.** The same
+display-name rules as the caller's own edit apply (the reserved `=` marker,
+the byte cap, the look-alike and staff-title checks of issues #835 and #843).
+A birthdate may be neither in the future nor before 1900-01-01, for the caller
+too: a typo such as `0198` would otherwise make anyone old enough for every
+age gate. Blank clears either field, which the caller's own screen does not
+offer and a SysOp needs.
+
+**Decision 3 — audited, without the birthdate.** Each edit is recorded in the
+account's admin history with who made it. A display name is shown to everyone,
+so the record keeps the old and new name; a birthdate is private unless its
+owner shows it, and the history is read by every SysOp and manager, so the
+record says only that it was set, changed or cleared.
+
+**Decision 4 — verified values are separate.** An age or real-name
+attestation is not touched by these edits and still decides every gate; the
+account screen says so when one is on record. The caller's own visibility
+settings for both fields are left as they are. Display names do not travel
+over NetBBS Link, so nothing is carried.
 
 ### SFTP over the SSH transport — declined
 
