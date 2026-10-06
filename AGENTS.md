@@ -170,7 +170,9 @@ The standing principle is:
 - **Menus and screens follow design doc §3.5 (issue #282); no dialog
   chains.** A hotkey-reached screen shows its content first and can be
   left with `[B]ack` (or a "Press any key" pause) without answering a
-  question and without writing anything. Actions are action-bar hotkeys,
+  question and without writing anything (a draft editor whose draft has
+  changed asks "Discard unsaved changes?" first: discarding typed work is
+  the destructive action the yes/no rule below allows). Actions are action-bar hotkeys,
   `edit_resource_draft` fields, or `pick_item` entries. A yes/no prompt is
   only ever the last keystroke behind a hotkey the caller chose,
   immediately before an irreversible, destructive, or network-touching

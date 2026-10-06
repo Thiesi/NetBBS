@@ -1066,8 +1066,12 @@ change it, ←→ to step a value. Fields have no letters on these screens, so t
 action keys (`[U]p`, `[R]emove`, `[P]ending posts`, `[L]ink`, `[S]tart
 service` and the rest) keep theirs. Changes go into a draft as on every other
 editor; nothing is stored before `[S]ave`. Once a field differs from what is
-stored, the action bar shows only `[S]ave` and `[B]ack` (which asks before
-discarding), so no action runs against values the screen no longer shows. On a
+stored, the action bar shows only `[S]ave` and `[B]ack`, so no action runs
+against values the screen no longer shows. `[B]ack` leaves at once while
+nothing has changed. With changes it discards typed work, which can't be
+undone, so it is the hotkey-chosen, destructive action the yes/no rule above
+allows a question for, the same "Discard unsaved changes?" every draft editor
+asks. On a
 Linked resource this node is not the origin of, a field the origin controls is
 shown in place, read-only, labelled "set by origin". Creating a resource uses
 the same screen with an empty draft and no actions. Account screens, settings
@@ -1209,8 +1213,8 @@ A row shows what **applies** to a caller, resolved through the Community
 cascade (`get_effective_min_age` and friends), never the resource's own raw
 unset value. A board that sets no age gate but sits in a Community that does
 is gated, and enforcement says so; a list that printed the resource's own
-`None` would report it as open. The editor behind `[E]` is where a SysOp sees
-which values the resource itself sets. An explicit `0` minimum age is not a
+`None` would report it as open. The resource's own screen in the console
+(§3.5) is where a SysOp sees which values the resource itself sets. An explicit `0` minimum age is not a
 gate -- `meets_age` admits everyone -- and is not tagged as one.
 
 In the prose fallback the gates lead the string, because a narrow terminal is
@@ -15116,14 +15120,15 @@ arrow key would change a resource at once.
 **Decision 2 — fields by the cursor, actions by their keys.** On every one of
 these screens a field letter collided with an action letter (on a board, `D`
 was Description and Down, `R` Read level and Remove, `P` Pinned and Pending
-posts; on a door `S` was Save and Start service). Rejected: keeping field
+posts; on a door, `D` was Description and Delete). Rejected: keeping field
 letters and moving the actions to a second page, which adds a keystroke to
 every action instead of removing one from every edit.
 
 **Decision 3 — a changed draft hides the actions.** While the draft differs
 from what is stored only `[S]ave` and `[B]ack` are offered. Otherwise `[U]p`,
 `[L]ink` or `[S]tart service` would act on a resource whose screen shows
-values that are not stored yet, and on a door `[S]` would mean two things.
+values that are not stored yet. It also settles the one clash between two
+actions: on a door, `[S]ave` and `[S]tart service` are never offered together.
 
 **Decision 4 — six screens, no more.** Accounts keep their screen: each key
 there is a separate, confirmed operation with its own log entry, not a field
