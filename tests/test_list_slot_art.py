@@ -228,7 +228,7 @@ def test_a_prompt_slot_places_the_prompt_in_the_art():
     art_text = LIST_ART + "\r\n  {prompt}"
     _, session = _pick(["b"], art_text=art_text)
     text = "".join(session.written)
-    assert text[text.rfind(ESC + "["):].startswith(f"{ESC}[9;3HChoice:")
+    assert text[text.rfind(f"{ESC}[9;3H"):].startswith(f"{ESC}[9;3HChoice:")
 
 
 def test_ascii_callers_and_small_terminals_get_the_generated_list():
@@ -264,3 +264,15 @@ def test_list_art_goes_out_as_art_with_its_pictographs():
     art_text = LIST_ART.replace("+------------------------------------------+", "+-------------------\u2665----------------------+", 1)
     _, session = _pick(["b"], art_text=art_text)
     assert "\x03" in "".join(session.written)
+
+
+def test_an_answer_to_a_choice_at_a_prompt_slot_starts_below_the_screen():
+    """Issue #1083: a choice typed at a prompt inside the art ends its line
+    below the art and the navigation lines, not on the row under the
+    prompt, where it would overwrite what is drawn there."""
+    art_text = LIST_ART + "\r\n  {prompt}"
+    _, session = _pick(["b"], art_text=art_text)
+    text = "".join(session.written)
+    # The art is 9 rows, the prompt sits on its last; the two navigation
+    # lines take rows 10 and 11, so the answer starts on row 12.
+    assert text[text.rfind("Choice:"):].startswith(f"Choice: b{ESC}[12;1H")
