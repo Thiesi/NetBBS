@@ -133,6 +133,7 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
+from netbbs.gate_summary import gates_line, resource_gates
 from netbbs.net.session import Session, physical_terminal_width, post_body_width, write_prompt
 from netbbs.net.shared_account import (
     authored_earlier_by_shared_account,
@@ -159,7 +160,7 @@ from netbbs.rendering import (
     screen_title,
 )
 from netbbs.rendering.ansi import strip_ansi
-from netbbs.rendering.charset import art_glyphs_to_cp437_controls
+from netbbs.rendering.charset import art_glyphs_to_cp437_controls, ellipsis_for
 from netbbs.rendering.detail import Section, Styled
 from netbbs.rendering.post_body import (
     art_body_from_editor,
@@ -1028,6 +1029,15 @@ async def _show_board(
     else:
         read_only_reason = _read_only_reason(db, user, board, closed=closed)
     linked_note = _linked_note(db, board, link_context)
+    # The gates this board applies, named under its title (issue #1105).
+    board_gates = resource_gates(db, board)
+
+    def _gates_note() -> str | None:
+        return gates_line(
+            board_gates, width=session.terminal_width, unicode_style=unicode_style,
+            ellipsis=ellipsis_for(session, unicode_style=unicode_style),
+        )
+
     # A first visit counts what is already here as read; from then on a
     # post is read once it is opened, and only then (issue #710).
     ensure_board_baseline(db, user, board)
@@ -1092,6 +1102,9 @@ async def _show_board(
             node_name_gradient=session.node_name_gradient,
         )
         notes = []
+        gates_note = _gates_note()
+        if gates_note:
+            notes.append(gates_note)
         if board.description:
             # At most two rows: a description has no length limit and can
             # arrive over Link, and the list is what the caller came for
@@ -1797,6 +1810,9 @@ async def _show_board(
             await session.write_line(
                 f"\r\n{screen_title(board_name, breadcrumb=(session.node_display_name, *breadcrumb), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient)}"
             )
+            gates_note = _gates_note()
+            if gates_note:
+                await session.write_line(gates_note)
             await session.write_line(
                 f"\r\n{empty_state('This message board has no posts yet', detail='It is ready for its first conversation.', width=session.terminal_width, header_color=header_color)}"
             )
