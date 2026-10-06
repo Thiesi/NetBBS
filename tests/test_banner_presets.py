@@ -190,3 +190,28 @@ def test_presets_avoid_ambiguous_width_glyphs(
         assert not found, (
             f"{family}/{preset.resource} uses {found}, whose width the terminal picks"
         )
+
+
+# CP437's full set of glyphs, including the pictures of its control range
+# (0x01-0x1F and 0x7F). Every font with the WGL4 set (Consolas, Cascadia,
+# Courier New, DejaVu) has them all, and a CP437 terminal draws each one as
+# itself or, for the few control bytes art can't send, a close stand-in.
+CP437_REPERTOIRE = frozenset(
+    bytes(range(0x20, 0x7F)).decode("cp437") + bytes(range(0x80, 0x100)).decode("cp437")
+    + "☺☻♥♦♣♠•◘○◙♂♀♪♫☼"
+    + "►◄↕‼¶§▬↨↑↓→←∟↔▲▼⌂"
+)
+
+
+@pytest.mark.parametrize(("family", "presets", "loader"), PRESET_FAMILIES)
+def test_presets_only_use_characters_every_terminal_font_has(
+    family: str, presets: tuple[BannerPreset, ...], loader: PresetLoader
+) -> None:
+    """Issue #1083 finding 1: PuTTY drew boxes for the diagonals and rounded
+    corners of some presets, and SyncTERM showed "??" for symbols CP437 has
+    no stand-in for. Bundled art keeps to CP437's repertoire, so it looks
+    the same in every terminal."""
+    for preset in presets:
+        visible = strip_ansi(decode_ansi_bytes(loader(preset)))
+        found = sorted({ch for ch in visible if ch not in CP437_REPERTOIRE and ch not in "\r\n\x1a"})
+        assert not found, f"{family}/{preset.resource} uses {[f'U+{ord(c):04X}' for c in found]}"
