@@ -863,6 +863,8 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
     status_badge,
+    status_mark,
+    status_result,
     telemetry_gauge,
     truncate,
     visible_width,
@@ -1193,15 +1195,15 @@ def _announce_line(session: Session, line: str) -> None:
     the line off a keypress echo that is no longer above it."""
     line = _LEADING_BREAK.sub(r"\1", line)
     if "\x1b[" not in line:
-        if line.startswith(_FAILED_OUTCOMES):
-            color = ERROR_COLOR
-        elif line.startswith(_NEUTRAL_OUTCOMES):
-            color = MUTED_COLOR
-        else:
-            color = SUCCESS_COLOR
         # A key the outcome mentions stands out as a menu key (issue #1083),
-        # and a path it names reads as a value (issue #1103).
-        line = highlight_result(line, color=color)
+        # a path it names reads as a value (issue #1103), and a success or
+        # failure says so with a leading mark (issue #1109).
+        if line.startswith(_FAILED_OUTCOMES):
+            line = status_result(line, "error")
+        elif line.startswith(_NEUTRAL_OUTCOMES):
+            line = highlight_result(line, color=MUTED_COLOR)
+        else:
+            line = status_result(line, "success")
     _notices.announce_styled(session, line)
 
 
@@ -1229,13 +1231,13 @@ def _co_sysop_question(username: str) -> str:
 
 
 def _announce_saved(session: Session, lead: str, path: object, tail: str) -> None:
-    """An outcome that names the file it saved: `lead` and `tail` in the
-    success colour, the path in the value colour so it reads as the thing
-    saved, and a key the tail mentions highlighted (issue #1083)."""
+    """An outcome that names the file it saved: the success mark, `lead`
+    and `tail` in the normal colours (issue #1109), the path in the value
+    colour so it reads as the thing saved, and a key the tail mentions
+    highlighted (issue #1083)."""
     _notices.announce_styled(
         session,
-        colored(lead, fg_color=SUCCESS_COLOR) + colored(str(path), fg_color=VALUE_COLOR)
-        + highlight_hotkeys(tail, color=SUCCESS_COLOR),
+        status_mark("success") + lead + colored(str(path), fg_color=VALUE_COLOR) + highlight_hotkeys(tail),
     )
 
 
@@ -10467,7 +10469,7 @@ async def _mrc_settings_screen(
         status = mrc_bridge.status()
         _announce_styled(
             session,
-            colored("Saved and applied. Link now: ", fg_color=SUCCESS_COLOR)
+            status_mark("success") + "Saved and applied. Link now: "
             + _mrc_state_line(status, unicode_style=unicode_style),
         )
         if status.last_error:

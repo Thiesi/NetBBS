@@ -296,7 +296,7 @@ def test_saving_mrc_settings_on_a_running_bridge_confirms_on_the_redrawn_screen(
                 await admin_menu(session, lane, operator, node_controls=_controls(bridge))
             rows = session.on_terminal()
             assert rows[0].endswith("Settings")
-            assert any(row.startswith("Saved and applied. Link now:") for row in rows), rows[-4:]
+            assert any(row.startswith("✓ Saved and applied. Link now:") for row in rows), rows[-4:]
         finally:
             await bridge.close()
             await fake.close()

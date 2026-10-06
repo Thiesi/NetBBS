@@ -39,6 +39,7 @@ from netbbs.net.char_input import InputCancelled, InputHistory
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.mail_flow import browse_mail
 from netbbs.rendering import (
+    status_mark,
     ACCENT_COLOR,
     ERROR_COLOR,
     LABEL_COLOR,
@@ -255,7 +256,8 @@ def test_inbox_delete_removes_message(tmp_path):
     asyncio.run(browse_mail(session, lane, bob))
 
     assert "Message deleted." in _written_text(session)
-    assert colored("Message deleted.", fg_color=SUCCESS_COLOR) in _written_text(session)
+    # A result is marked rather than drawn all in green (issue #1109).
+    assert status_mark("success") + "Message deleted." in _written_text(session)
     assert list_inbox(db, bob) == []
     lane.close()
     db.close()

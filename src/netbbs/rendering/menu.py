@@ -10,7 +10,15 @@ from __future__ import annotations
 import re
 
 from netbbs.rendering.ansi import colored
-from netbbs.rendering.theme import EMPHASIS_COLOR, MENU_KEY_COLOR, MUTED_COLOR, SUCCESS_COLOR, VALUE_COLOR
+from netbbs.rendering.theme import (
+    EMPHASIS_COLOR,
+    ERROR_COLOR,
+    MENU_KEY_COLOR,
+    MUTED_COLOR,
+    SUCCESS_COLOR,
+    VALUE_COLOR,
+    WARNING_COLOR,
+)
 
 Color = int | tuple[int, int, int]
 
@@ -127,6 +135,32 @@ def highlight_result(text: str, *, color: Color | None = None) -> str:
         position = match.start() + len(path)
     parts.append(highlight_hotkeys(text[position:], color=color))
     return "".join(part for part in parts if part)
+
+
+# How a result went, as a short mark in front of it (issue #1109): the line
+# itself keeps NetBBS's usual colours -- keys in the menu key's green, labels
+# and text plain, paths in the value colour -- instead of a line all in green
+# or red, which turned the key/label scheme around on every confirmation.
+# `charset` maps the marks for CP437 (✓ -> √) and ASCII (* and x).
+STATUS_MARKS: dict[str, tuple[str, Color]] = {
+    "success": ("✓", SUCCESS_COLOR),
+    "warning": ("!", WARNING_COLOR),
+    "error": ("✗", ERROR_COLOR),
+}
+
+
+def status_mark(status: str) -> str:
+    """The coloured mark for `status` ("success", "warning" or "error"),
+    with the space that follows it."""
+    mark, color = STATUS_MARKS[status]
+    return colored(mark, fg_color=color, bold=True) + " "
+
+
+def status_result(text: str, status: str) -> str:
+    """A result line: `status`'s mark, then `text` in the normal colours,
+    its keys highlighted and any path it names in the value colour, as
+    `highlight_result` does for a line with no colour of its own."""
+    return status_mark(status) + highlight_result(text)
 
 
 def _in_color(text: str, color: Color | None) -> str:

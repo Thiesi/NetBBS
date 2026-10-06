@@ -226,7 +226,7 @@ def test_apply_makes_the_change(db, lane, sysop):
     rows = _screen(lane, sysop, ["u", "u", "/", "alice", "l", "10", "a"])
 
     assert get_user_by_username(db, "alice").user_level == 10
-    assert "'alice' is now level 10." in rows
+    assert "✓ 'alice' is now level 10." in rows
 
 
 def test_back_leaves_the_level_alone(db, lane, sysop):
@@ -245,7 +245,7 @@ def test_a_change_that_opens_nothing_is_applied_without_a_preview(db, lane, syso
     rows = _screen(lane, sysop, ["u", "u", "/", "alice", "l", "10"])
 
     assert get_user_by_username(db, "alice").user_level == 10
-    assert "'alice' is now level 10. That opens and closes nothing for them." in rows
+    assert "✓ 'alice' is now level 10. That opens and closes nothing for them." in rows
 
 
 def test_a_refused_change_is_refused_before_any_preview(db, lane, sysop):

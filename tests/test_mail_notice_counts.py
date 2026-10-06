@@ -27,7 +27,7 @@ from netbbs.net.mail_flow import browse_mail
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.node_theme import set_accent_color_override
 from netbbs.net.notices import pending_notices
-from netbbs.rendering import ACCENT_COLOR, GOOD_NEWS_COLOR, MENU_KEY_COLOR, WARNING_COLOR, nearest_256
+from netbbs.rendering import ACCENT_COLOR, GOOD_NEWS_COLOR, MENU_KEY_COLOR, WARNING_COLOR, nearest_256, status_mark
 from netbbs.session_history import previous_call_started_at, record_session_start
 from tests.test_mail_arrivals import Session, _scan, _stop, _until, _watching, node  # noqa: F401
 
@@ -196,7 +196,8 @@ def test_the_eviction_count_stays_a_warning(node, monkeypatch):
     monkeypatch.setattr(main_menu, "acknowledge_eviction_notice", lambda db, user, n: None)
 
     raw = _raw(_first_menu(db, lane, alice, current))
-    assert _color_of(raw, "EVICTED LINE") == f"38;5;{WARNING_COLOR}"
+    # A warning is marked as one (issue #1109); its text keeps the usual colour.
+    assert status_mark("warning") + "EVICTED LINE" in raw
     assert _color_of(raw, "You have 1 unread message") == f"38;5;{GOOD_NEWS_COLOR}"
 
 
