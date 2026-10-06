@@ -190,3 +190,23 @@ def test_a_locked_fields_own_hotkey_does_not_open_it_on_an_ordinary_editor():
     ))
     assert draft["name"] == "Pen Repair"
     assert "Name: set by origin, so it can't be changed here." in _visible(_written_text(session))
+
+
+def test_creating_offers_save_even_for_an_untouched_prefilled_draft():
+    """A gallery prefill is complete as it is: creating has nothing stored to
+    match, so Save is on offer from the first draw."""
+    store = Store()
+    store.values = {"name": "From the gallery", "pinned": True}
+
+    async def prefilled() -> DetailState:
+        return DetailState(draft=dict(store.values))
+
+    session = NavigableFakeSession(["s"])
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Create", fields=_fields(), draft={},
+        save=store.save, error_type=SaveError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        detail=DetailMode(refresh=prefilled, stay_after_save=False),
+    ))
+    assert result == {"name": "From the gallery", "pinned": True}
+    assert "[S]ave" in _visible(_written_text(session))
