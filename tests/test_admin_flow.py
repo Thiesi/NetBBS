@@ -1060,7 +1060,7 @@ def test_create_user_with_blank_username_is_cancelled(db, lane, sysop):
 
 
 def test_list_users_and_select_shows_detail(db, lane, sysop):
-    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "sysop" in _written_text(session)
     assert "Level: 255" in _normalized_visible(_written_text(session))
@@ -1071,7 +1071,7 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     # this same session, alongside review_composition) had no on-demand
     # help wired in at all until now.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "/", "alice", "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "alice", "CTRL+H", " ", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "moderator/sysop capability" in text.lower()
@@ -1080,7 +1080,7 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
 
 def test_user_detail_ctrl_h_narrows_to_the_highlighted_field(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "/", "alice", "DOWN", "CTRL+H", " ", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "alice", "DOWN", "CTRL+H", " ", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     # Down lands on "l" (Level, the first of _USER_DETAIL_FIELD_ORDER) --
@@ -1096,7 +1096,7 @@ def test_user_detail_arrow_nav_activates_the_highlighted_field(db, lane, sysop):
     # arrow-selectable fields (_USER_DETAIL_FIELD_ORDER = l, t, i, k, r);
     # Space then activates it exactly like pressing "t" directly would.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "/", "alice", "DOWN", "DOWN", " ", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "alice", "DOWN", "DOWN", " ", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is not None
@@ -1120,7 +1120,7 @@ def test_user_detail_recent_admin_actions_show_who_performed_them(db, lane, syso
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     # The list is a screen of its own now ([H]istory, left with [B]ack);
     # the detail screen only counts the actions.
-    session = FakeSession(["u", "u", "0", "1", "l", "20", "h", "b", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "l", "20", "h", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     visible = _visible(_written_text(session))
@@ -1202,7 +1202,7 @@ def test_list_users_sort_by_highest_level_first_changes_pick_order(db, lane, sys
     # Default is alphabetical ascending -- press "l" twice (once for
     # level ascending, again to flip to descending) to get highest
     # level first.
-    session = FakeSession(["u", "u", "l", "l", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "l", "l", "0", "1", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Level: 255" in _normalized_visible(_written_text(session))  # sysop, picked as item 01
 
@@ -1211,7 +1211,7 @@ def test_list_users_defaults_to_alphabetical_ascending_with_no_sort_prompt_neede
     """List [u]sers jumps straight to the listing now -- no separate
     one-shot sort-order prompt to answer first."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "alice" in _written_text(session)  # item 01 alphabetically
     assert "Sorted by: Alphabetical ↑" in _written_text(session)
@@ -1265,7 +1265,7 @@ def test_user_picker_registration_toggle_shows_both_directions(db, lane, sysop):
 
 def test_user_picker_search_still_works(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "/", "alice", "b", "b", "b"])
+    session = FakeSession(["u", "u", "/", "alice", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     # A single match auto-selects straight into the detail screen.
     assert "Level: 10" in _normalized_visible(_written_text(session))
@@ -1353,7 +1353,7 @@ def test_list_users_unrecognized_key_sounds_a_bell_and_changes_nothing(db, lane,
     establishes -- not a lenient fallback, since there's no longer a
     separate one-shot prompt where that made sense."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "u", "z", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "z", "0", "1", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "\b \b\a" in _written_text(session)
     assert "alice" in _written_text(session)  # still item 01 alphabetically -- sort unchanged
@@ -1366,7 +1366,7 @@ def test_central_editor_lets_a_sysop_promote_then_disable_the_same_user_without_
     picking them a second time through a separate flow."""
     create_user(db, "alice", password="hunter2", user_level=10)
     session = FakeSession(
-        ["u", "u", "0", "1", "l", "20", "t", "y", "b", "b", "b"]
+        ["u", "u", "0", "1", "l", "20", "t", "y", "b", "b", "b", "b"]
     )
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1380,7 +1380,7 @@ def test_central_editor_lets_a_sysop_promote_then_disable_the_same_user_without_
 def test_promote_demote_changes_level(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     # alice sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["u", "p", "0", "1", "l", "20", "b", "b", "b"])
+    session = FakeSession(["u", "p", "0", "1", "l", "20", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.user_level == 20
@@ -1402,7 +1402,7 @@ def test_level_prompt_opens_on_the_current_level(db, lane, sysop):
     # Issue #845, F136: the level prompt showed `[10]` beside an empty line,
     # while every Create/Edit screen opens its number in the line itself.
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = _SeedRecordingSession(["u", "p", "0", "1", "l", "20", "b", "b", "b"])
+    session = _SeedRecordingSession(["u", "p", "0", "1", "l", "20", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "10" in session.seeds
     assert "[10]" not in _visible(_written_text(session))
@@ -1410,7 +1410,7 @@ def test_level_prompt_opens_on_the_current_level(db, lane, sysop):
 
 def test_level_prompt_left_as_it_opened_changes_nothing(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "p", "0", "1", "l", "10", "b", "b", "b"])
+    session = FakeSession(["u", "p", "0", "1", "l", "10", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "is now level" not in _written_text(session)
 
@@ -1419,7 +1419,7 @@ def test_promote_demote_shows_lockout_guard_message(db, lane, sysop):
     # sysop is the only user, and the only active SysOp -- demoting
     # them must be refused, with the message shown on screen, not a
     # crash.
-    session = FakeSession(["u", "p", "0", "1", "l", "10", "b", "b", "b"])
+    session = FakeSession(["u", "p", "0", "1", "l", "10", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "only active SysOp-level account" in _written_text(session)
     assert count_sysops(db) == 1
@@ -1430,7 +1430,7 @@ def test_promote_demote_shows_lockout_guard_message(db, lane, sysop):
 
 def test_disable_enable_toggles_status(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is not None
@@ -1438,14 +1438,14 @@ def test_disable_enable_toggles_status(db, lane, sysop):
 
 def test_disable_declining_confirmation_leaves_account_active(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "e", "0", "1", "t", "n", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "t", "n", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is None
 
 
 def test_disable_shows_lockout_guard_message(db, lane, sysop):
-    session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "only active SysOp-level account" in _written_text(session)
 
@@ -1463,7 +1463,7 @@ def test_restrict_login_blocks_a_user(db, lane, sysop):
     from netbbs.moderation import is_blocked
 
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "e", "0", "1", "r", "y", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "r", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1478,7 +1478,7 @@ def test_restrict_login_toggle_unblocks_an_already_blocked_user(db, lane, sysop)
     block_user(db, alice, blocked_by=sysop, reason="pre-blocked for test")
     assert is_blocked(db, alice) is True
 
-    session = FakeSession(["u", "e", "0", "1", "r", "y", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "r", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1490,7 +1490,7 @@ def test_restrict_login_declining_confirmation_leaves_status_unchanged(db, lane,
     from netbbs.moderation import is_blocked
 
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "e", "0", "1", "r", "n", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "r", "n", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert is_blocked(db, alice) is False
@@ -1509,7 +1509,7 @@ def test_admin_can_attach_a_public_key_to_an_existing_password_account(db, lane,
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["u", "e", "0", "1", "k", "a", raw_b64, "phone", "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "a", raw_b64, "phone", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1523,7 +1523,7 @@ def test_attaching_a_duplicate_public_key_is_refused(db, lane, sysop):
     create_user(db, "bob", verify_key=verify_key, user_level=10)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
 
-    session = FakeSession(["u", "e", "0", "1", "k", "a", raw_b64, "phone", "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "a", raw_b64, "phone", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1541,7 +1541,7 @@ def test_admin_can_remove_a_public_key_from_a_password_and_key_account(db, lane,
     alice = create_user(db, "alice", password="hunter2", verify_key=verify_key, user_level=10)
     assert alice.fingerprint is not None
 
-    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "y", "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "y", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1556,7 +1556,7 @@ def test_admin_removing_a_public_key_refused_with_no_password_set(db, lane, syso
     alice = create_user(db, "alice", verify_key=verify_key, user_level=10)
     assert alice.fingerprint is not None
 
-    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "y", "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "y", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
@@ -1579,7 +1579,7 @@ def test_key_list_marks_the_primary_key_and_warns_before_removing_it(db, lane, s
     phone_key = nacl.signing.SigningKey.generate()
     alice = add_ssh_key(db, alice, phone_key.verify_key, label="phone", changed_by=sysop)
 
-    session = FakeSession(["u", "e", "0", "1", "k", "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "default" in text and "(primary)" in text
@@ -1587,7 +1587,7 @@ def test_key_list_marks_the_primary_key_and_warns_before_removing_it(db, lane, s
     phone_line = next(line for line in text.split("\r\n") if "phone" in line)
     assert "(primary)" not in phone_line
 
-    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "n", "b", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "n", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "primary key" in text
@@ -1602,7 +1602,7 @@ def test_key_list_marks_the_primary_key_and_warns_before_removing_it(db, lane, s
 
 def test_delete_with_correct_username_confirmation_deletes(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "d", "0", "1", "d", "alice", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "alice", "b", "b", "b"])
     _run(session, lane, sysop)
     assert not any(u.username == "alice" for u in list_users(db))
     assert "deleted" in _written_text(session)
@@ -1610,7 +1610,7 @@ def test_delete_with_correct_username_confirmation_deletes(db, lane, sysop):
 
 def test_delete_with_mismatched_confirmation_does_not_delete(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert any(u.username == "alice" for u in list_users(db))
     assert "Cancelled" in _written_text(session)
@@ -1618,7 +1618,7 @@ def test_delete_with_mismatched_confirmation_does_not_delete(db, lane, sysop):
 
 def test_delete_with_blank_confirmation_does_not_delete(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "d", "0", "1", "d", "", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert any(u.username == "alice" for u in list_users(db))
 
@@ -1631,7 +1631,7 @@ def test_delete_warning_describes_retained_session_history_identity_data(db, lan
     or silently erased. Issue #592 renamed the screen those rows are
     read on, so the copy names the previous-callers history now."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "previous-callers history" in text
@@ -1651,7 +1651,7 @@ def test_disable_disconnects_the_targets_live_session(db, lane, sysop):
         await asyncio.sleep(0)
         registry.mark_authenticated(alice_session, "alice")
 
-        admin_session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b"])
+        admin_session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1677,7 +1677,7 @@ def test_re_enabling_does_not_disconnect_anyone(db, lane, sysop):
         await asyncio.sleep(0)
         registry.mark_authenticated(alice_session, "alice")
 
-        admin_session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b"])
+        admin_session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1703,7 +1703,7 @@ def test_delete_disconnects_the_targets_live_session(db, lane, sysop):
         await asyncio.sleep(0)
         registry.mark_authenticated(alice_session, "alice")
 
-        admin_session = FakeSession(["u", "d", "0", "1", "d", "alice", "b", "b"])
+        admin_session = FakeSession(["u", "d", "0", "1", "d", "alice", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1721,7 +1721,7 @@ def test_disable_without_node_controls_does_not_raise(db, lane, sysop):
     state (node_controls=None) -- disabling a user there must still
     work, just without anything to disconnect."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)  # must not raise
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is not None
@@ -1738,7 +1738,7 @@ def test_disabling_your_own_account_excludes_your_own_session(db, lane, sysop):
     async def scenario():
         node_controls = _node_controls()
         registry = node_controls.session_registry
-        admin_session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b"])
+        admin_session = FakeSession(["u", "e", "0", "1", "t", "y", "b", "b", "b", "b"])
         registry.enter(admin_session)
         registry.mark_authenticated(admin_session, sysop.username)
         try:
@@ -6717,7 +6717,7 @@ def test_list_users_shows_pending_approval_status(db, lane, sysop):
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "pending approval" in _written_text(session)
 
@@ -6726,7 +6726,7 @@ def test_approving_a_pending_user_clears_the_gate(db, lane, sysop):
     from netbbs.auth.users import create_user, list_users
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["u", "u", "0", "1", "a", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "a", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.pending_approval is False
@@ -6737,7 +6737,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, lane, sysop):
     from netbbs.auth.users import create_user, list_users
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["u", "u", "0", "1", "a", "n", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "a", "n", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.pending_approval is True
@@ -6746,7 +6746,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, lane, sysop):
 def test_detail_screen_for_a_non_pending_user_has_no_approve_prompt(db, lane, sysop):
     # sysop themselves is the sole (non-pending) user -- picking their
     # own entry must not prompt for approval at all.
-    session = FakeSession(["u", "u", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Approve this account" not in _written_text(session)
 
@@ -6756,7 +6756,7 @@ def test_detail_screen_can_grant_verify_identity_permission(db, lane, sysop):
 
     create_user(db, "carol", password="hunter2pw")
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["u", "u", "0", "1", "i", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "i", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.can_verify_identity is True
@@ -6768,7 +6768,7 @@ def test_detail_screen_can_revoke_verify_identity_permission(db, lane, sysop):
 
     carol = create_user(db, "carol", password="hunter2pw")
     set_can_verify_identity(db, carol, True, changed_by=sysop)
-    session = FakeSession(["u", "u", "0", "1", "i", "y", "b", "b", "b"])
+    session = FakeSession(["u", "u", "0", "1", "i", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.can_verify_identity is False
@@ -6815,7 +6815,7 @@ def test_pending_account_detail_shows_the_signup_answer(db, lane, sysop):
 
     pending = create_user(db, "anna_writes", password="hunter2", pending_approval=True)
     save_signup_answer(db, pending.id, question="What do you write with?", answer="A Lamy 2000.")
-    session = FakeSession(["u", "d", "0", "1", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "b", "b", "b", "b"])
 
     _run(session, lane, sysop)
 
@@ -10294,7 +10294,7 @@ def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sys
 
     mark_link_has_run(db)
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b", "b"])
 
     _run(session, lane, sysop)
 
@@ -10313,7 +10313,7 @@ def test_declining_a_registration_holds_no_name_and_skips_the_delete_ritual(db, 
 
     mark_link_has_run(db)
     create_user(db, "alice", password="hunter2", user_level=10, pending_approval=True)
-    session = FakeSession(["u", "d", "0", "1", "d", "y", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "y", "b", "b", "b"])
 
     _run(session, lane, sysop)
 
@@ -10329,7 +10329,7 @@ def test_declining_a_registration_holds_no_name_and_skips_the_delete_ritual(db, 
 
 def test_delete_warning_says_nothing_about_retirement_on_a_standalone_node(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b"])
+    session = FakeSession(["u", "d", "0", "1", "d", "not-alice", "b", "b", "b", "b"])
 
     _run(session, lane, sysop)
 

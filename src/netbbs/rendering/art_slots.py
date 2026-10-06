@@ -567,6 +567,9 @@ class ListSlotRow:
     number: str | None
     name: str
     column: str = ""
+    #: Kept whole after a name cut to fit (issue #1104: the Linked
+    #: marker, which a row inside art can't show by colour).
+    suffix: str = ""
 
 
 def list_name_width(slot: Slot, column_width: int) -> int:
@@ -623,7 +626,8 @@ def render_list_slot_art(
             number_style = replace(base, fg=MENU_KEY_COLOR, bold=True)
         pieces: list[tuple[str, Cell]] = []
         if entry is not None:
-            name = fit_slot_text(sanitize_text(entry.name), name_width, ellipsis)
+            suffix = entry.suffix if display_width(entry.suffix) < name_width else ""
+            name = fit_slot_text(sanitize_text(entry.name), name_width - display_width(suffix), ellipsis) + suffix
             name += " " * (name_width - display_width(name))
             pieces = [((entry.number or " - ").ljust(3) + " ", number_style), (name, style)]
             if column_width:

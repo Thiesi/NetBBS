@@ -199,7 +199,7 @@ def test_a_manager_sets_a_level_from_the_console(db, lane, sysop):
     helper = _staff(db, sysop, "helper", MANAGE)
     carol = create_user(db, "carol", password="hunter2pw")
     # Sorted: carol, helper, sysop -- carol is 01.
-    session = FakeSession(["u", "0", "1", "l", "20", "b", "b"])
+    session = FakeSession(["u", "0", "1", "l", "20", "b", "b", "b"])
     _staff_console(session, lane, helper)
     assert get_user_by_id(db, carol.id).user_level == 20
 
@@ -207,7 +207,7 @@ def test_a_manager_sets_a_level_from_the_console(db, lane, sysop):
 def test_a_manager_cannot_raise_to_255_from_the_console(db, lane, sysop):
     helper = _staff(db, sysop, "helper", MANAGE)
     carol = create_user(db, "carol", password="hunter2pw")
-    session = FakeSession(["u", "0", "1", "l", "255", "b", "b"])
+    session = FakeSession(["u", "0", "1", "l", "255", "b", "b", "b"])
     _staff_console(session, lane, helper)
     assert get_user_by_id(db, carol.id).user_level != SYSOP_LEVEL
     assert "only a SysOp can do that" in _visible(_written_text(session))
@@ -216,7 +216,7 @@ def test_a_manager_cannot_raise_to_255_from_the_console(db, lane, sysop):
 def test_the_sysops_account_is_view_only_for_staff(db, lane, sysop):
     helper = _staff(db, sysop, "helper", CO_SYSOP_PRESET)
     # Sorted: helper, sysop -- sysop is 02. "l" is refused with a bell.
-    session = FakeSession(["u", "0", "2", "l", "t", "d", "b", "b"])
+    session = FakeSession(["u", "0", "2", "l", "t", "d", "b", "b", "b"])
     _staff_console(session, lane, helper)
     detail = _visible(_written_text(session)).split("PRIVILEGES", 1)[-1].split("Choice:", 1)[0]
     assert "[L]evel" not in detail and "[D]elete" not in detail and "oggle enable" not in detail
@@ -228,7 +228,7 @@ def test_the_sysops_account_is_view_only_for_staff(db, lane, sysop):
 def test_staff_never_see_keys_blocklist_staff_or_delete(db, lane, sysop):
     helper = _staff(db, sysop, "helper", CO_SYSOP_PRESET)
     create_user(db, "carol", password="hunter2pw")
-    session = FakeSession(["u", "0", "1", "b", "b"])
+    session = FakeSession(["u", "0", "1", "b", "b", "b"])
     _staff_console(session, lane, helper)
     detail = _visible(_written_text(session)).split("PRIVILEGES", 1)[-1].split("Choice:", 1)[0]
     assert "[L]evel" in detail and "[P]assword" in detail

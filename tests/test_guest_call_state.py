@@ -449,7 +449,7 @@ def test_the_console_says_why_the_guest_account_cannot_verify_identity(db, sysop
     lane = DatabaseLane(db.path)
     try:
         # guest sorts before sysop: item 01. [I], yes, then back out.
-        session = ConsoleSession(["u", "u", "0", "1", "i", "y", "b", "b", "b"])
+        session = ConsoleSession(["u", "u", "0", "1", "i", "y", "b", "b", "b", "b"])
         _run(session, lane, sysop)
     finally:
         lane.close()
