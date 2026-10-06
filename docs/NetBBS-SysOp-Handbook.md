@@ -727,6 +727,22 @@ Create resources under **Content**, or use **Create** in a resource picker.
 An empty picker remains usable for creating the first resource. Review the
 draft and save it explicitly.
 
+**A resource's screen is its editor.** Choosing a Community, category,
+message board, file area, chat channel or door opens it on its own fields,
+with the cursor on the first: move it with Up and Down, press Enter (or
+Space) to change a field, and Left and Right step a choice. A line above the
+fields says what the screen is about: a board's posts and latest activity, its
+place in the list and whether it is Linked; a channel's MRC room; a door's
+compatibility. Longer details follow the fields: a Linked board's or area's
+**NetBBS Link** section, a channel's **Sharing**, a door's companion service.
+When the screen is paged with PgUp/PgDn, they are on the last page. The
+resource's actions keep their letters (**Up**, **Down**, **Remove**, **Pending
+posts**, **History**, **Link**, **Restrictions**, **Compatibility**, the
+service controls and the rest) and are offered while nothing waits to be
+saved. Once a field has changed, only **Save** and **Back** are offered, and
+**Back** asks before discarding the change. Creating a resource uses the same
+screen, empty and without actions.
+
 - **Message boards:** set read/write levels, moderation, retention, and gates.
   Pending posts remain in an approval queue. Edits retain revision identity.
 - **File areas:** set access, upload policy, size/retention rules, and moderation.
@@ -742,13 +758,6 @@ draft and save it explicitly.
   the others in the same category and Community; pinned ones stay first and
   move among themselves. **Remove** deletes it. A caller can still sort a list by
   activity with **[O]rder**.
-- **A board's or file area's screen** opens on its fields, the way a
-  Community's does: a line above them gives its posts or files and latest
-  activity, its place in the list and whether it is Linked, and for a Linked
-  one a **NetBBS Link** section follows the fields (on the last page when the
-  screen is paged with PgUp/PgDn). **Pending posts**/**Pending files**,
-  **Expired files**, **History**, **Link** and the origin actions are on the
-  same screen, offered while no change waits to be saved.
 - **Chat channels:** set join gates, visibility, invitations, and moderation.
   Hidden or invite-only channels need more than a sufficient account level.
 - **Communities:** group related resources and provide inherited defaults.
@@ -756,20 +765,8 @@ draft and save it explicitly.
   A Community is not an automatic grant to every resource inside it.
   Callers see Communities in your order: a new one goes last, and **Up** and
   **Down** on its screen move it. **Remove** deletes it; its resources stay,
-  without a Community. A Community's screen, and a category's, opens on its
-  fields: move the cursor to one and press Enter (or Space) to change it,
-  Left and Right step a choice, and **Save** stores the changes. While a
-  change waits to be saved, only **Save** and **Back** are offered; **Back**
-  then asks before discarding it.
+  without a Community.
 - **Doors:** attach registered games to a Community, or to none.
-- **A chat channel's or door's screen** opens on its fields too. A
-  channel's line above them says whether it is Linked and names its MRC room;
-  its **Sharing** section follows the fields, and **Restrictions**, **Link**
-  and the MRC room actions are on the screen. A door's line names its
-  compatibility; **Compatibility**, **Last diagnostic**, **Outbound**,
-  **World** and, for a door with a companion service, **Start**, **Halt**,
-  **Restart** and **View service log** are on the screen. As elsewhere, they
-  are offered while no change waits to be saved.
 
 **Where callers find it.** The main menu's **Message boards**, **Chat** and
 **Files** list everything of that kind on the node, whichever Community it
