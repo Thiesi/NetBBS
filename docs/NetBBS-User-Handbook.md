@@ -30,8 +30,10 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 Press a highlighted letter such as **[M]** for **Message boards**. Most menus react
 immediately, without Enter. In the browser you can also click an entry or a
 numbered row. In a list, type a row's number: two digits (**03**) or one digit
-and Enter (**3** Enter). **[?] Help** on the main menu sums up how the board
-works and who runs it. To write to the SysOp, send E-mail **To: sysop**.
+and Enter (**3** Enter). A pause that waits for you reads **[Enter] Continue**:
+any key goes on, and in the browser so does a click on it. **[?] Help** on the
+main menu sums up how the board works and who runs it. To write to the SysOp,
+send E-mail **To: sysop**.
 When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.

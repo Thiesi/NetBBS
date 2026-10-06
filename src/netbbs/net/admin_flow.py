@@ -69,6 +69,7 @@ from zoneinfo import available_timezones
 
 import nacl.signing
 
+from netbbs.rendering.menu import continue_prompt
 from netbbs.access_map import (
     AccountChange,
     Gate,
@@ -12648,9 +12649,10 @@ async def _diagnostic_log_tail_screen(session: Session, lane: DatabaseLane) -> N
     """
     await session.write_line(
         colored(
-            "\r\nDiagnostic log (live) -- press any key to stop.",
+            "\r\nDiagnostic log (live)",
             fg_color=await lane.run(effective_header_color_256), bold=True,
         )
+        + colored(" -- ", fg_color=MUTED_COLOR) + continue_prompt("Stop")
     )
     seed = await lane.run(list_diagnostic_log_entries, limit=_DIAGNOSTIC_TAIL_SEED_COUNT)
     last_id = 0
@@ -12848,9 +12850,10 @@ async def _node_log_tail_screen(session: Session, lane: DatabaseLane, path: Path
     `read_key()` is cancelled and gathered on every exit path."""
     await session.write_line(
         colored(
-            f"\r\nNode log (live, {_NODE_LOG_FLOOR_LABELS[floor]}) -- press any key to stop.",
+            f"\r\nNode log (live, {_NODE_LOG_FLOOR_LABELS[floor]})",
             fg_color=await lane.run(effective_header_color_256), bold=True,
         )
+        + colored(" -- ", fg_color=MUTED_COLOR) + continue_prompt("Stop")
     )
     await session.write_line(colored("Watching for new lines.", fg_color=MUTED_COLOR))
     follower = await asyncio.to_thread(NodeLogFollower, path)
@@ -14250,7 +14253,7 @@ async def _preview_welcome_banner_screen(
     # actually be read, sometimes in well under a second. Same
     # present-then-wait shape `netbbs.net.help_overlay.show_help`
     # already uses for the identical reason.
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -14718,7 +14721,7 @@ async def _welcome_banner_filesystem_screen(
             # Same present-then-wait fix as the empty-list message above --
             # otherwise `pick_item`'s own next redraw clears this before
             # it can be read.
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             continue
 
@@ -14888,7 +14891,7 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     # See _preview_welcome_banner_screen's identical fix for why this
     # wait exists -- without it, redraw_in_place clears this preview
     # before it can actually be read.
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -14975,7 +14978,7 @@ async def _check_main_menu_slot_art_screen(session: Session, lane: DatabaseLane,
                     await session.write_line(
                         colored(f"  {label}: generated menu instead -- {plan.reason}.", fg_color=WARNING_COLOR)
                     )
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -15013,20 +15016,20 @@ async def _preview_main_menu_slot_art(session: Session, lane: DatabaseLane, acto
     art = await lane.run(_read_slot_art)
     if art is None:
         await session.write_line(colored("\r\nNo usable art file to preview.", fg_color=MUTED_COLOR))
-        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.write_line(continue_prompt())
         await session.read_any_key()
         return
     # [D]isable leaves the mode alone, so a switched-off banner still lands
     # here: say under each draw that callers get the plain menu meanwhile.
     enabled = await lane.run(is_main_menu_banner_enabled)
-    for intro, level in (("as you see it", None), ("as a level-0 caller sees it", 0)):
+    for number, (intro, level) in enumerate((("as you see it", None), ("as a level-0 caller sees it", 0)), 1):
         # The art clears the screen, so what is being shown is said below it.
         await _write_slot_art_preview(session, lane, actor, art, level=level)
         if not enabled:
             await session.write_line(colored(
                 "Callers don't see this art yet: it's switched off. Use [E]nable.", fg_color=WARNING_COLOR
             ))
-        await session.write_line(colored(f"(the main menu {intro}) Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.write_line(colored(f"(the main menu {intro}, {number} of 2)  ", fg_color=MUTED_COLOR) + continue_prompt())
         await session.read_any_key()
 
 
@@ -15192,7 +15195,7 @@ async def _main_menu_banner_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_MASTHEAD_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             continue
 
@@ -15409,7 +15412,7 @@ async def _preview_logoff_banner_screen(
         await _write_banner_slot_notes(session, banner_text)
     else:
         await _write_banner_not_live(session, status, callers_see="no banner")
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -15559,7 +15562,7 @@ async def _logoff_banner_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_LOGOFF_BANNER_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             continue
 
@@ -15683,7 +15686,7 @@ async def _preview_new_account_banner_before_screen(session: Session, lane: Data
         await write_preformatted_line(session, banner_text)
     else:
         await _write_banner_not_live(session, status, callers_see="no banner")
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -15835,7 +15838,7 @@ async def _new_account_banner_before_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_NEW_ACCOUNT_BANNER_BEFORE_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             continue
 
@@ -15961,7 +15964,7 @@ async def _preview_new_account_banner_after_screen(session: Session, lane: Datab
         await write_preformatted_line(session, banner_text)
     else:
         await _write_banner_not_live(session, status, callers_see="no banner")
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -16113,7 +16116,7 @@ async def _new_account_banner_after_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_NEW_ACCOUNT_BANNER_AFTER_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             continue
 
@@ -16351,7 +16354,7 @@ async def _check_list_slot_art_screen(session: Session, lane: DatabaseLane, acto
                     await session.write_line(
                         colored(f"  {label}: generated list instead -- {reason}.", fg_color=WARNING_COLOR)
                     )
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -16389,7 +16392,7 @@ async def _preview_list_slot_art(session: Session, lane: DatabaseLane, actor: Us
             await session.write(move_cursor(art.height + 1, 1))
             if kind == CHAT_CHANNEL_PICKER:
                 await session.write_line(colored("(people online are filled in on a running node)", fg_color=MUTED_COLOR))
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -16516,7 +16519,7 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
         await write_preformatted_line(session, masthead_text)
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -16670,7 +16673,7 @@ async def _board_list_masthead_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_BOARD_LIST_BANNER_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             continue
 
@@ -16816,7 +16819,7 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
         await write_preformatted_line(session, masthead_text)
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -16968,7 +16971,7 @@ async def _file_area_masthead_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_FILE_AREA_BANNER_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             continue
 
@@ -17118,7 +17121,7 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
         await write_preformatted_line(session, masthead_text)
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
-    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
     await session.read_any_key()
 
 
@@ -17274,7 +17277,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.write_line(continue_prompt())
             await session.read_any_key()
             continue
 
@@ -22302,7 +22305,7 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
             "This is a remote service. NetBBS runs no program for it and shares no "
             "files with it, so it has no way to hand anything back to post. Outbound is "
             "for doors which run on this node.", width=session.terminal_width))
-        await session.write_line("Press any key to return.")
+        await session.write_line(continue_prompt("Back"))
         await session.read_any_key()
         return
     message, message_failed = "", False
@@ -22515,7 +22518,7 @@ async def _door_service_action(session: Session, lane: DatabaseLane, actor: User
         status = door_services.status(door.id)
         await session.write_line(sanitize_text((status.diagnostic if status else "")
                                                or "No output from this door's service."))
-        await session.write_line("Press any key to return.")
+        await session.write_line(continue_prompt("Back"))
         await session.read_any_key()
         return
     verb = {"s": "Start", "h": "Halt", "r": "Restart"}[choice]

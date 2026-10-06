@@ -75,6 +75,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
+from netbbs.rendering.menu import continue_prompt
 from netbbs.activity import follow, is_following, record_channel_seen, unfollow
 from netbbs.attestation import (
     age_gate,
@@ -2621,7 +2622,7 @@ async def _show_help_pages(
         ]
         if next_remaining:
             lines.append(
-                colored(f"More -- press any key [{page_number}/{projected_count}]", fg_color=MUTED_COLOR)
+                colored(f"More [{page_number}/{projected_count}] -- ", fg_color=MUTED_COLOR) + continue_prompt()
             )
         elif footer:
             # The last page's spare row, the one "More" takes on the others.
@@ -5918,7 +5919,7 @@ async def _chat_loop(
                 if discard_buffered_input is not None:
                     await discard_buffered_input()
                 await session.write(
-                    reset_scroll_region() + "\r\n" + colored("Press any key to continue...", fg_color=MUTED_COLOR)
+                    reset_scroll_region() + "\r\n" + continue_prompt()
                 )
                 await session.read_any_key()
             except SessionClosedError:
@@ -6335,7 +6336,7 @@ async def run_direct_chat_loop(
                 if discard_buffered_input is not None:
                     await discard_buffered_input()
                 await session.write(
-                    reset_scroll_region() + "\r\n" + colored("Press any key to continue...", fg_color=MUTED_COLOR)
+                    reset_scroll_region() + "\r\n" + continue_prompt()
                 )
                 await session.read_any_key()
             except SessionClosedError:
