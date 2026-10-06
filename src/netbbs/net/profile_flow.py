@@ -16,13 +16,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from netbbs.rendering.menu import continue_prompt
+from netbbs.rendering.menu import continue_prompt, highlight_hotkeys
 from netbbs.attestation import (
     AttestationError,
     ProfileFieldError,
     attest_age,
     attest_name,
     compute_age,
+    clear_own_profile_field,
     get_attestation,
     get_birthdate,
     get_display_name,
@@ -32,6 +33,7 @@ from netbbs.attestation import (
     is_location_visible,
     is_verified_badge_visible,
     set_attestation_link_visible,
+    revoke_attestation,
     set_birthdate,
     set_birthdate_visible,
     set_display_name,
@@ -173,6 +175,10 @@ _LOGOFF_SUMMARY_GRADIENT = [
 # What a row shows for a caller whose name is hidden -- and so, being
 # compared against, what keeps that row from being mailed (issue #821).
 _NAME_HIDDEN = "(name hidden)"
+
+
+#: Typed at a self-reported field to clear it (issue #1115).
+_CLEAR = "-"
 
 
 def _session_history_display_name(
@@ -1846,10 +1852,15 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
     async def _display_name_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["display_name"]
         await write_prompt(
-            session, f"\r\nDisplay name [{current or '(not set)'}] -- new value (blank to keep): "
+            session, f"\r\nDisplay name [{current or '(not set)'}] -- new value (blank to keep, - to clear): "
         )
         new_value = (await session.read_line()).strip()
         if not new_value:
+            return
+        if new_value == _CLEAR:
+            await lane.run(clear_own_profile_field, user, "display_name")
+            draft["display_name"] = None
+            await session.write_line("Display name cleared.")
             return
         try:
             await lane.run(set_display_name, user, new_value)
@@ -1862,10 +1873,15 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
     async def _location_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["location"]
         await write_prompt(
-            session, f"\r\nLocation [{current or '(not set)'}] -- new value (blank to keep): "
+            session, f"\r\nLocation [{current or '(not set)'}] -- new value (blank to keep, - to clear): "
         )
         new_value = (await session.read_line()).strip()
         if not new_value:
+            return
+        if new_value == _CLEAR:
+            await lane.run(clear_own_profile_field, user, "location")
+            draft["location"] = None
+            await session.write_line("Location cleared.")
             return
         try:
             await lane.run(set_location, user, new_value)
@@ -1880,10 +1896,15 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         await write_prompt(
             session,
             f"\r\nBirthdate [{current.isoformat() if current else '(not set)'}] "
-            "-- new value as YYYY-MM-DD (blank to keep): "
+            "-- new value as YYYY-MM-DD (blank to keep, - to clear): "
         )
         raw = (await session.read_line()).strip()
         if not raw:
+            return
+        if raw == _CLEAR:
+            await lane.run(clear_own_profile_field, user, "birthdate")
+            draft["birthdate"] = None
+            await session.write_line("Birthdate cleared.")
             return
         try:
             new_birthdate = date.fromisoformat(raw)
@@ -1991,11 +2012,18 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         return f"{birthdate.isoformat()} (age {compute_age(birthdate)})"
 
     def _preamble(d: Draft) -> str:
+        """What this node verified, with the values (issue #1115): apart
+        from the self-reported fields below, so a caller who clears their
+        own birthdate sees why an age still counts, and which one."""
         age_attestation, name_attestation = d["age_attestation"], d["name_attestation"]
         if age_attestation is None and name_attestation is None:
-            return colored("Verified: (none)", fg_color=MUTED_COLOR)
-        parts = [attr for attr, att in (("age", age_attestation), ("name", name_attestation)) if att is not None]
-        return colored(f"Verified: {', '.join(parts)}", fg_color=accent)
+            return colored("Verified by this node: (none)", fg_color=MUTED_COLOR)
+        parts = []
+        if age_attestation is not None:
+            parts.append(f"born {age_attestation.attested_value}")
+        if name_attestation is not None:
+            parts.append(f"real name {sanitize_text(name_attestation.attested_value)}")
+        return colored(f"Verified by this node: {', '.join(parts)}", fg_color=accent)
 
     visibility_help = (
         "Whether other callers can see this value at all. Private hides it everywhere "
@@ -2181,6 +2209,38 @@ async def _verify_identity_menu(session: Session, db: Database, verifier: User) 
         await _verify_user(session, db, verifier, selected)
 
 
+async def _revoke_one(session: Session, db: Database, verifier: User, subject: User) -> None:
+    """Withdraw `subject`'s verified age or real name (issue #1115), asking
+    which when both are on record, then confirming."""
+    age = get_attestation(db, subject, "age")
+    name = get_attestation(db, subject, "name")
+    if age is not None and name is not None:
+        await write_prompt(session, highlight_hotkeys("Revoke which: [A]ge, real [N]ame, or [B]ack? "))
+        which = (await session.read_key()).lower()
+        await session.write_line("")
+        if which not in ("a", "n"):
+            await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+            return
+        attribute = "age" if which == "a" else "name"
+    else:
+        attribute = "age" if age is not None else "name"
+    label = "age" if attribute == "age" else "real name"
+    if not await prompt_yes_no(
+        session,
+        f"Revoke the verified {label} of {subject.username!r}? Anything that asks for a "
+        f"verified {label} will refuse them again.",
+        default=False,
+    ):
+        await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+        return
+    try:
+        revoke_attestation(db, subject, attribute, actor=verifier)
+    except AttestationError as exc:
+        await session.write_line(colored(f"Could not revoke: {exc}", fg_color=MUTED_COLOR))
+        return
+    await session.write_line(f"Verified {label} revoked.")
+
+
 def _verification_status_description(db: Database, user: User) -> str:
     parts = []
     if get_attestation(db, user, "age") is not None:
@@ -2238,17 +2298,15 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
             "Attested real name: "
             + (sanitize_text(existing_name.attested_value) if existing_name is not None else "(not attested)")
         )
-        await session.write_line(
-            "\r\n"
-            + action_bar(
-                [
-                    menu_key("A", "ttest age"),
-                    menu_key("N", "ame", prefix="Attest ", capitalize=True),
-                    menu_key("B", "ack"),
-                ],
-                width=session.terminal_width,
-            )
-        )
+        actions = [
+            menu_key("A", "ttest age"),
+            menu_key("N", "ame", prefix="Attest ", capitalize=True),
+        ]
+        # Issue #1115: whoever may verify may also withdraw a verification.
+        if existing_age is not None or existing_name is not None:
+            actions.append(menu_key("R", "evoke"))
+        actions.append(menu_key("B", "ack"))
+        await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
         await write_prompt(session, "Choice: ")
 
     await _draw()
@@ -2272,6 +2330,14 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
                     await session.write_line(colored(f"Could not attest age: {exc}", fg_color=MUTED_COLOR))
                 else:
                     await session.write_line("Age attested.")
+            await session.write_line(continue_prompt())
+            await session.read_any_key()
+            await _draw()
+        elif choice == "r" and (
+            get_attestation(db, subject, "age") is not None or get_attestation(db, subject, "name") is not None
+        ):
+            await session.write_line("")
+            await _revoke_one(session, db, verifier, subject)
             await session.write_line(continue_prompt())
             await session.read_any_key()
             await _draw()

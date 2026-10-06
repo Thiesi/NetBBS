@@ -95,6 +95,7 @@ from netbbs.attestation import (
     get_attestation,
     get_birthdate,
     get_display_name,
+    revoke_attestation,
     withdraw_link_visibility,
 )
 from netbbs.auth.users import (
@@ -7360,6 +7361,8 @@ async def _draw_user_detail(
     # second button for the same thing.
     blocked = await lane.run(is_blocked, target)
     entries = await lane.run(list_actions_for_target_user, target.id)
+    age_verified = await lane.run(get_attestation, target, "age") is not None
+    name_verified = await lane.run(get_attestation, target, "name") is not None
     sections = [
         Section("Account", [
             _editable("l", "Level", level_label(target.user_level, await lane.run(get_level_names))),
@@ -7377,8 +7380,8 @@ async def _draw_user_detail(
             *(_detail_fields(
                 await lane.run(get_display_name, target),
                 await lane.run(get_birthdate, target),
-                age_verified=await lane.run(get_attestation, target, "age") is not None,
-                name_verified=await lane.run(get_attestation, target, "name") is not None,
+                age_verified=age_verified,
+                name_verified=name_verified,
                 field=_editable,
             ) if allowed is None or "e" in allowed else ()),
             # The list itself is a screen of its own (`[H]istory`): ten rows of
@@ -7445,6 +7448,9 @@ async def _draw_user_detail(
         options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
     if "i" in offered:
         options.append(MenuEntry(label=menu_key("I", "dentity verification"), brief="Grant/revoke attestation rights"))
+    # Issue #1115: only while there is a verification to withdraw.
+    if "v" in offered and (age_verified or name_verified):
+        options.append(MenuEntry(label=menu_key("V", "erification: revoke"), brief="Withdraw a verified age or name"))
     if "k" in offered:
         options.append(MenuEntry(label=menu_key("K", "ey"), brief="View/replace this user's SSH key"))
     if "p" in offered:
@@ -7470,7 +7476,7 @@ async def _draw_user_detail(
 _USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "n", "e", "k", "p", "s", "i", "u")
 
 #: Every action key on the account detail -- what a SysOp gets.
-_ALL_USER_DETAIL_KEYS = frozenset("alutrnekpsihd")
+_ALL_USER_DETAIL_KEYS = frozenset("alutrnekpsihdv")
 
 
 def _auto_promotion_label(target: User, kept: str | None) -> str:
@@ -7726,6 +7732,46 @@ async def _edit_account_detail(
         return
     if changed:
         _announce_line(session, what)
+
+
+async def _revoke_verification(session: Session, lane: DatabaseLane, actor: User, target: User) -> None:
+    """Issue #1115: withdraw `target`'s verified age or real name. Clearing
+    the self-entered birthdate or display name (`n`, `e`) never does this,
+    so it is an action of its own, confirmed and recorded. With both on
+    record, the SysOp picks one first."""
+    age = await lane.run(get_attestation, target, "age")
+    name = await lane.run(get_attestation, target, "name")
+    if age is None and name is None:
+        _announce_line(session, f"No verification on record for {target.username!r}.")
+        return
+    if age is not None and name is not None:
+        await write_prompt(
+            session, highlight_hotkeys("Revoke which: verified [A]ge, verified real [N]ame, or [B]ack? ")
+        )
+        which = (await session.read_key()).lower()
+        await session.write_line("")
+        if which not in ("a", "n"):
+            return
+        attribute = "age" if which == "a" else "name"
+    else:
+        attribute = "age" if age is not None else "name"
+    label = "age" if attribute == "age" else "real name"
+    shared = (age if attribute == "age" else name).link_visible
+    if not await prompt_yes_no(
+        session,
+        f"Revoke the verified {label} of {target.username!r}? Anything that asks for a "
+        f"verified {label} will refuse them again.",
+        default=False,
+    ):
+        return
+    try:
+        revoked = await lane.run(revoke_attestation, target, attribute, actor=actor)
+    except AttestationError as exc:
+        _announce(session, f"Not revoked: {exc}", error=True)
+        return
+    if revoked:
+        extra = " The nodes it was shared with are told at the next sync." if shared else ""
+        _announce_line(session, f"Revoked the verified {label} of {target.username!r}.{extra}")
 
 
 async def _show_user_detail_help(
@@ -7994,6 +8040,10 @@ async def _user_detail_screen(
         elif choice in ("n", "e"):
             await session.write_line("")
             await _edit_account_detail(session, lane, actor, target, choice)
+            blocked = await _redraw()
+        elif choice == "v":
+            await session.write_line("")
+            await _revoke_verification(session, lane, actor, target)
             blocked = await _redraw()
         elif choice == "i":
             await session.write_line("")

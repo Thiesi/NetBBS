@@ -133,7 +133,7 @@ def test_shows_current_state_with_nothing_set(db, lane, alice):
     assert "Location visibility: private" in squeezed(text)
     assert "Birthdate: (not set)" in squeezed(text)
     assert "Age visibility: private" in squeezed(text)
-    assert "Verified: (none)" in squeezed(text)
+    assert "Verified by this node: (none)" in squeezed(text)
     assert "Share verified age over Link: (not verified)" in squeezed(text)
     assert "Share verified name over Link: (not verified)" in squeezed(text)
 
@@ -253,7 +253,7 @@ def test_verified_summary_shows_attested_attributes(db, lane, alice):
     session = FakeSession(["b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
-    assert "Verified: age" in squeezed(text)
+    assert "Verified by this node: born 1990-05-01" in squeezed(text)
     assert "Share verified age over Link: off" in squeezed(text)
     assert "Share verified name over Link: (not verified)" in squeezed(text)
 

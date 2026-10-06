@@ -582,6 +582,14 @@ birthdate only that it changed. A verified age or real name is a separate
 record that these never change, and the screen says so when one is on record.
 Staff with **Manage accounts** can do the same for accounts within their reach.
 
+To take a verification back, use **[V]erification: revoke** on the same
+screen; it appears only while the account has a verified age or real name.
+With both on record it asks which, then asks you to confirm, and the account's
+**History** records it. Anything that asks for a verified age or name refuses
+the caller again (a SysOp excepted). Anyone allowed to verify can also revoke,
+from **[R]evoke** on the main menu's **[V]erify** screen. A verification the
+caller shared over Link is withdrawn there at the next sync.
+
 A disabled account, and a signup still awaiting approval, receive no mail:
 callers here are told so at the To prompt, and Link mail bounces with "that
 account is not taking mail at the moment", which does not tell the other node

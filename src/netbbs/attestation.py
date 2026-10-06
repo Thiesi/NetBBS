@@ -47,7 +47,7 @@ from netbbs.moderation.log import record_action
 from netbbs.rendering import VERIFIED_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
-from netbbs.user_preferences import get_user_preference, set_user_preference
+from netbbs.user_preferences import get_user_preference, session_preferences_for, set_user_preference
 
 _DISPLAY_NAME_KEY = "display_name"
 _DISPLAY_NAME_VISIBLE_KEY = "display_name_visible"
@@ -160,6 +160,27 @@ def set_location(db: Database, user: User, text: str) -> None:
     if byte_count > MAX_LOCATION_BYTES:
         raise ProfileFieldError(f"location cannot exceed {MAX_LOCATION_BYTES} bytes, got {byte_count}")
     set_user_preference(db, user, _LOCATION_KEY, text)
+
+
+#: The self-reported fields a caller may clear on their own Profile
+#: (issue #1115), by preference key.
+OWN_PROFILE_FIELDS = {"display_name": _DISPLAY_NAME_KEY, "location": _LOCATION_KEY, "birthdate": _BIRTHDATE_KEY}
+
+
+def clear_own_profile_field(db: Database, user: User, field: str) -> None:
+    """Clear one of `user`'s own self-reported fields (`"display_name"`,
+    `"location"` or `"birthdate"`) on their own Profile (issue #1115). A
+    caller could set these but never remove them again; a SysOp could
+    (#1110). A verified value (`attest_age`, `attest_name`) is a separate
+    record and stays. In a guest session the clear stays in memory, like
+    every other preference write there."""
+    key = OWN_PROFILE_FIELDS[field]
+    overlay = session_preferences_for(user)
+    if overlay is not None:
+        overlay.values[key] = None  # type: ignore[assignment]  # read back as "not set"
+        return
+    db.connection.execute("DELETE FROM user_preferences WHERE user_id = ? AND key = ?", (user.id, key))
+    db.connection.commit()
 
 
 def get_location(db: Database, user: User) -> str | None:
@@ -461,6 +482,50 @@ def _store_attestation(
         detail=f"attested {attribute} for {subject.username!r}",
     )
     return get_attestation(db, subject, attribute)
+
+
+def revoke_attestation(db: Database, subject: User, attribute: str, *, actor: User) -> bool:
+    """
+    Withdraw `subject`'s verified `attribute` (`"age"` or `"name"`) on
+    `actor`'s authority (issue #1115). The same people who may verify may
+    revoke: a SysOp, or an account with "Can verify identity"
+    (`_require_verifier`). Recorded in the account's admin history.
+
+    Clearing the self-entered birthdate or display name never does this
+    (#1110): the verification is a separate record, and only this removes
+    it. Once it is gone, `18v` and verified-name gates refuse the caller
+    again, a SysOp excepted (#1096).
+
+    NetBBS Link: a verification the caller had shared is revoked there by
+    the node's next sync pass, which signs a revocation for every live
+    shared object whose attestation is gone
+    (`netbbs.link.remote_attestation.reconcile_issued_attestations`) and
+    delivers it to the same recipients. Nothing more is needed here.
+
+    Returns whether there was anything to revoke.
+    """
+    if attribute not in {"age", "name"}:
+        raise AttestationError(f"unknown attestation attribute: {attribute!r}")
+    try:
+        _require_verifier(actor)
+    except AttestationError:
+        raise AttestationError("only a SysOp or an account that may verify identity can revoke a verification")
+    from netbbs.moderation.log import record_action_without_commit
+
+    label = "real name" if attribute == "name" else "age"
+    # The removal and its history entry land together, or neither does.
+    with db.connection:
+        cursor = db.connection.execute(
+            "DELETE FROM user_attestations WHERE subject_user_id = ? AND attribute = ?",
+            (subject.id, attribute),
+        )
+        if cursor.rowcount == 0:
+            return False
+        record_action_without_commit(
+            db, actor=actor, action=f"revoke_{attribute}", target_user_id=subject.id,
+            detail=f"revoked the verified {label} of {subject.username!r}",
+        )
+    return True
 
 
 def get_attestation(db: Database, user: User, attribute: str) -> UserAttestation | None:
