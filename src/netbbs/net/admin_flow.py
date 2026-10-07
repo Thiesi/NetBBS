@@ -600,6 +600,7 @@ from netbbs.net.char_input import (
     REFRESH_KEY,
     EditorKey,
     EditorKeyKind,
+    help_key_label,
     reject_unhandled_key,
 )
 from netbbs.net.confirm import prompt_yes_no
@@ -1544,6 +1545,7 @@ async def _write_banner_menu(
     screens budgeted the described menu against the whole terminal, so below
     72 columns, where `menu_grid` lays it out one entry per two rows, the
     screen's own title scrolled away before Choice: appeared."""
+    help_text = help_text.replace("Ctrl-H", help_key_label(session))  # issue #1119
     help_rows = len(wrap_to_width(help_text, session.terminal_width)) or 1
     await session.write_line(
         "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=used_rows + 1 + help_rows)
@@ -7483,7 +7485,7 @@ async def _draw_user_detail(
     await session.write_line(
         "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 5)
     )
-    await session.write_line(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
+    await session.write_line(colored(f"({help_key_label(session)} for help on these fields)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
     return blocked
 
@@ -14337,7 +14339,7 @@ async def _draw_banners_and_mastheads_menu(
             height=session.terminal_height,
         )
     )
-    await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
+    await session.write_line(colored(f"({help_key_label(session)} for help placing your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -14957,7 +14959,7 @@ async def _banner_router_help_screen(
     lines = [
         colored("Placing your own .ans file", fg_color=header_color, bold=True),
         "  Each banner/masthead below has its own file and its own exact path --",
-        "  pick one, then press Ctrl-H on that screen to see where it goes.",
+        f"  pick one, then press {help_key_label(session)} on that screen to see where it goes.",
     ]
     await show_help(session, "Banner/masthead help", lines, header_color=header_color, unicode_style=unicode_style)
 
@@ -15621,7 +15623,7 @@ async def _draw_banners_menu(
             height=session.terminal_height,
         )
     )
-    await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
+    await session.write_line(colored(f"({help_key_label(session)} for help placing your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -16538,7 +16540,7 @@ async def _draw_mastheads_menu(
             height=session.terminal_height,
         )
     )
-    await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
+    await session.write_line(colored(f"({help_key_label(session)} for help placing your own .ans files)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 
@@ -24154,7 +24156,7 @@ async def _draw_category_menu(
             height=session.terminal_height,
         )
     )
-    await session.write_line(colored("Ctrl-H: categories vs. Communities", fg_color=MUTED_COLOR))
+    await session.write_line(colored(f"{help_key_label(session)}: categories vs. Communities", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
 
 

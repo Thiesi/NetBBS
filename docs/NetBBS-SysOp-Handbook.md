@@ -1541,7 +1541,7 @@ The file goes beside the database and is named after the database file, minus
 | Chat-channel masthead | `EmptinessMachine_chat_channel_picker_banner.ans` |
 
 For the `netbbs.db` in this handbook's examples, the prefix is `netbbs_`. Press
-**Ctrl-H** on a piece's own screen to see the exact path for your node.
+**Ctrl-H** (F1 in SyncTERM) on a piece's own screen to see the exact path for your node.
 
 Placing the file does not turn it on. Each piece has its own switch, off by
 default, and callers keep seeing the built-in default until you open that

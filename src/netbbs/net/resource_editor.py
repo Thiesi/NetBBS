@@ -38,6 +38,7 @@ from netbbs.net.char_input import (
     EditorKeyKind,
     InputCancelled,
     MAX_LINE_LENGTH as _MAX_LINE_LENGTH,
+    help_key_label,
     reject_unhandled_key,
 )
 from netbbs.net.confirm import prompt_yes_no
@@ -309,15 +310,15 @@ _SAVE_BRIEF_DETAIL = "Store the changed fields"
 _DISCARD_BRIEF_DETAIL = "Leave, discarding the changes"
 
 
-def _detail_hint(unicode_style: bool, *, with_help: bool) -> str:
+def _detail_hint(unicode_style: bool, *, with_help: bool, help_key: str = "Ctrl-H") -> str:
     """The keys of a resource's own screen, on one row. It takes the place
     of the "(Ctrl-H for help on these fields)" row, so a resource's screen
     is no taller than the editor it replaced."""
     if unicode_style:
         hint = "↑↓ choose · Enter change · ←→ step"
-        return hint + " · Ctrl-H help" if with_help else hint
+        return hint + f" · {help_key} help" if with_help else hint
     hint = "Up/Down choose, Enter change, Left/Right step"
-    return hint + ", Ctrl-H help" if with_help else hint
+    return hint + f", {help_key} help" if with_help else hint
 
 
 def _field_value_lines(
@@ -844,7 +845,9 @@ async def edit_resource_draft(
         tail_blocks = [f"\r\n{menu_line}"]
         if hint_lines:
             tail_blocks.append(colored(
-                _detail_hint(unicode_style, with_help=any(f.help for f in fields)), fg_color=MUTED_COLOR,
+                _detail_hint(
+                    unicode_style, with_help=any(f.help for f in fields), help_key=help_key_label(session),
+                ), fg_color=MUTED_COLOR,
             ))
         if shown_message:
             tail_blocks.append(shown_message)
@@ -854,7 +857,7 @@ async def edit_resource_draft(
             # dead end advertised on every screen (issue #150's own
             # "does not need to cover every existing feature on day
             # one" scope extends to which screens mention it at all).
-            tail_blocks.append(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
+            tail_blocks.append(colored(f"({help_key_label(session)} for help on these fields)", fg_color=MUTED_COLOR))
         if page_hint is not None:
             tail_blocks.append(colored(page_hint, fg_color=MUTED_COLOR))
         # On a resource's own screen the tip is shown only where it fits below

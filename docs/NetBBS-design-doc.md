@@ -815,7 +815,12 @@ screens built on the shared draft-based field editor
 have help text authored. The two keys differ because Ctrl-H and Backspace
 share one byte (0x08): safe to repurpose at a single-keystroke menu, where
 Backspace already has nothing to act on, but not inside a real text editor,
-where 0x08 is live backspace-editing. Authoring help text per field is
+where 0x08 is live backspace-editing. On a terminal whose own Backspace key
+sends 0x08 (SyncTERM, `terminal_detect.sends_syncterm_keys`), the byte is
+Backspace on every screen, never help (issue #1119): help there is F1
+(`ESC[11~`, or `ESC O P`), which every screen that answers Ctrl-H also
+answers, and on-screen hints name the key that works
+(`char_input.help_key_label`). Authoring help text per field is
 incremental, not required for every field up front.
 
 Ctrl-C (confirmed with Thiesi, dogfood question) is an *incremental*, not a

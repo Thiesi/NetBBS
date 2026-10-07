@@ -13,7 +13,15 @@ from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
 
-from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind, InputCancelled, reject_unhandled_key
+from netbbs.net.char_input import (
+    CANCEL_KEY,
+    HELP_KEY,
+    EditorKey,
+    EditorKeyKind,
+    InputCancelled,
+    help_key_label,
+    reject_unhandled_key,
+)
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import take_notices, write_notices
@@ -849,7 +857,7 @@ async def review_composition(
         rows = [*_head(), preview_rule, *pages[page], preview_rule, "", *_menu(paged, packed)]
         if paged:
             rows.append(colored(f"(Page {page + 1} of {len(pages)} -- PgUp/PgDn to switch)", fg_color=MUTED_COLOR))
-        rows.append(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
+        rows.append(colored(f"({help_key_label(session)} for help on these fields)", fg_color=MUTED_COLOR))
         # A refused commit ("Could not create post: ...") returns here, and
         # this redraw would erase a line written before it (issue #680).
         rows.extend(message_rows)
