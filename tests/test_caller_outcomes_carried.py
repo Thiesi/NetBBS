@@ -215,3 +215,64 @@ def test_a_message_sent_from_whos_online_is_confirmed_on_the_redrawn_list(tmp_pa
     # The list redraws (clears) and only then shows the outcome above its prompt.
     assert _CLEAR in after_send.split("Message sent.", 1)[0]
     assert "[Enter]" not in _SGR.sub("", text)
+
+
+# -- doors ------------------------------------------------------------------------
+
+
+class _NoKeys:
+    """A session that must not be asked for a key: the result is announced."""
+
+    def __init__(self):
+        self.written: list[str] = []
+
+    async def write(self, text: str) -> None:
+        self.written.append(text)
+
+    async def write_line(self, text: str = "") -> None:
+        self.written.append(text + "\n")
+
+    async def read_key(self, echo: bool = True) -> str:
+        raise AssertionError("asked for a key to hold a result")
+
+    async def read_any_key(self) -> str:
+        raise AssertionError("asked for a key to hold a result")
+
+
+@pytest.mark.parametrize(
+    "reason, mark",
+    [("crashed", "✗"), ("busy", "!"), ("normal", None)],
+)
+def test_a_doors_result_is_announced_for_the_redrawn_door_list(reason, mark):
+    from types import SimpleNamespace
+
+    from netbbs.doors.runtime import DoorRunResult
+    from netbbs.net import door_flow
+
+    session = _NoKeys()
+    door = SimpleNamespace(name="Voidrunner")
+    kept_going = asyncio.run(door_flow._report_door_result(session, door, DoorRunResult(1, 1.0, reason)))
+    assert kept_going is True
+    assert session.written == []
+    [line] = take_notices(session)
+    shown = _SGR.sub("", line).lstrip()
+    assert "Voidrunner" in shown
+    if mark is None:
+        assert not shown.startswith(("✗", "!", "✓"))
+    else:
+        assert shown.startswith(mark)
+
+
+# -- Find -------------------------------------------------------------------------
+
+
+def test_a_cancelled_search_is_said_on_the_menu_it_returns_to(db, lane, carol):
+    from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+    from netbbs.net import scan_and_find
+    from netbbs.net.char_input import InputHistory
+
+    session = FakeSession([""])
+    asyncio.run(scan_and_find._find_screen(
+        session, db, lane, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), carol,
+    ))
+    assert any("Search cancelled." in _SGR.sub("", line) for line in take_notices(session))

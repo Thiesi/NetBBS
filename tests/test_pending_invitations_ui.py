@@ -56,6 +56,10 @@ class FakeSession:
             raise AssertionError("FakeSession.read_key() called with no more scripted keys")
         return key
 
+    async def read_any_key(self) -> str:
+        # The listing is held until the caller has read it (issue #1124).
+        return await self.read_key()
+
     async def read_line(self, echo: bool = True, **kwargs) -> str:
         line = next(self._lines, None)
         if line is None:
@@ -125,7 +129,11 @@ def test_show_pending_invitations_with_none_pending(tmp_path):
 
     asyncio.run(_show_pending_invitations(session, db, bob))
 
-    assert "no pending chat channel invitations" in _written_text(session)
+    # Said on the main menu it returns to, not written above its redraw
+    # (issue #1124).
+    from netbbs.net.notices import take_notices
+
+    assert any("no pending chat channel invitations" in line for line in take_notices(session))
     db.close()
 
 
@@ -136,7 +144,7 @@ def test_show_pending_invitations_lists_channel_and_inviter(tmp_path):
     channel = create_channel(db, "secret-club", creator=alice, members_only=True, hidden=True)
     _grant_manage_members(db, alice, channel)
     create_invitation(db, channel, bob, invited_by=alice)
-    session = FakeSession()
+    session = FakeSession(keys=["x"])
 
     asyncio.run(_show_pending_invitations(session, db, bob))
 
@@ -189,7 +197,7 @@ def test_main_menu_i_key_shows_the_pending_invitation_screen(tmp_path):
     channel = create_channel(db, "lobby", creator=alice, members_only=True)
     _grant_manage_members(db, alice, channel)
     create_invitation(db, channel, bob, invited_by=alice)
-    session = FakeSession(keys=["i", "l"])
+    session = FakeSession(keys=["i", "x", "l"])
 
     asyncio.run(
         _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), bob)
@@ -232,7 +240,7 @@ def test_offline_invitee_sees_the_notice_and_menu_option_on_next_login(tmp_path)
     create_invitation(db, channel, bob, invited_by=alice)  # bob is offline the whole time
 
     # "y" is for the "Log off?" confirmation.
-    session = FakeSession(keys=["i", "l"], lines=["y"])
+    session = FakeSession(keys=["i", "x", "l"], lines=["y"])
 
     asyncio.run(
         run_authenticated_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), bob)

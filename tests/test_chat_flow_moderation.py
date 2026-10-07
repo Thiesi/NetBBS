@@ -291,7 +291,11 @@ def test_banned_user_cannot_rejoin(db, lane, hub, presence, mailbox, history, sy
         return rejoin_session
 
     rejoin_session = asyncio.run(scenario())
-    assert "banned" in _written_text(rejoin_session)
+    # Said on the screen the caller returns to (issue #1124), not written
+    # above its redraw.
+    from netbbs.net.notices import take_notices
+
+    assert any("banned" in line for line in take_notices(rejoin_session))
     assert hub.participant_count(channel.name) == 0
 
 
