@@ -179,3 +179,11 @@ def test_ctrl_h_still_opens_the_lists_help_elsewhere():
 def test_f1_opens_the_lists_help_on_syncterm():
     chosen, screen = _from_disk(b"\x1b[11~\rb", SYNCTERM)
     assert _HELP_MARK in screen
+
+
+def test_the_list_names_the_help_key_a_caller_can_press():
+    _, syncterm_screen = _from_disk(b"b", SYNCTERM)
+    _, xterm_screen = _from_disk(b"b", XTERM)
+    assert "F1: help" in syncterm_screen
+    assert "Ctrl-H: help" not in syncterm_screen
+    assert "Ctrl-H: help" in xterm_screen
