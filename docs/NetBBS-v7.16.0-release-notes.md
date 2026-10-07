@@ -336,5 +336,6 @@ banner or masthead files you removed. Two things outlast the restore:
   reads genesis fields with `payload.get`.
 - **Revocations over Link** (#1118) are tested in-process; no real node has
   received one from this release.
-- **No test ran on NetBSD or Linux** for this release; the gate was the full
-  suite on Windows on the exact release tree (see the release page).
+- **The release gate:** **14,144 passed, 138 skipped** in the full suite
+  (`pytest -n auto`) and 5 of 5 `timing_sensitive` tests, on Windows, on the
+  release tree. No test ran on NetBSD or Linux for this release.
