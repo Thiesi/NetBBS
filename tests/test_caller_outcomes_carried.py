@@ -215,3 +215,62 @@ def test_a_message_sent_from_whos_online_is_confirmed_on_the_redrawn_list(tmp_pa
     # The list redraws (clears) and only then shows the outcome above its prompt.
     assert _CLEAR in after_send.split("Message sent.", 1)[0]
     assert "[Enter]" not in _SGR.sub("", text)
+
+
+# -- doors ------------------------------------------------------------------------
+
+
+class _Keys:
+    """A session that counts the keys it is asked for."""
+
+    def __init__(self):
+        self.written: list[str] = []
+        self.keys_asked = 0
+
+    async def write(self, text: str) -> None:
+        self.written.append(text)
+
+    async def write_line(self, text: str = "") -> None:
+        self.written.append(text + "\n")
+
+    async def read_key(self, echo: bool = True) -> str:
+        self.keys_asked += 1
+        return "x"
+
+    async def read_any_key(self) -> str:
+        self.keys_asked += 1
+        return "x"
+
+
+def test_a_doors_exit_keeps_its_pause_so_the_doors_last_screen_can_be_read():
+    """Review on #1126: a door's own last screen -- War Dialer's "needs
+    40x12" refusal, a final message -- sits above the host's epilogue, which
+    both bundled doors reserve rows for (`HOST_EPILOGUE_ROWS`). That is a
+    screen to read, not an outcome to carry, so the pause stays."""
+    from types import SimpleNamespace
+
+    from netbbs.doors.runtime import DoorRunResult
+    from netbbs.net import door_flow
+
+    session = _Keys()
+    door = SimpleNamespace(name="War Dialer")
+    assert asyncio.run(door_flow._report_door_result(session, door, DoorRunResult(0, 1.0, "normal"))) is True
+    shown = _SGR.sub("", "".join(session.written))
+    assert "Left War Dialer." in shown
+    assert "[Enter]" in shown
+    assert session.keys_asked == 1
+
+
+# -- Find -------------------------------------------------------------------------
+
+
+def test_a_cancelled_search_is_said_on_the_menu_it_returns_to(db, lane, carol):
+    from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+    from netbbs.net import scan_and_find
+    from netbbs.net.char_input import InputHistory
+
+    session = FakeSession([""])
+    asyncio.run(scan_and_find._find_screen(
+        session, db, lane, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), carol,
+    ))
+    assert any("Search cancelled." in _SGR.sub("", line) for line in take_notices(session))

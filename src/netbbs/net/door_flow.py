@@ -27,6 +27,7 @@ from netbbs.doors.runtime import DoorRunResult, run_door
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
+from netbbs.net.notices import announce
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, physical_terminal_width
@@ -141,14 +142,10 @@ async def browse_doors(
         # service with no screen left to stop it.
         door = await lane.run(get_door, door.id)
         if door is None:
-            await session.write_line(
-                colored("That door is no longer available.", fg_color=MUTED_COLOR)
-            )
+            announce(session, "That door is no longer available.", tone="muted")
             continue
         if not meets_level(user, door.min_play_level):
-            await session.write_line(
-                colored("You no longer have permission to play that door.", fg_color=MUTED_COLOR)
-            )
+            announce(session, "You no longer have permission to play that door.", tone="muted")
             continue
 
         # A caller who redraws in place expects each screen to replace the
@@ -165,9 +162,8 @@ async def browse_doors(
         # experience than one line here and a return to the picker.
         if door_services is not None:
             if problem := await door_services.ensure_running(door):
-                await session.write_line(colored(sanitize_text(problem), fg_color=MUTED_COLOR))
-                await session.write_line(continue_prompt("Back to the door list"))
-                await session.read_any_key()
+                # Shown above the redrawn door list (issue #1124).
+                announce(session, problem, tone="muted")
                 continue
         await session.write_line(colored(f"\r\nLaunching {door.name}...", fg_color=MUTED_COLOR))
         # Issue #470: "3 callers in Blacksite" on Who's online is the best

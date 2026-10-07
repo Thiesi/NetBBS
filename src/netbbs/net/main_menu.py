@@ -91,6 +91,7 @@ from netbbs.rendering import (
     MenuEntry,
     clear_screen,
     colored,
+    continue_prompt,
     field_row,
     menu_grid,
     menu_key,
@@ -801,11 +802,11 @@ async def _show_pending_invitations(session: Session, db: Database, user: User) 
     decision, unchanged by this issue), so this is purely informational,
     telling the invitee what to type and where."""
     pending = list_pending_invitations_for_user(db, user)
+    if not pending:
+        announce(session, "You have no pending chat channel invitations.", tone="muted")
+        return
     header = colored("Pending invitations:", fg_color=effective_header_color(session, db), bold=True)
     await session.write_line(f"\r\n{header}")
-    if not pending:
-        await session.write_line("You have no pending chat channel invitations.")
-        return
     for invitation in pending:
         when = format_for_display(invitation.created_at, db)
         await session.write_line(
@@ -818,6 +819,11 @@ async def _show_pending_invitations(session: Session, db: Database, user: User) 
             fg_color=MUTED_COLOR,
         )
     )
+    # A list to read, not an action's outcome: held until the caller is done
+    # with it, since the main menu's in-place redraw would otherwise erase it
+    # the moment it was drawn (issue #1124).
+    await session.write_line("\r\n" + continue_prompt())
+    await session.read_any_key()
 
 
 async def _main_menu(
@@ -1163,9 +1169,7 @@ async def _main_menu_loop(
                         current_history_id=current_history_id,
                     )
                 else:
-                    await session.write_line(
-                        colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
-                    )
+                    announce(session, "New scan is not available in this context.", tone="muted")
                 redraw = True
             elif choice in ("?", HELP_KEY):
                 await end_choice_line(session)
@@ -1180,9 +1184,7 @@ async def _main_menu_loop(
                         transfers=node_controls.transfers if node_controls is not None else None,
                     )
                 else:
-                    await session.write_line(
-                        colored("Find is not available in this context.", fg_color=MUTED_COLOR)
-                    )
+                    announce(session, "Find is not available in this context.", tone="muted")
                 redraw = True
             elif choice == "d":
                 await end_choice_line(session)
@@ -1224,9 +1226,7 @@ async def _main_menu_loop(
                     notice = _access_change_notice(user, refreshed)
                     user = refreshed
                 else:
-                    await session.write_line(
-                        colored("Your profile is not available in this context.", fg_color=MUTED_COLOR)
-                    )
+                    announce(session, "Your profile is not available in this context.", tone="muted")
                 redraw = True
             elif choice == "e":
                 # Not gated here: `browse_mail` refuses a caller mail is
@@ -1249,9 +1249,7 @@ async def _main_menu_loop(
                         transfers=node_controls.transfers if node_controls is not None else None,
                     )
                 else:
-                    await session.write_line(
-                        colored("Mail is not available in this context.", fg_color=MUTED_COLOR)
-                    )
+                    announce(session, "Mail is not available in this context.", tone="muted")
                 redraw = True
             elif choice == "h":
                 await end_choice_line(session)
@@ -1290,18 +1288,14 @@ async def _main_menu_loop(
                 if lane is not None:
                     await admin_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
                 else:
-                    await session.write_line(
-                        colored("SysOp menu is not available in this context.", fg_color=MUTED_COLOR)
-                    )
+                    announce(session, "SysOp menu is not available in this context.", tone="muted")
                 redraw = True
             elif choice == "t" and sees_staff_list(db, user):
                 await end_choice_line(session)
                 if lane is not None:
                     await staff_list_screen(session, lane, user)
                 else:
-                    await session.write_line(
-                        colored("The Staff list is not available in this context.", fg_color=MUTED_COLOR)
-                    )
+                    announce(session, "The Staff list is not available in this context.", tone="muted")
                 redraw = True
             elif choice == "s" and is_staff(user):
                 await end_choice_line(session)
@@ -1309,9 +1303,7 @@ async def _main_menu_loop(
                 if lane is not None:
                     await staff_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
                 else:
-                    await session.write_line(
-                        colored("The staff console is not available in this context.", fg_color=MUTED_COLOR)
-                    )
+                    announce(session, "The staff console is not available in this context.", tone="muted")
                 redraw = True
             elif choice == "a" and not meets_level(user, SYSOP_LEVEL) and has_moderation_scope(db, user):
                 await end_choice_line(session)
@@ -1321,9 +1313,7 @@ async def _main_menu_loop(
                         transfers=node_controls.transfers if node_controls is not None else None,
                     )
                 else:
-                    await session.write_line(
-                        colored("Moderation is not available in this context.", fg_color=MUTED_COLOR)
-                    )
+                    announce(session, "Moderation is not available in this context.", tone="muted")
                 redraw = True
             else:
                 await session.write(reject_unhandled_key(choice))
@@ -1537,7 +1527,7 @@ async def _browse_kind(
                 mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
             )
         else:
-            await session.write_line(colored("Chat is not available in this context.", fg_color=MUTED_COLOR))
+            announce(session, "Chat is not available in this context.", tone="muted")
     elif kind == "f":
         # Same lane-is-None reasoning as chat, above.
         if lane is not None:
@@ -1553,9 +1543,7 @@ async def _browse_kind(
                 transfers=node_controls.transfers if node_controls is not None else None,
             )
         else:
-            await session.write_line(
-                colored("File areas are not available in this context.", fg_color=MUTED_COLOR)
-            )
+            announce(session, "File areas are not available in this context.", tone="muted")
     elif kind == "g":
         # design doc: doors are one of the features migrated onto the
         # two-lane database execution model from the start (see
@@ -1571,7 +1559,7 @@ async def _browse_kind(
                 chat_hub=hub,
             )
         else:
-            await session.write_line(colored("Doors are not available in this context.", fg_color=MUTED_COLOR))
+            announce(session, "Doors are not available in this context.", tone="muted")
 
 
 def _plural(count: int, noun: str) -> str:

@@ -667,7 +667,7 @@ async def _find_screen(
     await session.write("Search terms (Enter cancels): ")
     query = (await session.read_line()).strip()
     if not query:
-        await session.write_line(colored("Search cancelled.", fg_color=MUTED_COLOR))
+        announce(session, "Search cancelled.", tone="muted")
         return
 
     def _load(db: Database) -> tuple[list[_SearchResultItem], bool]:

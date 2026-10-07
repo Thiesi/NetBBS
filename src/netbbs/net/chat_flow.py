@@ -362,7 +362,7 @@ async def browse_channels(
         if allowed:
             allowed, denial_message = _mrc_identity_check(mrc_bridge, channel, user)
         if not allowed:
-            await session.write_line(colored(denial_message, fg_color=MUTED_COLOR))
+            announce(session, denial_message, tone="muted")
             channel = await _pick_channel(
                 session, lane, hub, user, category_id=None,
                 community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix, mrc_bridge=mrc_bridge,
@@ -5045,9 +5045,7 @@ async def _chat_loop(
     """
     until = await lane.run(_check_ban, channel, user)
     if until is not None:
-        await session.write_line(
-            colored(f"\r\nYou are banned from this channel ({until}).", fg_color=MUTED_COLOR)
-        )
+        announce(session, f"You are banned from this channel ({until}).", tone="muted")
         return _Quit()
 
     if mrc_bridge is not None:
@@ -5059,18 +5057,14 @@ async def _chat_loop(
         mapping = mrc_bridge.mapping_for(channel)
         if mapping is None and is_open_room_name(channel.name):
             # Retired between being picked and being entered.
-            await session.write_line(
-                colored(f"\r\n{sanitize_text(channel.name)} was retired just now; pick another room.", fg_color=MUTED_COLOR)
-            )
+            announce(session, f"{channel.name} was retired just now; pick another room.", tone="muted")
             return _ToPicker()
         if mapping is not None and mapping.is_open_room and mrc_bridge.room_blocked(mapping.room):
-            await session.write_line(
-                colored(f"\r\nThe SysOp has blocked MRC room #{sanitize_text(mapping.room)} on this node.", fg_color=MUTED_COLOR)
-            )
+            announce(session, f"The SysOp has blocked MRC room #{mapping.room} on this node.", tone="muted")
             return _ToPicker()
         allowed, denial_message = _mrc_identity_check(mrc_bridge, channel, user)
         if not allowed:
-            await session.write_line(colored(f"\r\n{denial_message}", fg_color=MUTED_COLOR))
+            announce(session, denial_message, tone="muted")
             return _ToPicker()
         if mapping is not None:
             mrc_bridge.note_entry(channel)
