@@ -10089,8 +10089,12 @@ animation nobody is watching is only a delay. `fast` is a display preset beside
 preset is applied and before the title card, the door plays a full-screen
 splash of about two and a half seconds: a parallax starfield, a ringed planet
 drawn two pixels to a cell in half blocks, a ship crossing on a cooling plasma
-trail, and the wordmark resolving in over it. It follows every rule above, and
-it is the one effect that takes the key that ends it: whatever follows is a new
+trail, and the wordmark resolving in over it. It follows every rule above but two.
+Left to run to its end, it holds its last frame under a "press any key to
+launch" prompt until the caller presses a key, or input ends, or the terminal
+is resized: a title card that vanished the moment it was complete was gone
+before anyone had looked at it. And it is the one effect that takes the key
+that ends it: whatever follows is a new
 screen the caller has not seen yet, so a key pressed to skip a title card must
 not act on it. Keys typed before the splash appears are left for the game, and
 a launch that has already shown a refusal or a recovery screen skips it. It
@@ -12244,13 +12248,16 @@ skipped, or was never enabled.
 session opens with: the call dialing out, the handshake, `CONNECT`, the
 masthead burning in and the ring of ten exchanges lighting in its holders'
 colors, drawn by cursor-addressed cell updates for about two and a half
-seconds and then cleared, so it leaves nothing behind on the screens that
-follow. Any key ends it and is consumed whole; it is omitted under every preset
+seconds. Left to run to its end it holds its last frame, with "press any
+key" where "any key skips" stood, until a key is pressed or input ends; it
+is then cleared, so it leaves nothing behind on the screens that follow. Any
+key ends it and is consumed whole; it is omitted under every preset
 that omits motion, and whenever input is already waiting or stdin cannot be
 polled without reading it, so it never takes a keystroke meant for a later
-screen. A frame is written at least every 50 ms until the hand-over: the splash
-is never silent, so a driver that waits for output to settle does not type into
-it.
+screen. A frame is written at least every 50 ms until the last one: the
+animation is never silent, so a driver that waits for output to settle does not
+type into it. Only the finished picture is quiet, and that is a screen waiting
+for its key like any other.
 
 *Presets.* Scene offers a free Display screen with immediate ASCII-decoration,
 monochrome and Fast-mode toggles. Back writes nothing. Store one bounded boolean

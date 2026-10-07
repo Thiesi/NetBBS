@@ -86,6 +86,17 @@ _PROXY_VARIABLES = (
 
 
 @pytest.fixture(autouse=True)
+def _no_door_splash(monkeypatch):
+    """Bundled doors launched by a test open straight on their first screen.
+
+    A finished launch splash waits for a key, so a test that starts a real door
+    and waits for its first prompt before typing would wait forever. The
+    splash's own tests take this back off (`monkeypatch.delenv`)."""
+    monkeypatch.setenv("DOOR_SPLASH", "0")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_real_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", _local_only_getaddrinfo)
     for variable in _PROXY_VARIABLES:

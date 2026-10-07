@@ -44,7 +44,8 @@ are available in the games' help and the developer design reference; this guide
 focuses on operating and recovering them.
 
 Each bundled game opens with an animated title of about two and a half seconds,
-which any key skips. It plays only on a live terminal, never when the caller has
+which any key skips. Once it has finished it stays on the screen, under a
+"press any key" prompt, until the caller presses a key. It plays only on a live terminal, never when the caller has
 already typed ahead, and Voidrunner and War Dialer leave it out when the caller's
 display settings turn motion off. War Dialer plays it only on hosts where it can
 poll the terminal without reading from it, so not on Windows. **MANUAL — inside
