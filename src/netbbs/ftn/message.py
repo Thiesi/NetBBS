@@ -39,6 +39,7 @@ from netbbs.ftn.chrs import (
     choose_outbound_charset,
     codec_for_kludge,
     decode,
+    kludge_for_codec,
     truncate_encoded,
 )
 from netbbs.ftn.packet import PackedMessage
@@ -199,7 +200,7 @@ def encode_message(message: FtnMessage) -> PackedMessage:
     subject to 71, on character boundaries.
     """
     if message.charset:
-        charset = Charset(message.charset, _kludge_for_codec(message.charset))
+        charset = Charset(message.charset, kludge_for_codec(message.charset))
     else:
         charset = choose_outbound_charset(message.to_name, message.from_name, message.subject,
                                           message.body, message.origin or "", message.tear_line or "")
@@ -359,15 +360,9 @@ def _split_kludge(line: str) -> tuple[str, str]:
 
 
 def _format_kludge(name: str, value: str) -> str:
-    # FMPT, TOPT and INTL take no colon (FTS-4001); every other kludge does.
-    separator = " " if name.upper() in ("FMPT", "TOPT", "INTL") or name == "Via" else ": "
+    # FMPT, TOPT, INTL and Via take no colon (FTS-4001); every other kludge does.
+    separator = " " if name.upper() in ("FMPT", "TOPT", "INTL", "VIA") else ": "
     return f"{KLUDGE}{name}{separator}{value}"
-
-
-def _kludge_for_codec(codec: str) -> str:
-    names = {"cp437": "CP437 2", "utf-8": "UTF-8 4", "ascii": "ASCII 1", "cp866": "CP866 2",
-             "latin-1": "LATIN-1 2", "iso8859-2": "LATIN-2 2", "iso8859-15": "LATIN-9 2"}
-    return names.get(codec, f"{codec.upper()} 2")
 
 
 def _raw_kludge(text: bytes, name: bytes) -> str | None:
