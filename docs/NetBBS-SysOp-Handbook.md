@@ -636,8 +636,8 @@ under **Users** and choose **Staff**:
 | Manage accounts | Disable and re-enable accounts, reset passwords, set levels from 0 to 254 |
 | Moderate everything | Act as moderator on every board, file area and chat channel, local and carried. It also lets them read and post on every board and file area whatever its level; age and verified-name gates still apply |
 
-**Co-SysOp** on the same screen sets all three in one step, then asks whether
-the new Co-SysOp may also verify identity. Every change asks
+**Co-SysOp** on the same screen sets all three in one step; **Verify identity**
+beside it gives or takes the right to verify identity. Every change asks
 for confirmation first and is audit-logged, and you can remove any permission
 on its own later. The account's level stays whatever it was.
 
@@ -705,8 +705,9 @@ attestations through **Verify** on the main menu. As SysOp you can always
 verify; the account screen's **Can verify identity** row says so. For anyone
 else, switch it on with **[i]** on their account. It is separate from making
 someone a moderator, and the **Co-SysOp** preset does not include it: vouching
-for someone's age or name is a separate trust you give on its own. Applying the
-preset asks about it as a second question, defaulting to no. Callers enter
+for someone's age or name is a separate trust you give on its own. Besides **[i]**
+on the account, **Verify identity** on the staff screen switches it too, and
+applying the preset reminds you of it. Callers enter
 the birthdate you verify in **Your profile › Name & details**. Establish your own verification
 procedure outside NetBBS; the software records the attestation, not proof
 that a document or a person's claim is authentic.

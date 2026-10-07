@@ -54,9 +54,9 @@ def test_staff_need_the_flag_granted_separately(db):
 
 def test_the_co_sysop_question_says_verifying_is_separate():
     question = _co_sysop_question("Copperplate")
-    # Asked as its own question right after the preset (issue #1115), so
-    # the question no longer points at a key on another screen.
-    assert "Verifying identity is asked next" in question
+    # Points at the key on the screen the question is asked from (issue
+    # #1115), not at [i] on the account screen.
+    assert "[V]erify identity" in question
     assert "[i]" not in question
 
 

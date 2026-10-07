@@ -1,7 +1,8 @@
 """
-Issue #1115, findings 1 and 2: the Co-SysOp preset asks whether the new
-Co-SysOp may also verify identity, instead of pointing at `[i]` on a screen
-the SysOp is not looking at; and the account's sub-screens (staff
+Issue #1115, findings 1 and 2: verifying identity is granted with
+`[V]erify identity` on the staff screen the Co-SysOp preset is applied from,
+instead of a hint pointing at `[i]` on a screen the SysOp is not looking at
+(and without a chained second question); and the account's sub-screens (staff
 permissions, password, SSH keys) redraw in place instead of scrolling, with
 each outcome carried into the redraw above the prompt.
 """
@@ -65,52 +66,51 @@ def _last_screen(session) -> str:
     return _visible(_written_text(session).rsplit(clear_screen(), 1)[-1])
 
 
-# -- finding 1: the Co-SysOp preset asks about verifying ----------------------------
+# -- finding 1: verifying is granted from the screen the preset is applied on --------
 
 
-def test_the_preset_then_yes_grants_verifying_and_audits_it(db, lane, sysop):
+def test_verify_identity_on_the_staff_screen_grants_it_and_audits_it(db, lane, sysop):
     carol = create_user(db, "carol", password="hunter2pw")
-    session = FakeSession(["c", "y", "y", "b"])
+    session = FakeSession(["v", "y", "b"])
     result = _staff_screen(session, lane, sysop, carol)
 
-    stored = get_user_by_id(db, carol.id)
-    assert stored.staff_permissions == int(CO_SYSOP_PRESET)
-    assert stored.can_verify_identity is True
+    assert get_user_by_id(db, carol.id).can_verify_identity is True
     assert result.can_verify_identity is True
-    assert "Also let 'carol' verify identity?" in _visible(_written_text(session))
+    assert "Let 'carol' verify identity?" in _visible(_written_text(session))
     actions = [entry.action for entry in list_actions_for_target_user(db, carol.id)]
     # The same audit row `[i]` on the account writes.
     assert "set_can_verify_identity" in actions
 
 
-def test_the_preset_then_no_leaves_verifying_off(db, lane, sysop):
+def test_verify_identity_toggles_off_again(db, lane, sysop):
     carol = create_user(db, "carol", password="hunter2pw")
-    session = FakeSession(["c", "y", "n", "b"])
+    carol = set_can_verify_identity(db, carol, True, changed_by=sysop)
+    session = FakeSession(["v", "y", "b"])
+    _staff_screen(session, lane, sysop, carol)
+    assert get_user_by_id(db, carol.id).can_verify_identity is False
+
+
+def test_the_preset_alone_asks_nothing_more_and_names_the_key(db, lane, sysop):
+    carol = create_user(db, "carol", password="hunter2pw")
+    # The preset's own confirmation is the only question: no chained second
+    # one (AGENTS.md, §3.5). "b" right after it reaches Back.
+    session = FakeSession(["c", "y", "b"])
     _staff_screen(session, lane, sysop, carol)
 
     stored = get_user_by_id(db, carol.id)
     assert stored.staff_permissions == int(CO_SYSOP_PRESET)
     assert stored.can_verify_identity is False
+    screen = _last_screen(session)
+    assert "use [V]erify identity" in screen
+    assert "[V]erify identity" in screen.split("use [V]erify identity")[0]
 
 
-def test_no_verify_question_when_they_can_already_verify(db, lane, sysop):
+def test_no_reminder_when_they_can_already_verify(db, lane, sysop):
     carol = create_user(db, "carol", password="hunter2pw")
-    set_can_verify_identity(db, carol, True, changed_by=sysop)
-    carol = get_user_by_id(db, carol.id)
-    # One "y" only: a second question would read "b" and never reach Back.
+    carol = set_can_verify_identity(db, carol, True, changed_by=sysop)
     session = FakeSession(["c", "y", "b"])
     _staff_screen(session, lane, sysop, carol)
-    assert "verify identity?" not in _visible(_written_text(session))
-
-
-def test_a_declined_preset_asks_nothing_more(db, lane, sysop):
-    carol = create_user(db, "carol", password="hunter2pw")
-    session = FakeSession(["c", "n", "b"])
-    _staff_screen(session, lane, sysop, carol)
-    stored = get_user_by_id(db, carol.id)
-    assert stored.staff_permissions == 0
-    assert stored.can_verify_identity is False
-    assert "verify identity?" not in _visible(_written_text(session))
+    assert "use [V]erify identity" not in _visible(_written_text(session))
 
 
 # -- finding 2: the staff screen redraws in place -------------------------------------

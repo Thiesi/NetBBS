@@ -1233,24 +1233,28 @@ def _co_sysop_question(username: str) -> str:
     """The Co-SysOp preset's yes/no question. Verifying identity is not part
     of the preset (maintainer decision, issue #1103): vouching for a
     caller's age or name travels to other nodes and opens adult areas, so a
-    SysOp grants it to a helper on its own -- asked as a second question
-    right after the preset is applied (issue #1115), not left to a hint
-    about a key on another screen."""
+    SysOp grants it to a helper on its own -- with `[V]erify identity` on
+    the staff screen this question is asked from (issue #1115), not with a
+    key on the account screen the SysOp is not looking at. Not a second
+    question after this one: AGENTS.md allows no dialog chains."""
     return (
         f"Make {username!r} a Co-SysOp -- approve accounts, manage accounts (disable, "
         "password reset, display names and birthdates, levels up to 254) and moderate "
         "everything? They can't act on "
         "SysOps or other staff, or reach Settings, Link, Node, DNS or backups, and members "
-        "see them on the Staff list. Verifying identity is asked next, on its own."
+        "see them on the Staff list. Verifying identity is separate: [V]erify identity "
+        "on this screen."
     )
 
 
-def _co_sysop_verify_question(username: str) -> str:
-    """The question that follows an applied Co-SysOp preset (issue #1115)."""
-    return (
-        f"Also let {username!r} verify identity? They could then vouch for callers' "
-        "ages and real names, which other nodes may trust."
-    )
+def _verify_identity_question(username: str, giving: bool) -> str:
+    """`[V]erify identity`'s yes/no on the staff screen (issue #1115)."""
+    if giving:
+        return (
+            f"Let {username!r} verify identity? They could then vouch for callers' "
+            "ages and real names, which other nodes may trust."
+        )
+    return f"Stop {username!r} from verifying identity?"
 
 
 def _announce_saved(session: Session, lead: str, path: object, tail: str) -> None:
@@ -8133,6 +8137,10 @@ async def _staff_permissions_screen(
             MenuEntry(label=menu_key("E", "verything", prefix="Moderate "),
                       brief=_yes_no(target.has_staff(StaffPermission.MODERATE_ALL))),
         ]
+        # Verifying identity is not a staff permission (§5.5) but a SysOp
+        # gives it to the same helpers, so it sits here too (issue #1115):
+        # the Co-SysOp preset's outcome points at this key on this screen.
+        options.append(MenuEntry(label=menu_key("V", "erify identity"), brief=_yes_no(target.can_verify_identity)))
         options.append(MenuEntry(label=menu_key("C", "o-SysOp preset"), brief="All three at once"))
         options.append(MenuEntry(label=menu_key("N", "one"), brief="Remove every staff permission"))
         options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the account"))
@@ -8142,6 +8150,9 @@ async def _staff_permissions_screen(
         await session.write_line("")
         if choice == "b":
             return target
+        if choice == "v":
+            target = await _toggle_verify_identity(session, lane, actor, target, node_controls)
+            continue
         if choice in _STAFF_TOGGLE_KEYS:
             flag = _STAFF_TOGGLE_KEYS[choice]
             giving = not target.has_staff(flag)
@@ -8175,26 +8186,31 @@ async def _staff_permissions_screen(
             f"{target.username!r} staff permissions: {describe_staff_permissions(target.staff_permissions)}.",
         )
         if choice == "c" and not target.can_verify_identity:
-            # Verifying is not part of the preset (issue #1103), but the
-            # SysOp is asked here rather than told about a key on the
-            # account screen they are not looking at (issue #1115).
-            target = await _offer_verify_identity(session, lane, actor, target)
+            # Verifying is not part of the preset (issue #1103); the outcome
+            # names the key that grants it on the screen it is shown on
+            # (issue #1115).
+            _announce_line(session, "To let them verify identity too, use [V]erify identity.")
         _request_live_access_recheck(node_controls, target)
 
 
-async def _offer_verify_identity(session: Session, lane: DatabaseLane, actor: User, target: User) -> User:
-    """Ask, after an applied Co-SysOp preset, whether the new Co-SysOp may
-    also verify identity; on yes grant it exactly as `[i]` on the account
-    does (`set_can_verify_identity`, audited the same way). Returns the
-    account as it now stands."""
-    if not await prompt_yes_no(session, _co_sysop_verify_question(target.username), default=False):
+async def _toggle_verify_identity(
+    session: Session, lane: DatabaseLane, actor: User, target: User, node_controls: NodeControls | None
+) -> User:
+    """`[V]erify identity` on the staff screen: the same audited
+    `set_can_verify_identity` as `[i]` on the account, one confirmation
+    behind the key (§3.5). Returns the account as it now stands."""
+    giving = not target.can_verify_identity
+    if not await prompt_yes_no(session, _verify_identity_question(target.username, giving), default=False):
         return target
     try:
-        target = await lane.run(set_can_verify_identity, target, True, changed_by=actor)
+        target = await lane.run(set_can_verify_identity, target, giving, changed_by=actor)
     except UserManagementError as exc:
         _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return target
-    _announce_line(session, f"{target.username!r} can now verify identity: yes.")
+    _announce_line(
+        session, f"{target.username!r} can now verify identity: {'yes' if target.can_verify_identity else 'no'}."
+    )
+    _request_live_access_recheck(node_controls, target)
     return target
 
 
