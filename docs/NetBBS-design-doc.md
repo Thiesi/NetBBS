@@ -11344,8 +11344,14 @@ inbound body verbatim; the hub adds nothing. The bridge therefore
 sends every chunk in a house style (`|08<|14nick|08>|16|07 text`, the
 prefix paid for out of the same 140-character budget) and peels an
 inbound prefix only when the embedded name equals `from_user` -- an
-unmatched body is recorded whole, nothing is guessed. Decisions taken
-with it:
+unmatched body is recorded whole, nothing is guessed. Issue #1152 added
+handles no reference client writes but users choose, such as
+`+Nick+[CASTLE BBS]` or `^Nick<tag>`. The spec makes a body's first word
+the sender's handle, so a first word that names `from_user` is peeled too,
+with only punctuation touching the name. The word runs to the first
+whitespace outside brackets, because a tag may hold a space. A body that is
+nothing but that word, or has an unbalanced bracket, stays whole. Decisions
+taken with it:
 
 - **Color codes are content, not markup.** `|00`-`|23` survive in a
   stored MRC body (printable ASCII, safe to store) and are turned into
