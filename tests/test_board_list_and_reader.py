@@ -251,7 +251,9 @@ def test_a_caller_who_can_only_read_is_told_why(db, alice, monkeypatch):
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
-    assert "Read only: posting needs level 50." in session.visible()
+    # The "Requires:" line marks the level this caller lacks (#1115).
+    assert "Requires: level 50+ to post" in session.visible()
+    assert "Read only" not in session.visible()
     assert "[P]ost" not in session.visible()
 
 
@@ -563,7 +565,9 @@ def test_an_empty_board_says_why_a_caller_cannot_post(db, alice):
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
-    assert "Read only: posting needs level 50." in session.visible()
+    # The "Requires:" line marks the level this caller lacks (#1115).
+    assert "Requires: level 50+ to post" in session.visible()
+    assert "Read only" not in session.visible()
 
 
 def test_reading_a_late_arrival_does_not_move_the_jump_position_back(db, alice, monkeypatch):
