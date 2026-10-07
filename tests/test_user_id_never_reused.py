@@ -56,3 +56,24 @@ def test_the_migration_seeds_the_mark_from_the_highest_existing_id(tmp_path, mon
     db.connection.commit()
 
     assert create_user(db, "bob", password="hunter2").id == 8
+
+
+def test_the_migration_counts_ids_the_moderation_log_saw_deleted(tmp_path, monkeypatch):
+    """The newest account deleted *before* the upgrade: its id is gone from
+    `users`, but the deletion's log entry still names it."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "Issue #1131" in m.description)
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    old = Database(tmp_path / "node.db")
+    sysop = create_user(old, "sysop", password="hunter2", user_level=255)
+    create_user(old, "alice", password="hunter2")
+    newest = create_user(old, "carol", password="hunter2")
+    delete_user(old, newest, deleted_by=sysop)
+    old.connection.close()
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS)
+
+    db = Database(tmp_path / "node.db")
+
+    assert create_user(db, "dave", password="hunter2").id == newest.id + 1

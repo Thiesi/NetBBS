@@ -154,8 +154,9 @@ Keep persistent data outside the temporary launch directory. For a profiled
 third-party door, the installation directory is the usual root; document any
 additional paths and how to back them up. Identify a player using the stable
 `user_id` together with `node_id` if data can be shared between nodes. A node
-never gives a deleted account's `user_id` to a new account, though restoring an
-older backup can.
+never gives a deleted account's `user_id` to a new account. Two exceptions:
+restoring an older backup, and an id freed before the node had this rule
+(issue #1131) with no record of it in the moderation log.
 Handles and display names can change. These fields are identifiers, not
 credentials or evidence of user privileges.
 

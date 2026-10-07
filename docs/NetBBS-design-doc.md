@@ -1367,9 +1367,12 @@ An account's numeric id is never given to another account on the same node
 newest account's id went to the next registrant, and a door or BBSLink game
 keyed on `user_id` handed the deleted player's saves to a stranger. The node
 keeps the highest id ever used and gives each new account the next one above
-it. One limit remains: restoring a backup takes the high-water mark back with
-it, so an id issued after the backup was taken can be issued again. Code that
-must survive that too pairs the id with the account's `created_at` (the guest
+it. Two limits remain. Restoring a backup takes the high-water mark back with
+it, so an id issued after the backup was taken can be issued again. And the
+mark starts, on upgrade, at the highest id still in use or named by a deletion
+in the moderation log; an id freed with no such record (before the log named
+ids, or by a hand edit) can still go to one more account. Code that must
+survive either pairs the id with the account's `created_at` (the guest
 designation, §4.6).
 
 ### 4.2 Registration modes
