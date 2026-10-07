@@ -39,6 +39,7 @@ from netbbs.age_requirement import describe_age_gate
 from netbbs.config import get_mail_min_level, get_node_map_min_level
 from netbbs.doors.registry import list_doors
 from netbbs.files.areas import FileArea, list_file_areas
+from netbbs.ftn.networks import list_networks
 from netbbs.storage.database import Database
 
 
@@ -52,6 +53,7 @@ class GateKind(str, Enum):
     NODE_MAP = "node_map"
     MAIL = "mail"
     MRC_OPEN_ROOM = "mrc_open_room"
+    NETMAIL = "netmail"
     SYSOP = "sysop"
 
 
@@ -253,6 +255,15 @@ def _node_gates(db: Database) -> list[Gate]:
             GateKind.MRC_OPEN_ROOM, None, "Open MRC rooms", rooms.min_level, LevelSource.SETTING, rooms.min_level,
             conditions=_age_condition(rooms.min_age, rooms.age_requirement) + _name_condition(rooms.name_requirement),
             off=rooms_off,
+        ),
+        # Design doc §6.8: one per FTN network, its own netmail level.
+        *(
+            Gate(
+                GateKind.NETMAIL, network.id, f"Netmail on {network.name}", network.netmail_min_level,
+                LevelSource.SETTING, network.netmail_min_level,
+                off=None if network.enabled else "the network is off", note="needs Mail too",
+            )
+            for network in list_networks(db)
         ),
         Gate(GateKind.SYSOP, None, "SysOp console", SYSOP_LEVEL, LevelSource.FIXED, SYSOP_LEVEL),
     ]
@@ -466,6 +477,7 @@ GATE_WORDS: dict[GateKind, tuple[str, str]] = {
     GateKind.NODE_MAP: ("open", "node-wide"),
     GateKind.MAIL: ("use", "node-wide"),
     GateKind.MRC_OPEN_ROOM: ("open", "node-wide"),
+    GateKind.NETMAIL: ("send", "node-wide"),
     GateKind.SYSOP: ("use", "node-wide"),
 }
 
