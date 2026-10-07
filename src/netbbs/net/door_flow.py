@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 
+from netbbs.rendering.menu import continue_prompt
 from netbbs.auth.users import User
 from netbbs.doors import Door, get_door, list_doors
 from netbbs.doors.profiles import is_remote
@@ -33,7 +34,7 @@ from netbbs.net.session_activity import records_activity
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
 from netbbs.net.notices import announce
-from netbbs.rendering import MUTED_COLOR, WARNING_COLOR, clear_screen, colored, sanitize_text
+from netbbs.rendering import MUTED_COLOR, clear_screen, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -187,18 +188,12 @@ async def browse_doors(
             return
 
 
-# What a run's end reports: a door that broke is a failure, one the caller
-# could not play right now (too small a window, in use, out of time) a
-# warning, and leaving it as usual nothing more than a note.
-_DOOR_FAILURES = frozenset({"failed_to_start", "crashed", "relay_failed"})
-_DOOR_REFUSALS = frozenset({"timed_out", "terminal_too_small", "busy"})
-
-
 async def _report_door_result(session: Session, door: Door, result: DoorRunResult) -> bool:
-    """Says what happened above the redrawn door list (issue #1124):
-    announced, so the list's in-place redraw shows it instead of erasing
-    it, and no keypress is asked for. Returns `False` (stop browsing, the
-    caller is already gone) for a disconnect, `True` otherwise."""
+    """Shows what happened, then waits for a keystroke before the picker
+    redraws -- same "present, then wait" shape `netbbs.net.help_overlay.
+    show_help` already uses, so an in-place redraw can't wipe this
+    message before it's read. Returns `False` (stop browsing, the caller
+    is already gone) for a disconnect, `True` otherwise."""
     if result.reason == "caller_disconnected":
         return False
     if result.reason == "failed_to_start":
@@ -218,10 +213,7 @@ async def _report_door_result(session: Session, door: Door, result: DoorRunResul
         message = f"{door.name} is in use. Please try again when another caller has finished."
     else:
         message = f"Left {door.name}."
-    if result.reason in _DOOR_FAILURES:
-        announce(session, message, tone="error")
-    elif result.reason in _DOOR_REFUSALS:
-        announce(session, message, color=WARNING_COLOR)
-    else:
-        announce(session, message, tone="muted")
+    await session.write_line(colored(f"\r\n{message}", fg_color=MUTED_COLOR))
+    await session.write_line(continue_prompt())
+    await session.read_any_key()
     return True

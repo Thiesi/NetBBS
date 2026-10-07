@@ -220,11 +220,12 @@ def test_a_message_sent_from_whos_online_is_confirmed_on_the_redrawn_list(tmp_pa
 # -- doors ------------------------------------------------------------------------
 
 
-class _NoKeys:
-    """A session that must not be asked for a key: the result is announced."""
+class _Keys:
+    """A session that counts the keys it is asked for."""
 
     def __init__(self):
         self.written: list[str] = []
+        self.keys_asked = 0
 
     async def write(self, text: str) -> None:
         self.written.append(text)
@@ -233,34 +234,31 @@ class _NoKeys:
         self.written.append(text + "\n")
 
     async def read_key(self, echo: bool = True) -> str:
-        raise AssertionError("asked for a key to hold a result")
+        self.keys_asked += 1
+        return "x"
 
     async def read_any_key(self) -> str:
-        raise AssertionError("asked for a key to hold a result")
+        self.keys_asked += 1
+        return "x"
 
 
-@pytest.mark.parametrize(
-    "reason, mark",
-    [("crashed", "✗"), ("busy", "!"), ("normal", None)],
-)
-def test_a_doors_result_is_announced_for_the_redrawn_door_list(reason, mark):
+def test_a_doors_exit_keeps_its_pause_so_the_doors_last_screen_can_be_read():
+    """Review on #1126: a door's own last screen -- War Dialer's "needs
+    40x12" refusal, a final message -- sits above the host's epilogue, which
+    both bundled doors reserve rows for (`HOST_EPILOGUE_ROWS`). That is a
+    screen to read, not an outcome to carry, so the pause stays."""
     from types import SimpleNamespace
 
     from netbbs.doors.runtime import DoorRunResult
     from netbbs.net import door_flow
 
-    session = _NoKeys()
-    door = SimpleNamespace(name="Voidrunner")
-    kept_going = asyncio.run(door_flow._report_door_result(session, door, DoorRunResult(1, 1.0, reason)))
-    assert kept_going is True
-    assert session.written == []
-    [line] = take_notices(session)
-    shown = _SGR.sub("", line).lstrip()
-    assert "Voidrunner" in shown
-    if mark is None:
-        assert not shown.startswith(("✗", "!", "✓"))
-    else:
-        assert shown.startswith(mark)
+    session = _Keys()
+    door = SimpleNamespace(name="War Dialer")
+    assert asyncio.run(door_flow._report_door_result(session, door, DoorRunResult(0, 1.0, "normal"))) is True
+    shown = _SGR.sub("", "".join(session.written))
+    assert "Left War Dialer." in shown
+    assert "[Enter]" in shown
+    assert session.keys_asked == 1
 
 
 # -- Find -------------------------------------------------------------------------
