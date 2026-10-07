@@ -68,7 +68,7 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.notices import announce, write_notices
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
-from netbbs.rendering import ERROR_COLOR, LABEL_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
+from netbbs.rendering import LABEL_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
 from netbbs.rendering.ansi import clear_screen
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
