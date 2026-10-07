@@ -57,6 +57,7 @@ from netbbs.auth.users import User
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.picker import ListColumn, pick_item
+from netbbs.net.notices import announce
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.redraw_preference import redraw_in_place_enabled
@@ -779,18 +780,22 @@ async def administer_service(session: Session, lane: DatabaseLane, actor: User) 
     """
     token = await lane.run(get_admin_token)
     base_url = await lane.run(get_service_url)
+    # Every way out of here returns to the Managed DNS screen, whose
+    # redraw clears: each outcome is announced for that screen to show
+    # (issue #1119), not written under the clear.
     if token is None or base_url is None:
-        await _write_note(
+        announce(
             session,
             "Service administration needs [managed_dns] admin_token (and a service address) in "
             "netbbs.toml; this node has neither the token nor a reason to have it unless it "
             "belongs to the service's operator.",
+            tone="muted",
         )
         return
     try:
         from netbbs.managed_dns.client import ManagedDnsError, admin_registrations, outbound_session
     except ModuleNotFoundError:
-        await _write_note(session, "Service administration requires NetBBS's optional HTTP support.")
+        announce(session, "Service administration requires NetBBS's optional HTTP support.", tone="error")
         return
 
     presentation = {
@@ -816,7 +821,7 @@ async def administer_service(session: Session, lane: DatabaseLane, actor: User) 
             async with outbound_session(base_url) as http_session:
                 return await admin_registrations(http_session, base_url, token=token)
         except ManagedDnsError as exc:
-            await _write_note(session, f"Could not list the service's registrations: {sanitize_text(str(exc))}")
+            announce(session, f"Could not list the service's registrations: {exc}", tone="error")
             return None
 
     rows = await load()
@@ -850,7 +855,7 @@ async def administer_service(session: Session, lane: DatabaseLane, actor: User) 
 
     while True:
         if not rows:
-            await _write_note(session, "The service holds no registrations.")
+            announce(session, "The service holds no registrations.", tone="muted")
             return
         index_rows(rows)
         chosen = await pick_item(
@@ -956,14 +961,23 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
                 )
                 await write_prompt(session, "Reason (required, one sentence you will understand in six months): ")
                 reason = (await session.read_line()).strip()
+                # Outcomes are carried into the list's next draw (issue #1119):
+                # written here, the list's clearing redraw wiped them at once.
                 if not reason:
-                    await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+                    announce(session, "Cancelled.", tone="muted")
                     return
                 await write_prompt(
                     session, f"Type the name {row.name!r} to confirm revocation, or anything else to cancel: "
                 )
-                if (await session.read_line()).strip() != row.name:
-                    await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+                typed = (await session.read_line()).strip()
+                if typed != row.name:
+                    if typed:
+                        announce(
+                            session, f"Cancelled: {typed!r} is not {row.name!r}. Nothing was revoked.",
+                            color=WARNING_COLOR,
+                        )
+                    else:
+                        announce(session, "Cancelled.", tone="muted")
                     return
                 try:
                     async with outbound_session(base_url) as http_session:
@@ -972,9 +986,9 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
                             node_fingerprint=row.node_fingerprint, created_at=row.created_at,
                         )
                 except ManagedDnsError as exc:
-                    await _write_note(session, f"Revocation failed: {sanitize_text(str(exc))}")
+                    announce(session, f"Revocation failed: {str(exc)}", tone="error")
                     return
                 names = ", ".join(f"{revoked}.netbbs.org" for revoked in result.revoked)
-                await _write_note(session, f"Revoked: {names}. The record is gone and the holder cannot reclaim it.")
+                announce(session, f"Revoked: {names}. The record is gone and the holder cannot reclaim it.")
                 return
             await session.write(reject_unhandled_key(choice))

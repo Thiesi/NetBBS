@@ -1092,7 +1092,11 @@ masked credential entry (issue #611): a password is typed twice because the
 caller cannot see it, preceded by the current one where the account acts on
 itself, and a draft editor would have to hold the plaintext across redraws to
 offer anything more. Each prompt cancels on a blank line and nothing is
-written before the last one.
+written before the last one. A type-the-name confirmation answered with
+anything other than the name is not a silent cancel: the next screen says
+what was typed and that nothing happened, as a warning (issue #1119); only a
+blank answer is the plain "Cancelled.". Like every outcome, it is carried into
+the screen drawn next, never written under that screen's clear.
 
 **A console resource opens on its own fields** (issue #1081). The six resource
 screens of the SysOp console -- a Community, a category, a message board, a
