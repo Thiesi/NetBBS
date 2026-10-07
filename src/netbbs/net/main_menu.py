@@ -83,7 +83,6 @@ from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
-    continue_prompt,
     ALERT_COLOR,
     MUTED_COLOR,
     SUCCESS_COLOR,
@@ -92,6 +91,7 @@ from netbbs.rendering import (
     MenuEntry,
     clear_screen,
     colored,
+    continue_prompt,
     field_row,
     menu_grid,
     menu_key,

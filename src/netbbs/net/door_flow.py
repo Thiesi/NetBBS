@@ -27,13 +27,13 @@ from netbbs.doors.runtime import DoorRunResult, run_door
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
+from netbbs.net.notices import announce
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, physical_terminal_width
 from netbbs.net.session_activity import records_activity
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
-from netbbs.net.notices import announce
 from netbbs.rendering import MUTED_COLOR, clear_screen, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
