@@ -126,6 +126,58 @@ _SENDER_PREFIX_TEMPLATES = (
 )
 
 
+_PIPE_TOKEN_RE = re.compile(r"\|[0-9A-Za-z]{2}")
+_OPENERS, _CLOSERS = "([{<", ")]}>"
+_NAME_CHAR_RE = re.compile(r"[0-9A-Za-z_]")
+
+
+def _decorated_handle(body: str, from_user: str) -> tuple[str, int] | None:
+    """Issue #1152: a sender handle no template knows, such as
+    `+Michael_Nln+[CASTLE BBS]` or `^Johnny5<grAvY>`. The MRC spec makes
+    the body's first word the sender's handle, so that word is peeled
+    when it names `from_user`: the name comes before any whitespace, with
+    only punctuation touching it (`Alicehello` is not Alice's handle).
+    The word then runs to the first whitespace outside brackets, since a
+    tag may hold a space. Pipe codes are zero width. An unbalanced bracket,
+    or nothing after the word, leaves the body whole. Returns `(text,
+    index of the name in body)`."""
+    if not from_user:
+        return None
+    visible: list[tuple[str, int]] = []  # (character, index in body)
+    position = 0
+    while position < len(body):
+        token = _PIPE_TOKEN_RE.match(body, position)
+        if token is not None:
+            position = token.end()
+            continue
+        if visible or not body[position].isspace():
+            visible.append((body[position].lower(), position))
+        position += 1
+    word = "".join(char for char, _ in visible)
+    for spelling in sorted({from_user.lower(), from_user.lower().replace("_", " ")}):
+        name_start = word.find(spelling)
+        if name_start == -1 or any(char.isspace() for char in word[:name_start]):
+            continue
+        name_end = name_start + len(spelling)
+        if name_start and _NAME_CHAR_RE.match(word[name_start - 1]):
+            continue
+        if name_end < len(word) and _NAME_CHAR_RE.match(word[name_end]):
+            continue
+        depth = 0
+        for index, (char, at) in enumerate(visible):
+            if char in _OPENERS:
+                depth += 1
+            elif char in _CLOSERS:
+                depth -= 1
+                if depth < 0:
+                    return None
+            elif char.isspace() and depth == 0 and index >= name_end:
+                text = body[at:].lstrip()
+                return (text, visible[name_start][1]) if strip_pipe_codes(text).strip() else None
+        return None
+    return None
+
+
 def _sender_prefix_patterns(from_user: str) -> list[tuple[str, re.Pattern[str]]]:
     """The three anchored templates for one sender. A Mystic display
     name keeps its spaces inside the body (`<John Doe>`) while the
@@ -518,13 +570,17 @@ def split_sender_prefix(body: str, from_user: str) -> tuple[str, str]:
     Returns `(kind, text)`: `kind` is `"action"` for the shared `/me`
     template, else `"message"`; `text` keeps its color codes. A body
     that does not start with `from_user` in one of the reference
-    clients' shapes comes back whole -- the equality with `from_user`
-    is what makes this safe, nothing is guessed."""
+    clients' shapes, or as a decorated first word naming it (issue
+    #1152), comes back whole -- `from_user` is what makes this safe,
+    nothing is guessed."""
     if from_user:
         for kind, pattern in _sender_prefix_patterns(from_user):
             match = pattern.match(body)
             if match is not None:
                 return kind, match.group("text")
+        decorated = _decorated_handle(body, from_user)
+        if decorated is not None:
+            return "message", decorated[0]
     return "message", body
 
 
@@ -534,10 +590,16 @@ def sender_color(body: str, from_user: str) -> int | None:
         for _kind, pattern in _sender_prefix_patterns(from_user):
             match = pattern.match(body)
             if match is not None:
-                colors = [int(value) for value in re.findall(r"\|([0-9]{2})", body[:match.start("nick")])
-                          if int(value) < 16]
-                return colors[-1] if colors else None
+                return _last_foreground(body[:match.start("nick")])
+        decorated = _decorated_handle(body, from_user)
+        if decorated is not None:
+            return _last_foreground(body[:decorated[1]])
     return None
+
+
+def _last_foreground(codes: str) -> int | None:
+    colors = [int(value) for value in re.findall(r"\|([0-9]{2})", codes) if int(value) < 16]
+    return colors[-1] if colors else None
 
 
 def format_room_body(nick: str, text: str, *, nick_color: int = DEFAULT_NICK_COLOR) -> str:

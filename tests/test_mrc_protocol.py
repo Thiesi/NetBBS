@@ -257,6 +257,38 @@ def test_split_sender_prefix_records_a_body_whole_unless_it_names_the_sender():
     assert split_sender_prefix("hello", "") == ("message", "hello")
 
 
+@pytest.mark.parametrize(
+    "body, sender, text",
+    [
+        # Both seen in a live room (issue #1152): the handle as the
+        # sender's client decorates it, no template's shape.
+        ("|11+Michael_Nln+|08[CASTLE BBS]|07 hello all", "Michael_Nln", "hello all"),
+        ("^Johnny5<grAvY> hey", "johnny5", "hey"),
+        # A tag may hold a space; so may a Mystic display name.
+        ("|11+Michael Nln+[CASTLE BBS] hi", "Michael_Nln", "hi"),
+        ("Alice: hi", "Alice", "hi"),
+        ("|12^|14Alice|05<tag> |07yo", "Alice", "|07yo"),
+    ],
+)
+def test_split_sender_prefix_peels_a_decorated_handle_that_names_the_sender(body, sender, text):
+    assert split_sender_prefix(body, sender) == ("message", text)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Alicehello there",           # the name runs on: not Alice's handle
+        "+Alice+",                    # nothing after the handle
+        "+Alice+[TAG unbalanced hi",  # the tag never closes
+        "[x] Alice hi",               # the name is not in the first word
+        ":)Alice) hi",                # a closing bracket with no opener
+        "+Bob+[TAG] hi",              # someone else's handle
+    ],
+)
+def test_split_sender_prefix_keeps_a_body_whole_when_the_first_word_is_not_the_handle(body):
+    assert split_sender_prefix(body, "Alice") == ("message", body)
+
+
 def test_house_style_bodies_and_their_budget():
     assert format_room_body("alice", "hi") == "|08<|14alice|08>|16|07 hi"
     assert format_action_body("alice", "waves") == "|15* |13alice waves"
@@ -340,4 +372,5 @@ def test_sender_color_comes_from_the_matching_handle_not_the_body():
     assert protocol.sender_color("|15* |13bob |09waves", "bob") == 13
     assert protocol.sender_color("|08<|14John Doe|08> hello", "John_Doe") == 14
     assert protocol.sender_color("|11<mallory> hello", "bob") is None
+    assert protocol.sender_color("|12^|14Johnny5|05<grAvY> |07yo", "johnny5") == 14
     assert protocol.sender_color("plain old scrollback", "bob") is None
