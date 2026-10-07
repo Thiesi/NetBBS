@@ -139,12 +139,15 @@ def test_a_second_sysop_arriving_mid_answer_is_told_and_not_parked(tmp_path):
     db = Database(tmp_path / "node.db")
     set_opt_in(db, OptIn.DECLINED)
     set_node_display_name(db, "Named")
-    gate = asyncio.Event()
+    gate, prompted = asyncio.Event(), asyncio.Event()
 
     class _BlockingSession(FakeSession):
-        async def read_key(self, echo: bool = True) -> str:
+        # The yes/no prompt reads through read_editor_key; gating read_key
+        # held nothing, and the test passed only on lucky timing (#1146).
+        async def read_editor_key(self, **kwargs):
+            prompted.set()
             await gate.wait()
-            return await super().read_key(echo)
+            return await super().read_editor_key(**kwargs)
 
     first = _BlockingSession(["y"])
     second = FakeSession([])  # any read would raise on exhausted input
@@ -153,8 +156,7 @@ def test_a_second_sysop_arriving_mid_answer_is_told_and_not_parked(tmp_path):
         lane = DatabaseLane(db.path)
         try:
             task = asyncio.create_task(offer_onboarding(first, lane))
-            for _ in range(20):
-                await asyncio.sleep(0)
+            await asyncio.wait_for(prompted.wait(), 30)
             await offer_onboarding(second, lane)  # returns without prompting
             gate.set()
             await task
