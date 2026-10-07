@@ -1143,7 +1143,16 @@ next shows it directly above its prompt, and a picker shows it above its
 list. No keypress is asked for. This started in the SysOp console and now
 applies to every screen: boards, file areas, the composition review screen
 shared by posts and mail, every picker, the main menu and the mailbox that
-flows unwind back to.
+flows unwind back to. Every draft editor shows the session's pending outcomes
+by default, so a field's own prompt -- Profile's "Display name cleared.", a
+refused date -- is read on the redraw that follows it (issue #1124). Plain
+outcome text is classified the same way on both sides
+(`notices.announce_line`): a success gets `✓`, a failure ("Could not …",
+"Not a valid …") `✗`, a "Cancelled." or "No …" stays muted. A flow shared
+with a live stream -- a Link live message or a direct-chat invite, which chat
+runs inline -- takes a `report` callable: chat writes the outcome into its
+stream, the Who screen announces it for its redrawn list. The Verify screen
+and the Who screen no longer hold a result behind `[Enter] Continue`.
 
 A screen with a nothing-to-do state still draws a `[B]ack` bar and waits,
 rather than returning straight into its parent's redraw, where it would flash
@@ -2986,8 +2995,9 @@ the main menu to answer, and the inviter's waiting screen says the
 invitation opens there (issue #843). A door or a file transfer that owns the
 recipient's terminal gets no notice, only the waiting-screen line. The main
 menu is drawn again after the invitation is handled, with a decline carried
-above its prompt, because a direct chat clears the screen on its way out. For
-the same reason the Who screen does not pause after a direct chat that ran.
+above its prompt, because a direct chat clears the screen on its way out. The
+Who screen never pauses either: an invitation that ends without a chat is
+announced above its redrawn list (issue #1124).
 An unanswered invite expires automatically after a short fixed window, with
 an explicit accepted/declined/timed-out outcome always shown to the inviter
 -- never a silent no-op.

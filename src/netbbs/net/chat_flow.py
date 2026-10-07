@@ -2273,14 +2273,17 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     await _deliver_private_message(ctx, target, body)
 
 
-async def _refuse_live_message(session: Session, lane: DatabaseLane, target: User, sender: User) -> bool:
+async def _refuse_live_message(
+    session: Session, lane: DatabaseLane, target: User, sender: User,
+    report: Callable[[str], Awaitable[None]] | None = None,
+) -> bool:
     """Tell `session` why `target` takes no live message from `sender`
     (`netbbs.messaging_preferences.live_message_refusal`: the opt-out or
     a block, issue #925) and return `True`; `False` when it may be sent."""
     refusal = await lane.run(lambda db: live_message_refusal(db, target, sender=sender))
     if refusal is None:
         return False
-    await session.write_line(colored(sanitize_text(refusal), fg_color=MUTED_COLOR))
+    await (report or session.write_line)(colored(sanitize_text(refusal), fg_color=MUTED_COLOR))
     return True
 
 
@@ -6387,6 +6390,7 @@ async def run_direct_chat_invite_flow(
     session_registry: ActiveSessionRegistry,
     user: User,
     target: User,
+    report: Callable[[str], Awaitable[None]] | None = None,
 ) -> bool:
     """
     Send a mutual direct-chat invite to `target` and run the whole
@@ -6415,13 +6419,15 @@ async def run_direct_chat_invite_flow(
     says where the invitation will open (issue #843).
 
     Returns whether a direct chat ran. It clears the screen on its way
-    out, so a caller that would otherwise hold an outcome on a "Press
-    any key" pause has nothing left to show.
+    out. An outcome that ends it without a chat (a refusal, a decline, a
+    timeout) goes to `report` -- `session.write_line` by default; the
+    Who screen announces it for its redrawn list instead (issue #1124).
     """
-    if await _refuse_live_message(session, lane, target, user):
+    report = report or session.write_line
+    if await _refuse_live_message(session, lane, target, user, report):
         return False
     if not presence.is_online(target.username):
-        await session.write_line(
+        await report(
             colored(f"{sanitize_text(target.username)} is not currently online.", fg_color=MUTED_COLOR)
         )
         return False
@@ -6433,7 +6439,7 @@ async def run_direct_chat_invite_flow(
             invites[target_session] = invite
 
     if not invites:
-        await session.write_line(
+        await report(
             colored(
                 f"{sanitize_text(target.username)} is currently deciding on another invite -- try again shortly.",
                 fg_color=MUTED_COLOR,
@@ -6524,7 +6530,7 @@ async def run_direct_chat_invite_flow(
         if key is not None and key.lower() == "c":
             for target_session in invites:
                 direct_invites.cancel(target_session)
-            await session.write_line(colored("\r\nInvitation cancelled.", fg_color=MUTED_COLOR))
+            await report(colored("\r\nInvitation cancelled.", fg_color=MUTED_COLOR))
             return False
 
         if resolved:
@@ -6558,9 +6564,9 @@ async def run_direct_chat_invite_flow(
         )
         return True
     elif outcome == "declined":
-        await session.write_line(colored(f"\r\n{sanitize_text(target.username)} declined.", fg_color=MUTED_COLOR))
+        await report(colored(f"\r\n{sanitize_text(target.username)} declined.", fg_color=MUTED_COLOR))
     else:  # "timed_out" -- "cancelled" never reaches here (that's only ever this same inviter's own cancel_key_task path above)
-        await session.write_line(
+        await report(
             colored(f"\r\n{sanitize_text(target.username)} didn't respond in time.", fg_color=MUTED_COLOR)
         )
     return False

@@ -43,6 +43,7 @@ from netbbs.net.char_input import (
 )
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.help_overlay import show_help
+from netbbs.net.notices import take_notices
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -666,7 +667,14 @@ async def edit_resource_draft(
     what is stored only `[S]ave` and `[B]ack` are offered; a save stays
     on the screen and reloads it. A `FieldSpec.locked` field is shown but
     says why it can't be changed instead of opening its prompt.
+
+    `notices` defaults to this session's pending outcomes (issue #1124):
+    whatever a field's own prompt announced is shown on the redraw that
+    follows it, on every editor -- the caller's as well as the console's.
     """
+    if notices is None:
+        def notices() -> list[str]:
+            return take_notices(session)
     detail_state: DetailState | None = None
     if detail is not None:
         detail_state = await detail.refresh()
