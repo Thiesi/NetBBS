@@ -1195,31 +1195,10 @@ def _announce(session: Session, text: str, *, error: bool = False, color: int | 
 
 _CLEAR_SEQUENCE = "\x1b[2J"
 _LEADING_BREAK = re.compile(r"^((?:\x1b\[[0-9;]*m)*)(?:\r\n)+")
-# An outcome that changed nothing reads muted, not as a green success.
-_NEUTRAL_OUTCOMES = ("Cancelled", "No change", "Already ", "No ", "Nothing ")
-# A net under the sites converted from a bare `write_line`: a failure that was
-# never styled must not turn success-green merely by being announced. A site
-# that knows it is reporting a failure says so with `_announce(..., error=True)`.
-_FAILED_OUTCOMES = ("Error", "Could not", "Cannot ", "Can't ", "Failed", "Unable ")
-
-
 def _announce_line(session: Session, line: str) -> None:
-    """Queue a line exactly as an action would have written it. One that is
-    already styled keeps its colours; a plain one reads as a success, or muted
-    when it says nothing was done. A leading blank row is dropped -- it spaced
-    the line off a keypress echo that is no longer above it."""
-    line = _LEADING_BREAK.sub(r"\1", line)
-    if "\x1b[" not in line:
-        # A key the outcome mentions stands out as a menu key (issue #1083),
-        # a path it names reads as a value (issue #1103), and a success or
-        # failure says so with a leading mark (issue #1109).
-        if line.startswith(_FAILED_OUTCOMES):
-            line = status_result(line, "error")
-        elif line.startswith(_NEUTRAL_OUTCOMES):
-            line = highlight_result(line, color=MUTED_COLOR)
-        else:
-            line = status_result(line, "success")
-    _notices.announce_styled(session, line)
+    """Queue a line exactly as an action would have written it; shared with
+    the caller's screens (`notices.announce_line`, issue #1124)."""
+    _notices.announce_line(session, line)
 
 
 def _confirmation_refused(session: Session, typed: str, expected: str, *, kept: str = "Nothing was deleted.") -> None:

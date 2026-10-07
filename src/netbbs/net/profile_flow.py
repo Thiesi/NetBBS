@@ -74,7 +74,7 @@ from netbbs.net.draft_storage import drafts_directory
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.mail_flow import mail_blocked_notice, mail_open_to, mail_someone
 from netbbs.net.menu_description_preference import menu_description_level, set_menu_description_level
-from netbbs.net.notices import announce, pending_notice_rows, take_notices, write_notices
+from netbbs.net.notices import announce, announce_line, pending_notice_rows, take_notices, write_notices
 from netbbs.net.node_theme import (
     effective_accent_color,
     effective_accent_color_256,
@@ -1005,10 +1005,9 @@ async def _sort_preferences_screen(session: Session, lane: DatabaseLane, user: U
                 user, selected.resource_kind,
                 community_id=selected.community_id, category_id=selected.category_id,
             )
-            await session.write_line(colored(
-                "Cleared for this call." if signed_in_without_credential(session) else "Cleared.",
-                fg_color=MUTED_COLOR,
-            ))
+            announce_line(
+                session, "Cleared for this call." if signed_in_without_credential(session) else "Cleared."
+            )
 
 
 # -- a session that signed in without a credential (issue #1073) -----------
@@ -1714,7 +1713,7 @@ async def _edit_bio(session: Session, lane: DatabaseLane, user: User) -> None:
         current = await lane.run(get_bio, user)
         if current and await prompt_yes_no(session, "Clear your bio instead of editing it?", default=False):
             await lane.run(set_bio, user, "")
-            await session.write_line("Bio cleared.")
+            announce_line(session, "Bio cleared.")
             return
         result = await edit_line_body(
             session,
@@ -1730,9 +1729,9 @@ async def _edit_bio(session: Session, lane: DatabaseLane, user: User) -> None:
     try:
         await lane.run(set_bio, user, text)
     except BioError as exc:
-        await session.write_line(colored(f"Could not save bio: {exc}", fg_color=MUTED_COLOR))
+        announce_line(session, f"Could not save bio: {exc}")
         return
-    await session.write_line("Bio updated.")
+    announce_line(session, "Bio updated.")
 
 
 def _bio_draft_path(db: Database, user: User) -> Path:
@@ -1769,7 +1768,7 @@ async def _edit_signature(session: Session, lane: DatabaseLane, user: User) -> N
         current = await lane.run(get_signature, user)
         if current and await prompt_yes_no(session, "Clear your signature instead of editing it?", default=False):
             await lane.run(set_signature, user, "")
-            await session.write_line("Signature cleared.")
+            announce_line(session, "Signature cleared.")
             return
         result = await edit_line_body(
             session,
@@ -1785,9 +1784,9 @@ async def _edit_signature(session: Session, lane: DatabaseLane, user: User) -> N
     try:
         await lane.run(set_signature, user, text)
     except SignatureError as exc:
-        await session.write_line(colored(f"Could not save signature: {exc}", fg_color=MUTED_COLOR))
+        announce_line(session, f"Could not save signature: {exc}")
         return
-    await session.write_line("Signature updated.")
+    announce_line(session, "Signature updated.")
 
 
 def _signature_draft_path(db: Database, user: User) -> Path:
@@ -1860,15 +1859,15 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         if new_value == _CLEAR:
             await lane.run(clear_own_profile_field, user, "display_name")
             draft["display_name"] = None
-            await session.write_line("Display name cleared.")
+            announce_line(session, "Display name cleared.")
             return
         try:
             await lane.run(set_display_name, user, new_value)
         except ProfileFieldError as exc:
-            await session.write_line(colored(f"Could not save display name: {exc}", fg_color=MUTED_COLOR))
+            announce_line(session, f"Could not save display name: {exc}")
             return
         draft["display_name"] = new_value
-        await session.write_line("Display name updated.")
+        announce_line(session, "Display name updated.")
 
     async def _location_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["location"]
@@ -1881,15 +1880,15 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         if new_value == _CLEAR:
             await lane.run(clear_own_profile_field, user, "location")
             draft["location"] = None
-            await session.write_line("Location cleared.")
+            announce_line(session, "Location cleared.")
             return
         try:
             await lane.run(set_location, user, new_value)
         except ProfileFieldError as exc:
-            await session.write_line(colored(f"Could not save location: {exc}", fg_color=MUTED_COLOR))
+            announce_line(session, f"Could not save location: {exc}")
             return
         draft["location"] = new_value
-        await session.write_line("Location updated.")
+        announce_line(session, "Location updated.")
 
     async def _birthdate_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["birthdate"]
@@ -1904,20 +1903,20 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         if raw == _CLEAR:
             await lane.run(clear_own_profile_field, user, "birthdate")
             draft["birthdate"] = None
-            await session.write_line("Birthdate cleared.")
+            announce_line(session, "Birthdate cleared.")
             return
         try:
             new_birthdate = date.fromisoformat(raw)
         except ValueError:
-            await session.write_line(colored("Not a valid date (expected YYYY-MM-DD).", fg_color=MUTED_COLOR))
+            announce_line(session, "Not a valid date (expected YYYY-MM-DD).")
             return
         try:
             await lane.run(set_birthdate, user, new_birthdate)
         except ProfileFieldError as exc:
-            await session.write_line(colored(f"Could not save birthdate: {exc}", fg_color=MUTED_COLOR))
+            announce_line(session, f"Could not save birthdate: {exc}")
             return
         draft["birthdate"] = new_birthdate
-        await session.write_line("Birthdate updated.")
+        announce_line(session, "Birthdate updated.")
 
     def _link_share_toggle(attribute: str) -> Callable[[Session, DatabaseLane, Draft], Awaitable[None]]:
         # One keystroke flips `link_visible` either way -- but only the
@@ -2219,7 +2218,7 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
         which = (await session.read_key()).lower()
         await session.write_line("")
         if which not in ("a", "n"):
-            await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+            announce_line(session, "Cancelled.")
             return
         attribute = "age" if which == "a" else "name"
     else:
@@ -2231,20 +2230,18 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
         f"verified {label} will refuse them again.",
         default=False,
     ):
-        await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+        announce_line(session, "Cancelled.")
         return
     try:
         revoked = revoke_attestation(db, subject, attribute, actor=verifier)
     except AttestationError as exc:
-        await session.write_line(colored(f"Could not revoke: {exc}", fg_color=MUTED_COLOR))
+        announce_line(session, f"Could not revoke: {exc}")
         return
     if revoked:
-        await session.write_line(f"Verified {label} revoked.")
+        announce_line(session, f"Verified {label} revoked.")
     else:
         # Someone else revoked it while this screen waited for an answer.
-        await session.write_line(
-            colored(f"No verified {label} on record for {subject.username!r} any more.", fg_color=MUTED_COLOR)
-        )
+        announce_line(session, f"No verified {label} on record for {subject.username!r} any more.")
 
 
 def _verification_status_description(db: Database, user: User) -> str:
@@ -2313,6 +2310,9 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
             actions.append(menu_key("R", "evoke"))
         actions.append(menu_key("B", "ack"))
         await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
+        # What the last action reported (issue #1124): shown above the
+        # prompt of the redrawn status, not held behind a keypress.
+        await write_notices(session)
         await write_prompt(session, "Choice: ")
 
     await _draw()
@@ -2327,41 +2327,35 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
             await write_prompt(session, "Attested birthdate (YYYY-MM-DD, blank to cancel): ")
             raw = (await session.read_line()).strip()
             if not raw:
-                await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+                announce_line(session, "Cancelled.")
             else:
                 try:
                     birthdate = date.fromisoformat(raw)
                     attest_age(db, subject, birthdate, verifier=verifier)
                 except (ValueError, AttestationError) as exc:
-                    await session.write_line(colored(f"Could not attest age: {exc}", fg_color=MUTED_COLOR))
+                    announce_line(session, f"Could not attest age: {exc}")
                 else:
-                    await session.write_line("Age attested.")
-            await session.write_line(continue_prompt())
-            await session.read_any_key()
+                    announce_line(session, "Age attested.")
             await _draw()
         elif choice == "r" and (
             get_attestation(db, subject, "age") is not None or get_attestation(db, subject, "name") is not None
         ):
             await session.write_line("")
             await _revoke_one(session, db, verifier, subject)
-            await session.write_line(continue_prompt())
-            await session.read_any_key()
             await _draw()
         elif choice == "n":
             await session.write_line("")
             await write_prompt(session, "Attested real name (blank to cancel): ")
             raw = (await session.read_line()).strip()
             if not raw:
-                await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+                announce_line(session, "Cancelled.")
             else:
                 try:
                     attest_name(db, subject, raw, verifier=verifier)
                 except AttestationError as exc:
-                    await session.write_line(colored(f"Could not attest name: {exc}", fg_color=MUTED_COLOR))
+                    announce_line(session, f"Could not attest name: {exc}")
                 else:
-                    await session.write_line("Real name attested.")
-            await session.write_line(continue_prompt())
-            await session.read_any_key()
+                    announce_line(session, "Real name attested.")
             await _draw()
         else:
             await session.write(reject_unhandled_key(choice))
