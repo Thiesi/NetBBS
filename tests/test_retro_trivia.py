@@ -36,6 +36,12 @@ def _load():
 rt = _load()
 
 
+@pytest.fixture(autouse=True)
+def _splash_switched_on(monkeypatch):
+    """The suite turns door splashes off (conftest); these tests are about it."""
+    monkeypatch.delenv("DOOR_SPLASH", raising=False)
+
+
 @pytest.fixture
 def keys(monkeypatch):
     """Feed `read_key` a scripted sequence, one key per call."""
@@ -468,3 +474,16 @@ def test_the_environment_can_switch_the_splash_off(monkeypatch, value):
     with contextlib.redirect_stdout(buffer):
         assert not rt.play_splash(rt.Palette(truecolor=True), {}, 80, 24, poll=poll)
     assert buffer.getvalue() == "" and poll.takes == 0
+
+
+@pytest.mark.parametrize("width, height", [(40, 12), (80, 24)])
+def test_left_to_run_it_waits_for_a_key_under_a_prompt(width, height):
+    frames = rt.splash_frames(rt.Palette(truecolor=True), {"handle": "keeper"}, width, height)
+    poll = _FakePoll(key_after=len(frames) + 3)  # every frame, then three idle polls
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        assert rt.play_splash(rt.Palette(truecolor=True), {"handle": "keeper"}, width, height, poll=poll)
+    assert poll.takes == len(frames) + 4, "the finished splash did not wait for its key"
+    shown = buffer.getvalue()
+    assert "any key to begin" in shown or "PRESS ANY KEY" in shown or "ANY KEY" in shown
+    assert shown.endswith("\x1b[2J\x1b[H\x1b[?25h")

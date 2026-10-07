@@ -610,6 +610,8 @@ SPLASH_FRAME_SECONDS = 0.1
 SPLASH_FRAMES = 25
 #: How long the door listens for typing-ahead before it draws anything.
 SPLASH_GRACE_SECONDS = 0.2
+#: How often a finished splash, waiting for its key, looks again.
+SPLASH_HOLD_POLL_SECONDS = 0.5
 #: The rest of a key's input unit (an arrow key is three bytes) arrives within
 #: this of its first byte, and goes with it.
 _SPLASH_UNIT_SECONDS = 0.03
@@ -1033,6 +1035,8 @@ class _Splash:
         col = centre - _visible_width(full) // 2
         self.cells[(row, col)] = ("✦", star)
         self.cells[(row, col + 3)] = (body, text_style)
+        # Where a stage too small for the lower third's hint says what it waits for.
+        self.header = (row, col + 3, _visible_width(body), text_style)
         self.cells[(row, col + 3 + _visible_width(body) + 2)] = ("✦", star)
 
     def _compose_logo(self, row: int, kind: str, centre: int) -> None:
@@ -1157,6 +1161,20 @@ class _Splash:
         for r, c, glyph, style in self.letters[index]:
             self.canvas.put(r, c, glyph, style if lit else off)
 
+    def hold(self) -> str:
+        """What the finished show waits under, after `frames`: nothing more
+        where the lower third already says "any key to begin", otherwise the
+        header's own words, centred in its place."""
+        if self.hint:
+            return ""
+        row, col, width, style = self.header
+        prompt = next((text for text in ("PRESS ANY KEY", "ANY KEY") if len(text) <= width), "")
+        if not prompt:
+            return ""
+        pad = width - len(prompt)
+        self.canvas.put(row, col, " " * (pad // 2) + prompt + " " * (pad - pad // 2), style)
+        return self.canvas.take()
+
     def frames(self) -> list[str]:
         """The whole show, as one string per frame. The first clears the
         screen and draws the stage dark; each later one changes only what
@@ -1229,9 +1247,16 @@ def splash_frames(p: Palette, info: dict, width: int, height: int) -> list[str] 
     when the terminal is smaller than the compact composition needs."""
     if width < 40 or height < 12:
         return None
+    show = _splash_show(p, info, width, height)
+    return show.frames() if show else None
+
+
+def _splash_show(p: Palette, info: dict, width: int, height: int) -> "_Splash | None":
+    if width < 40 or height < 12:
+        return None
     width, height = min(width, 240), min(height, 80)
     seed = zlib.crc32(f"{info.get('node_name', '')}/{info.get('handle', '')}".encode("utf-8", "replace"))
-    return _Splash(p, info, width, height, random.Random(seed)).frames()
+    return _Splash(p, info, width, height, random.Random(seed))
 
 
 def splash_switched_off() -> bool:
@@ -1254,14 +1279,21 @@ def play_splash(p: Palette, info: dict, width: int, height: int, poll: _KeyPoll 
         poll = _open_key_poll()
     if poll is None:
         return False
-    frames = splash_frames(p, info, width, height)
-    if frames is None or poll.waiting(SPLASH_GRACE_SECONDS):
+    show = _splash_show(p, info, width, height)
+    if show is None or poll.waiting(SPLASH_GRACE_SECONDS):
         return False
+    frames = show.frames()
     try:
         for frame in frames:
             out(frame)
             if poll.take(SPLASH_FRAME_SECONDS):
                 break
+        else:
+            # Left to run to the end, the stage stays up until a key -- which
+            # is spent, like one that skips -- or the end of input.
+            out(show.hold())
+            while not poll.take(SPLASH_HOLD_POLL_SECONDS):
+                pass
     finally:
         out(f"{RESET}{ESC}[2J{ESC}[H{ESC}[?25h")
     return True

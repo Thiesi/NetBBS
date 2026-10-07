@@ -5619,16 +5619,21 @@ belong in issues, commits, or Git history.
 
 ---
 
-### A bundled door's launch splash must never look settled
+### A bundled door's launch splash must not look settled until it is
 
-The three bundled doors open with an animated splash that holds the screen for
-about 2.5 seconds. Two kinds of tooling drive those doors with scripted keys, and
-both constrain how the hold may behave:
+The three bundled doors open with an animated splash of about 2.5 seconds,
+which then holds its finished picture until a key is pressed. Two kinds of
+tooling drive those doors with scripted keys, and both constrain how it may
+behave:
 
 - `scripts/door_gallery.py` and the website capture scripts type each key once a
   door's output has gone quiet. A silent hold would read as a settled screen, and
-  the first scripted key would be spent skipping the splash. The splash therefore
-  writes a frame at least every 0.1 s until it has cleared and handed over.
+  the first scripted key would be spent skipping the splash. The animation
+  therefore writes a frame at least every 0.1 s until its last frame. The held
+  picture after it is quiet, and is meant to be: it is a settled screen waiting
+  for a key. It must therefore never animate while it waits -- a twinkle there
+  would keep the gallery's settle from ever returning -- and it must end at end
+  of input, which is how the gallery finishes its `~` walk.
   The gallery also runs every walk with `DOOR_SPLASH=0`: the splash clears the
   screen, so with it on the `^` walk keeps nothing but the splash, and War
   Dialer's masthead -- drawn after it -- has no panel. Only the `~` walk turns it

@@ -3418,6 +3418,9 @@ SPLASH_CONNECT = "CONNECT 14400"
 SPLASH_TAGLINE = "Rival crews. Ten exchanges. One scene."
 SPLASH_TAGLINE_SHORT = "Ten exchanges. One scene."
 SPLASH_HINT = "any key skips"
+# What the finished splash waits under, in the hint's own place: the same
+# width, so it overwrites it exactly.
+SPLASH_HOLD_HINT = "press any key"
 
 # The large masthead: five rows of solid blocks, two-column strokes, open
 # counters, and a two-column gap between letters so the shadow never closes it.
@@ -3715,6 +3718,25 @@ def splash_bytes(frames: list[list[SplashOp]]) -> list[str]:
     return rendered
 
 
+def splash_hold_prompt(p: Palette, width: int, height: int) -> str:
+    """The prompt a finished splash waits under. The large layout puts it where
+    "any key skips" stood; the compact one, which has no hint, at the right of
+    the dial row."""
+    kind, top, left, rows, cols = splash_layout(width, height)
+    row = 2 if kind == "large" else 1
+    col = cols - len(SPLASH_HOLD_HINT) - 1
+    return f"{ESC}[{top + row};{left + col}H" + sty(p.amber + BOLD, SPLASH_HOLD_HINT)
+
+
+def _splash_hold() -> None:
+    """Keep the finished splash up until the caller presses a key, and spend
+    that key's whole input unit. End of input ends the wait."""
+    try:
+        read_input_key()
+    except (InputSequenceError, EOFError, OSError, ValueError):
+        pass
+
+
 def _splash_ready(p: Palette) -> bool:
     """Whether a caller is plainly there, watching, with nothing typed yet."""
     if not motion_enabled(p) or _PENDING_INPUT:
@@ -3740,7 +3762,10 @@ def splash_switched_off() -> bool:
 
 
 def play_splash(p: Palette, info: dict, season_number: int, width: int, height: int) -> bool:
-    """Draw the splash if it may be drawn. True if it ran (to the end or skipped)."""
+    """Draw the splash if it may be drawn. True if it ran (to the end or skipped).
+
+    Left to run to the end, it holds its last frame under a prompt until a key
+    is pressed; a key during the animation ends it at once instead."""
     if splash_switched_off() or not _splash_ready(p) or width < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
         return False
     seed = zlib.crc32(f"{info.get('node_name', '')}/{info.get('handle', '')}".encode("utf-8"))
@@ -3751,6 +3776,9 @@ def play_splash(p: Palette, info: dict, season_number: int, width: int, height: 
             out(text)
             if _beat(SPLASH_FRAME_SECONDS, hand_back=False):
                 break
+        else:
+            out(splash_hold_prompt(p, width, height))
+            _splash_hold()
     finally:
         out(f"{RESET}{ESC}[2J{ESC}[H{ESC}[?25h")
     return True

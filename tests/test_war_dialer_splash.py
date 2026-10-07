@@ -37,6 +37,12 @@ wd = _load()
 INFO = {"handle": "alice", "node_name": "Harbor Lights"}
 
 
+@pytest.fixture(autouse=True)
+def _splash_switched_on(monkeypatch):
+    """The suite turns door splashes off (conftest); these tests are about it."""
+    monkeypatch.delenv("DOOR_SPLASH", raising=False)
+
+
 def _width(text: str) -> int:
     return sum(wd._char_width(ch) for ch in text)
 
@@ -156,16 +162,46 @@ def test_any_key_ends_it_at_once_and_is_consumed(monkeypatch):
     assert len(written) == 1 + 3 + 1
 
 
-def test_left_to_run_it_plays_every_frame_and_hands_over_cleared(monkeypatch):
-    written = []
+def test_left_to_run_it_plays_every_frame_holds_for_a_key_and_hands_over_cleared(monkeypatch):
+    written, keys = [], []
     monkeypatch.setattr(wd, "out", written.append)
     monkeypatch.setattr(wd.select, "select", lambda r, w, x, t: ([], [], []))
     monkeypatch.setattr(wd.sys, "stdin", io.StringIO(""))
     monkeypatch.setattr(wd, "_beat", lambda seconds, *, hand_back=True: False)
+    monkeypatch.setattr(wd, "read_input_key", lambda: keys.append("x") or "x")
     assert wd.play_splash(_palette(), INFO, 2, 40, 12) is True
     frames = wd.splash_frames(_palette(), INFO, 2, 40, 12, seed=0)
-    assert len(written) == len(frames) + 2
+    # Every frame, then the prompt it waits under, then the handover.
+    assert len(written) == len(frames) + 3
+    assert wd.SPLASH_HOLD_HINT in written[-2]
+    assert keys == ["x"], "the finished splash did not wait for its key"
     assert written[-1].endswith("\x1b[?25h")
+
+
+def test_a_key_during_the_animation_does_not_also_wait_for_a_second(monkeypatch):
+    written, keys = [], []
+    monkeypatch.setattr(wd, "out", written.append)
+    monkeypatch.setattr(wd.select, "select", lambda r, w, x, t: ([], [], []))
+    monkeypatch.setattr(wd.sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(wd, "_beat", lambda seconds, *, hand_back=True: True)
+    monkeypatch.setattr(wd, "read_input_key", lambda: keys.append("x") or "x")
+    assert wd.play_splash(_palette(), INFO, 2, 80, 24) is True
+    assert keys == [] and not any(wd.SPLASH_HOLD_HINT in text for text in written)
+
+
+@pytest.mark.parametrize("width, height", [(40, 12), (64, 20), (80, 24), (132, 50)])
+def test_the_hold_prompt_stays_inside_the_terminal(width, height):
+    prompt = wd.splash_hold_prompt(_palette(), width, height)
+    row, col = (int(n) for n in re.match(r"\x1b\[(\d+);(\d+)H", prompt).groups())
+    assert 1 <= row <= height and 1 <= col
+    assert col + len(wd.SPLASH_HOLD_HINT) - 1 < width
+
+
+def test_end_of_input_ends_the_hold(monkeypatch):
+    def gone():
+        raise EOFError
+    monkeypatch.setattr(wd, "read_input_key", gone)
+    wd._splash_hold()  # returns rather than waiting forever, or raising
 
 
 def test_the_large_masthead_spells_the_name():
