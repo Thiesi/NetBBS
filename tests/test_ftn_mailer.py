@@ -219,8 +219,7 @@ def test_an_unexpected_error_is_a_failed_call_in_the_status(db, setup, monkeypat
 
     async def run():
         lane = DatabaseLane(db.path)
-        mailer = FtnMailer(lane)
-        monkeypatch.setattr(mailer, "_session", broken)
+        mailer = FtnMailer(lane, connect=broken)
         try:
             return await mailer.poll(network)
         finally:
