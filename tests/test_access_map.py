@@ -34,6 +34,9 @@ from netbbs.communities import create_community, meets_write_gate
 from netbbs.config import set_mail_min_level, set_node_map_min_level
 from netbbs.doors.registry import create_door
 from netbbs.files.areas import create_file_area
+from netbbs.ftn.address import FtnAddress
+from netbbs.ftn.netmail import netmail_refusal
+from netbbs.ftn.networks import FtnNetwork, save_network
 from netbbs.link.onboarding import set_configured_link_enabled
 from netbbs.mail import mail_access_refusal
 from netbbs.mrc.settings import (
@@ -85,6 +88,9 @@ def _node(db: Database):
     set_configured_link_enabled(db, True)
     save_mrc_settings(db, MrcSettings(enabled=True, host="127.0.0.1", port=5000, tls=False, site_name="Board"))
     save_open_room_settings(db, OpenRoomSettings(enabled=True, min_level=99))
+    save_network(db, FtnNetwork(name="fsxNet", domain="fsxnet", our_address=FtnAddress(21, 1, 199),
+                                uplink_address=FtnAddress(21, 1, 100), uplink_host="hub.example", enabled=True,
+                                netmail_min_level=100))
     return sysop
 
 
@@ -201,6 +207,8 @@ def _real_check(db: Database, user, gate: Gate) -> bool:
         return mail_access_refusal(db, user) is None
     if kind is GateKind.MRC_OPEN_ROOM:
         return _open_room_gate_denial(db, user, load_open_room_settings(db)) is None
+    if kind is GateKind.NETMAIL:
+        return netmail_refusal(db, user, "Joe (21:3/110)") is None
     if kind is GateKind.SYSOP:
         return is_usable_sysop(user)
     raise AssertionError(f"no real check for {kind}: add one here")
@@ -269,6 +277,7 @@ LEVEL_CHECK_SITES: dict[tuple[str, str], GateKind | str] = {
     ("netbbs/net/directory_flow.py", "playable_registrations"): GateKind.DOOR,
     ("netbbs/net/node_map_flow.py", "may_open_node_map"): GateKind.NODE_MAP,
     ("netbbs/mail.py", "mail_access_refusal"): GateKind.MAIL,
+    ("netbbs/ftn/netmail.py", "netmail_refusal"): GateKind.NETMAIL,
     ("netbbs/auth/users.py", "set_user_level"): "who may raise whom (§5.6)",
     ("netbbs/chat/moderation.py", "_ensure_target_rank_allows_moderation"): "moderator rank, not access",
     ("netbbs/net/login_flow.py", "_apply_access_change"): "tells a live session its level changed",
