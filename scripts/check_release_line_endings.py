@@ -3,7 +3,10 @@
 Issue #1130: releases built from a Windows checkout with core.autocrlf
 shipped CRLF in nearly every file. `.gitattributes` now keeps checkouts LF;
 this checks the artifacts themselves before they are published. A member
-holding a NUL byte is binary and is not checked.
+holding a NUL byte is binary and is not checked, and neither are the
+metadata files setuptools writes itself (`PKG-INFO`, `METADATA`, the sdist's
+`setup.cfg` and `*.egg-info/`), which it writes with the platform's line
+ending whatever the checkout holds.
 
     python scripts/check_release_line_endings.py dist/netbbs-X.whl dist/netbbs-X.tar.gz
 """
@@ -29,9 +32,16 @@ def _members(path: Path) -> Iterator[tuple[str, bytes]]:
                 yield member.name, archive.extractfile(member).read()
 
 
+def _generated_by_setuptools(name: str) -> bool:
+    parts = name.split("/")
+    return (parts[-1] in {"PKG-INFO", "METADATA"} or ".egg-info" in name
+            or (len(parts) == 2 and parts[1] == "setup.cfg"))
+
+
 def crlf_members(path: Path) -> list[str]:
     """The names of the text members of `path` that contain a CRLF."""
-    return [name for name, data in _members(path) if b"\0" not in data and b"\r\n" in data]
+    return [name for name, data in _members(path)
+            if not _generated_by_setuptools(name) and b"\0" not in data and b"\r\n" in data]
 
 
 def main(argv: list[str]) -> int:

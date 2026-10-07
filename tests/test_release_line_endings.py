@@ -17,6 +17,7 @@ _FILES = {
     "netbbs/door.py": b"#!/usr/bin/env python3\r\nprint('hi')\r\n",
     "netbbs/ok.py": b"print('ok')\n",
     "netbbs/art.bin": b"\x00\r\n\x01",
+    "netbbs-1.0.dist-info/METADATA": b"Metadata-Version: 2.4\r\n",
 }
 
 
