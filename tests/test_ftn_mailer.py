@@ -209,3 +209,22 @@ def test_the_mailer_task_starts_checks_and_closes(db, setup):
 
     asyncio.run(run())
     assert get_network(db, network.id).enabled is False
+
+
+def test_an_unexpected_error_is_a_failed_call_in_the_status(db, setup, monkeypatch):
+    _, network, _ = setup
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    async def run():
+        lane = DatabaseLane(db.path)
+        mailer = FtnMailer(lane)
+        monkeypatch.setattr(mailer, "_session", broken)
+        try:
+            return await mailer.poll(network)
+        finally:
+            lane.close()
+
+    status = asyncio.run(run())
+    assert status.failures == 1 and "boom" in status.last_error

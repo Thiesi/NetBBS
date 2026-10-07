@@ -140,8 +140,21 @@ class FtnMailer:
         return pending > 0 and now - status.last_attempt >= MIN_CALL_GAP
 
     async def poll(self, network: FtnNetwork) -> PollStatus:
-        """Call the uplink once; returns the network's updated status."""
+        """Call the uplink once; returns the network's updated status. Any
+        failure, expected or not, is a failed call in the status the console
+        shows, never a stale success."""
         status = self.status.setdefault(network.id, PollStatus())
+        try:
+            return await self._poll(network, status)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            status.failures += 1
+            status.last_error = f"internal error: {exc}"
+            _logger.exception("FTN %s: call to the uplink failed unexpectedly", network.name)
+            return status
+
+    async def _poll(self, network: FtnNetwork, status: PollStatus) -> PollStatus:
         status.last_attempt = self._clock()
         messages = await self._lane.run(pending_outbound, network.id, limit=MAX_MESSAGES_PER_PACKET)
         outgoing: list[OutgoingFile] = []

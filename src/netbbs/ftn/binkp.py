@@ -223,7 +223,12 @@ class _Session:
         payload = argument.encode("latin-1", "replace") if isinstance(argument, str) else argument
         async with self._write_lock:
             self.writer.write(encode_frame(command, payload))
-            await self.writer.drain()
+            # Bounded like every read: a remote that stops reading would
+            # otherwise hold the session open forever on a full buffer.
+            try:
+                await asyncio.wait_for(self.writer.drain(), self.timeout)
+            except asyncio.TimeoutError as exc:
+                raise BinkpError(f"the remote took nothing for {self.timeout:.0f} seconds") from exc
 
     async def send_info(self, system: SystemInfo, *, offer_cram: bool) -> None:
         for line in (f"SYS {system.name}", f"ZYZ {system.sysop}", f"LOC {system.location or '-'}",
