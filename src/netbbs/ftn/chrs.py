@@ -86,6 +86,22 @@ def codec_for_kludge(value: str | None, *, codepage: str | None = None, default:
     return _IDENTIFIERS.get(identifier, default)
 
 
+# The identifier written for each codec: the registered name, not a legacy
+# alias (`IBMPC`, `+7_FIDO`, `ISO-8859-1`) that only reading accepts.
+_LEGACY = {"IBMPC", "+7_FIDO", "ISO-8859-1"}
+_KLUDGE_FOR_CODEC = {codec: name for name, codec in _IDENTIFIERS.items() if name not in _LEGACY}
+
+
+def kludge_for_codec(codec: str) -> str:
+    """The `^ACHRS` value naming `codec`, which `codec_for_kludge` reads
+    back as the same codec. Level 4 for UTF-8, 1 for ASCII, 2 otherwise."""
+    name = _KLUDGE_FOR_CODEC.get(codec)
+    if name is None:
+        raise ValueError(f"no CHRS identifier for codec {codec!r}")
+    level = {"UTF-8": 4, "ASCII": 1}.get(name, 2)
+    return f"{name} {level}"
+
+
 def decode(data: bytes, codec: str) -> str:
     """Decode text bytes; anything the codec can't read becomes U+FFFD."""
     return data.decode(codec, errors="replace")
