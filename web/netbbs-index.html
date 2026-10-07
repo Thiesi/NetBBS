@@ -222,6 +222,7 @@
   <div class="nav-row">
     <a class="brand" href="#top"><span class="dot"></span>NetBBS</a>
     <nav class="nav-links">
+      <a href="#fidonet" class="hide-sm">FidoNet</a>
       <a href="#new" class="hide-sm">Games</a>
       <a href="#link" class="hide-sm">NetBBS Link</a>
       <a href="#screens" class="hide-sm">Screens</a>
@@ -246,7 +247,8 @@
             live chat, personal mail, file sharing, and door games on a server
             you run and moderate. Callers connect through <b>a browser, SSH,
             or Telnet</b>. Run independently, join other nodes through
-            <b>NetBBS Link</b>, or connect chat channels to the MRC network.</p>
+            <b>NetBBS Link</b>, connect chat channels to the MRC network, or
+            carry FidoNet echomail and netmail.</p>
           <div class="cta-row">
             <a class="btn btn-primary" href="#quickstart">Get started →</a>
             <a class="btn btn-ghost" href="overview.html" id="overview-link">Explore the features</a>
@@ -333,6 +335,49 @@
   </section>
 
   <!-- ============================= NEW IN v6 ============================= -->
+  <section class="section" id="fidonet">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">New in v7.17 &middot; FidoNet</span>
+        <h2>NetBBS can bark now.</h2>
+        <p>FidoNet's logo is a dog, and its networks have carried
+          conversations between BBSes since 1984. NetBBS now joins FidoNet,
+          fsxNet and other FTN networks as an ordinary node: echomail arrives
+          on your message boards, netmail arrives in Mail, and NetBBS speaks
+          BinkP itself, so there is no separate mailer or tosser to install.</p>
+      </div>
+      <div class="ways pair">
+        <div class="way">
+          <h3>For the SysOp</h3>
+          <p>Everything is set up in the SysOp console, and nothing runs
+            until you create and enable a network.</p>
+          <ul class="link-list">
+            <li><b>A network in one editor.</b> A new network starts filled in with fsxNet's hub; add the address and passwords your coordinator gives you.</li>
+            <li><b>An echo on a message board.</b> Put an echo tag on a message board and ask the hub for more with AreaFix. A message board is local, NetBBS Link or FTN, never two at once.</li>
+            <li><b>Polls and answers.</b> NetBBS calls your hub on a schedule, and sooner when mail is waiting. It can also answer calls on the BinkP port, 24554.</li>
+            <li><b>Direct netmail.</b> Import a nodelist and netmail goes straight to any node that lists a BinkP host. Everything else goes through your hub.</li>
+          </ul>
+        </div>
+        <div class="way">
+          <h3>For callers</h3>
+          <p>An echo is read like any other message board, and netmail is
+            written like any other letter.</p>
+          <ul class="link-list">
+            <li><b>Names with addresses.</b> Authors from the network show as <code>Joe Bloggs (21:3/110)</code>, and Reply works as usual.</li>
+            <li><b>Netmail from Mail.</b> Write <code>Name (zone:net/node)</code> on the To line. The compose screen says that netmail is not private.</li>
+            <li><b>The SysOp decides who sends.</b> Netmail leaves under the node's address, so only the SysOp can send it until the SysOp lowers its level.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="qs-note">So far NetBBS has exchanged FTN mail only with itself
+        and with test fixtures. Its first session with a live hub is still to
+        come, so treat your first connection to a real network as a test.
+        File echoes (TIC), file requests, hub mode and QWK are not supported.
+        The <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-SysOp-Handbook.md#ftn-networks-fidonet-fsxnet" target="_blank" rel="noopener">SysOp handbook</a>
+        has the setup steps.</p>
+    </div>
+  </section>
+
   <section class="section" id="new">
     <div class="wrap">
       <div class="section-head">
@@ -681,6 +726,11 @@
           <p>Bridge chat channels onto the MRC network, or let callers open any room on it as a chat channel.</p>
         </div>
         <div class="feature">
+          <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><ellipse cx="8" cy="11" rx="3.2" ry="2.6" stroke="currentColor" stroke-width="1.3"/><circle cx="3.4" cy="6.6" r="1.3" stroke="currentColor" stroke-width="1.2"/><circle cx="6.2" cy="3.6" r="1.3" stroke="currentColor" stroke-width="1.2"/><circle cx="9.8" cy="3.6" r="1.3" stroke="currentColor" stroke-width="1.2"/><circle cx="12.6" cy="6.6" r="1.3" stroke="currentColor" stroke-width="1.2"/></svg></div>
+          <h3>FidoNet &amp; fsxNet</h3>
+          <p>Echomail on your message boards and netmail in Mail, over BinkP that NetBBS speaks itself, with a nodelist for direct netmail.</p>
+        </div>
+        <div class="feature">
           <div class="icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="3" width="13" height="10" rx="1.4" stroke="currentColor" stroke-width="1.3"/><path d="M2 4L8 8.5L14 4" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
           <h3>Personal mail</h3>
           <p>Mail with drafts, replies, forwarding, several recipients, read receipts and blocking — local, or across NetBBS Link with delivery you can see.</p>
@@ -726,7 +776,7 @@
         <span class="eyebrow">Get started</span>
         <h2>Start with a local look around.</h2>
         <p>This is a trial on your own machine: only you can connect to it. A node that callers can reach is a permanent installation with its own service account, which the <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-SysOp-Handbook.md#installing-netbbs" target="_blank" rel="noopener">SysOp handbook</a> walks through. The trial database can simply be deleted afterwards.</p>
-        <p>You need Python 3.11 or newer: <code>python3 --version</code> tells you which you have. On Debian and Ubuntu, also run <code>sudo apt install python3-venv</code> first. Download the <code>.whl</code> file (the &ldquo;wheel&rdquo;, a ready-to-install package) from <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">GitHub Releases</a> into a fresh directory. In the commands below, replace VERSION with the version number only, for example <code>7.16.0</code>.</p>
+        <p>You need Python 3.11 or newer: <code>python3 --version</code> tells you which you have. On Debian and Ubuntu, also run <code>sudo apt install python3-venv</code> first. Download the <code>.whl</code> file (the &ldquo;wheel&rdquo;, a ready-to-install package) from <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">GitHub Releases</a> into a fresh directory. In the commands below, replace VERSION with the version number only, for example <code>7.17.0</code>.</p>
       </div>
       <div class="quickstart-box">
         <div class="qs-bar">

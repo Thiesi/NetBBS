@@ -202,6 +202,10 @@
           <div class="t-head"><h3>Inter-BBS chat — the MRC bridge</h3><span class="badge complete">Complete</span></div>
           <p>A bridge onto MRC, the public inter-BBS chat network that Mystic, Synchronet and ENiGMA&frac12; boards already use: chat channels a SysOp maps to rooms, open rooms callers can enter on demand as chat channels of their own, away/topic/message-of-the-day presence carried both ways, and opt-in private messages. Shipped across v5.7.0 through v5.10.0; the scoping decision behind it is closed.</p>
         </div>
+        <div class="t-item pending">
+          <div class="t-head"><h3>FidoNet-technology networks</h3><span class="badge pending">Live test pending</span></div>
+          <p>New in v7.17.0: NetBBS joins FidoNet, fsxNet and other FTN networks as an ordinary node, speaking BinkP itself. It polls its hub and can answer calls, carries echoes on message boards, and delivers netmail in Mail, sending it direct to nodes from an imported nodelist. Off until a SysOp enables a network. So far it has exchanged mail only with itself and with test fixtures; the first session with a live hub is still to come. File echoes, file requests, hub mode and QWK are not supported.</p>
+        </div>
         <div class="t-item active">
           <div class="t-head"><h3>Doors &amp; games</h3><span class="badge active">Available</span></div>
           <p>Retro Trivia, Voidrunner, and War Dialer are bundled. Add trusted native programs, selected DOS games through DOSBox-X, doors built for another operating system in a virtual machine per caller, or remote services such as DoorParty and BBSLink. Companion services and an optional outbound hook, which lets a door post to message boards and speak in chat channels, support external door developers. Native doors run as the service account; resource limits do not isolate them from its files. Legacy compatibility is documented for specific game versions and host configurations, and virtual-machine doors have so far run one game end to end.</p>
@@ -224,6 +228,7 @@
           <ul>
             <li><b>Message boards &amp; files</b> — a post list and a reader, read tracking per post, full-text search, real Zmodem and browser transfers.</li>
             <li><b>Mail</b> — personal mail, local or across NetBBS Link: drafts, replies, forwarding, several recipients, read receipts, blocking, search, and the delivery state of every letter you sent to another node.</li>
+            <li><b>FidoNet &amp; fsxNet</b> — echomail on message boards and netmail in Mail over BinkP, polled and answered, with a nodelist for direct netmail and the SysOp choosing who may send it.</li>
             <li><b>Communities</b> — topic-first grouping of message boards, chat channels, and file areas.</li>
             <li><b>Directory</b> — vCard/finger-style caller lookup and preferences.</li>
             <li><b>Classic terminals</b> — a session speaks UTF-8, CP437 or plain ASCII, detected when the caller connects and changeable in their profile, so SyncTERM draws its boxes right.</li>
