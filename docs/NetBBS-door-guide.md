@@ -681,6 +681,11 @@ Choose the matching native template:
 
 - `native-stdio.json`: redirected input/output; executable plus drop-file argv.
 - `native-pty.json`: programs requiring a controlling terminal and `TERM=ansi`.
+  The door's terminal starts with raw input (no line editing, no echo, no
+  CR-to-LF translation: Enter arrives as CR) and with output processing on, so
+  a bare LF the program writes reaches the caller as CR LF. Curses and other
+  full-screen programs set the modes they want themselves; a line-oriented
+  program that wants cooked input sets it with `stty` in its wrapper.
 - `native-door32.json`: POSIX socket-mode DOOR32; lowercase `door32.sys`, with
   a private inherited descriptor, not the caller's actual socket. The program
   must support POSIX descriptors, not Windows Winsock handles.

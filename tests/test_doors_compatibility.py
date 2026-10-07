@@ -115,6 +115,30 @@ def test_probe_persists_verified_output_result(valid, db, lane, player, tmp_path
     assert f"reason={result.reason}" in entries[0].detail
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX PTY")
+def test_pty_door_starts_with_raw_input_but_newline_translation():
+    """NetBSD curses ends a line with a bare LF and expects the CR from ONLCR (#1145)."""
+    import termios
+    from netbbs.doors.endpoints import pty_endpoint
+
+    endpoint, slave = pty_endpoint(80, 24)
+    try:
+        iflag, oflag, _cflag, lflag = termios.tcgetattr(slave)[:4]
+        assert oflag & termios.OPOST and oflag & termios.ONLCR
+        assert not lflag & (termios.ICANON | termios.ECHO)
+        assert not iflag & termios.ICRNL
+        os.write(slave, b"one\ntwo")
+        seen = b""
+        while b"two" not in seen:
+            chunk = asyncio.run(asyncio.wait_for(endpoint.read(64), 2))
+            assert chunk, seen
+            seen += chunk
+        assert seen == b"one\r\ntwo"
+    finally:
+        os.close(slave)
+        asyncio.run(endpoint.close())
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX half-closed socket")
 @pytest.mark.parametrize("end", ["drain", "cancel"])
 def test_remote_input_closure_drains_pending_output(end):
