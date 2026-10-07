@@ -74,6 +74,13 @@ carried NetBBS Link content; it is not a search of the entire network.
 
 Open a message board, select a post, and use the displayed actions to read,
 reply, or start a topic. Follow a resource to make it easier to revisit.
+
+Some boards may carry an **echo** from an FTN network such as FidoNet or
+fsxNet. People on many other BBSes read and write in an echo, and what you post
+there goes out to them too. Their posts are signed with a name and an FTN
+address, as in `Joe Bloggs (21:3/110)`. **Reply** works as on any board. An
+edit or a deletion stays on this BBS, because other BBSes keep the copy they
+already received.
 On a moderated board, your post may wait for approval before others see it.
 You are told at the main menu when it is approved or rejected; a rejection
 also arrives as mail from **System**, with the reason and what you wrote.
@@ -154,6 +161,18 @@ Each person gets their own copy, and every copy shows everyone it went to --
 there is no blind copy. If one of them can't take it when you press **Send**
 -- their mailbox is full, say -- nothing is sent to anyone: the review screen
 names them, and **[T]o** lets you take them off and send to the rest.
+
+If this BBS is on an FTN network such as FidoNet or fsxNet, you may be able to
+send **netmail** to someone on another BBS of that network. Write their name
+and FTN address on the To line, as in `Joe Bloggs (21:3/110)`. The screen
+names the network the letter goes out on.
+
+- **Not private:** every system netmail passes through can read it.
+- **One person at a time:** a netmail can't go to a list of names.
+- **Who may send it:** the SysOp decides who may send netmail. Until they
+  choose otherwise, only the SysOp can.
+- **Replies:** **Reply** to a netmail in your Inbox, or to one in Sent, writes
+  netmail back.
 
 A letter can point at files that are already in a file area here, up to
 five. On the review screen press **[A]ttach file**, choose the file area and

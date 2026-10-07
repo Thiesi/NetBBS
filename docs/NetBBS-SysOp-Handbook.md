@@ -19,6 +19,7 @@ basic familiarity with your server's command line, but no Python programming.
 - [Door games](#door-games)
 - [NetBBS Link](#netbbs-link)
 - [MRC chat bridge](#mrc-chat-bridge)
+- [FTN networks (FidoNet, fsxNet)](#ftn-networks-fidonet-fsxnet)
 - [Daily operation](#daily-operation)
 - [State, backup, and recovery](#state-backup-and-recovery)
 - [Upgrading and removing NetBBS](#upgrading-and-removing-netbbs)
@@ -1397,6 +1398,74 @@ MRC occupancy; the hub roster does not supply a remote away count. A hub
 nickname or room correction that cannot identify one of several local callers
 produces a notice and diagnostic instead of being applied to an arbitrary
 account.
+
+## FTN networks (FidoNet, fsxNet)
+
+NetBBS can join FidoNet or an FTN othernet, such as fsxNet, as an ordinary FTN
+node. Echomail arrives on boards and netmail in Mail. It is a gateway, not
+NetBBS Link. An FTN board is never also a Linked board, and nothing that
+arrives over FTN is trust-evaluated.
+
+1. Apply to the network for an address. fsxNet, the usual first network for a
+   new BBS, takes applications by email on the form in its infopack. It gives
+   you an address such as `21:1/199`, a hub, and one password for both BinkP
+   and AreaFix.
+2. Under **Settings → Echomail & netmail (FTN)**, press [C]reate.
+   - A new network starts as fsxNet's main hub. Enter **Our address** and the
+     passwords, then **Enable** it.
+   - **Answer calls** lets the hub, and other nodes, call this BBS on the
+     **Answer port** (24554 by default), which must be reachable from the
+     internet.
+   - Without it, the BBS only calls out, once every **Poll** interval.
+3. On each board that should carry an echo, use [E]cho on the board's screen
+   and enter the echo's tag, such as `FSX_GEN`. Each echo goes to one board,
+   and a Linked board can't carry one.
+4. Ask the hub to send those echoes. Under **Node → FTN mail**, press
+   [A]reaFix and enter `+FSX_GEN`, or `%LIST` to see what the hub carries. The
+   hub's answer arrives in your Mail.
+
+An echomail message from the network is posted under its author's FTN name
+and address, and goes through the board's own moderation. What callers post on
+an FTN board goes out with the next call. Edits and deletions stay on this BBS,
+because FTN has no way to carry them.
+
+### Netmail
+
+Netmail is personal mail to an address written as `Name (zone:net/node)`.
+
+- **Who may send it:** each network has a **Netmail level**, and only accounts
+  at that level may send netmail. It starts at 255, SysOp only, because netmail
+  leaves under this BBS's address.
+- **Who receives it:** every account. Netmail for a name with no account here
+  comes to you.
+- **Direct delivery:** import the network's nodelist, either from **Node → FTN
+  mail** with [N]odelist import, or with
+  `python -m netbbs.admin ftn-import-nodelist fsxNet FSXNET.280`. Netmail to a
+  node whose nodelist entry gives a BinkP host then goes to it directly.
+- **Via the hub:** the rest goes through the hub, and so does anything a direct
+  call fails to deliver after three tries.
+
+### Held packets and status
+
+Some packets are held instead of tossed:
+
+- a packet from a caller that didn't prove a password;
+- a packet addressed to another address;
+- a message that couldn't be stored, for example because a mailbox was full.
+
+Look at them under **Node → FTN mail** with [H]eld packets, then [R]elease
+(toss) or [D]elete each one.
+
+**Node → FTN mail** also shows each network's last call, errors, waiting
+messages and recently answered calls. [P]oll now calls the hub at once.
+
+### Not supported
+
+- file echoes (TIC) and file requests;
+- acting as a hub for other nodes;
+- ARC and ARJ bundles. Ask the hub for ZIP bundles or uncompressed packets.
+
+Check a network's rules before gating its echoes anywhere else.
 
 ## Daily operation
 

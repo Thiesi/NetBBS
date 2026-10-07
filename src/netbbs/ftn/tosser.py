@@ -118,6 +118,22 @@ def toss_packet(
     return result
 
 
+def release_held(db: Database, network: FtnNetwork, held_id: int) -> TossResult:
+    """Toss a held packet as if it came from a secure session -- the SysOp
+    looked at it and vouches for it -- and drop it from the held store.
+    What still can't be stored is held again, as a new entry with the
+    reason it gives now."""
+    from netbbs.ftn.queue import delete_held, held_content, list_held
+
+    held = next((h for h in list_held(db) if h.id == held_id), None)
+    content = held_content(db, held_id)
+    if held is None or content is None:
+        raise FtnFormatError("that held packet is gone")
+    delete_held(db, held_id)
+    return toss_packet(db, network, content, secure=True, remote_address=held.remote_address,
+                       file_name=held.file_name)
+
+
 class _Unstorable(Exception):
     """This message can't be stored here; it is held with this reason."""
 

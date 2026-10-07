@@ -350,6 +350,24 @@ async def _prompt_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
         return None
 
 
+def run_ftn_import_nodelist(db: Database, network_name: str, path: Path) -> str:
+    """`ftn-import-nodelist`: the outcome line, or `ValueError`/`OSError`
+    saying why nothing was imported (design doc §6.8)."""
+    from netbbs.ftn.networks import list_networks
+    from netbbs.ftn.nodelist import MAX_NODELIST_BYTES, import_nodelist
+    from netbbs.moderation.log import record_action
+
+    network = next((n for n in list_networks(db) if n.name.casefold() == network_name.casefold()), None)
+    if network is None:
+        names = ", ".join(n.name for n in list_networks(db)) or "none"
+        raise ValueError(f"no FTN network called {network_name!r} (networks: {names})")
+    if path.stat().st_size > MAX_NODELIST_BYTES:
+        raise ValueError(f"{path.name} is over {MAX_NODELIST_BYTES // (1024 * 1024)} MiB")
+    count = import_nodelist(db, network.id, path.read_bytes().decode("cp437", errors="replace"))
+    record_action(db, actor=None, action="import_ftn_nodelist", detail=f"{network.name}: {count} nodes from {path.name}")
+    return f"Imported {count} nodes for {network.name} from {path.name}."
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The tool's argument parser, separate from `main()` so its shape
     can be tested without a terminal. With no subcommand the tool opens
@@ -429,6 +447,19 @@ def build_parser() -> argparse.ArgumentParser:
     levels.add_argument("--to", help="the level to show --user's change to")
     levels.add_argument("--json", action="store_true", help="print JSON instead of text")
     _add_common(levels, defaults=False)
+    nodelist = subcommands.add_parser(
+        "ftn-import-nodelist",
+        help="import an FTN network's nodelist, for direct netmail",
+        description=(
+            "Replace an FTN network's stored nodelist with the given (unpacked) nodelist file. "
+            "Netmail to a node the list says answers BinkP then goes to it directly; the rest goes "
+            "via the uplink. The console does the same from Node, FTN mail, [N]odelist import. "
+            "Safe while the node runs."
+        ),
+    )
+    nodelist.add_argument("network", help="the network's name, as in Settings, FTN networks")
+    nodelist.add_argument("path", type=Path, help="the nodelist file, e.g. FSXNET.123")
+    _add_common(nodelist, defaults=False)
     return parser
 
 
@@ -463,6 +494,15 @@ def main(argv: list[str] | None = None) -> None:
                 stream=sys.stderr,
             )
         ) from exc
+
+    if args.command == "ftn-import-nodelist":
+        try:
+            print_wrapped(run_ftn_import_nodelist(db, args.network, args.path))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(terminal_wrapped(f"Not imported: {exc}", stream=sys.stderr)) from exc
+        finally:
+            db.close()
+        return
 
     if args.command in ("last", "levels"):
         # Read-only and attributed to nobody: no SysOp to pick, no raw terminal.

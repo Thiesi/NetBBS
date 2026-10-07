@@ -27,6 +27,7 @@ import asyncio
 import logging
 from enum import Enum, auto
 from pathlib import Path
+from typing import Any
 
 from netbbs.auth.users import (
     MIN_REGISTRATION_PASSWORD_LENGTH,
@@ -231,6 +232,9 @@ async def handle_session(
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
     mrc_bridge: MrcBridge | None = None,
+    # Design doc §6.8: the node's FTN mailer and listener, for the console.
+    ftn_mailer: Any = None,
+    ftn_listener: Any = None,
     backup_identity_dir: Path | None = None,
     # Issue #475: this node's `netbbs.net.file_transfer.
     # TransferGrants`, or `None` on a node with no web listener --
@@ -339,6 +343,8 @@ async def handle_session(
         drain_scheduler=drain_scheduler if drain_scheduler is not None else SequenceScheduler(),
         shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
         mrc_bridge=mrc_bridge,
+        ftn_mailer=ftn_mailer,
+        ftn_listener=ftn_listener,
         chat_hub=hub,
         backup_identity_dir=backup_identity_dir,
         transfers=transfers,
@@ -1047,6 +1053,9 @@ async def handle_ssh_session(
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
     mrc_bridge: MrcBridge | None = None,
+    # Design doc §6.8: the node's FTN mailer and listener, for the console.
+    ftn_mailer: Any = None,
+    ftn_listener: Any = None,
     backup_identity_dir: Path | None = None,
     # Issue #475: this node's `netbbs.net.file_transfer.
     # TransferGrants`, or `None` on a node with no web listener --
@@ -1114,6 +1123,8 @@ async def handle_ssh_session(
         drain_scheduler=drain_scheduler if drain_scheduler is not None else SequenceScheduler(),
         shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
         mrc_bridge=mrc_bridge,
+        ftn_mailer=ftn_mailer,
+        ftn_listener=ftn_listener,
         chat_hub=hub,
         backup_identity_dir=backup_identity_dir,
         transfers=transfers,

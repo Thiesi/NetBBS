@@ -348,7 +348,9 @@ from netbbs.link.boards import (
     rebuild_carried_post_materialization,
     set_board_posting,
 )
+from netbbs.ftn.networks import list_networks
 from netbbs.ftn.scanner import export_post_if_ftn
+from netbbs.net.ftn_console import board_echo_action, board_echo_rows, ftn_networks_screen, ftn_status_screen
 from netbbs.link.channels import (
     LinkChannelsError, carried_channel_count, is_channel_linked, link_channel, linked_channel_ids,
 )
@@ -3608,6 +3610,11 @@ async def _system_menu(
             await _mrc_settings_screen(session, lane, actor, node_controls=node_controls)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "e":
+            await session.write_line("")
+            await ftn_networks_screen(session, lane, actor, node_controls=node_controls)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "p":
             await session.write_line("")
             await _trust_menu(session, lane, actor, link_context=link_context)
@@ -3789,6 +3796,7 @@ async def _draw_system_menu(
             ),
         ),
         MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge channels to the MRC network"),
+        MenuEntry(label=menu_key("E", "chomail & netmail (FTN)"), brief="FidoNet-style networks"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
     ]
     option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
@@ -13465,6 +13473,10 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await session.write_line("")
             await _lock_and_drain_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "f":
+            await session.write_line("")
+            await ftn_status_screen(session, lane, actor, node_controls)
+            await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _mrc_status_screen(session, lane, actor, node_controls)
@@ -13534,6 +13546,7 @@ async def _draw_node_menu(
                 MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
                 MenuEntry(label=menu_key("S", "hutdown"), brief="Schedule a node shutdown"),
                 MenuEntry(label=menu_key("C", "hat bridge (MRC)"), brief="Inter-BBS chat link status"),
+                MenuEntry(label=menu_key("F", "TN mail"), brief="Calls, AreaFix, held packets"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Operations"),
             ],
             description_level, session=session, used_rows=panel_rows + 3,
@@ -19624,6 +19637,15 @@ async def _board_screen(
                 [Section("NetBBS Link", rows)], width=session.terminal_width,
                 unicode_style=await lane.run(unicode_style_enabled, actor),
             )
+        # Design doc §6.8: a board is local, Linked or FTN, never two, so a
+        # Linked board shows no FTN section and offers no [E]cho.
+        ftn_networks = [] if linked else await lane.run(list_networks)
+        if ftn_networks:
+            ftn_rows = await lane.run(board_echo_rows, board)
+            after = (after + "\r\n" if after else "") + _sections_text(
+                [Section("FTN", ftn_rows)], width=session.terminal_width,
+                unicode_style=await lane.run(unicode_style_enabled, actor),
+            )
         actions = []
         if place > 0:
             actions.append(DetailAction("u", menu_key("U", "p"), _act(lambda b: _move(b, -1)), brief="Earlier in the callers' list"))
@@ -19646,6 +19668,10 @@ async def _board_screen(
             actions.append(DetailAction("w", menu_key("W", "ho posts"), _act(_who_posts), brief="Who may post, network-wide"))
         if has_incoming_offer:
             actions.append(DetailAction("a", menu_key("A", "ccept transfer"), _act(_accept), brief="Accept incoming origin transfer"))
+        if ftn_networks:
+            actions.append(DetailAction(
+                "e", menu_key("E", "cho (FTN)"), _act(lambda b: board_echo_action(session, lane, actor, b)),
+                brief="Carry an FTN echo area here"))
         return DetailState(
             draft={**_board_draft(board), **labels},
             title=sanitize_text(board.name),
