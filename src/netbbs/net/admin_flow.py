@@ -1221,6 +1221,22 @@ def _announce_line(session: Session, line: str) -> None:
     _notices.announce_styled(session, line)
 
 
+def _confirmation_refused(session: Session, typed: str, expected: str, *, kept: str = "Nothing was deleted.") -> None:
+    """The outcome of a type-the-name confirmation that did not match (issue
+    #1119). An empty answer is a plain cancel, as the prompt offers. Anything
+    else was most likely an attempt to confirm that went wrong, so it is a
+    warning that says what was typed and that nothing happened -- a muted
+    "Cancelled." under a screen that just redrew read as if nothing had."""
+    typed = typed.strip()
+    if not typed:
+        _announce_line(session, "Cancelled.")
+        return
+    _notices.announce_styled(
+        session,
+        status_result(f"Cancelled: {sanitize_text(typed)!r} is not {sanitize_text(expected)!r}. {kept}", "warning"),
+    )
+
+
 def _can_verify_label(target: User) -> str:
     """The account's "Can verify identity" row. A SysOp verifies by level
     (issue #1103), so the row says so rather than a bare "no" that reads as
@@ -8301,7 +8317,7 @@ async def _delete_user_confirm(
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != target.username:
-        _announce_line(session, "Cancelled.")
+        _confirmation_refused(session, confirmation, target.username)
         return False
     try:
         await lane.run(delete_user, target, deleted_by=actor)
@@ -11739,8 +11755,9 @@ async def _carry_decisions_screen(
                 )
             )
             await write_prompt(session, f"Type the name {selected.name!r} to confirm, or anything else to cancel: ")
-            if (await session.read_line()).strip() != selected.name:
-                _announce_line(session, "Cancelled.")
+            typed = (await session.read_line()).strip()
+            if typed != selected.name:
+                _confirmation_refused(session, typed, selected.name, kept="Nothing was purged.")
                 continue
             try:
                 await lane.run(purge_excluded, selected.kind, selected.resource_id, actor=actor)
@@ -19070,7 +19087,7 @@ async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: 
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != community.name:
-        _announce_line(session, "Cancelled.")
+        _confirmation_refused(session, confirmation, community.name)
         return False
     await lane.run(delete_community, community, deleted_by=actor)
     _announce_line(session, f"{community.name!r} deleted.")
@@ -20346,7 +20363,7 @@ async def _delete_board_screen(
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != board.name:
-        _announce_line(session, "Cancelled.")
+        _confirmation_refused(session, confirmation, board.name)
         return False
     # Issues #669/#683: a Linked board keeps its genesis and is recorded as
     # excluded, so it stays declared as not carried and does not come back.
@@ -20379,7 +20396,7 @@ async def _hide_carried_screen(
     await write_prompt(session, f"Type the {label} name {name!r} to confirm, or anything else to cancel: ")
     confirmation = (await session.read_line()).strip()
     if confirmation != name:
-        _announce_line(session, "Cancelled.")
+        _confirmation_refused(session, confirmation, name)
         return False
     return await _remove_resource(
         session, lane, actor, kind, resource_id, name, own_fingerprint=own_fingerprint, delete=None,
@@ -21464,7 +21481,7 @@ async def _delete_area_screen(
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != area.name:
-        _announce_line(session, "Cancelled.")
+        _confirmation_refused(session, confirmation, area.name)
         return False
     # Issues #669/#683: a Linked file area keeps its genesis and is recorded as
     # excluded, so it stays declared as not carried and does not come back.
@@ -22956,7 +22973,7 @@ async def _war_dialer_competition_flow(
     # Exact, or with stray surrounding spaces -- but a name that really has
     # them can still be typed exactly.
     if entered != world.name and entered.strip() != world.name:
-        _announce_line(session, "Cancelled. Nothing was changed.")
+        _confirmation_refused(session, entered, world.name, kept="Nothing was changed.")
         return
     latest = await lane.run(get_door, door.id)
     if latest is None or (await asyncio.to_thread(_war_dialer_world_of, db_path, latest))[0] != world:
@@ -23140,7 +23157,7 @@ async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User,
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != door.name:
-        _announce_line(session, "Cancelled.")
+        _confirmation_refused(session, confirmation, door.name)
         return False
     await lane.run(delete_door, door, deleted_by=actor)
     _announce_line(session, f"{door.name!r} deleted.")
@@ -24042,7 +24059,7 @@ async def _delete_channel_screen(
     )
     confirmation = (await session.read_line()).strip()
     if confirmation != channel.name:
-        _announce_line(session, "Cancelled.")
+        _confirmation_refused(session, confirmation, channel.name)
         return False
     # Issues #669/#683: a Linked channel keeps its genesis and is recorded as
     # excluded, so it stays declared as not carried and does not come back.
@@ -24437,7 +24454,7 @@ async def _category_screen(
         )
         confirmation = (await session.read_line()).strip()
         if confirmation != target.name:
-            _announce_line(session, "Cancelled.")
+            _confirmation_refused(session, confirmation, target.name)
             return False
         await lane.run(delete, target, deleted_by=actor)
         _announce_line(session, f"{target.name!r} deleted.")

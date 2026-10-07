@@ -967,6 +967,11 @@ async def _operator_scenario(tmp_path, inputs, *, token="s3cret", contact=None, 
 
         actor = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
         await administer_service(session, lane, actor)
+        # What the Managed DNS screen draws next: the outcomes the screen
+        # announced on its way out (issue #1119).
+        from netbbs.net.notices import take_notices
+
+        session.written.append("\r\n".join(take_notices(session)))
         lane.close()
         statuses = {
             name: (row.status if row else None)
@@ -1009,8 +1014,11 @@ def test_operator_revocation_is_cancelled_by_a_wrong_name_or_an_empty_reason(tmp
         tmp_path,
         ["0", "2", "r", "a reason", "not-beta", "0", "2", "r", "", "b"],
     ))
-    text = _visible("".join(session.written))
-    assert text.count("Cancelled.") == 2
+    text = " ".join(_visible("".join(session.written)).split())
+    # A wrong name is told back as a warning (issue #1119); an empty reason
+    # is a plain cancel. Both carried into the table's next draw.
+    assert "Cancelled: 'not-beta' is not 'beta'. Nothing was revoked." in text
+    assert text.count("Cancelled.") == 1
     assert statuses == {"alpha": "pending", "beta": "pending"}
 
 

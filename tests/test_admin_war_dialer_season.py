@@ -139,7 +139,11 @@ def test_cancelling_changes_nothing_and_takes_no_backup(db, lane, sysop, identit
     session = FakeSession(_war_dialer_world_keys("n", *answers))
     _live(session, lane, sysop, identity_dir)
 
-    assert "Cancelled. Nothing was changed." in _normalized_visible(_written_text(session))
+    text = _normalized_visible(_written_text(session))
+    # A blank reason is a plain cancel; a filename that doesn't match says
+    # what was typed (issue #1119). Neither changes anything.
+    assert "Cancelled. Nothing was changed." in text or "Cancelled: 'wrong.db' is not" in text
+    assert "Nothing was changed." in text
     assert world_status(db.path, path)["stored_season"] == "1"
     assert _backups(db) == []
 

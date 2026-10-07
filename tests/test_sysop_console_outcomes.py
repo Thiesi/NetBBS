@@ -82,7 +82,8 @@ def test_a_cancelled_delete_says_so_on_the_detail_screen_it_returns_to(db, lane,
     rows = _screen(lane, sysop, ["c", "m", "l", "0", "1", "r", "not the name"])
     assert [board.name for board in list_boards(db)] == ["General"]
     assert rows[0].endswith("General")  # still the board's own screen
-    assert "Cancelled." in _above_the_prompt(rows)
+    # A name that doesn't match is told back as a warning (issue #1119).
+    assert "! Cancelled: 'not the name' is not 'General'. Nothing was deleted." in _above_the_prompt(rows)
 
 
 def test_a_changed_user_level_is_confirmed_on_the_redrawn_user_screen(db, lane, sysop):
