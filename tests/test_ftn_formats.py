@@ -18,7 +18,9 @@ import pytest
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, find_address, parse_address
 from netbbs.ftn.bundle import MAX_UNPACKED_BYTES, archive_kind, build_bundle, bundle_name, extract_packets, packet_name
-from netbbs.ftn.chrs import CP437, UTF8, choose_outbound_charset, codec_for_kludge, truncate_encoded
+from netbbs.ftn.chrs import _IDENTIFIERS, CP437, UTF8, choose_outbound_charset, codec_for_kludge, kludge_for_codec, truncate_encoded
+
+_IDENTIFIER_CODECS = list(_IDENTIFIERS.values())
 from netbbs.ftn.message import (
     FtnMessage,
     build_origin,
@@ -437,3 +439,15 @@ def test_a_caller_s_text_cannot_inject_kludges_or_lines():
     assert decoded.msgid is None
     assert decoded.body == "hiMSGID: 1:2/3 deadbeefSEEN-BY: 9/9more"
     assert decoded.origin == "XY (1:2/3)"
+
+
+@pytest.mark.parametrize("codec", sorted(set(_IDENTIFIER_CODECS)))
+def test_every_readable_charset_is_written_back_under_a_name_that_reads_as_it(codec):
+    assert codec_for_kludge(kludge_for_codec(codec)) == codec
+    message = FtnMessage(to_name="All", from_name="A", subject="s", body="plain", charset=codec)
+    assert decode_message(encode_message(message)).charset == codec
+
+
+def test_via_keeps_its_no_colon_form_in_any_case():
+    message = FtnMessage(to_name="A", from_name="B", subject="s", body="b", trailing_kludges=[("VIA", "1:2/3")])
+    assert b"\x01VIA 1:2/3\r" in encode_message(message).text
