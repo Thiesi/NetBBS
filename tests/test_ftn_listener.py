@@ -199,3 +199,65 @@ def test_a_port_already_taken_is_reported_not_raised(db, setup):
         assert "cannot listen" in error
     finally:
         blocker.close()
+
+
+def test_a_second_call_from_the_same_address_is_told_the_node_is_busy(db, setup):
+    async def test(listener):
+        host, port = listener.listening_on
+        first_reader, first_writer = await asyncio.open_connection(host, port)
+        try:
+            await read_frame(first_reader, 5)  # the first call is being answered
+            reader, writer = await asyncio.open_connection(host, port)
+            try:
+                return await read_frame(reader, 5)
+            finally:
+                writer.close()
+        finally:
+            first_writer.close()
+
+    command, argument = asyncio.run(_with_listener(db, test))
+    assert command == M_BSY
+
+
+def test_a_strangers_bundle_is_held_as_it_came_not_unpacked(db, setup):
+    from netbbs.ftn.bundle import build_bundle
+
+    bundle = build_bundle([(f"{n:08x}.pkt", _echomail(f"one of many {n}", STRANGER)) for n in range(5)])
+
+    async def test(listener):
+        await _call(listener, address=STRANGER, password="", files=[OutgoingFile("0000ffff.su0", bundle)])
+        await _settled(listener)
+
+    asyncio.run(_with_listener(db, test))
+    (held,) = queue.list_held(db)
+    assert (held.file_name, held.reason) == ("0000ffff.su0", "unsecure session")
+    assert queue.held_content(db, held.id) == bundle
+
+
+def test_closing_with_a_call_in_progress_does_not_wait_for_it(db, setup):
+    async def test(listener):
+        host, port = listener.listening_on
+        reader, writer = await asyncio.open_connection(host, port)
+        await read_frame(reader, 5)  # answered, then silent: an idle call
+        started = asyncio.get_running_loop().time()
+        await listener.close()
+        writer.close()
+        return asyncio.get_running_loop().time() - started
+
+    assert asyncio.run(_with_listener(db, test)) < 5
+
+
+def test_a_failure_after_the_handshake_is_recorded(db, setup, monkeypatch):
+    async def broken(*args, **kwargs):
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(listener_module, "toss_received", broken)
+
+    async def test(listener):
+        await _call(listener)
+        await _settled(listener)
+        return listener
+
+    listener = asyncio.run(_with_listener(db, test))
+    assert "database gone" in listener.last_error
+    assert listener.recent[-1].outcome.startswith("failed")
