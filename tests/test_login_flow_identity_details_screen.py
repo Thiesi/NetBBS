@@ -192,14 +192,15 @@ def test_blank_value_prompt_leaves_visibility_untouched(db, lane, alice):
     # Issue #282 regression: the value prompt used to be followed by an
     # unconditional "Show it publicly? [y/N]" whose answer was always
     # written, so pressing Enter twice just to look at a field silently
-    # set it private. Now a blank keeps the value and touches nothing else.
+    # set it private. Each line now opens on its value, so Enter on it
+    # keeps the value and touches nothing else.
     set_display_name(db, alice, "Alice W")
     set_display_name_visible(db, alice, True)
     set_location(db, alice, "Retro City")
     set_location_visible(db, alice, True)
     set_birthdate(db, alice, date(2000, 1, 1))
     set_birthdate_visible(db, alice, True)
-    session = FakeSession(["d", "", "l", "", "a", "", "b"])
+    session = FakeSession(["d", "Alice W", "l", "Retro City", "a", "2000-01-01", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_display_name(db, alice) == "Alice W"
     assert is_display_name_visible(db, alice) is True
@@ -230,6 +231,32 @@ def test_birthdate_edit_sets_value_and_age(db, lane, alice):
     text = _visible(session)
     assert f"(age {compute_age(date(2000, 1, 1))})" in text
     assert "Age visibility: public" in squeezed(text)
+
+
+def test_each_value_opens_in_its_own_line_and_esc_keeps_it(db, lane, alice):
+    """The prompt used to put "[current] -- new value as YYYY-MM-DD (blank
+    to keep, - to clear):" before the cursor, leaving two columns of an
+    80-column screen to type a birthdate into. The value now opens in a
+    line of its own, the way the SysOp edits it (#1110)."""
+    from netbbs.net.char_input import InputCancelled
+
+    set_display_name(db, alice, "Alice W")
+    set_birthdate(db, alice, date(2000, 1, 1))
+    seeded = []
+
+    class Escaping(FakeSession):
+        async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
+            seeded.append(kwargs.get("initial"))
+            raise InputCancelled
+
+    session = Escaping(["d", "a", "b"])
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
+    assert seeded == ["Alice W", "2000-01-01"]
+    assert get_display_name(db, alice) == "Alice W"
+    assert get_birthdate(db, alice) == date(2000, 1, 1)
+    text = _visible(session)
+    assert "Birthdate (YYYY-MM-DD) (Enter saves, blank clears, Esc keeps):" in text
+    assert "[2000-01-01]" not in text
 
 
 def test_birthdate_rejects_an_invalid_date_format(db, lane, alice):

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from netbbs.rendering.menu import continue_prompt, highlight_hotkeys
 from netbbs.attestation import (
@@ -86,7 +86,15 @@ from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.animation_preference import animations_enabled, set_animations_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
-from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, live_choice_field
+from netbbs.net.resource_editor import (
+    Draft,
+    FieldSpec,
+    edit_resource_draft,
+    inline_field,
+    live_choice_field,
+    read_field_line,
+    write_field_prompt,
+)
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.shared_account import shared_account_refusal, signed_in_without_credential
 from netbbs.digits import is_ascii_number
@@ -177,8 +185,11 @@ _LOGOFF_SUMMARY_GRADIENT = [
 _NAME_HIDDEN = "(name hidden)"
 
 
-#: Typed at a self-reported field to clear it (issue #1115).
-_CLEAR = "-"
+#: How a self-reported field on Name & details is edited. The same words
+#: as `admin_flow._CLEAR_HINT` (issue #557) for a value that can be
+#: cleared; kept here because the caller's screens do not import the
+#: console's.
+_FIELD_HINT = "Enter saves, blank clears, Esc keeps"
 
 
 def _session_history_display_name(
@@ -1848,75 +1859,60 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         "delivered_name": (await lane.run(attestation_delivery_counts, user.id, "name"))[0],
     }
 
-    async def _display_name_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        current = draft["display_name"]
-        await write_prompt(
-            session, f"\r\nDisplay name [{current or '(not set)'}] -- new value (blank to keep, - to clear): "
-        )
-        new_value = (await session.read_line()).strip()
-        if not new_value:
-            return
-        if new_value == _CLEAR:
-            await lane.run(clear_own_profile_field, user, "display_name")
-            draft["display_name"] = None
-            announce_line(session, "Display name cleared.")
-            return
-        try:
-            await lane.run(set_display_name, user, new_value)
-        except ProfileFieldError as exc:
-            announce_line(session, f"Could not save display name: {exc}")
-            return
-        draft["display_name"] = new_value
-        announce_line(session, "Display name updated.")
+    def _self_reported_prompt(
+        key: str, name: str, *, label: str | None = None, as_text: Callable[[Any], str],
+        parse: Callable[[str], Any], invalid: str = "", save: Callable[..., Any],
+    ) -> Callable[[Session, DatabaseLane, Draft], Awaitable[None]]:
+        """One self-reported value, edited the way the SysOp edits it
+        (#1110): the value opens in the line, blank clears it, Esc keeps
+        it. The prompt used to put "[current] -- new value (blank to keep,
+        - to clear):" in front of the cursor, which left two columns to
+        type a birthdate into on an 80-column screen. `parse` raises
+        ValueError for an entry that is not a value, and `invalid` says so."""
 
-    async def _location_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        current = draft["location"]
-        await write_prompt(
-            session, f"\r\nLocation [{current or '(not set)'}] -- new value (blank to keep, - to clear): "
-        )
-        new_value = (await session.read_line()).strip()
-        if not new_value:
-            return
-        if new_value == _CLEAR:
-            await lane.run(clear_own_profile_field, user, "location")
-            draft["location"] = None
-            announce_line(session, "Location cleared.")
-            return
-        try:
-            await lane.run(set_location, user, new_value)
-        except ProfileFieldError as exc:
-            announce_line(session, f"Could not save location: {exc}")
-            return
-        draft["location"] = new_value
-        announce_line(session, "Location updated.")
+        @inline_field
+        async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
+            current = "" if draft[key] is None else as_text(draft[key])
+            await write_field_prompt(
+                session, colored(f"{label or name} ({_FIELD_HINT}):", fg_color=MUTED_COLOR), hint=_FIELD_HINT,
+            )
+            try:
+                raw = (await read_field_line(session, initial=current)).strip()
+            except InputCancelled:
+                await session.write_line("")
+                return
+            if raw == current:
+                return
+            if not raw:
+                await lane.run(clear_own_profile_field, user, key)
+                draft[key] = None
+                announce_line(session, f"{name} cleared.")
+                return
+            try:
+                value = parse(raw)
+            except ValueError:
+                announce_line(session, colored(f"{invalid} -- unchanged.", fg_color=MUTED_COLOR))
+                return
+            try:
+                await lane.run(save, user, value)
+            except ProfileFieldError as exc:
+                announce_line(session, colored(f"Could not save {name.lower()}: {exc}", fg_color=MUTED_COLOR))
+                return
+            draft[key] = value
+            announce_line(session, f"{name} updated.")
 
-    async def _birthdate_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        current = draft["birthdate"]
-        await write_prompt(
-            session,
-            f"\r\nBirthdate [{current.isoformat() if current else '(not set)'}] "
-            "-- new value as YYYY-MM-DD (blank to keep, - to clear): "
-        )
-        raw = (await session.read_line()).strip()
-        if not raw:
-            return
-        if raw == _CLEAR:
-            await lane.run(clear_own_profile_field, user, "birthdate")
-            draft["birthdate"] = None
-            announce_line(session, "Birthdate cleared.")
-            return
-        try:
-            new_birthdate = date.fromisoformat(raw)
-        except ValueError:
-            announce_line(session, "Not a valid date (expected YYYY-MM-DD).")
-            return
-        try:
-            await lane.run(set_birthdate, user, new_birthdate)
-        except ProfileFieldError as exc:
-            announce_line(session, f"Could not save birthdate: {exc}")
-            return
-        draft["birthdate"] = new_birthdate
-        announce_line(session, "Birthdate updated.")
+        return prompt
+
+    _display_name_prompt = _self_reported_prompt(
+        "display_name", "Display name", as_text=sanitize_text, parse=str, save=set_display_name,
+    )
+    _location_prompt = _self_reported_prompt(
+        "location", "Location", as_text=sanitize_text, parse=str, save=set_location,
+    )
+    _birthdate_prompt = _self_reported_prompt(
+        "birthdate", "Birthdate", label="Birthdate (YYYY-MM-DD)", as_text=date.isoformat,
+        parse=date.fromisoformat, invalid="Not a valid date (expected YYYY-MM-DD)", save=set_birthdate,
+    )
 
     def _link_share_toggle(attribute: str) -> Callable[[Session, DatabaseLane, Draft], Awaitable[None]]:
         # One keystroke flips `link_visible` either way -- but only the
