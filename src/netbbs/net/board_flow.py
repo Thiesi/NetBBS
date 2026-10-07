@@ -86,6 +86,7 @@ from netbbs.link.boards import (
     queue_board_post_tombstone_if_linked,
 )
 from netbbs.moderation import BoardPermission, has_permission
+from netbbs.ftn.scanner import export_post_if_ftn
 from netbbs.mail import MAX_MAIL_SUBJECT_BYTES
 from netbbs.file_refs import FileRef, body_with_link_text, open_ref, refs_some_readers_cannot_open
 from netbbs.net.board_list_banner import load_board_list_banner, load_board_list_slot_art
@@ -1680,6 +1681,7 @@ async def _show_board(
             unread["count"] = unread_post_count(db, user, board) or 0
         if link_context is not None:
             queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
+        export_post_if_ftn(db, post, board)
         if post.status == "pending":
             # A moderated board holds the post back: only its author sees
             # it, marked "held" (issue #678), until a moderator approves it.

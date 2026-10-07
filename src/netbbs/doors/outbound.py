@@ -1306,6 +1306,11 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
             # peers is worth recording but must not turn into a refusal the
             # door might act on by posting again.
             _logger.warning("could not queue door post %s for Link: %s", post.post_id, exc)
+    # An FTN board's post goes out to its echo (design doc §6.8) like any
+    # local post; a full queue is logged there, not refused here.
+    from netbbs.ftn.scanner import export_post_if_ftn
+
+    export_post_if_ftn(db, post, board)
 
     answer({"status": "posted", "post_id": post.post_id,
                             "board": board.name, "moderated": board.moderated})

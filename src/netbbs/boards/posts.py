@@ -245,6 +245,8 @@ def create_labelled_post(
     body: str,
     *,
     commit: bool = True,
+    parent_post_id: str | None = None,
+    created_at: str | None = None,
 ) -> Post:
     """
     Create a post authored by a *label* rather than by a local account
@@ -294,8 +296,17 @@ def create_labelled_post(
     between the two leaves a post missing from the search index until the
     next reindex, which is a far smaller thing to lose than the audit
     entry saying a door wrote it.
+
+    `parent_post_id` makes the post a reply, checked like `create_post`'s;
+    `created_at` keeps a date the post was written elsewhere (the FTN
+    gateway, design doc §6.8), in `utc_now_iso` form. A door passes
+    neither.
     """
     _check_content_length(subject, body)
+    if parent_post_id is not None and db.connection.execute(
+        "SELECT 1 FROM posts WHERE post_id = ? AND board_id = ?", (parent_post_id, board.id)
+    ).fetchone() is None:
+        raise PostError(f"parent post {parent_post_id!r} not found on board {board.name!r}")
     closed_row = db.connection.execute(
         "SELECT * FROM boards WHERE id = ?", (board.id,)
     ).fetchone()
@@ -307,12 +318,12 @@ def create_labelled_post(
         raise PostError(f"board {board.name!r} is no longer available on this node")
 
     status = "pending" if board.moderated else "approved"
-    created_at = utc_now_iso()
+    created_at = created_at or utc_now_iso()
     post_id = compute_content_id(
         {
             "type": "board_post",
             "board_id": board.board_id,
-            "parent_post_id": None,
+            "parent_post_id": parent_post_id,
             "author": author_label,
             "subject": subject,
             "body": body,
@@ -325,9 +336,9 @@ def create_labelled_post(
             INSERT INTO posts
                 (post_id, board_id, parent_post_id, author_user_id, author_label,
                  author_fingerprint, subject, body, created_at, status, root_post_id)
-            VALUES (?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?)
             """,
-            (post_id, board.id, author_label, subject, body, created_at, status, post_id),
+            (post_id, board.id, parent_post_id, author_label, subject, body, created_at, status, post_id),
         )
         if commit:
             db.connection.commit()

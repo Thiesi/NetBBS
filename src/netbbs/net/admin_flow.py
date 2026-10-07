@@ -348,6 +348,7 @@ from netbbs.link.boards import (
     rebuild_carried_post_materialization,
     set_board_posting,
 )
+from netbbs.ftn.scanner import export_post_if_ftn
 from netbbs.link.channels import (
     LinkChannelsError, carried_channel_count, is_channel_linked, link_channel, linked_channel_ids,
 )
@@ -20902,6 +20903,7 @@ async def _post_action_screen(
                 await lane.run(
                     queue_approved_board_post_if_linked, approved, board, node_identity=link_context.node_identity
                 )
+            await lane.run(export_post_if_ftn, approved, board)
             _announce_line(session, "Approved.")
             return
         if choice == "r":
