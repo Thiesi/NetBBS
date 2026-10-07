@@ -50,6 +50,14 @@ from netbbs.auth.users import (
 )
 from netbbs.identity.addressing import is_valid_user_part, user_part_problem
 from netbbs.link.boards import LinkContext
+from netbbs.ftn.netmail import (
+    format_ftn_recipient,
+    is_ftn_recipient,
+    netmail_notice,
+    netmail_refusal,
+    parse_ftn_recipient,
+    send_netmail,
+)
 from netbbs.link.mail import (
     DELIVERY_STATUS_LABELS, RELAYED_DISPLAY_STATUS, LinkMailError, acknowledge_delivery_notices, compose_link_message,
     delivery_display_status, delivery_explanation, record_resend,
@@ -1891,6 +1899,19 @@ async def _show_inbox_message(
         link_sender = (
             _split_link_address(message.sender_label) if message.sender_user_id is None else None
         )
+        if message.sender_user_id is None and is_ftn_recipient(message.sender_label):
+            # Netmail (design doc §6.8): the reply goes back as netmail, To
+            # filled in with the sender's FTN name and address.
+            refused = await lane.run(netmail_refusal, user, message.sender_label)
+            if refused is not None:
+                announce(session, f"Can't reply: {refused}", tone="error")
+                continue
+            await _compose_mail(
+                session, lane, user, prefill_to=[message.sender_label], prefill_subject=subject,
+                prefill_body=quote_body(plain_post_body(message.body), author=message.sender_label) or None,
+                link_context=link_context, reply_key=_reply_key(message),
+            )
+            continue
         if link_sender is not None:
             # Mail from another BBS has no local sender account; the reply
             # goes back over Link to the address it came from (issue #805).
@@ -2022,7 +2043,9 @@ def _block_target(db: Database, reader: User, message: MailMessage) -> BlockTarg
         if sender is None or sender_unblockable_reason(db, reader, sender) is not None:
             return None
         return BlockTarget(user_id=sender.id, address=None)
-    if _split_link_address(message.sender_label) is not None:
+    if _split_link_address(message.sender_label) is not None or is_ftn_recipient(message.sender_label):
+        # A Link sender by `user@<fingerprint>`, a netmail sender by
+        # `Name (zone:net/node)`: the label it arrives with.
         return BlockTarget(user_id=None, address=message.sender_label)
     return None
 
@@ -2087,7 +2110,8 @@ def _load_blocked_rows(db: Database, user: User) -> list[_BlockedRow]:
         else:
             assert block.blocked_address is not None
             name = _link_sender_name(db, block.blocked_address)
-            where = f"on a linked BBS; blocked {since}"
+            network = "FidoNet-style netmail" if is_ftn_recipient(block.blocked_address) else "a linked BBS"
+            where = f"on {network}; blocked {since}"
         rows.append(_BlockedRow(block=block, name=name, where=where))
     return rows
 
@@ -2473,6 +2497,16 @@ async def mail_someone(
     if refusal is not None:
         announce(session, refusal, tone="error")
         return False
+    if link_address is not None and is_ftn_recipient(link_address):
+        # A netmail address (design doc §6.8), as a Sent netmail keeps it.
+        refused = await lane.run(netmail_refusal, user, link_address)
+        if refused is not None:
+            announce(session, refused, tone="error")
+            return False
+        return await _compose_mail(
+            session, lane, user, prefill_to=[link_address], prefill_subject=subject, prefill_body=quote or None,
+            link_context=link_context, reply_key=reply_key, resend_key=resend_key, resend_of=resend_of,
+        )
     if link_address is not None:
         shown = await _display_link_address(lane, link_address)
         if link_context is None:
@@ -2950,9 +2984,17 @@ async def _compose_mail(
             )
         return await settle_one(text)
 
+    async def netmail_hint(text: str | None) -> str | None:
+        if not is_ftn_recipient(text):
+            return None
+        return await lane.run(netmail_notice, text)
+
     async def settle_one(text: str) -> tuple[str, str]:
         # "sysop" wherever an address is typed, [T]o included (#840).
         text = await lane.run(resolve_sysop_alias, text)
+        if is_ftn_recipient(text):
+            normalized = format_ftn_recipient(*parse_ftn_recipient(text))
+            return normalized, normalized
         if link_enabled and "@" in text:
             # Kept by the node's technical identity once it names one
             # (issue #826): Send and a resumed draft reach the node the
@@ -2989,7 +3031,8 @@ async def _compose_mail(
     if recipient_text is not None:
         # A resumed letter shows its Subject too: nothing is asked again.
         await compose_screen(
-            [("To", recipient_label), *([("Subject", prefill_subject)] if resumed and resumed.subject else [])]
+            [("To", recipient_label), *([("Subject", prefill_subject)] if resumed and resumed.subject else [])],
+            hint=await netmail_hint(recipient_text),
         )
     else:
         to_hint = (
@@ -3053,11 +3096,18 @@ async def _compose_mail(
                 if len(entries) > 1:
                     seed = join_recipients(entries)
                 continue
+            if len(entries) > 1 and any(is_ftn_recipient(entry) for entry in entries):
+                await session.write_line(colored(
+                    "Netmail goes to one person at a time: send it on its own.", fg_color=ERROR_COLOR))
+                seed = join_recipients(entries)
+                continue
             break
         recipient_text, recipient_label = await settle_recipient(join_recipients(entries))
-        if picked:
+        notice = await netmail_hint(recipient_text)
+        if picked or notice:
             # Chosen from the list, so never typed on this screen: shown.
-            await compose_screen([("To", recipient_label)])
+            # A netmail says where it goes and that it is not private.
+            await compose_screen([("To", recipient_label)], hint=notice)
 
     if resumed is not None and resumed.subject is not None:
         subject = resumed.subject
@@ -3124,9 +3174,9 @@ async def _compose_mail(
         # body at the limit, but the signature is added afterwards and can
         # carry it over. Said on the review screen, where [B]ody and
         # [U]pdate subject fix it; Send is refused until then.
-        to_another_bbs = link_enabled and (
+        to_another_bbs = (link_enabled and (
             reply_address is not None or any("@" in entry for entry in split_recipients(recipient_text))
-        )
+        )) or is_ftn_recipient(recipient_text)
         too_long = _too_long_to_send(subject, body)
         if too_long is None and files and to_another_bbs:
             # A letter to another BBS ends with a line naming each file
@@ -3215,6 +3265,24 @@ async def _compose_mail(
                 _forget_letter(draft_path)
                 return True
             continue
+
+        if reply_address is None and is_ftn_recipient(recipient_text):
+            # Netmail (design doc §6.8): checked again at Send, since the
+            # SysOp may have changed the network's level meanwhile.
+            if files:
+                problem = await lane.run(lambda db: _unavailable_file_problem(db, user, files))
+                if problem is not None:
+                    announce(session, problem, tone="error")
+                    continue
+            try:
+                ftn_body = await lane.run(body_with_link_text, body, files)
+                await lane.run(send_netmail, user, recipient_text, subject, ftn_body)
+            except MailError as exc:
+                announce(session, f"Could not send: {exc}", tone="error")
+                continue
+            _forget_letter(draft_path)
+            announce(session, "Netmail queued. It goes out with this BBS's next call to its hub.")
+            return True
 
         if link_enabled and (reply_address is not None or "@" in recipient_text):
             # The To prompt checks this too; the address may have been
@@ -3489,6 +3557,12 @@ def _check_to_entry(db, sender: User, text: str, link_enabled: bool) -> _Checked
     account that takes mail from `sender`. Returns the recipient, or why
     not, sanitized, in the words the prompt shows."""
     text = resolve_sysop_alias(db, text)
+    if is_ftn_recipient(text):
+        # Netmail (design doc §6.8): `Name (zone:net/node)`, never `@`.
+        refused = netmail_refusal(db, sender, text)
+        if refused is not None:
+            return sanitize_text(refused)
+        return _CheckedRecipient(text=format_ftn_recipient(*parse_ftn_recipient(text)))
     if link_enabled and "@" in text:
         checked = _check_link_recipient(db, text)
         if isinstance(checked, str):

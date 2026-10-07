@@ -53,6 +53,7 @@ from netbbs.mail import (
     MailboxFullError,
     MailError,
     deliver_external_mail_without_commit,
+    mail_sender_refusal,
 )
 from netbbs.search import reindex_post
 from netbbs.storage.database import Database
@@ -71,6 +72,7 @@ class TossResult:
     duplicates: int = 0
     unknown_areas: dict[str, int] = field(default_factory=dict)
     not_for_us: int = 0
+    blocked: int = 0  # netmail from a sender its recipient blocked
     held: int = 0  # messages, or a whole packet, held for the SysOp
     lost: int = 0  # held store full: nothing could keep them
     truncated_packet: bool = False
@@ -173,10 +175,17 @@ def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader
         return
     recipient, note = _netmail_recipient(db, message.to_name)
     body = message.body if note is None else f"{note}\n\n{message.body}"
+    sender_label = _label(message.from_name, netmail_origin(message, header))
+    if note is None and mail_sender_refusal(db, recipient, sender_address=sender_label) is not None:
+        # The recipient blocked this sender (issue #817's block, by the
+        # label it arrives with). Dropped, its MSGID kept, so a resend is too.
+        db.connection.commit()
+        result.blocked += 1
+        return
     try:
         deliver_external_mail_without_commit(
             db, recipient,
-            sender_label=_label(message.from_name, netmail_origin(message, header)),
+            sender_label=sender_label,
             subject=message.subject.strip() or "(no subject)",
             body=_fit(body, MAX_MAIL_BODY_BYTES),
             created_at=_written_at(message),
