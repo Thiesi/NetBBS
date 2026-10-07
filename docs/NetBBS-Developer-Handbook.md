@@ -153,7 +153,10 @@ as protection for the node's keys or database.
 Keep persistent data outside the temporary launch directory. For a profiled
 third-party door, the installation directory is the usual root; document any
 additional paths and how to back them up. Identify a player using the stable
-`user_id` together with `node_id` if data can be shared between nodes.
+`user_id` together with `node_id` if data can be shared between nodes. A node
+never gives a deleted account's `user_id` to a new account. Two exceptions:
+restoring an older backup, and an id freed before the node had this rule
+(issue #1131) with no record of it in the moderation log.
 Handles and display names can change. These fields are identifiers, not
 credentials or evidence of user privileges.
 
@@ -232,7 +235,7 @@ Two kinds of registration deliberately get none of it:
 | --- | --- |
 | `door_api` | Contract version, currently `4`. Refuse a version you do not understand rather than probing for fields. |
 | `handle` | The caller's NetBBS handle. |
-| `user_id` | Their stable numeric id on this node. |
+| `user_id` | Their stable numeric id on this node, never reused for another account. |
 | `terminal_width`, `terminal_height` | Current geometry; rewritten mid-run if the caller resizes and the door opted in (see the resize section above). |
 | `color_depth` | `truecolor` or `256`. |
 | `unicode_style` | The caller's own NetBBS glyph preference, so a door can match what they already chose. |

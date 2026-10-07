@@ -316,8 +316,9 @@ def test_drain_stops_treating_a_demoted_sysop_as_exempt(db):
 
 @pytest.mark.parametrize("same_name", [False, True])
 def test_a_deleted_accounts_id_taken_by_a_newcomer_disconnects_rather_than_adopting_it(db, same_name):
-    """`users.id` is a plain rowid: deleting the newest account frees its
-    id for the next registration, and on a node that has never run Link
+    """An id can come round again after a restore from an older backup,
+    which carries the high-water mark from before (issue #1131); the test
+    winds the mark back to stand for it. On a node that has never run Link
     the name is freed too. The old session must end, not become the
     newcomer."""
     boss = create_user(db, "boss", password="hunter2", user_level=SYSOP_LEVEL)
@@ -330,6 +331,8 @@ def test_a_deleted_accounts_id_taken_by_a_newcomer_disconnects_rather_than_adopt
         session.feed("n")
         await _until(lambda: "Choice" in session.text())
         delete_user(db, caller, deleted_by=boss)
+        db.connection.execute("UPDATE user_id_high_water SET id = ?", (caller.id - 1,))
+        db.connection.commit()
         newcomer = create_user(
             db, "caller" if same_name else "newcomer", password="hunter2", user_level=SYSOP_LEVEL
         )
