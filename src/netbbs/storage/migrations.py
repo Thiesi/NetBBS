@@ -4197,4 +4197,26 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1135 (design doc §6.8, Decision 5): each FTN network's nodelist, as far as "
+            "direct netmail needs it -- every listed node's address and, when it lists one, "
+            "the BinkP host and port it answers on (IBN/INA flags). Replaced whole by each "
+            "import; empty on upgrade, so every netmail goes via the uplink until one is."
+        ),
+        sql="""
+        CREATE TABLE ftn_nodelist (
+            network_id  INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            zone        INTEGER NOT NULL,
+            net         INTEGER NOT NULL,
+            node        INTEGER NOT NULL,
+            name        TEXT NOT NULL,
+            binkp_host  TEXT,
+            binkp_port  INTEGER,
+            PRIMARY KEY (network_id, zone, net, node)
+        );
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_imported_at TEXT;
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_entries INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]
