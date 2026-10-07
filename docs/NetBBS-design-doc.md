@@ -4434,9 +4434,16 @@ roles:
 - **Originating.** The node polls each network's uplink on its interval, at
   least once a day, as hubs ask, and calls out sooner when mail is waiting.
 - **Answering.** The node listens on a configurable port (24554 by default)
-  for an uplink or a direct caller. Only a session whose address and password
-  match a configured link is *secure*. Packets from an unsecure session are
-  held for the SysOp rather than tossed.
+  for an uplink or a direct caller. The port is one for the whole node, and
+  the node listens only while some enabled network answers calls.
+  - **Secure sessions.** Only a session whose address and password match a
+    configured link is *secure*, and only a secure caller is handed that
+    network's waiting mail. A caller presenting an uplink's address with the
+    wrong password is refused.
+  - **Unsecure sessions.** Packets from an unsecure session are held for the
+    SysOp rather than tossed.
+  - **Limit.** At most a few calls run at once; another caller is told the
+    node is busy (`M_BSY`).
 
 No external mailer or tosser is needed or supported. Packets are Type 2+
 (FSC-0048) when written, and Type 2, 2+ or FSC-0039 are accepted when read.
