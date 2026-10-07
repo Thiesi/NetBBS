@@ -564,7 +564,9 @@ your terminal:
 - **Unicode** suits modern terminals and the browser.
 - **CP437** suits classic BBS terminals such as SyncTERM, and shows ANSI art as
   it was drawn. SyncTERM's Home, End, Page Up, Page Down, Insert and Delete
-  keys work as they do in other terminals.
+  keys work as they do in other terminals. SyncTERM's Backspace key sends the
+  same code as Ctrl-H, so in SyncTERM it stays Backspace, and **F1** opens a
+  screen's help instead. NetBBS names F1 where other terminals see Ctrl-H.
 - **ASCII** is plain text that any terminal shows.
 
 Some nodes draw their welcome art or main-menu art slowly, at the speed of an

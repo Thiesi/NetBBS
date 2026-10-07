@@ -93,7 +93,7 @@ from netbbs.net.art_pacing import art_speed
 from netbbs.net.list_art import BOARD_LIST, list_slot_fields
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import NAME_GATE_NOTE
-from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, help_key_label, reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import (
     ReviewAction,
@@ -1168,7 +1168,7 @@ async def _show_board(
         # A hint is the first thing a short terminal can spare: the list's
         # rows are what the caller came for.
         if session.terminal_height >= _HINT_MIN_HEIGHT:
-            below_rows.append(colored("(Up/Down to move, Ctrl-H for help)", fg_color=MUTED_COLOR))
+            below_rows.append(colored(f"(Up/Down to move, {help_key_label(session)} for help)", fg_color=MUTED_COLOR))
         below = "\r\n".join(below_rows)
         return above, below
 
