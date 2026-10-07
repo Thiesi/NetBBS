@@ -222,3 +222,20 @@ def test_replying_from_sent_writes_netmail_to_the_same_address(db, network, alic
     _, message = _queued(db, network)
     assert (message.to_name, message.subject) == ("Joe Bloggs", "Re: Plans")
     assert [m.recipient_remote_address for m in list_sent(db, alice)] == ["Joe Bloggs (21:3/110)"] * 2
+
+
+def test_a_netmail_address_added_on_the_review_screen_is_refused_in_a_list(db, network, alice):
+    """[T]o on the review screen settles the new list without the To
+    prompt's checks; Send still refuses a netmail address in company."""
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    session = FakeSession(keys=["c", "t", "s", "c", "b"],
+                          lines=["bob", "Hello", "Body", "/done", "bob, Joe (21:3/110)"])
+    lane = DatabaseLane(db.path)
+    try:
+        asyncio.run(browse_mail(session, lane, alice))
+    finally:
+        lane.close()
+
+    assert "Netmail goes to one person at a time" in _written_text(session)
+    assert queue.count_pending_outbound(db, network.id) == 0
+    assert list_inbox(db, bob) == []  # all or none: bob got nothing either
