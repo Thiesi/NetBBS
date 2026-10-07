@@ -6,7 +6,8 @@ this checks the artifacts themselves before they are published. A member
 holding a NUL byte is binary and is not checked, and neither are the
 metadata files setuptools writes itself (`PKG-INFO`, `METADATA`, the sdist's
 `setup.cfg` and `*.egg-info/`), which it writes with the platform's line
-ending whatever the checkout holds.
+ending whatever the checkout holds, nor ANSI art (`*.ans`), whose rows end
+with CR LF by design.
 
     python scripts/check_release_line_endings.py dist/netbbs-X.whl dist/netbbs-X.tar.gz
 """
@@ -38,10 +39,16 @@ def _generated_by_setuptools(name: str) -> bool:
             or (len(parts) == 2 and parts[1] == "setup.cfg"))
 
 
+def _crlf_is_content(name: str) -> bool:
+    # ANSI art ends its rows with CR LF (`.gitattributes`).
+    return name.lower().endswith(".ans")
+
+
 def crlf_members(path: Path) -> list[str]:
     """The names of the text members of `path` that contain a CRLF."""
     return [name for name, data in _members(path)
-            if not _generated_by_setuptools(name) and b"\0" not in data and b"\r\n" in data]
+            if not _generated_by_setuptools(name) and not _crlf_is_content(name)
+            and b"\0" not in data and b"\r\n" in data]
 
 
 def main(argv: list[str]) -> int:
