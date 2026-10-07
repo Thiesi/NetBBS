@@ -14,7 +14,6 @@ board per network. A board is local, Linked or FTN, never two (§16 "Issue
 
 from __future__ import annotations
 
-import codecs
 import re
 import sqlite3
 from dataclasses import dataclass, replace
@@ -23,7 +22,7 @@ from netbbs.auth.users import SYSOP_LEVEL, is_valid_level
 from netbbs.boards import Board
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, parse_address
-from netbbs.ftn.chrs import DEFAULT_CHARSET
+from netbbs.ftn.chrs import DEFAULT_CHARSET, kludge_for_codec
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -95,10 +94,12 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
         raise FtnNetworkError(
             f"Poll interval must be {MIN_POLL_MINUTES}-{MAX_POLL_MINUTES} minutes; hubs ask for at least daily."
         )
+    # A set FTN can name in a CHRS kludge: a message read in it can be
+    # written back saying so (`netbbs.ftn.chrs.kludge_for_codec`).
     try:
-        codecs.lookup(network.default_charset)
-    except LookupError:
-        raise FtnNetworkError(f"{network.default_charset!r} is not a known character set.") from None
+        kludge_for_codec(network.default_charset)
+    except ValueError:
+        raise FtnNetworkError(f"{network.default_charset!r} is not a character set FTN can name.") from None
     origin_text = " ".join(network.origin_text.split())
     if len(origin_text) > MAX_ORIGIN_TEXT or not origin_text.isprintable():
         raise FtnNetworkError(f"Origin text must be at most {MAX_ORIGIN_TEXT} printable characters.")
