@@ -18,6 +18,7 @@ _FILES = {
     "netbbs/ok.py": b"print('ok')\n",
     "netbbs/art.bin": b"\x00\r\n\x01",
     "netbbs-1.0.dist-info/METADATA": b"Metadata-Version: 2.4\r\n",
+    "netbbs/net/banner_presets/welcome/a.ans": b"row one\r\nrow two\r\n",
 }
 
 
