@@ -539,6 +539,25 @@ def _users_has_column(db: Database, column: str) -> bool:
     return any(row["name"] == column for row in db.connection.execute("PRAGMA table_info(users)"))
 
 
+def _next_user_id(db: Database) -> int | None:
+    """An id no account on this node has ever had (issue #1131).
+
+    SQLite alone would give the highest free rowid, so deleting the newest
+    account handed its id to the next one, and a door keyed on `user_id`
+    gave the deleted player's saves to a stranger. Asked inside the
+    creating transaction, so two registrations cannot pick the same id.
+    A schema from before the high-water table falls back to SQLite's rule.
+    """
+    if db.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_id_high_water'"
+    ).fetchone() is None:
+        return None
+    return db.connection.execute(
+        "SELECT MAX(COALESCE((SELECT MAX(id) FROM users), 0),"
+        "           COALESCE((SELECT id FROM user_id_high_water WHERE singleton = 1), 0)) + 1"
+    ).fetchone()[0]
+
+
 def _create_user_with_password_hash(
     db: Database,
     username: str,
@@ -570,10 +589,11 @@ def _create_user_with_password_hash(
         db.connection.execute(
             """
             INSERT INTO users
-                (username, password_hash, public_key, fingerprint, user_level, created_at, pending_approval)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (id, username, password_hash, public_key, fingerprint, user_level, created_at, pending_approval)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (username, password_hash, public_key_b64, fingerprint, user_level, created_at, int(pending_approval)),
+            (_next_user_id(db), username, password_hash, public_key_b64, fingerprint, user_level, created_at,
+             int(pending_approval)),
         )
         # Issue #992: a starting level other than 0 is a person's choice, and
         # keeps the promotion rules away like any level set by hand.

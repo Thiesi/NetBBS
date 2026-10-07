@@ -116,11 +116,12 @@ def guest_designation(db: Database) -> tuple[int, str] | None:
     """The designated `(account id, created_at)`, or `None`.
 
     **An id alone is not an identity here** (Codex review). `users.id`
-    is `INTEGER PRIMARY KEY` without `AUTOINCREMENT`, so SQLite hands
-    out the highest free rowid -- delete the newest account and the next
-    one created takes its number back. Designating a guest, deleting it,
-    and creating a new account then silently pointed guest login at the
-    replacement, with whatever level it happened to have.
+    was a reusable rowid -- delete the newest account and the next one
+    created took its number back. Designating a guest, deleting it, and
+    creating a new account then silently pointed guest login at the
+    replacement, with whatever level it happened to have. Ids are no
+    longer reused (issue #1131), but a restore from an older backup
+    still brings one round again.
 
     The account's `created_at` is recorded alongside and must match,
     which a recreated row cannot do: it is stamped at insert, to
@@ -148,8 +149,8 @@ def clear_designation_for_deleted_user(db: Database, user_id: int) -> None:
     """Drop the designation if it names `user_id` (Codex review, round
     five).
 
-    The `(id, created_at)` pair is not quite unique. `users.id` is a
-    reusable rowid, and `created_at` is *not* a tiebreaker: this
+    The `(id, created_at)` pair is not quite unique. `users.id` was a
+    reusable rowid before issue #1131, and `created_at` is *not* a tiebreaker: this
     project's own suite has observed two accounts created close enough
     together to share a stored timestamp, which is why `list_users`
     sorts "registered" by `id` rather than by `created_at` alone. Delete
