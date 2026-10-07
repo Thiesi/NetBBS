@@ -49,7 +49,7 @@ from netbbs.ftn.networks import (
     set_board_area,
 )
 from netbbs.ftn.nodelist import MAX_NODELIST_BYTES, NodelistError, import_nodelist
-from netbbs.ftn.queue import count_pending_outbound, delete_held, list_held
+from netbbs.ftn.queue import FtnQueueFullError, count_pending_outbound, delete_held, list_held
 from netbbs.ftn.tosser import release_held
 from netbbs.moderation.log import record_action
 from netbbs.net.session import Session
@@ -303,7 +303,9 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
         if status is not None and status.last_error:
             rows.append(Field("Last error", sanitize_text(status.last_error)))
         rows.append(Field("Waiting", f"{count_pending_outbound(db, network.id)} messages"))
-        held = [h for h in list_held(db) if h.network_id == network.id]
+        # The same packets [H]eld packets lists: this network's, and those a
+        # deleted network left behind.
+        held = [h for h in list_held(db) if h.network_id in (network.id, None)]
         rows.append(Field("Held", f"{len(held)} packets"))
         imported = db.connection.execute(
             "SELECT nodelist_imported_at, nodelist_entries FROM ftn_networks WHERE id = ?", (network.id,)
@@ -373,7 +375,8 @@ async def _pick_network(session: Session, lane: DatabaseLane, actor: User) -> Ft
         return networks[0] if networks else None
     chrome = await af._load_chrome(lane, actor)
     return await af.pick_item(
-        session, networks, name_of=lambda n: n.name, description_of=lambda n: n.our_address.four_d,
+        session, networks, name_of=lambda n: n.name, stable_id_of=lambda n: n.id,
+        description_of=lambda n: n.our_address.four_d,
         title="Which network?", empty_message="No networks.",
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,
@@ -397,7 +400,7 @@ async def _areafix(session: Session, lane: DatabaseLane, actor: User, network: F
     try:
         commands = areafix_commands(text)
         await lane.run(lambda db: queue_areafix(db, get_network(db, network.id), actor, commands))
-    except AreaFixError as exc:
+    except (AreaFixError, FtnQueueFullError) as exc:
         af._announce(session, str(exc), error=True)
         return
     if mailer is not None:

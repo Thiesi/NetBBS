@@ -148,3 +148,40 @@ def test_the_cli_imports_a_nodelist(db, tmp_path):
     assert direct_route(db, network.id, FtnAddress(21, 1, 110))[1] == "joe.example"
     with pytest.raises(ValueError, match="no FTN network called 'other'"):
         run_ftn_import_nodelist(db, "other", path)
+
+
+def test_a_released_packet_for_another_address_is_tossed_not_held_again(db, sysop):
+    network = _network(db)
+    board = create_board(db, "general", creator=sysop)
+    set_board_area(db, board, network.id, "FSX_GEN")
+    message = FtnMessage(to_name="All", from_name="Hub", subject="Hi", body="Misaddressed", area="FSX_GEN",
+                         date=datetime.datetime(2026, 10, 7, 9, 0), kludges=[("MSGID", "21:1/100 00000009")],
+                         origin="Hub (21:1/100)", orig_net=1, orig_node=100, dest_net=1, dest_node=5)
+    data = build_packet(PacketHeader(orig=HUB, dest=FtnAddress(21, 1, 5), created=None), [encode_message(message)])
+    toss_packet(db, network, data, secure=True, remote_address="21:1/100", file_name="x.pkt")
+    (held,) = queue.list_held(db)
+    assert "not to this node" in held.reason
+
+    result = release_held(db, network, held.id)
+
+    assert (result.posts, result.refused_packet) == (1, None)
+    assert queue.list_held(db) == []
+
+
+def test_with_two_networks_an_action_asks_which(db, lane, sysop):
+    _network(db)
+    _network(db, name="AgoraNet", domain="agoranet", our_address=FtnAddress(46, 1, 9),
+             uplink_address=FtnAddress(46, 1, 1), uplink_host="agora.example")
+    session = FakeSession(["a", "2", "", "+agn_gen", "b"])  # "" is Enter
+    asyncio.run(ftn_status_screen(session, lane, sysop, _controls()))
+    text = _visible(_written_text(session))
+    assert "Which network?" in text
+    assert "AreaFix request queued: +AGN_GEN" in text
+
+
+def test_a_full_queue_is_said_on_the_areafix_screen(db, lane, sysop, monkeypatch):
+    _network(db)
+    monkeypatch.setattr(queue, "MAX_PENDING_PER_NETWORK", 0)
+    session = FakeSession(["a", "%list", "b"])
+    asyncio.run(ftn_status_screen(session, lane, sysop, _controls()))
+    assert "already waiting" in _visible(_written_text(session))

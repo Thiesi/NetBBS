@@ -83,8 +83,11 @@ class TossResult:
 
 def toss_packet(
     db: Database, network: FtnNetwork, data: bytes, *, secure: bool, remote_address: str, file_name: str,
+    vouched: bool = False,
 ) -> TossResult:
-    """Toss one packet received for `network`; see the module docstring."""
+    """Toss one packet received for `network`; see the module docstring.
+    `vouched` is the SysOp releasing a held packet: its address and packet
+    password were looked at, so they don't hold it again."""
     result = TossResult()
     if not secure:
         return _hold_packet(db, network, data, remote_address, file_name, "unsecure session", result)
@@ -93,10 +96,10 @@ def toss_packet(
     except FtnFormatError as exc:
         return _hold_packet(db, network, data, remote_address, file_name, f"unreadable packet: {exc}", result)
     header = packet.header
-    if not _addressed_to(header.dest, network.our_address):
+    if not vouched and not _addressed_to(header.dest, network.our_address):
         return _hold_packet(db, network, data, remote_address, file_name,
                             f"addressed to {header.dest.four_d}, not to this node", result)
-    if network.packet_password and header.password.upper() != network.packet_password.upper():
+    if not vouched and network.packet_password and header.password.upper() != network.packet_password.upper():
         return _hold_packet(db, network, data, remote_address, file_name, "packet password does not match", result)
 
     result.truncated_packet = packet.truncated
@@ -134,7 +137,7 @@ def release_held(db: Database, network: FtnNetwork, held_id: int) -> TossResult:
     if held is None or content is None:
         raise FtnFormatError("that held packet is gone")
     delete_held(db, held_id)
-    return toss_packet(db, network, content, secure=True, remote_address=held.remote_address,
+    return toss_packet(db, network, content, secure=True, vouched=True, remote_address=held.remote_address,
                        file_name=held.file_name)
 
 
