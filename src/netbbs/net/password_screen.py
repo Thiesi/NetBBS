@@ -65,8 +65,11 @@ from netbbs.auth.users import (
     verify_password_off_loop,
 )
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.notices import announce, write_notices
+from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
-from netbbs.rendering import ERROR_COLOR, LABEL_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
+from netbbs.rendering import LABEL_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
+from netbbs.rendering.ansi import clear_screen
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -86,23 +89,25 @@ async def manage_password_screen(session: Session, lane: DatabaseLane, target: U
     possessive = "your" if self_service else f"{sanitize_text(target.username)}'s"
 
     if getattr(session, "authenticated_without_credential", False):
-        await session.write_line("")
-        await session.write_line(
-            colored(
-                "This session signed in without a password, so it cannot change one. "
-                "A SysOp can set this account's password from the SysOp console.",
-                fg_color=ERROR_COLOR,
-            )
+        announce(
+            session,
+            "This session signed in without a password, so it cannot change one. "
+            "A SysOp can set this account's password from the SysOp console.",
+            tone="error",
         )
         return target
 
+    # Issue #1115: with redraw-in-place on (the viewer's own preference),
+    # each pass draws the screen from the top instead of scrolling a new
+    # copy under the old one, and an outcome is carried into that redraw.
+    redraw_in_place = await lane.run(redraw_in_place_enabled, changed_by)
     while True:
         def _load(db: Database) -> tuple[bool, int]:
             return has_password(db, target), len(list_ssh_keys(db, target))
 
         password_set, key_count = await lane.run(_load)
 
-        await session.write_line("")
+        await session.write(clear_screen() if redraw_in_place else "\r\n")
         await session.write_line(colored(f"Password on {possessive} account:", fg_color=LABEL_COLOR, bold=True))
         await session.write_line(
             "  " + ("set" if password_set else colored("(none -- this account signs in by key only)", fg_color=MUTED_COLOR))
@@ -114,7 +119,9 @@ async def manage_password_screen(session: Session, lane: DatabaseLane, target: U
         options = [menu_key("C", "hange password" if password_set else "reate a password"), menu_key("B", "ack")]
         if password_set and key_count > 0:
             options.insert(1, menu_key("R", "emove password (key-only login)"))
-        await write_prompt(session, f"\r\n{action_bar(options, width=session.terminal_width)}: ")
+        await session.write_line("")
+        await write_notices(session)
+        await write_prompt(session, f"{action_bar(options, width=session.terminal_width)}: ")
         choice = (await session.read_key()).lower()
 
         if choice == "b":
@@ -136,15 +143,13 @@ async def _current_password_verified(session: Session, lane: DatabaseLane, targe
     if throttle is not None and not throttle.allow_attempt(
         source=getattr(session, "peer_address", None), username=target.username
     ):
-        await session.write_line(
-            colored("Too many password attempts right now. Try again later.", fg_color=ERROR_COLOR)
-        )
+        announce(session, "Too many password attempts right now. Try again later.", tone="error")
         return False
     await write_prompt(session, "Current password: ")
     current = await session.read_line(echo=False)
     stored_hash = await lane.run(load_password_hash, target)
     if not await verify_password_off_loop(current, stored_hash):
-        await session.write_line(colored("That is not the current password.", fg_color=ERROR_COLOR))
+        announce(session, "That is not the current password.", tone="error")
         return False
     return True
 
@@ -161,20 +166,15 @@ async def _change_password(
     await write_prompt(session, f"New password ({floor}blank to cancel): ")
     first = await session.read_line(echo=False)
     if not first:
-        await session.write_line(colored("Cancelled -- nothing changed.", fg_color=MUTED_COLOR))
+        announce(session, "Cancelled -- nothing changed.", tone="muted")
         return target
     if self_service and len(first) < MIN_REGISTRATION_PASSWORD_LENGTH:
-        await session.write_line(
-            colored(
-                f"Password must be at least {MIN_REGISTRATION_PASSWORD_LENGTH} characters -- nothing changed.",
-                fg_color=ERROR_COLOR,
-            )
-        )
+        announce(session, f"Password must be at least {MIN_REGISTRATION_PASSWORD_LENGTH} characters -- nothing changed.", tone="error")
         return target
     await write_prompt(session, "Confirm new password: ")
     second = await session.read_line(echo=False)
     if first != second:
-        await session.write_line(colored("The two entries did not match -- nothing changed.", fg_color=ERROR_COLOR))
+        announce(session, "The two entries did not match -- nothing changed.", tone="error")
         return target
     new_hash = await hash_password_off_loop(first)
     try:
@@ -183,15 +183,10 @@ async def _change_password(
         # UserManagementError: the actor may no longer reset this account
         # (issue #836) -- a staff permission revoked, or the account raised
         # out of their reach, since the screen opened.
-        await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
+        announce(session, str(exc), tone="error")
         return target
-    await session.write_line(
-        colored(
-            "Password changed. It applies to your next sign-in." if self_service
-            else f"Password set for {sanitize_text(target.username)!r}. It applies to their next sign-in.",
-            fg_color=MUTED_COLOR,
-        )
-    )
+    announce(session, "Password changed. It applies to your next sign-in." if self_service
+            else f"Password set for {sanitize_text(target.username)!r}. It applies to their next sign-in.", tone="success")
     return target
 
 
@@ -213,7 +208,7 @@ async def _remove_password(
         # UserManagementError: the actor may no longer reset this account
         # (issue #836) -- a staff permission revoked, or the account raised
         # out of their reach, since the screen opened.
-        await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
+        announce(session, str(exc), tone="error")
         return target
-    await session.write_line(colored("Password removed. This account now signs in by key only.", fg_color=MUTED_COLOR))
+    announce(session, "Password removed. This account now signs in by key only.", tone="success")
     return target

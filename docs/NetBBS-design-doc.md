@@ -2165,8 +2165,11 @@ An account at level 255 records age and name attestations and gets the main
 menu's **Verify** whether or not `can_verify_identity` is set, as it passes the
 gates above. Staff permissions, the Co-SysOp preset included, never imply it:
 vouching for a caller's age or name opens adult areas and can travel to nodes
-that trust this one, so a SysOp grants it to a helper on its own, and the
-Co-SysOp question says so. One rule, `main_menu.offers_verify`, decides the
+that trust this one, so a SysOp grants it to a helper on its own. The staff
+screen the Co-SysOp preset is applied from carries **[V]erify identity**, the
+same audited toggle as **[i]** on the account, and the preset's question and
+outcome name that key (issue #1115). Not a second question after the preset:
+that would be a dialog chain (§3.5). One rule, `main_menu.offers_verify`, decides the
 menu entry, and `attestation._require_verifier` the same when an attestation is
 written. The refusals for a verified age or name say where a caller sets a
 birthdate (Your profile › Name & details) and who to ask (the Staff list), and

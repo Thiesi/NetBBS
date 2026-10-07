@@ -387,6 +387,7 @@ def test_the_co_sysop_preset_is_one_confirmed_step(db, lane, sysop):
     _run(session, lane, sysop)
     carol = get_user_by_username(db, "carol")
     assert carol.staff_permissions == int(CO_SYSOP_PRESET)
+    assert carol.can_verify_identity is False
     assert "approve accounts, manage accounts, moderate everything" in _visible(_written_text(session))
 
 

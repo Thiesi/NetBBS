@@ -28,9 +28,12 @@ from netbbs.auth.users import AuthError, User, add_ssh_key, list_ssh_keys, remov
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.net.char_input import InputCancelled
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.notices import announce, write_notices
+from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
+from netbbs.rendering.ansi import clear_screen
 from netbbs.rendering.charset import ellipsis_for
-from netbbs.rendering import ERROR_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
+from netbbs.rendering import LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
@@ -75,21 +78,23 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
         # whole design. This is a check on *how this session got in*.
         # Signing in with the account's own password reaches this screen
         # exactly as before.
-        await session.write_line("")
         # Says what can actually be done, not what sounds reasonable
         # (Codex review). An earlier version of this line told the
         # caller to sign in with the account's own password -- which,
         # for the guest account, is exactly what guest login makes
         # unreachable on Telnet and web while guest access is on.
-        await session.write_line(
-            colored(
-                "This session signed in without a password, so it cannot manage keys. "
-                "A SysOp can manage this account's keys from the SysOp console.",
-                fg_color=ERROR_COLOR,
-            )
+        # Carried to the screen drawn next (issue #1115).
+        announce(
+            session,
+            "This session signed in without a password, so it cannot manage keys. "
+            "A SysOp can manage this account's keys from the SysOp console.",
+            tone="error",
         )
         return target
 
+    # Issue #1115: drawn from the top on every pass with redraw-in-place on,
+    # outcomes carried into the redraw -- the viewer's own preference.
+    redraw_in_place = await lane.run(redraw_in_place_enabled, changed_by)
     while True:
         def _load(db: Database) -> tuple[list, str, str]:
             keys = list_ssh_keys(db, target)
@@ -98,7 +103,7 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
 
         keys, display_format, display_timezone = await lane.run(_load)
 
-        await session.write_line("")
+        await session.write(clear_screen() if redraw_in_place else "\r\n")
         await session.write_line(colored(f"SSH/public keys on {possessive} account:", fg_color=LABEL_COLOR, bold=True))
         if not keys:
             await session.write_line(colored("  (none registered)", fg_color=MUTED_COLOR))
@@ -128,7 +133,9 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
         options = [menu_key("A", "dd a key"), menu_key("B", "ack")]
         if keys:
             options.insert(1, menu_key("R", "emove a key"))
-        await write_prompt(session, f"\r\n{action_bar(options, width=session.terminal_width)}: ")
+        await session.write_line("")
+        await write_notices(session)
+        await write_prompt(session, f"{action_bar(options, width=session.terminal_width)}: ")
         choice = (await session.read_key()).lower()
 
         if choice == "b":
@@ -173,7 +180,7 @@ async def _add_key(session: Session, lane: DatabaseLane, target: User, *, change
     try:
         verify_key: nacl.signing.VerifyKey = parse_verify_key(text)
     except IdentityError as exc:
-        await session.write_line(colored(f"Could not parse key: {exc}", fg_color=ERROR_COLOR))
+        announce(session, f"Could not parse key: {exc}", tone="error")
         return target
     # Opens on the key's own comment, if it has one; Enter takes what is
     # shown and Escape backs out, as every seeded field does.
@@ -186,16 +193,14 @@ async def _add_key(session: Session, lane: DatabaseLane, target: User, *, change
         await session.write_line("")
         return target
     if _looks_like_key(label):
-        await session.write_line(colored(
-            "That looks like a key, not a label. Nothing was added.", fg_color=ERROR_COLOR,
-        ))
+        announce(session, "That looks like a key, not a label. Nothing was added.", tone="error")
         return target
     try:
         target = await lane.run(add_ssh_key, target, verify_key, label=label, changed_by=changed_by)
     except AuthError as exc:
-        await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
+        announce(session, str(exc), tone="error")
         return target
-    await session.write_line(colored(f"Key {(label or 'unlabeled')!r} added.", fg_color=MUTED_COLOR))
+    announce(session, f"Key {(label or 'unlabeled')!r} added.", tone="success")
     return target
 
 
@@ -210,7 +215,7 @@ async def _remove_key(session: Session, lane: DatabaseLane, target: User, keys: 
     except ValueError:
         position = -1
     if not (1 <= position <= len(keys)):
-        await session.write_line(colored("Not a valid key number.", fg_color=ERROR_COLOR))
+        announce(session, "Not a valid key number.", tone="error")
         return target
     key = keys[position - 1]
     if key.fingerprint == target.fingerprint and len(keys) > 1:
@@ -236,7 +241,7 @@ async def _remove_key(session: Session, lane: DatabaseLane, target: User, keys: 
     try:
         target = await lane.run(remove_ssh_key, target, key.fingerprint, changed_by=changed_by)
     except AuthError as exc:
-        await session.write_line(colored(str(exc), fg_color=ERROR_COLOR))
+        announce(session, str(exc), tone="error")
         return target
-    await session.write_line(colored(f"Key {key.label!r} removed.", fg_color=MUTED_COLOR))
+    announce(session, f"Key {key.label!r} removed.", tone="success")
     return target
