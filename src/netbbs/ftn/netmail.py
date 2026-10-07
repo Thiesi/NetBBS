@@ -15,6 +15,10 @@ Inbox, so Reply fills it in. `@` stays Link's (`user@node`).
   address) and queues the encoded netmail for the uplink in the same
   transaction, with INTL, FMPT/TOPT where points need them, MSGID, PID,
   TZUTC and CHRS. Netmail goes to one person at a time.
+- It is routed direct when the network's nodelist lists where the
+  destination (a point's boss node) answers BinkP, and via the uplink
+  otherwise (Decision 5); the mailer falls back to the uplink when direct
+  calls keep failing.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.chrs import MAX_NAME_BYTES
 from netbbs.ftn.message import FtnMessage, encode_message, format_msgid, format_tzutc
 from netbbs.ftn.networks import FtnNetwork, list_networks
+from netbbs.ftn.nodelist import direct_route
 from netbbs.ftn.packet import ATTR_PRIVATE, pack_message
 from netbbs.ftn.queue import FtnQueueFullError, enqueue_outbound_without_commit, next_msgid_serial_without_commit
 from netbbs.ftn.scanner import PRODUCT
@@ -119,8 +124,13 @@ def send_netmail(db: Database, sender: User, text: str, subject: str, body: str)
         mail_id = db.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
         index_mail_without_commit(db, mail_id)
         packed = _encode(db, network, sender, name, address, subject, body)
+        # Decision 5: direct when the nodelist lists where the node (a
+        # point's boss) answers, unless that node is the uplink anyway.
+        direct = direct_route(db, network.id, address)
+        route = "direct" if direct is not None and not direct[0].same_node(network.uplink_address) else "uplink"
         enqueue_outbound_without_commit(
             db, network.id, kind="netmail", reference_id=str(mail_id), destination=str(address), packed=packed,
+            route=route,
         )
     except FtnQueueFullError as exc:
         db.connection.rollback()

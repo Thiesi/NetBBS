@@ -138,9 +138,15 @@ def pending_outbound(
     ]
 
 
-def count_pending_outbound(db: Database, network_id: int) -> int:
+def count_pending_outbound(db: Database, network_id: int, *, route: str | None = None) -> int:
+    """Unsent messages for the network, on one route or on both."""
+    if route is None:
+        return db.connection.execute(
+            "SELECT COUNT(*) FROM ftn_outbound WHERE network_id = ? AND status = 'pending'", (network_id,)
+        ).fetchone()[0]
     return db.connection.execute(
-        "SELECT COUNT(*) FROM ftn_outbound WHERE network_id = ? AND status = 'pending'", (network_id,)
+        "SELECT COUNT(*) FROM ftn_outbound WHERE network_id = ? AND status = 'pending' AND route = ?",
+        (network_id, route),
     ).fetchone()[0]
 
 
