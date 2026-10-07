@@ -3600,6 +3600,11 @@ async def _send_to_several(
     review screen, one line per recipient. A resend (`resend_of`, issue
     #919) marks the failed copies it reached as resent. Returns whether
     it was sent."""
+    if any(is_ftn_recipient(entry) for entry in entries):
+        # However To got here -- typed, or edited on the review screen -- a
+        # netmail address never rides in a list (design doc §6.8).
+        announce(session, "Netmail goes to one person at a time: send it on its own.", tone="error")
+        return False
     link_enabled = link_context is not None
     if len(entries) > MAX_MAIL_RECIPIENTS:
         announce(session, too_many_recipients_text(len(entries)), tone="error")
