@@ -477,12 +477,11 @@ async def _caller_who_screen(
             # like a Link reply's address (issue #805).
             offer_mail = mail_open and link_context is not None
             if not live and not offer_mail and lane is None:
-                await session.write_line(
-                    colored(
-                        f"{sanitize_text(selected.username)} is connected to a different linked node -- live "
-                        "messaging isn't available from this session.",
-                        fg_color=MUTED_COLOR,
-                    )
+                announce(
+                    session,
+                    f"{selected.username} is connected to a different linked node -- live "
+                    "messaging isn't available from this session.",
+                    tone="muted",
                 )
                 return True
             node_label = _remote_who_node_label(db, selected)
