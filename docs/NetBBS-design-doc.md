@@ -4465,7 +4465,7 @@ per board. Nothing is mapped by default.
   through can read it.
 - **Senders.** Each network has a minimum level for sending netmail. It
   defaults to SysOp only until the SysOp lowers it, because netmail goes out
-  under the node's address. Every account can receive netmail.
+  under the node's address. No level gates receiving it.
 - **Routing.** A netmail goes **direct when possible**. The node processes
   the network's nodelist (FTS-5000) and calls the destination over BinkP when
   its entry lists a BinkP host (`IBN`/`INA` flags). Otherwise the netmail
