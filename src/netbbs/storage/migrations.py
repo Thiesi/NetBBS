@@ -4091,4 +4091,25 @@ MIGRATIONS = [
             CHECK (default_age_requirement IN ('verified') OR default_age_requirement IS NULL);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1131: an account id is never handed out twice. `users.id` is an INTEGER "
+            "PRIMARY KEY without AUTOINCREMENT, so deleting the newest account gave its id to the "
+            "next one, and a door or BBSLink keyed on `user_id` passed the deleted player's data "
+            "on. `user_id_high_water` holds the highest id ever used; account creation picks the "
+            "next id above it, and a trigger raises it on every insert. Seeded from the current "
+            "highest id: an id freed before this migration cannot be known any more."
+        ),
+        sql="""
+        CREATE TABLE user_id_high_water (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            id        INTEGER NOT NULL
+        );
+        INSERT INTO user_id_high_water (singleton, id) SELECT 1, COALESCE(MAX(id), 0) FROM users;
+        CREATE TRIGGER users_raise_id_high_water AFTER INSERT ON users
+        BEGIN
+            UPDATE user_id_high_water SET id = MAX(id, NEW.id) WHERE singleton = 1;
+        END;
+        """,
+    ),
 ]

@@ -1362,6 +1362,16 @@ proved no credential. The current-password proof inside a session charges the
 same login throttle as the login prompt, so an unattended session is not an
 unthrottled place to guess.
 
+An account's numeric id is never given to another account on the same node
+(issue #1131). SQLite reuses the highest free rowid, so before this a deleted
+newest account's id went to the next registrant, and a door or BBSLink game
+keyed on `user_id` handed the deleted player's saves to a stranger. The node
+keeps the highest id ever used and gives each new account the next one above
+it. One limit remains: restoring a backup takes the high-water mark back with
+it, so an id issued after the backup was taken can be issued again. Code that
+must survive that too pairs the id with the account's `created_at` (the guest
+designation, §4.6).
+
 ### 4.2 Registration modes
 
 A node has one registration mode:
@@ -1775,9 +1785,9 @@ Three consequences follow, and are intended rather than gaps:
   ordinary password prompt.
 - The designation records the account's **id and creation timestamp**, and both
   must match. Neither a name nor an id alone is an identity: a name resolves to
-  whatever row holds it now, and `users.id` is `INTEGER PRIMARY KEY` without
-  `AUTOINCREMENT`, so SQLite hands a freed rowid to the next account created.
-  Either alone would hand passwordless access to a replacement account.
+  whatever row holds it now, and an id, though never reused in normal running
+  (§4.1), comes round again after a restore from an older backup. Either alone
+  would hand passwordless access to a replacement account.
 - **The guest account has no mail** (issue #816, §6.4). This is the one place
   the guest is treated as a guest, because a mailbox is not an area an account
   may or may not enter: it is the account's own correspondence. Every guest

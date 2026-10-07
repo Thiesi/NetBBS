@@ -100,10 +100,11 @@ def test_the_account_survives_guest_login_being_turned_off(tmp_path):
 def test_a_recreated_account_does_not_inherit_the_designation(tmp_path):
     """Neither a name nor an id alone is an identity here.
 
-    A name lookup resolves whatever row holds the name now. And an id is
-    *reusable*: `users.id` is `INTEGER PRIMARY KEY` without
-    `AUTOINCREMENT`, so SQLite hands back the highest free rowid --
-    delete the newest account and the next one created takes its number.
+    A name lookup resolves whatever row holds the name now. And an id
+    comes round again after a restore from an older backup: the node
+    never reuses one itself (issue #1131), but the backup carries the
+    high-water mark from before. The test winds the mark back to stand
+    for that restore.
 
     The guest is created **last** here on purpose, so it holds the
     highest id and deleting it frees exactly that number. An earlier
@@ -115,6 +116,8 @@ def test_a_recreated_account_does_not_inherit_the_designation(tmp_path):
     guest = create_user(db, "guest2", password="hunter2", user_level=1)
     set_guest_user(db, guest)
     delete_user(db, guest, deleted_by=sysop)
+    db.connection.execute("UPDATE user_id_high_water SET id = ?", (guest.id - 1,))
+    db.connection.commit()
     impostor = create_user(db, "guest2", password="different", user_level=200)
     assert impostor.id == guest.id, "this test is pointless unless the id is actually reused"
     assert guest_login_for(db, "guest2") is None
