@@ -15517,7 +15517,7 @@ the byte cap, the look-alike and staff-title checks of issues #835 and #843).
 A birthdate may be neither in the future nor before 1900-01-01, for the caller
 too: a typo such as `0198` would otherwise make anyone old enough for every
 age gate. Blank clears either field, which a SysOp needs. The caller's own
-screen edits the same values the same way (Decision 6).
+screen takes the same keys for the same values (Decision 6).
 
 **Decision 3 — audited, without the birthdate.** Each edit is recorded in the
 account's admin history with who made it. A display name is shown to everyone,
@@ -15550,8 +15550,9 @@ A caller's Profile used to say only "Verified: age"; it now shows what this
 node verified, with the value ("Verified by this node: born 1980-01-01, real
 name …"), apart from the self-reported fields below it, so a caller who
 clears their own birthdate can see why an age still counts. The display
-name, location and birthdate open in a line of their own, as on the SysOp's
-screen: Enter saves, blank clears, Esc keeps. Before #1115 a caller could
+name, location and birthdate open in a line of their own with the value in
+it, and take the same keys as the SysOp's edit of them: Enter saves, blank
+clears, Esc keeps. Before #1115 a caller could
 change these but never remove them; #1115 cleared them with a typed `-`, and
 the prompt that explained it left two columns of an 80-column screen to type
 a birthdate into, so it was replaced. A birthdate still showing after a SysOp cleared

@@ -185,8 +185,10 @@ _LOGOFF_SUMMARY_GRADIENT = [
 _NAME_HIDDEN = "(name hidden)"
 
 
-#: How a self-reported field on Name & details is edited: the SysOp's
-#: wording for the same values (issue #1110).
+#: How a self-reported field on Name & details is edited. The same words
+#: as `admin_flow._CLEAR_HINT` (issue #557) for a value that can be
+#: cleared; kept here because the caller's screens do not import the
+#: console's.
 _FIELD_HINT = "Enter saves, blank clears, Esc keeps"
 
 
@@ -1858,20 +1860,21 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
     }
 
     def _self_reported_prompt(
-        key: str, label: str, *, as_text: Callable[[Any], str], parse: Callable[[str], Any],
-        save: Callable[..., Any],
+        key: str, name: str, *, label: str | None = None, as_text: Callable[[Any], str],
+        parse: Callable[[str], Any], invalid: str = "", save: Callable[..., Any],
     ) -> Callable[[Session, DatabaseLane, Draft], Awaitable[None]]:
         """One self-reported value, edited the way the SysOp edits it
         (#1110): the value opens in the line, blank clears it, Esc keeps
         it. The prompt used to put "[current] -- new value (blank to keep,
         - to clear):" in front of the cursor, which left two columns to
-        type a birthdate into on an 80-column screen."""
+        type a birthdate into on an 80-column screen. `parse` raises
+        ValueError for an entry that is not a value, and `invalid` says so."""
 
         @inline_field
         async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
             current = "" if draft[key] is None else as_text(draft[key])
             await write_field_prompt(
-                session, colored(f"{label} ({_FIELD_HINT}):", fg_color=MUTED_COLOR), hint=_FIELD_HINT,
+                session, colored(f"{label or name} ({_FIELD_HINT}):", fg_color=MUTED_COLOR), hint=_FIELD_HINT,
             )
             try:
                 raw = (await read_field_line(session, initial=current)).strip()
@@ -1880,7 +1883,6 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 return
             if raw == current:
                 return
-            name = label.split(" (")[0]
             if not raw:
                 await lane.run(clear_own_profile_field, user, key)
                 draft[key] = None
@@ -1889,7 +1891,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             try:
                 value = parse(raw)
             except ValueError:
-                announce_line(session, colored("Not a valid date (expected YYYY-MM-DD) -- unchanged.", fg_color=MUTED_COLOR))
+                announce_line(session, colored(f"{invalid} -- unchanged.", fg_color=MUTED_COLOR))
                 return
             try:
                 await lane.run(save, user, value)
@@ -1908,8 +1910,8 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         "location", "Location", as_text=sanitize_text, parse=str, save=set_location,
     )
     _birthdate_prompt = _self_reported_prompt(
-        "birthdate", "Birthdate (YYYY-MM-DD)", as_text=date.isoformat, parse=date.fromisoformat,
-        save=set_birthdate,
+        "birthdate", "Birthdate", label="Birthdate (YYYY-MM-DD)", as_text=date.isoformat,
+        parse=date.fromisoformat, invalid="Not a valid date (expected YYYY-MM-DD)", save=set_birthdate,
     )
 
     def _link_share_toggle(attribute: str) -> Callable[[Session, DatabaseLane, Draft], Awaitable[None]]:
