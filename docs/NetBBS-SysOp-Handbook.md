@@ -1550,6 +1550,12 @@ refuses a missing file or one over 256 KiB. If a file that was enabled later
 goes missing or grows past that limit, callers get the default silently and the
 node logs a warning.
 
+**Disable** turns a piece off and leaves its file in place. To get rid of the
+file, **Remove file** (offered while one is saved) deletes it after one yes/no
+and switches the piece off with it. It is recorded in the audit trail. The
+piece's **Mode** and **Speed** stay as they were and apply to the next file you
+place.
+
 Empty rows at the bottom of a piece are not sent, so a banner drawn in the top
 seven rows of the 24-row editor takes seven rows on a caller's screen. Empty
 rows between parts of the art are kept.
