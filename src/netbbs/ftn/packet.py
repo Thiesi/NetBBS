@@ -197,7 +197,9 @@ def _header_time(year: int, month: int, day: int, hour: int, minute: int, second
 def _build_header(header: PacketHeader) -> bytes:
     orig, dest = header.orig, header.dest
     created = header.created or datetime.datetime.now()
-    password = header.password.encode("ascii")
+    # A password read from a remote packet may hold bytes ASCII lacks; they
+    # go back as "?" rather than refuse the packet a held message is put in.
+    password = header.password.encode("ascii", errors="replace")
     if len(password) > PASSWORD_FIELD:
         raise FtnFormatError(f"packet password is longer than {PASSWORD_FIELD} bytes")
     capability = CAPABILITY_2PLUS
@@ -226,7 +228,8 @@ def _parse_message(data: bytes, offset: int) -> tuple[PackedMessage, int]:
         raise _Truncated
     (_version, orig_node, dest_node, orig_net, dest_net, attributes, cost) = _MESSAGE_HEAD.unpack_from(data, offset)
     offset += _MESSAGE_HEAD.size
-    date = data[offset:offset + DATE_FIELD].split(b"\x00", 1)[0]
+    # A writer that fills all 20 bytes leaves no NUL; the 19 are the date.
+    date = data[offset:offset + DATE_FIELD].split(b"\x00", 1)[0][:DATE_FIELD - 1]
     offset += DATE_FIELD
     to_name, offset = _read_string(data, offset, TO_FROM_FIELD, "To name")
     from_name, offset = _read_string(data, offset, TO_FROM_FIELD, "From name")

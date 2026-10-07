@@ -57,6 +57,11 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_SESSION_BYTES = 256 * 1024 * 1024
 MAX_FILES = 512
 MAX_ADDRESSES = 32
+# A session's whole life, and the handshake's: the idle timeout alone resets
+# on every frame, so a caller trickling M_NUL lines could hold a slot forever.
+SESSION_SECONDS = 3600.0
+HANDSHAKE_SECONDS = 60.0
+MAX_INFO_FRAMES = 100
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -157,7 +162,21 @@ async def run_session(
     An originating side that names `expected_remote` ends the session
     before any password or file moves if the remote doesn't present it.
 
-    Raises `BinkpError`; the caller closes the connection either way."""
+    Raises `BinkpError`; the caller closes the connection either way. The
+    handshake must finish within `HANDSHAKE_SECONDS` and the whole session
+    within `SESSION_SECONDS`."""
+    try:
+        return await asyncio.wait_for(_run_session(
+            reader, writer, originating=originating, our_addresses=our_addresses, system=system,
+            password=password, password_for=password_for, outgoing=outgoing, outgoing_for=outgoing_for,
+            expected_remote=expected_remote, timeout=timeout,
+        ), SESSION_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise BinkpError(f"the session ran over {SESSION_SECONDS / 60:.0f} minutes") from exc
+
+
+async def _run_session(reader, writer, *, originating, our_addresses, system, password, password_for,
+                       outgoing, outgoing_for, expected_remote, timeout) -> SessionResult:
     session = _Session(reader, writer, timeout)
     result = session.result
     await session.send_info(system, offer_cram=not originating)
@@ -196,6 +215,7 @@ async def run_session(
         await session.send(M_OK, "secure" if result.secure else "non-secure")
         files = list(outgoing_for(result.remote_addresses, result.secure) if outgoing_for else [])
 
+    session.established = True
     await session.transfer(files)
     return result
 
@@ -204,7 +224,10 @@ def _password_matches(offered: str, expected: str, challenge: str | None) -> boo
     if offered.startswith("CRAM-MD5-"):
         if challenge is None:
             return False
-        return hmac.compare_digest(offered[9:].lower(), cram_digest(expected, challenge))
+        # As bytes: a str holding anything past ASCII makes compare_digest
+        # raise rather than answer.
+        return hmac.compare_digest(offered[9:].lower().encode("latin-1", "replace"),
+                                   cram_digest(expected, challenge).encode("ascii"))
     return hmac.compare_digest(offered.encode("latin-1", "replace"), expected.encode("latin-1", "replace"))
 
 
@@ -218,6 +241,9 @@ class _Session:
         self._challenge = secrets.token_hex(16)
         self._write_lock = asyncio.Lock()
         self._received_bytes = 0
+        self._info_frames = 0
+        self.established = False
+        self._handshake_ends = asyncio.get_running_loop().time() + HANDSHAKE_SECONDS
 
     async def send(self, command: int | None, argument: str | bytes) -> None:
         payload = argument.encode("latin-1", "replace") if isinstance(argument, str) else argument
@@ -239,7 +265,17 @@ class _Session:
             self.cram_challenge = self._challenge
 
     async def read_command(self) -> tuple[int, str]:
-        command, argument = await read_frame(self.reader, self.timeout)
+        timeout = self.timeout
+        if not self.established:
+            timeout = min(timeout, self._handshake_ends - asyncio.get_running_loop().time())
+            if timeout <= 0:
+                raise BinkpError(f"the handshake took over {HANDSHAKE_SECONDS:.0f} seconds")
+        try:
+            command, argument = await read_frame(self.reader, timeout)
+        except BinkpError:
+            if not self.established and asyncio.get_running_loop().time() >= self._handshake_ends:
+                raise BinkpError(f"the handshake took over {HANDSHAKE_SECONDS:.0f} seconds") from None
+            raise
         if command is None:
             raise BinkpError("a data frame before the session was established")
         text = argument.decode("latin-1")
@@ -248,6 +284,9 @@ class _Session:
         if command == M_BSY:
             raise BinkpError(f"the remote is busy: {text}")
         if command == M_NUL:
+            self._info_frames += 1
+            if self._info_frames > MAX_INFO_FRAMES:
+                raise BinkpError(f"more than {MAX_INFO_FRAMES} information lines")
             self._note_info(text)
         return command, text
 
@@ -307,6 +346,9 @@ class _Session:
             chunk = MAX_FRAME
             for start in range(offset, len(file.data), chunk):
                 await self.send(None, file.data[start:start + chunk])
+        # Before the write, not after it: a remote's M_GET arriving while
+        # M_EOB drains must not queue a file this loop will never send.
+        state.eob_started = True
         await self.send(M_EOB, "")
         state.eob_sent.set()
         state.check_done()
@@ -320,9 +362,10 @@ class _Session:
             if not frame.done():
                 frame.cancel()
                 finished.cancel()
-                await asyncio.gather(frame, return_exceptions=True)
+                await asyncio.gather(frame, finished, return_exceptions=True)
                 return
             finished.cancel()
+            await asyncio.gather(finished, return_exceptions=True)
             command, argument = frame.result()
             if command is None:
                 if current is None:
@@ -352,6 +395,10 @@ class _Session:
                 state.skip(text.split(" ", 1)[0])
             elif command == M_GET:
                 state.resend(text)
+            elif command == M_NUL:
+                self._info_frames += 1
+                if self._info_frames > MAX_INFO_FRAMES:
+                    raise BinkpError(f"more than {MAX_INFO_FRAMES} information lines")
             elif command == M_EOB:
                 if current is not None:
                     raise BinkpError(f"end of batch in the middle of {current[0]}")
@@ -396,6 +443,7 @@ class _Transfer:
         self.files = {file.name: file for file in files}
         self.to_send: list[tuple[OutgoingFile, int]] = [(file, 0) for file in files]
         self.awaiting: set[str] = set()
+        self.eob_started = False
         self.eob_sent = asyncio.Event()
         self.eob_received = False
         self.done = asyncio.Event()
@@ -414,7 +462,7 @@ class _Transfer:
         # Only before this side's end of batch: binkp/1.0 sends nothing after
         # it. Outgoing names are fresh each session, so a remote never holds
         # a partial copy to resume; this covers a remote that asks anyway.
-        if self.eob_sent.is_set():
+        if self.eob_started:
             return
         parts = text.split()
         if len(parts) >= 4 and parts[0] in self.files and parts[3].isdigit():

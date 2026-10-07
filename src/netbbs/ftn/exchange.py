@@ -55,6 +55,11 @@ async def toss_received(lane, network: FtnNetwork, result: SessionResult) -> Tos
 
 
 async def _toss_file(lane, network, received: ReceivedFile, remote: str, secure: bool, total: TossResult) -> None:
+    if not secure:
+        # Nothing proved who sent it: kept as it came, nothing unpacked, for
+        # the SysOp to look at -- a stranger's bundle doesn't get to expand.
+        await _hold(lane, network, remote, received, "unsecure session", total)
+        return
     kind = archive_kind(received.data)
     if kind == "pkt":
         packets = [(received.name, received.data)]

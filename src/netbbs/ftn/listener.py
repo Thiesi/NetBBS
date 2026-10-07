@@ -14,8 +14,8 @@ packets are tossed. Any other caller gets a non-secure session: it may
 deliver, but what it brings is held for the SysOp (`netbbs.ftn.tosser`),
 and it is given nothing.
 
-At most `MAX_SESSIONS` calls run at once; another caller is told the node
-is busy (`M_BSY`) and disconnected.
+At most `MAX_SESSIONS` calls run at once, one per caller address; another
+caller is told the node is busy (`M_BSY`) and disconnected.
 """
 
 from __future__ import annotations
@@ -74,6 +74,7 @@ class FtnListener:
         self._server: asyncio.base_events.Server | None = None
         self._bound: tuple[str | None, int] | None = None
         self._sessions: set[asyncio.Task] = set()
+        self._peers: set[str] = set()
         self.recent: deque[AnsweredCall] = deque(maxlen=RECENT_SESSIONS)
         self.last_error: str | None = None
 
@@ -90,11 +91,13 @@ class FtnListener:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self._stop_server()
+        # Sessions first: since Python 3.12 the server's wait_closed() waits
+        # for every handler, so a live session would hold the shutdown.
         sessions = list(self._sessions)
         for session in sessions:
             session.cancel()
         await asyncio.gather(*sessions, return_exceptions=True)
+        await self._stop_server()
 
     async def _run(self) -> None:
         while True:
@@ -136,7 +139,10 @@ class FtnListener:
                 await asyncio.wait_for(server.wait_closed(), 5)
 
     async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if len(self._sessions) >= MAX_SESSIONS:
+        peer = writer.get_extra_info("peername")
+        peer_ip = peer[0] if isinstance(peer, tuple) else "?"
+        # One call per address at a time, so one caller can't take every slot.
+        if len(self._sessions) >= MAX_SESSIONS or peer_ip in self._peers:
             with contextlib.suppress(OSError):
                 writer.write(encode_frame(M_BSY, b"Too many sessions, call again later"))
                 await writer.drain()
@@ -144,10 +150,18 @@ class FtnListener:
             return
         task = asyncio.current_task()
         self._sessions.add(task)
+        self._peers.add(peer_ip)
         try:
             await self._answer(reader, writer)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- nothing else retrieves a session's failure
+            self.last_error = f"answering {peer_ip} failed: {exc}"
+            self._record(peer_ip, "", False, f"failed: {exc}")
+            _logger.exception("FTN: answering %s failed", peer_ip)
         finally:
             self._sessions.discard(task)
+            self._peers.discard(peer_ip)
             writer.close()
             with contextlib.suppress(OSError, asyncio.TimeoutError):
                 await asyncio.wait_for(writer.wait_closed(), 5)
