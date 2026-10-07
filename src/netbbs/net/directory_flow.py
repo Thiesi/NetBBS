@@ -459,11 +459,10 @@ async def _caller_who_screen(
         # is carried into the redrawn list (issue #1124).
         announce_styled(session, line)
 
-    async def _act_on(selected: _WhoEntry) -> bool:
-        """Returns whether an outcome was written that the caller should
-        get to read before the list is redrawn over it. `[E]-mail` (issue
-        #821) announces its outcome instead, which the list shows above its
-        prompt, so it returns `False`."""
+    async def _act_on(selected: _WhoEntry) -> None:
+        """Acts on the chosen entry. Every outcome is announced, so the
+        list shows it above its prompt when it redraws (issues #821,
+        #1124)."""
         # Mail is offered to anyone listed, while mail is open to the caller
         # (issue #816) -- it needs the lane `mail_someone` runs on.
         mail_open = lane is not None and await mail_open_to(session, lane, user)
@@ -483,7 +482,7 @@ async def _caller_who_screen(
                     "messaging isn't available from this session.",
                     tone="muted",
                 )
-                return True
+                return
             node_label = _remote_who_node_label(db, selected)
             # Issue #282: selecting a remote caller used to drop straight
             # into the message prompt, so someone who picked the name only
@@ -518,17 +517,17 @@ async def _caller_who_screen(
             options.append(_BACK)
             action = await _choose(options)
             if action == "b":
-                return False
+                return
             if action == "k":
                 await _toggle(remote_block)
-                return False
+                return
             if action == "e":
                 assert lane is not None  # offer_mail's own condition
                 await mail_someone(
                     session, lane, user, link_address=f"{selected.username}@{selected.node_fingerprint}",
                     link_context=link_context,
                 )
-                return False
+                return
             assert lane is not None and link_context is not None  # live's own condition
             await write_prompt(
                 session, f"Message to {link_address_label(sanitize_text(selected.username), sanitize_text(node_label))}: "
@@ -536,19 +535,19 @@ async def _caller_who_screen(
             message = (await session.read_line()).strip()
             if not message:
                 announce_line(session, "Cancelled: message cannot be blank.")
-                return True
+                return
             await send_live_direct_message(
                 session, lane, user, f"{selected.username}@{selected.node_fingerprint}", message,
                 link_context=link_context, report=_report,
             )
-            return True
+            return
 
         assert selected.username is not None  # filtered above
         try:
             target = get_user_by_username(db, selected.username)
         except AuthError:
             announce(session, "That account no longer exists.", tone="error")
-            return True
+            return
 
         # Opting out of direct messages (and so of chat invites) is not
         # opting out of mail (issue #821): such a caller is still offered
@@ -567,7 +566,7 @@ async def _caller_who_screen(
         )
         if not live and not offer_mail and not offer_block and not blocked:
             announce(session, refusal or "", tone="muted")
-            return True
+            return
 
         offer_invite = live and direct_invites is not None and lane is not None
         if live:
@@ -607,35 +606,35 @@ async def _caller_who_screen(
         action = await _choose(options)
 
         if action == "b":
-            return False
+            return
         if action == "k":
             await _toggle(local_block)
-            return False
+            return
         if action == "e":
             assert lane is not None  # offer_mail's own condition
             await mail_someone(session, lane, user, recipient=target, link_context=link_context)
-            return False
+            return
         if action == "i":
             assert direct_invites is not None and lane is not None  # offer_invite's own condition
             # Issue #843: a direct chat that ran cleared the screen on its
             # way out; a pause there would sit on a blank screen.
-            chatted = await run_direct_chat_invite_flow(
+            await run_direct_chat_invite_flow(
                 session, lane, hub, presence, direct_invites, node_controls.session_registry, user, target,
                 report=_report,
             )
-            return not chatted
+            return
 
         await write_prompt(session, f"Message to {selected.username}: ")
         message = (await session.read_line()).strip()
         if not message:
             announce_line(session, "Cancelled: message cannot be blank.")
-            return True
+            return
         # Checked again as it goes: a block or opt-out may have come while
         # the message was typed.
         refusal = live_message_refusal(db, target, sender=user)
         if refusal is not None:
             announce(session, refusal, tone="muted")
-            return True
+            return
 
         delivered = await node_controls.session_registry.notify_one(
             selected.session,
@@ -645,7 +644,7 @@ async def _caller_who_screen(
             announce(session, "Message sent.")
         else:
             announce(session, f"{selected.username} is no longer online.", tone="error")
-        return True
+        return
 
     def _stable_id(entry: _WhoEntry) -> int:
         return entry.session_id if isinstance(entry, SessionSummary) else entry.stable_id
