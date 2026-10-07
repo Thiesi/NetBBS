@@ -45,7 +45,7 @@ from netbbs.net.board_flow import _browse_boards, visible_boards
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.boards.moderation_notices import acknowledge_moderation_notices, pending_moderation_notices
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, write_notices
-from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, InputHistory, reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, InputHistory, help_key_label, reject_unhandled_key
 from netbbs.net.chat_flow import browse_channels, run_direct_chat_loop, visible_channels
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.directory_flow import _browse_directory, _caller_who_screen
@@ -1466,7 +1466,7 @@ async def _how_this_board_works(session: Session, db: Database, user: User) -> N
         + (" Clicking a [letter] works too." if web else ""),
         "Lists number their rows: type the number (03, or 3 and Enter), or move with the arrow keys and press Enter.",
         "[B]ack goes one level up. [N]ew scan shows what is new since your last visit, one place after another.",
-        "Ctrl-H or ? shows help on most screens.",
+        f"{help_key_label(session)} or ? shows help on most screens.",
         "",
         _contact_line(sysops, caller_mail_refusal(session, db, user)),
         "",

@@ -137,7 +137,7 @@ from netbbs.net.file_ref_view import (
 )
 from netbbs.net.file_transfer import TransferGrants
 from netbbs.net.char_input import (
-    HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, InputCancelled, reject_unhandled_key,
+    HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, InputCancelled, help_key_label, reject_unhandled_key,
 )
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import (
@@ -1435,7 +1435,7 @@ class _MailboxScreen:
         below_rows = [menu]
         # The hint is the first thing a short terminal can spare.
         if session.terminal_height >= _HINT_MIN_HEIGHT:
-            below_rows.append(colored("(Up/Down to move, Ctrl-H for help)", fg_color=MUTED_COLOR))
+            below_rows.append(colored(f"(Up/Down to move, {help_key_label(session)} for help)", fg_color=MUTED_COLOR))
         return above, "\r\n".join(below_rows)
 
     def _furniture_rows(self) -> int:
