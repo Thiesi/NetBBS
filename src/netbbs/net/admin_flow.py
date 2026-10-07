@@ -14391,6 +14391,13 @@ async def _welcome_banner_menu(
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=banner_path, label="the welcome banner", audit_action="upload_welcome_banner")
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "r":
+            await session.write_line("")
+            await _remove_banner_file(
+                session, lane, actor, status_of=welcome_banner_status, set_enabled=set_welcome_banner_enabled,
+                label="the welcome banner", audit_action="remove_welcome_banner",
+            )
+            await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "c":
             await session.write_line("")
             shown = await lane.run(_toggle_welcome_banner_credit, actor)
@@ -14458,6 +14465,7 @@ async def _draw_welcome_banner_menu(
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            *_remove_file_entry(status),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
         ],
         description_level,
@@ -14819,6 +14827,55 @@ _BANNER_FILE_SUFFIX_OF: dict[Callable[[Database], Path], Callable[[str], str]] =
 }
 
 
+def _remove_file_entry(status) -> list[MenuEntry]:
+    """`[R]emove file` (issue #1119), offered only while a file is saved:
+    with nothing to delete there is nothing to offer."""
+    if not status.exists:
+        return []
+    return [MenuEntry(label=menu_key("R", "emove file"), brief="Delete the saved .ans file")]
+
+
+async def _remove_banner_file(
+    session: Session, lane: DatabaseLane, actor: User, *,
+    status_of, set_enabled, label: str, audit_action: str,
+) -> None:
+    """Delete a banner's or masthead's saved file (issue #1119): until now a
+    SysOp could only switch one off, and a file that should be gone stayed
+    on disk. One yes/no, then the file goes and the piece is switched off
+    with it -- left on, it would read "switched on, but no file is saved".
+    Its mode and speed stay: they describe how art is shown, and apply
+    again to whatever file comes next."""
+    status = await lane.run(status_of)
+    if not status.exists:
+        _announce(session, f"No file is saved for {label}.", color=MUTED_COLOR)
+        return
+    if not await prompt_yes_no(session, f"Delete {status.path}? It can't be brought back.", default=False):
+        _announce_line(session, "Cancelled. Nothing was deleted.")
+        return
+
+    def _apply(db: Database) -> tuple[bool, bool]:
+        was_enabled = status_of(db).enabled
+        try:
+            status.path.unlink()
+        except FileNotFoundError:
+            return False, was_enabled
+        if was_enabled:
+            set_enabled(db, False)
+        record_action(db, actor=actor, action=audit_action, detail=str(status.path))
+        return True, was_enabled
+
+    try:
+        removed, was_enabled = await lane.run(_apply)
+    except OSError as exc:
+        _announce(session, f"Could not delete {status.path}: {exc.strerror or exc}", error=True)
+        return
+    if not removed:
+        _announce(session, f"No file is saved for {label}.", color=MUTED_COLOR)
+        return
+    switched = " and switched it off" if was_enabled else ""
+    _announce_line(session, f"Deleted {status.path}{switched}. Callers see what they would with no file.")
+
+
 async def _upload_banner_piece(
     session: Session, lane: DatabaseLane, actor: User, *,
     path_of: Callable[[Database], Path], label: str, audit_action: str,
@@ -15107,6 +15164,13 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=main_menu_banner_path, label="the main-menu masthead", audit_action="upload_main_menu_banner")
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "r":
+            await session.write_line("")
+            await _remove_banner_file(
+                session, lane, actor, status_of=main_menu_banner_status, set_enabled=set_main_menu_banner_enabled,
+                label="the main-menu masthead", audit_action="remove_main_menu_banner",
+            )
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "m":
             await session.write_line("")
             await _toggle_main_menu_art_mode(session, lane, actor)
@@ -15165,6 +15229,7 @@ async def _draw_main_menu_banner_menu(
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            *_remove_file_entry(status),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
         ],
         description_level,
@@ -15671,6 +15736,13 @@ async def _logoff_banner_menu(
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=logoff_banner_path, label="the log-off banner", audit_action="upload_logoff_banner")
             await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "r":
+            await session.write_line("")
+            await _remove_banner_file(
+                session, lane, actor, status_of=logoff_banner_status, set_enabled=set_logoff_banner_enabled,
+                label="the log-off banner", audit_action="remove_logoff_banner",
+            )
+            await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -15708,6 +15780,7 @@ async def _draw_logoff_banner_menu(
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            *_remove_file_entry(status),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
         ],
         description_level,
@@ -15952,6 +16025,13 @@ async def _new_account_banner_before_menu(session: Session, lane: DatabaseLane, 
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=new_account_banner_before_path, label="the before-signup banner", audit_action="upload_new_account_banner_before")
             await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "r":
+            await session.write_line("")
+            await _remove_banner_file(
+                session, lane, actor, status_of=new_account_banner_before_status, set_enabled=set_new_account_banner_before_enabled,
+                label="the before-signup banner", audit_action="remove_new_account_banner_before",
+            )
+            await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -15989,6 +16069,7 @@ async def _draw_new_account_banner_before_menu(
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            *_remove_file_entry(status),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
         ],
         description_level,
@@ -16230,6 +16311,13 @@ async def _new_account_banner_after_menu(session: Session, lane: DatabaseLane, a
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=new_account_banner_after_path, label="the after-signup banner", audit_action="upload_new_account_banner_after")
             await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "r":
+            await session.write_line("")
+            await _remove_banner_file(
+                session, lane, actor, status_of=new_account_banner_after_status, set_enabled=set_new_account_banner_after_enabled,
+                label="the after-signup banner", audit_action="remove_new_account_banner_after",
+            )
+            await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
             await _banner_help_screen(
@@ -16267,6 +16355,7 @@ async def _draw_new_account_banner_after_menu(
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            *_remove_file_entry(status),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
         ],
         description_level,
@@ -16766,6 +16855,13 @@ async def _board_list_masthead_menu(session: Session, lane: DatabaseLane, actor:
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=board_list_banner_path, label="the message-board masthead", audit_action="upload_board_list_banner")
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "r":
+            await session.write_line("")
+            await _remove_banner_file(
+                session, lane, actor, status_of=board_list_banner_status, set_enabled=set_board_list_banner_enabled,
+                label="the message-board masthead", audit_action="remove_board_list_banner",
+            )
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "m":
             await session.write_line("")
             await _toggle_list_art_mode(session, lane, actor, BOARD_LIST)
@@ -16826,6 +16922,7 @@ async def _draw_board_list_masthead_menu(
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            *_remove_file_entry(status),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
         ],
         description_level,
@@ -17066,6 +17163,13 @@ async def _file_area_masthead_menu(session: Session, lane: DatabaseLane, actor: 
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=file_area_banner_path, label="the file-area masthead", audit_action="upload_file_area_banner")
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "r":
+            await session.write_line("")
+            await _remove_banner_file(
+                session, lane, actor, status_of=file_area_banner_status, set_enabled=set_file_area_banner_enabled,
+                label="the file-area masthead", audit_action="remove_file_area_banner",
+            )
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "m":
             await session.write_line("")
             await _toggle_list_art_mode(session, lane, actor, FILE_AREA)
@@ -17126,6 +17230,7 @@ async def _draw_file_area_masthead_menu(
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            *_remove_file_entry(status),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
         ],
         description_level,
@@ -17364,6 +17469,13 @@ async def _chat_channel_picker_masthead_menu(session: Session, lane: DatabaseLan
             await session.write_line("")
             await _upload_banner_piece(session, lane, actor, path_of=chat_channel_picker_banner_path, label="the chat-channel masthead", audit_action="upload_chat_channel_picker_banner")
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "r":
+            await session.write_line("")
+            await _remove_banner_file(
+                session, lane, actor, status_of=chat_channel_picker_banner_status, set_enabled=set_chat_channel_picker_banner_enabled,
+                label="the chat-channel masthead", audit_action="remove_chat_channel_picker_banner",
+            )
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "m":
             await session.write_line("")
             await _toggle_list_art_mode(session, lane, actor, CHAT_CHANNEL_PICKER)
@@ -17424,6 +17536,7 @@ async def _draw_chat_channel_picker_masthead_menu(
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
+            *_remove_file_entry(status),
             MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
         ],
         description_level,
