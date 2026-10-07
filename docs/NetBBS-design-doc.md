@@ -4449,7 +4449,7 @@ per board. Nothing is mapped by default.
   - the `AREA:` line, `^AMSGID` (a persisted serial, unique across restores),
     `^AREPLY`, `^APID`, `^ATZUTC` and `^ACHRS`;
   - a tear line and an Origin line;
-  - SEEN-BY and `^APATH` as FSC-0074 sets them.
+  - SEEN-BY and `^APATH` as FTS-0004 sets them.
 
   A post that arrived from FTN is never exported again. SEEN-BY and PATH on
   tossed messages are kept intact, so loop detection works.
@@ -4474,9 +4474,10 @@ per board. Nothing is mapped by default.
 - **Kludges.** INTL, FMPT and TOPT (FTS-4001) are written whenever zones or
   points need them.
 - **Inbound delivery.** Netmail is delivered by matching the To name,
-  case-insensitively, against a username (and the account's alias, if it has
-  one). A netmail matching no account goes to the SysOp, marked as addressed
-  to someone else. It is not bounced.
+  case-insensitively, against a username: addressing uses the canonical
+  identity (§6.3), never a chat alias. A netmail matching no account, or an
+  account that takes no mail, goes to the SysOp, marked as addressed to
+  someone else. It is not bounced.
 - **Robots.** AreaFix is netmail too. The console's Areas screen sends `+TAG`,
   `-TAG` and `%LIST` to the uplink's AreaFix and shows the replies.
 
@@ -15619,7 +15620,8 @@ passwords for the SysOp to keep in step. It is also awkward on Windows.
 **Decision 2 — the first version answers calls as well as polling.**
 Rejected: poll-only first. Answering needs an open port, so it stays a
 per-network switch, but hubs deliver crash mail sooner to a node that
-answers. Direct netmail (Decision 5) also needs it.
+answers, and a node this one netmails directly (Decision 5) can only answer
+the same way if this node takes the call.
 
 **Decision 3 — a board is local, Linked or FTN, never two.** Rejected: both,
 opt-in behind a warning. fsxNet's gating rule forbids carrying its traffic
