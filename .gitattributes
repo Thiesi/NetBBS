@@ -3,6 +3,11 @@
 # shebang ended in CR, and shipped files differed from what git stores.
 * text=auto eol=lf
 
+# ANSI art keeps its bytes: CR LF ends each row, and a bare LF would move
+# down without returning to column 0, so every row after the first would
+# wrap. Stored as drawn and checked out as stored.
+*.ans -text whitespace=cr-at-eol
+
 # Unified patches contain significant context prefixes and upstream indentation.
 examples/doors/dosbox-x-*.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
 
