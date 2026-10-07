@@ -80,10 +80,10 @@ def parse_nodelist(text: str) -> list[NodelistEntry]:
             node = number
         else:  # hold, down, and anything unknown: no calls
             continue
+        if len(entries) >= MAX_ENTRIES:
+            raise NodelistError(f"more than {MAX_ENTRIES} entries")
         host, port = _binkp_target(fields[7:])
         entries.append(NodelistEntry(zone, net, node, fields[2].strip().replace("_", " ")[:60], host, port))
-        if len(entries) > MAX_ENTRIES:
-            raise NodelistError(f"more than {MAX_ENTRIES} entries")
     return entries
 
 

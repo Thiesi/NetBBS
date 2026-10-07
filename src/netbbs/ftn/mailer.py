@@ -47,7 +47,7 @@ from dataclasses import dataclass, replace
 from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.binkp import BinkpError, OutgoingFile, SessionResult, SystemInfo, run_session
 from netbbs.ftn.bundle import packet_name
-from netbbs.ftn.exchange import outbound_packet, summary, system_info, toss_received
+from netbbs.ftn.exchange import MAX_MESSAGES_PER_PACKET, outbound_packet, summary, system_info, toss_received
 from netbbs.ftn.networks import FtnNetwork, list_networks
 from netbbs.ftn.nodelist import direct_route
 from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
@@ -139,7 +139,8 @@ class FtnMailer:
         once per `MIN_CALL_GAP`. After `DIRECT_ATTEMPTS` failed calls, or
         once the nodelist no longer lists where the node answers, its
         netmail goes via the uplink instead."""
-        messages = await self._lane.run(pending_outbound, network.id, route="direct")
+        # The same bound per call as the uplink's packet; the rest goes next time.
+        messages = await self._lane.run(pending_outbound, network.id, route="direct", limit=MAX_MESSAGES_PER_PACKET)
         groups: dict[tuple[FtnAddress, str, int], list] = {}
         to_uplink = []
         for message in messages:

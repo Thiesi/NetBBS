@@ -198,3 +198,12 @@ def test_netmail_whose_node_left_the_nodelist_goes_via_the_uplink(db, network, a
 
     asyncio.run(run())
     assert queue.count_pending_outbound(db, network.id, route="uplink") == 1
+
+
+def test_the_entry_cap_takes_exactly_its_limit(monkeypatch):
+    from netbbs.ftn import nodelist as nodelist_module
+
+    monkeypatch.setattr(nodelist_module, "MAX_ENTRIES", 3)
+    assert len(parse_nodelist("Zone,21,Z,X,Y,-,300\n,1,A,X,Y,-,300\n,2,B,X,Y,-,300\n")) == 3
+    with pytest.raises(NodelistError, match="more than 3"):
+        parse_nodelist("Zone,21,Z,X,Y,-,300\n,1,A,X,Y,-,300\n,2,B,X,Y,-,300\n,3,C,X,Y,-,300\n")
