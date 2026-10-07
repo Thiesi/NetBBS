@@ -149,24 +149,65 @@ def gates_line(
     three dots."""
     if not gates:
         return None
+    room = max(1, width)
+    pieces = _laid_out(gates, unmet, room=room, unicode_style=unicode_style)
+    plain = "".join(text for text, _ in pieces)
+    if display_width(plain) <= room:
+        return "".join(colored(text, fg_color=color) for text, color in pieces)
+    return _cut(pieces, plain, room, ellipsis)
+
+
+def _laid_out(gates: tuple[str, ...], unmet, *, room: int, unicode_style: bool) -> list[tuple[str, int]]:
+    """The line's pieces in their usual order when it fits, else with the
+    unmet gates first."""
+    pieces = _pieces(gates, unicode_style=unicode_style, unmet=unmet, unmet_first=False)
+    if display_width("".join(text for text, _ in pieces)) <= room:
+        return pieces
+    return _pieces(gates, unicode_style=unicode_style, unmet=unmet, unmet_first=True)
+
+
+def _ordered(gates: tuple[str, ...], unmet) -> list[str]:
+    """`gates` with the unmet ones first, for a line too wide for the
+    screen (review on #1116): it is cut from the end, and the gate that
+    explains why this caller is refused must be the last thing to go."""
+    return [gate for gate in gates if gate in unmet] + [gate for gate in gates if gate not in unmet]
+
+
+def _pieces(gates: tuple[str, ...], *, unicode_style: bool, unmet, unmet_first: bool) -> list[tuple[str, int]]:
+    """Each piece of the line with the colour it is drawn in; the label and
+    separators keep the gate colour."""
     separator = " · " if unicode_style else " - "
-    # Each piece with the colour it is drawn in; the label and separators
-    # keep the gate colour.
     pieces: list[tuple[str, int]] = [(_LABEL, GATE_COLOR)]
-    for index, gate in enumerate(gates):
+    for index, gate in enumerate(_ordered(gates, unmet) if unmet_first else gates):
         if index:
             pieces.append((separator, GATE_COLOR))
         if gate in unmet:
             pieces.append((gate + ("" if unicode_style else _UNMET_MARK), ERROR_COLOR))
         else:
             pieces.append((gate, GATE_COLOR))
+    return pieces
+
+
+def unmet_gates_shown(
+    gates: tuple[str, ...], unmet, *, width: int, unicode_style: bool = True, ellipsis: str = "..."
+) -> bool:
+    """Whether every gate in `unmet` survives whole on the line `gates_line`
+    draws at `width` -- so a screen may drop its own separate explanation
+    only when the line really carries it (review on #1116)."""
+    if not unmet:
+        return False
+    pieces = _laid_out(gates, unmet, room=max(1, width), unicode_style=unicode_style)
     plain = "".join(text for text, _ in pieces)
-    room = max(1, width)
-    if display_width(plain) <= room:
-        return "".join(colored(text, fg_color=color) for text, color in pieces)
-    # Too wide: cut the whole line as one, then give each kept character
-    # back the colour of the piece it came from. The ellipsis takes the
-    # colour of the piece it cuts into.
+    shown = plain if display_width(plain) <= max(1, width) else truncate_to_width(plain, max(1, width), ellipsis=ellipsis)
+    if shown != plain and shown.endswith(ellipsis):
+        shown = shown[: len(shown) - len(ellipsis)]
+    return all(text in shown for text, color in pieces if color == ERROR_COLOR)
+
+
+def _cut(pieces: list[tuple[str, int]], plain: str, room: int, ellipsis: str) -> str:
+    """Too wide: cut the whole line as one, then give each kept character
+    back the colour of the piece it came from. The ellipsis takes the
+    colour of the piece it cuts into."""
     cut = truncate_to_width(plain, room, ellipsis=ellipsis)
     kept = cut[: len(cut) - len(ellipsis)] if cut != plain and cut.endswith(ellipsis) else cut
     out: list[str] = []

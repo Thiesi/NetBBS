@@ -279,3 +279,26 @@ def test_an_upload_level_the_caller_lacks_is_marked(db, lane, alice):
     written = "".join(session.written)
     assert "Requires: level 30+ to upload" in strip_ansi(written)
     assert colored("level 30+ to upload", fg_color=ERROR_COLOR) in written
+
+
+def test_an_unmet_gate_comes_first_so_a_cut_line_keeps_it():
+    # Review on #1116: the line is cut from the end, and the gate that
+    # explains the refusal was always last.
+    gates = ("age 18+ verified", "verified name, shown", "level 250+ to post")
+    line = strip_ansi(gates_line(gates, width=44, unicode_style=False, unmet={"level 250+ to post"}))
+    assert line.startswith("Requires: level 250+ to post (not met)")
+
+
+def test_a_narrow_screen_keeps_the_read_only_line_when_the_mark_is_cut(db, alice):
+    from netbbs.gate_summary import unmet_gates_shown
+
+    gates = ("age 18+ verified", "level 255+ to post")
+    assert unmet_gates_shown(gates, {"level 255+ to post"}, width=80) is True
+    assert unmet_gates_shown(gates, {"level 255+ to post"}, width=20) is False
+
+    board = create_board(db, "news", creator=alice, min_write_level=255)
+    member = _member(db)
+    session = BoardSession(["b"])
+    session.terminal_width = 20
+    asyncio.run(board_flow._show_board(session, db, board, member))
+    assert "Read only" in session.visible()

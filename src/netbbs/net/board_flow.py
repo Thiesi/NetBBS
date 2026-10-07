@@ -133,7 +133,7 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.gate_summary import gates_line, resource_gates, unmet_gates
+from netbbs.gate_summary import gates_line, resource_gates, unmet_gates, unmet_gates_shown
 from netbbs.net.session import Session, physical_terminal_width, post_body_width, write_prompt
 from netbbs.net.shared_account import (
     authored_earlier_by_shared_account,
@@ -1030,9 +1030,14 @@ async def _show_board(
         read_only_reason = None
     elif may_write:
         read_only_reason = posting_refusal(db, board, own_fingerprint=own_fingerprint, is_reply=False)
-    elif board_unmet:
+    elif unmet_gates_shown(
+        board_gates, board_unmet, width=session.terminal_width, unicode_style=unicode_style,
+        ellipsis=ellipsis_for(session, unicode_style=unicode_style),
+    ):
         # The marked gate on the "Requires:" line already says why; a
         # second "Read only: posting needs level N." repeated it (#1115).
+        # Only when the line really shows it: a narrow screen cuts the line
+        # (review on #1116), and then the separate reason stays.
         read_only_reason = None
     else:
         read_only_reason = _read_only_reason(db, user, board, closed=closed)

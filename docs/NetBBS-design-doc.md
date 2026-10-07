@@ -15344,6 +15344,10 @@ explains it. The maintainer's wording was "the warning colour"; it is the
 error colour because `WARNING_COLOR` (amber, 214) sits next to `GATE_COLOR`
 (orange, 208) and the mark would not show. Rejected: keeping both lines and
 rewording the second, which still says one thing twice.
+When the line is too wide for the screen, the unmet gates move to its front,
+since it is cut from the end; and the separate line is dropped only when every
+unmet gate survives the cut whole (`unmet_gates_shown`), so a narrow screen
+keeps the reason.
 
 ### Issue #1110 — a SysOp corrects a caller's display name and birthdate — decided
 
