@@ -267,3 +267,12 @@ def test_held_packets_are_kept_listed_and_bounded(db, monkeypatch):
                                   content=b"6789", reason="unsecure session")
     queue.delete_held(db, held[0].id)
     assert queue.list_held(db) == []
+
+
+def test_a_message_already_queued_is_not_refused_by_a_full_queue(db, monkeypatch):
+    network = save_network(db, _fsxnet())
+    queue.enqueue_outbound_without_commit(db, network.id, kind="echomail", reference_id="a",
+                                          destination="21:1/100", packed=b"x")
+    monkeypatch.setattr(queue, "MAX_PENDING_PER_NETWORK", 1)
+    assert not queue.enqueue_outbound_without_commit(db, network.id, kind="echomail", reference_id="a",
+                                                     destination="21:1/100", packed=b"x")

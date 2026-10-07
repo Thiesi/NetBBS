@@ -97,6 +97,11 @@ def enqueue_outbound_without_commit(
     """Queue an encoded message; False if this one is already queued (each
     post or letter goes out once per network). Raises `FtnQueueFullError`
     at `MAX_PENDING_PER_NETWORK` unsent messages."""
+    if db.connection.execute(
+        "SELECT 1 FROM ftn_outbound WHERE network_id = ? AND kind = ? AND reference_id = ?",
+        (network_id, kind, reference_id),
+    ).fetchone() is not None:
+        return False  # already queued (or sent): not a new row, so not against the cap
     pending = db.connection.execute(
         "SELECT COUNT(*) FROM ftn_outbound WHERE network_id = ? AND status = 'pending'", (network_id,)
     ).fetchone()[0]
