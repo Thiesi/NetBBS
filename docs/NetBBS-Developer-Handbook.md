@@ -791,7 +791,10 @@ records the bounded host/game profiles.
 For release work, build with `python -m build`, install the wheel into an
 isolated environment outside the checkout, and verify version, packaged assets,
 bootstrap, and a real caller path. Preserve required extras. Do not treat an
-editable install as evidence that wheel assets are present.
+editable install as evidence that wheel assets are present. Build from a fresh
+checkout, which `.gitattributes` makes LF on every platform, and run
+`python scripts/check_release_line_endings.py dist/*` on the artifacts before
+publishing: it fails on any text member with a CRLF.
 
 Use repository-local checks and review; hosted CI is not a requirement for
 this project's workflow. Record actual test results and remaining manual

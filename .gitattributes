@@ -1,3 +1,8 @@
+# Every text file is LF in every checkout (issue #1130). Releases are built on
+# Windows, and with core.autocrlf the wheel and sdist shipped CRLF: a door's
+# shebang ended in CR, and shipped files differed from what git stores.
+* text=auto eol=lf
+
 # Unified patches contain significant context prefixes and upstream indentation.
 examples/doors/dosbox-x-*.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
 
