@@ -598,7 +598,9 @@ Games may use different controls.
 
 Some resources require an account level, verified age, or verified name.
 When you open one, a **Requires:** line under its title says what it asks,
-for example `Requires: age 18+ verified · level 20+ to post`.
+for example `Requires: age 18+ verified · level 20+ to post`. A requirement
+you don't meet is shown in red, or followed by `(not met)` if you use plain
+ASCII, so the same line tells you why you can read a board but not post.
 A name requirement may also disclose the verified name beside contributions
 in that resource. Ask the SysOp what is required before sharing identity
 information. You cannot grant yourself access by editing your profile.

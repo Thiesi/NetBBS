@@ -130,7 +130,7 @@ from netbbs.net.node_theme import effective_accent_color_256, effective_header_c
 from netbbs.net.notices import announce, announce_styled, write_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import EditorHeader, edit_prose
-from netbbs.gate_summary import gates_line, resource_gates
+from netbbs.gate_summary import gates_line, resource_gates, unmet_gates
 from netbbs.net.session import Session, physical_terminal_width
 from netbbs.net.shared_account import (
     authored_earlier_by_shared_account,
@@ -562,12 +562,15 @@ def cut_filename(name: str, width: int, *, ellipsis: str = "...") -> str:
     return cut_to_width(name, room - visible_width(tail)) + ellipsis + tail
 
 
-def _gates_note(session: Session, gates: tuple[str, ...], *, unicode_style: bool) -> str | None:
+def _gates_note(
+    session: Session, gates: tuple[str, ...], *, unicode_style: bool, unmet: frozenset[str] = frozenset()
+) -> str | None:
     """The area's gates as one line under its title (issue #1105), or
-    `None` when it has none."""
+    `None` when it has none; the ones this caller does not meet, such as
+    an upload level, are marked (issue #1115)."""
     return gates_line(
         gates, width=session.terminal_width, unicode_style=unicode_style,
-        ellipsis=ellipsis_for(session, unicode_style=unicode_style),
+        ellipsis=ellipsis_for(session, unicode_style=unicode_style), unmet=unmet,
     )
 
 
@@ -594,6 +597,7 @@ async def _render_area_page(
     highlighted: int | None = None,
     queue_count: int = 0,
     gates: tuple[str, ...] = (),
+    unmet: frozenset[str] = frozenset(),
 ) -> None:
     """Renders one page of files plus its navigation options and command
     hints — the unit that should be redrawn on an actual page change
@@ -602,7 +606,7 @@ async def _render_area_page(
     await _render_file_page(
         session, lane, area_name, page, name_requirement=name_requirement, redraw_in_place=redraw_in_place,
         unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
-        gates=gates,
+        gates=gates, unmet=unmet,
     )
     options = []
     if page.has_older:
@@ -1049,6 +1053,8 @@ async def _show_area(
     ) = await lane.run(_load)
     # The gates this area applies, named under its title (issue #1105).
     area_gates = await lane.run(resource_gates, area)
+    # The ones this caller does not meet, such as the upload level (#1115).
+    area_unmet = await lane.run(unmet_gates, user, area)
 
     def _may_describe(entry: FileEntry) -> bool:
         """Whether this caller's save would actually be accepted for
@@ -1136,7 +1142,7 @@ async def _show_area(
             can_keep=_keep_offered(area, current_page), following=follows["on"],
             description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
-            queue_count=await _queue_count(), gates=area_gates,
+            queue_count=await _queue_count(), gates=area_gates, unmet=area_unmet,
         )
         if current_page.entries:
             await lane.run(record_file_area_seen, user, area, current_page.entries[-1])
@@ -1153,7 +1159,7 @@ async def _show_area(
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
         node_name_gradient=session.node_name_gradient)
         await session.write_line(f"\r\n{heading}")
-        gates_note = _gates_note(session, area_gates, unicode_style=unicode_style)
+        gates_note = _gates_note(session, area_gates, unicode_style=unicode_style, unmet=area_unmet)
         if gates_note:
             await session.write_line(gates_note)
         state = empty_state(
@@ -1475,7 +1481,7 @@ async def _show_area(
         describable_pending = [entry for entry in pending_uploads if _may_describe(entry)]
         queued = await _queue_count()
         await session.write_line(f"\r\n{heading}")
-        gates_note = _gates_note(session, area_gates, unicode_style=unicode_style)
+        gates_note = _gates_note(session, area_gates, unicode_style=unicode_style, unmet=area_unmet)
         if gates_note:
             await session.write_line(gates_note)
         await session.write_line(f"\r\n{state}")
@@ -1889,6 +1895,7 @@ async def _render_file_page(
     truecolor: bool = False,
     highlighted: int | None = None,
     gates: tuple[str, ...] = (),
+    unmet: frozenset[str] = frozenset(),
 ) -> None:
     header_color = await lane.run(effective_header_color_256)
     header = screen_title(
@@ -1902,7 +1909,7 @@ async def _render_file_page(
         node_name_gradient=session.node_name_gradient,
     )
     await session.write_line(f"\r\n{header}")
-    gates_note = _gates_note(session, gates, unicode_style=unicode_style)
+    gates_note = _gates_note(session, gates, unicode_style=unicode_style, unmet=unmet)
     if gates_note:
         await session.write_line(gates_note)
     if not page.entries:
