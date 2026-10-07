@@ -342,3 +342,11 @@ def test_what_one_node_exports_another_tosses(db, sysop, network, board, tmp_pat
 def _unpack(packed: bytes):
     header = PacketHeader(orig=OURS, dest=UPLINK, created=None)
     return parse_packet(build_packet_from_packed(header, [packed])).messages[0]
+
+
+def test_a_cut_off_packet_says_so_in_the_log(db, network, board, caplog):
+    data = _packet(_echo(), _echo("second", msgid="21:3/110 00000002"))
+    with caplog.at_level("WARNING"):
+        result = _toss(db, network, data[:-20])
+    assert result.truncated_packet and result.posts == 1
+    assert "the packet was cut off" in caplog.text

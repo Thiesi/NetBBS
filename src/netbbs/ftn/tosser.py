@@ -108,12 +108,14 @@ def toss_packet(
         except (_Unstorable, FtnFormatError) as exc:
             db.connection.rollback()
             _hold_message(db, network, header, packed, remote_address, file_name, str(exc), result)
-    if result.unknown_areas or result.not_for_us or result.held:
+    if result.unknown_areas or result.not_for_us or result.held or result.truncated_packet:
         _logger.warning(
             "FTN %s: packet %s from %s -- %d posts, %d netmail, %d duplicates, unknown areas %s, "
-            "%d netmail for other nodes, %d held",
+            "%d netmail for other nodes, %d held%s",
             network.name, file_name, remote_address, result.posts, result.netmail, result.duplicates,
             dict(result.unknown_areas), result.not_for_us, result.held,
+            "; the packet was cut off, so messages after the break were not received"
+            if result.truncated_packet else "",
         )
     return result
 

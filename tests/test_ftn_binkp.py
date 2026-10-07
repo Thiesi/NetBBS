@@ -221,3 +221,23 @@ def test_a_silent_remote_times_out():
 ])
 def test_received_names_are_made_safe(name, safe):
     assert safe_file_name(name) == safe
+
+
+def test_a_remote_that_stops_reading_ends_the_session():
+    """A write whose buffer never drains (a remote that stopped reading)
+    times out like a read, instead of holding the session open forever.
+    Driven with a writer that never drains: loopback on some platforms
+    absorbs any amount, so a real socket can't show it everywhere."""
+    class StuckWriter:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            await asyncio.Event().wait()
+
+    async def run():
+        session = binkp._Session(asyncio.StreamReader(), StuckWriter(), timeout=0.2)
+        await session.send(M_NUL, "SYS test")
+
+    with pytest.raises(BinkpError, match="took nothing"):
+        asyncio.run(run())
