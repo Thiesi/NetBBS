@@ -89,7 +89,8 @@ class FtnMailer:
         self._wake = asyncio.Event()
         self._last_maintenance: float | None = None
         self.status: dict[int, PollStatus] = {}
-        self.direct_status: dict[str, PollStatus] = {}  # by the called node's 4D address
+        # By network and the called node's 4D address: numbering is per network.
+        self.direct_status: dict[tuple[int, str], PollStatus] = {}
 
     async def start(self) -> None:
         if self._task is None:
@@ -149,7 +150,7 @@ class FtnMailer:
                 groups.setdefault(target, []).append(message)
         now = self._clock()
         for (node, host, port), waiting in groups.items():
-            status = self.direct_status.setdefault(node.four_d, PollStatus())
+            status = self.direct_status.setdefault((network.id, node.four_d), PollStatus())
             if status.last_attempt is not None and now - status.last_attempt < MIN_CALL_GAP:
                 continue
             status.last_attempt = now
