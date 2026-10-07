@@ -4119,4 +4119,82 @@ MIGRATIONS = [
         END;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1135 (design doc §6.8): storage for the FTN gateway. `ftn_networks` holds "
+            "one record per FidoNet-technology network: this node's address in it, the uplink, "
+            "the passwords, polling and answering, the default character set, the Origin line "
+            "and the minimum level for sending netmail (SysOp only until lowered). A board "
+            "carries one echo area through `boards.ftn_network_id`/`ftn_area_tag`, unique per "
+            "network; a post records its `ftn_msgid` and whether it arrived from FTN "
+            "(`ftn_inbound`, never exported again). `ftn_seen_msgids` is the dupe history, "
+            "`ftn_outbound` the queue of encoded messages waiting for a session, and "
+            "`ftn_held_inbound` the packets held for the SysOp (an unsecure session's, or one "
+            "that would not toss). Nothing is configured on upgrade, so nothing changes."
+        ),
+        sql="""
+        CREATE TABLE ftn_networks (
+            id                 INTEGER PRIMARY KEY,
+            name               TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            domain             TEXT NOT NULL,
+            our_address        TEXT NOT NULL,
+            uplink_address     TEXT NOT NULL,
+            uplink_host        TEXT NOT NULL DEFAULT '',
+            uplink_port        INTEGER NOT NULL DEFAULT 24554 CHECK (uplink_port BETWEEN 1 AND 65535),
+            session_password   TEXT NOT NULL DEFAULT '',
+            packet_password    TEXT NOT NULL DEFAULT '',
+            areafix_password   TEXT NOT NULL DEFAULT '',
+            poll_minutes       INTEGER NOT NULL DEFAULT 60 CHECK (poll_minutes BETWEEN 5 AND 1440),
+            answers_calls      INTEGER NOT NULL DEFAULT 0,
+            enabled            INTEGER NOT NULL DEFAULT 0,
+            default_charset    TEXT NOT NULL DEFAULT 'cp437',
+            origin_text        TEXT NOT NULL DEFAULT '',
+            netmail_min_level  INTEGER NOT NULL DEFAULT 255,
+            created_at         TEXT NOT NULL
+        );
+
+        ALTER TABLE boards ADD COLUMN ftn_network_id INTEGER REFERENCES ftn_networks(id) ON DELETE SET NULL;
+        ALTER TABLE boards ADD COLUMN ftn_area_tag TEXT;
+        CREATE UNIQUE INDEX idx_boards_ftn_area
+            ON boards(ftn_network_id, ftn_area_tag COLLATE NOCASE) WHERE ftn_network_id IS NOT NULL;
+
+        ALTER TABLE posts ADD COLUMN ftn_msgid TEXT;
+        ALTER TABLE posts ADD COLUMN ftn_inbound INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX idx_posts_ftn_msgid ON posts(board_id, ftn_msgid) WHERE ftn_msgid IS NOT NULL;
+
+        CREATE TABLE ftn_seen_msgids (
+            network_id  INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            area_tag    TEXT NOT NULL COLLATE NOCASE,
+            msgid       TEXT NOT NULL,
+            seen_at     TEXT NOT NULL,
+            PRIMARY KEY (network_id, area_tag, msgid)
+        );
+        CREATE INDEX idx_ftn_seen_msgids_age ON ftn_seen_msgids(seen_at);
+
+        CREATE TABLE ftn_outbound (
+            id              INTEGER PRIMARY KEY,
+            network_id      INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            kind            TEXT NOT NULL CHECK (kind IN ('echomail', 'netmail')),
+            reference_id    TEXT NOT NULL,
+            destination     TEXT NOT NULL,
+            route           TEXT NOT NULL DEFAULT 'uplink' CHECK (route IN ('uplink', 'direct')),
+            packed          BLOB NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent')),
+            created_at      TEXT NOT NULL,
+            sent_at         TEXT,
+            UNIQUE (network_id, kind, reference_id)
+        );
+        CREATE INDEX idx_ftn_outbound_pending ON ftn_outbound(network_id, status, route);
+
+        CREATE TABLE ftn_held_inbound (
+            id              INTEGER PRIMARY KEY,
+            network_id      INTEGER REFERENCES ftn_networks(id) ON DELETE SET NULL,
+            remote_address  TEXT NOT NULL,
+            file_name       TEXT NOT NULL,
+            content         BLOB NOT NULL,
+            reason          TEXT NOT NULL,
+            received_at     TEXT NOT NULL
+        );
+        """,
+    ),
 ]
