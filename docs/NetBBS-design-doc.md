@@ -2361,9 +2361,12 @@ remains its own grant: it is about attestation, not about running the node.
 **Co-SysOp** is a preset, not a role. On an account's detail a SysOp can apply
 it in one confirmed step: it sets all three staff permissions. Afterwards the
 account holds exactly those permissions, and the SysOp can remove any of them
-one at a time. The account detail's privileges group lists the staff
-permissions, the verify-identity permission and a summary of the account's
-moderator grants, so a SysOp sees everything an account may do in one place.
+one at a time. The account detail lists the staff permissions and the
+verify-identity permission among its editable fields, and a summary of the
+account's moderator grants in its read-only Record group, so a SysOp sees
+everything an account may do in one place. The editable fields are one column
+in the cursor's order and the read-only facts sit below them (issue #1119): a
+two-column layout made the cursor zigzag and step over read-only rows.
 
 **What staff can never do.** A staff member acts only on accounts below level
 255 that hold no staff permission; a moderator-only account is within reach.

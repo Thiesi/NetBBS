@@ -218,7 +218,7 @@ def test_the_sysops_account_is_view_only_for_staff(db, lane, sysop):
     # Sorted: helper, sysop -- sysop is 02. "l" is refused with a bell.
     session = FakeSession(["u", "0", "2", "l", "t", "d", "b", "b", "b"])
     _staff_console(session, lane, helper)
-    detail = _visible(_written_text(session)).split("PRIVILEGES", 1)[-1].split("Choice:", 1)[0]
+    detail = _visible(_written_text(session)).split("RECORD", 1)[-1].split("Choice:", 1)[0]
     assert "[L]evel" not in detail and "[D]elete" not in detail and "oggle enable" not in detail
     assert "Backup:" not in detail
     fresh = get_user_by_id(db, sysop.id)
@@ -230,7 +230,7 @@ def test_staff_never_see_keys_blocklist_staff_or_delete(db, lane, sysop):
     create_user(db, "carol", password="hunter2pw")
     session = FakeSession(["u", "0", "1", "b", "b", "b"])
     _staff_console(session, lane, helper)
-    detail = _visible(_written_text(session)).split("PRIVILEGES", 1)[-1].split("Choice:", 1)[0]
+    detail = _visible(_written_text(session)).split("RECORD", 1)[-1].split("Choice:", 1)[0]
     assert "[L]evel" in detail and "[P]assword" in detail
     for hidden in ("[K]ey", "estrict login", "[S]taff", "dentity verification", "[D]elete"):
         assert hidden not in detail

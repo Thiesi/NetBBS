@@ -655,9 +655,12 @@ widen their own permissions. They cannot raise anyone to 255, delete an
 account, grant staff permissions or moderator grants, or reach Settings, Link,
 Node, DNS or backups.
 
-The **Privileges** group on an account's detail screen shows its staff
-permissions, the identity-verifier permission, and every moderator grant it
-holds, such as `board "News": approve`.
+An account's detail screen lists what you can change in one column, in the
+order the arrow keys walk it: level, status, blocklist, display name, birthdate,
+public key, password, staff permissions, the identity-verifier permission and
+automatic promotion. Below that, under **Record**, is what you can't change
+there: when the account was created, how many admin actions it has, and every
+moderator grant it holds, such as `board "News": approve`.
 
 A staff member sees **[S]taff** on their main menu instead of [S]ysOp. It
 opens a reduced console that counts what waits for them and offers only what

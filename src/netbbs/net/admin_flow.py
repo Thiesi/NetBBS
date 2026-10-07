@@ -7394,20 +7394,24 @@ async def _draw_user_detail(
     entries = await lane.run(list_actions_for_target_user, target.id)
     age_verified = await lane.run(get_attestation, target, "age") is not None
     name_verified = await lane.run(get_attestation, target, "name") is not None
+    # Issue #1119: every field the cursor walks is in one block, top to
+    # bottom in `_USER_DETAIL_FIELD_ORDER`, and what can't be changed here
+    # is grouped below it. Pairing the account's fields side by side made
+    # the cursor zigzag between columns, stepping over read-only rows. One
+    # section, not three: their headings cost the rows that let the screen
+    # still fit 24 now that the fields are one to a row.
     sections = [
         Section("Account", [
             _editable("l", "Level", level_label(target.user_level, await lane.run(get_level_names))),
             _editable("t", "Status", status, color=SUCCESS_COLOR if status == "active" else WARNING_COLOR),
-            Field("Member since", member_since, color=METADATA_COLOR),
             _editable(
                 "r", "Blocked", "yes (local blocklist)" if blocked else "no",
                 color=ERROR_COLOR if blocked else VALUE_COLOR,
             ),
             # Issue #1110: the caller's own name and birthdate, which a SysOp
-            # or account manager can correct. In this section, not one of
-            # their own: the screen has to fit 24 rows. Shown only to whoever
-            # may edit them (review on #1112): a birthdate is private, and an
-            # approver reviewing a signup has no need for it.
+            # or account manager can correct. Shown only to whoever may edit
+            # them (review on #1112): a birthdate is private, and an approver
+            # reviewing a signup has no need for it.
             *(_detail_fields(
                 await lane.run(get_display_name, target),
                 await lane.run(get_birthdate, target),
@@ -7415,17 +7419,9 @@ async def _draw_user_detail(
                 name_verified=name_verified,
                 field=_editable,
             ) if allowed is None or "e" in allowed else ()),
-            # The list itself is a screen of its own (`[H]istory`): ten rows of
-            # it here pushed the account's own fields off a 24-row terminal.
-            Field(
-                "Admin actions", f"{len(entries)} recorded" if entries else "none recorded",
-                color=VALUE_COLOR if entries else MUTED_COLOR,
-            ),
-        ], paired=True),
-        # Issue #611: whether a password exists, never the password. Beside
-        # the key line because the two together are "how this account gets
-        # in", and a SysOp resetting one wants to see the other.
-        Section("Sign-in", [
+            # Issue #611: whether a password exists, never the password. Beside
+            # the key line because the two together are "how this account gets
+            # in", and a SysOp resetting one wants to see the other.
             _editable(
                 "k", "Public key", target.fingerprint if target.fingerprint else "(none)",
                 color=VALUE_COLOR if target.fingerprint else MUTED_COLOR,
@@ -7434,13 +7430,9 @@ async def _draw_user_detail(
                 "p", "Password",
                 "set" if await lane.run(has_password, target) else "(none -- key login only)",
             ),
-        ]),
-        # Design doc §5.6 (issue #836, F132): everything this account may
-        # do beyond its level, in one place -- the staff permissions, the
-        # verify-identity permission (§5.5) beside them but separate, and
-        # a summary of its moderator grants, which used to show nowhere
-        # on the account.
-        Section("Privileges", [
+            # Design doc §5.6 (issue #836, F132): what this account may do
+            # beyond its level -- the staff permissions, and the
+            # verify-identity permission (§5.5) beside them but separate.
             _editable(
                 "s", "Staff", describe_staff_permissions(target.staff_permissions),
                 color=VALUE_COLOR if target.staff_permissions else MUTED_COLOR,
@@ -7448,18 +7440,28 @@ async def _draw_user_detail(
             _editable("i", "Can verify identity", _can_verify_label(target)),
             # Issue #992: last, so the arrow order of the fields above holds.
             _editable("u", "Auto promotion", _auto_promotion_label(target, await lane.run(kept_from_rules, target))),
-            _grants_field(await lane.run(_grant_summaries, target)),
         ]),
     ]
     # Issue #835 (F072): what the caller said when signing up, for whoever
     # decides on the account. Typed by an unauthenticated caller, so
-    # sanitized like any other remote text.
+    # sanitized like any other remote text. Read-only, so below the fields.
     signup_answer = await lane.run(load_signup_answer, target.id) if target.pending_approval else None
     if signup_answer is not None:
-        sections.insert(1, Section("Signup answer", [
+        sections.append(Section("Signup answer", [
             Note(f"Asked: {sanitize_text(signup_answer.question)}"),
             Note(f"Answer: {sanitize_text(signup_answer.answer)}"),
         ]))
+    # The account's record: nothing here is changed on this screen. The
+    # admin-action list itself is a screen of its own (`[H]istory`); ten
+    # rows of it here pushed the account's fields off a 24-row terminal.
+    sections.append(Section("Record", [
+        Field("Member since", member_since, color=METADATA_COLOR),
+        Field(
+            "Admin actions", f"{len(entries)} recorded" if entries else "none recorded",
+            color=VALUE_COLOR if entries else MUTED_COLOR,
+        ),
+        _grants_field(await lane.run(_grant_summaries, target)),
+    ], paired=True))
     panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
     offered = allowed if allowed is not None else _ALL_USER_DETAIL_KEYS
     options = []
