@@ -7772,6 +7772,9 @@ async def _revoke_verification(session: Session, lane: DatabaseLane, actor: User
     if revoked:
         extra = " The nodes it was shared with are told at the next sync." if shared else ""
         _announce_line(session, f"Revoked the verified {label} of {target.username!r}.{extra}")
+    else:
+        # Someone else revoked it while this screen waited for an answer.
+        _announce_line(session, f"No verified {label} on record for {target.username!r} any more.")
 
 
 async def _show_user_detail_help(

@@ -230,3 +230,20 @@ def test_the_verify_screen_says_so_when_someone_else_revoked_first(db, sysop, ca
     text = profile_visible(session)
     assert "Verified real name revoked." not in text
     assert "No verified real name on record for 'carol' any more." in text
+
+
+def test_the_account_screen_says_so_when_someone_else_revoked_first(db, lane, sysop, carol, monkeypatch):
+    # Review on #1118: the account screen said nothing at all in that case.
+    from netbbs.net import admin_flow
+
+    attest_age(db, carol, BORN, verifier=sysop)
+    real_revoke = admin_flow.revoke_attestation
+
+    def revoke_after_another(db_, subject, attribute, *, actor):
+        real_revoke(db_, subject, attribute, actor=actor)  # the other session
+        return real_revoke(db_, subject, attribute, actor=actor)
+
+    monkeypatch.setattr(admin_flow, "revoke_attestation", revoke_after_another)
+    text = _detail(AdminSession(["v", "y", "b"]), lane, sysop, carol)
+    assert "Revoked the verified age" not in text
+    assert "No verified age on record for 'carol' any more." in text
