@@ -213,3 +213,20 @@ def test_a_birthdate_a_sysop_cleared_is_gone_from_the_profile(db, lane, sysop, c
     session = ProfileSession(["b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, carol))
     assert "Birthdate: (not set)" in squeezed(profile_visible(session))
+
+
+def test_the_verify_screen_says_so_when_someone_else_revoked_first(db, sysop, carol, monkeypatch):
+    # Review on #1118: the success line was printed whatever revoking returned.
+    attest_name(db, carol, "Carol Example", verifier=sysop)
+    real_revoke = profile_flow.revoke_attestation
+
+    def revoke_after_another(db_, subject, attribute, *, actor):
+        real_revoke(db_, subject, attribute, actor=actor)  # the other session
+        return real_revoke(db_, subject, attribute, actor=actor)
+
+    monkeypatch.setattr(profile_flow, "revoke_attestation", revoke_after_another)
+    session = ProfileSession(["r", "y", "x", "b"])
+    asyncio.run(profile_flow._verify_user(session, db, sysop, carol))
+    text = profile_visible(session)
+    assert "Verified real name revoked." not in text
+    assert "No verified real name on record for 'carol' any more." in text

@@ -2234,11 +2234,17 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
         await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
         return
     try:
-        revoke_attestation(db, subject, attribute, actor=verifier)
+        revoked = revoke_attestation(db, subject, attribute, actor=verifier)
     except AttestationError as exc:
         await session.write_line(colored(f"Could not revoke: {exc}", fg_color=MUTED_COLOR))
         return
-    await session.write_line(f"Verified {label} revoked.")
+    if revoked:
+        await session.write_line(f"Verified {label} revoked.")
+    else:
+        # Someone else revoked it while this screen waited for an answer.
+        await session.write_line(
+            colored(f"No verified {label} on record for {subject.username!r} any more.", fg_color=MUTED_COLOR)
+        )
 
 
 def _verification_status_description(db: Database, user: User) -> str:
