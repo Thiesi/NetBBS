@@ -4395,6 +4395,102 @@ managers may supply dependencies, but a PyPI, pkgsrc, apt, or other independentl
 managed NetBBS package is not supported because it would introduce a second
 owner and release channel for the installed application files.
 
+### 6.8 FidoNet-technology networks (issue #166)
+
+A node can join FidoNet or an FTN othernet (fsxNet, AgoraNet, Micronet, ...)
+as an ordinary FTN node. The node carries echomail on boards and netmail in
+Mail. This is a **gateway at the boundary**. Link's protocol, events and trust
+model do not change, and FTN content never enters them. Decisions and the
+alternatives rejected for each are in §16, "Issue #166".
+
+**Networks.** A SysOp adds one network record per FTN network:
+
+- the network's name and 5D domain;
+- this node's address in it (`zone:net/node`, or `.point` for a point);
+- the uplink's address and its BinkP `host:port`;
+- the session password, plus optional packet and AreaFix passwords;
+- the poll interval, and whether this node answers incoming calls.
+
+Every network is off until the SysOp enables it, and settings take effect
+without a restart, as MRC's do (§6.3).
+
+**Transport: native BinkP, both directions.** The node speaks binkp/1.0
+(FTS-1026) in-process, with CRAM-MD5 (FTS-1027) and NR mode (FTS-1028). Two
+roles:
+
+- **Originating.** The node polls each network's uplink on its interval, at
+  least once a day, as hubs ask, and calls out sooner when mail is waiting.
+- **Answering.** The node listens on a configurable port (24554 by default)
+  for an uplink or a direct caller. Only a session whose address and password
+  match a configured link is *secure*. Packets from an unsecure session are
+  held for the SysOp rather than tossed.
+
+No external mailer or tosser is needed or supported. Packets are Type 2+
+(FSC-0048) when written, and Type 2, 2+ or FSC-0039 are accepted when read.
+Bundles are ZIP, identified by content rather than by name. Outbound mail is
+queued in the database, modelled on §13.7's work items, not in BSO
+directories.
+
+**Echomail on boards.** A board is either local, Linked or FTN; it cannot be
+two of these. One echo area maps to one board, and the SysOp sets the mapping
+per board. Nothing is mapped by default.
+
+- *Inbound.* An echomail message becomes a post on its board:
+  - **Author.** It is labelled `Name (zone:net/node[.point])`, never with `@`,
+    which names a Link identity. It has no local account and no fingerprint.
+  - **Moderation.** It goes through the board's own moderation (§5.3). It is
+    never trust-evaluated (§12): FTN has no identity a node can verify.
+  - **Threading and date.** `^AREPLY` threads it under the post carrying the
+    matching `^AMSGID`. The message's own date, corrected by `^ATZUTC`, is
+    kept as the post's date.
+  - **Duplicates.** A message whose MSGID (or, without one, content hash) was
+    seen on that area before is dropped.
+- *Outbound.* A local post on an FTN board is exported to the uplink:
+  - the `AREA:` line, `^AMSGID` (a persisted serial, unique across restores),
+    `^AREPLY`, `^APID`, `^ATZUTC` and `^ACHRS`;
+  - a tear line and an Origin line;
+  - SEEN-BY and `^APATH` as FSC-0074 sets them.
+
+  A post that arrived from FTN is never exported again. SEEN-BY and PATH on
+  tossed messages are kept intact, so loop detection works.
+- *Edits and deletions* have no FTN equivalent. A local edit is not
+  re-exported, and removing an FTN-sourced post removes only the local copy.
+
+**Netmail in Mail.** Netmail is personal mail (§6.4) with an FTN address:
+
+- **Addressing.** A caller writes to `Name (zone:net/node[.point])` on the
+  To line. It is the same form an FTN author is shown with on a board, and
+  replying to an FTN post or netmail fills it in. The compose screen names
+  the network and says that netmail is not private: every system it passes
+  through can read it.
+- **Senders.** Each network has a minimum level for sending netmail. It
+  defaults to SysOp only until the SysOp lowers it, because netmail goes out
+  under the node's address. Every account can receive netmail.
+- **Routing.** A netmail goes **direct when possible**. The node processes
+  the network's nodelist (FTS-5000) and calls the destination over BinkP when
+  its entry lists a BinkP host (`IBN`/`INA` flags). Otherwise the netmail
+  goes to the uplink for routing, and so does one whose direct call fails
+  after its retries.
+- **Kludges.** INTL, FMPT and TOPT (FTS-4001) are written whenever zones or
+  points need them.
+- **Inbound delivery.** Netmail is delivered by matching the To name,
+  case-insensitively, against a username (and the account's alias, if it has
+  one). A netmail matching no account goes to the SysOp, marked as addressed
+  to someone else. It is not bounced.
+- **Robots.** AreaFix is netmail too. The console's Areas screen sends `+TAG`,
+  `-TAG` and `%LIST` to the uplink's AreaFix and shows the replies.
+
+**Character sets.** Text is decoded by its `^ACHRS` kludge (FTS-5003). Without
+one, the network's default is used, CP437 unless the SysOp sets another.
+Outbound text is written in CP437 when every character fits, and in UTF-8
+otherwise. The kludge always names the set used. To, From and Subject are cut
+on character boundaries to FTS-0001's 35 and 71 bytes. Inbound text is
+sanitized before display like any other external content.
+
+**Not part of this design:** file echoes (TIC), file requests, acting as a
+hub for downlinks (AreaFix robot, SEEN-BY fan-out to other nodes), nodelist
+publishing, and QWK. Each needs its own decision.
+
 ---
 
 ## 7. NetBBS Link: identity, events, and compatibility
@@ -15490,6 +15586,81 @@ not in the SSH listener. Recorded as issue #505.
 Revisit only if a concrete caller-facing need appears that HTTP transfer cannot
 serve — not because SFTP would be convenient to have.
 
+### Issue #166 — FidoNet/BinkP gateway — decided
+
+The issue scoped an FTN gateway as a hedge against Link's adoption: FidoNet
+and its othernets are populated networks today. The maintainer decided the
+design on 2026-10-07. Normative description: §6.8.
+
+**Research.**
+- **Prior art.** Every current BBS package runs its FTN mailer and tosser
+  inside the BBS:
+  - Synchronet: SBBSecho and BinkIT;
+  - Mystic: MIS and MUTIL;
+  - ENiGMA½: a native BinkP 1.1 mailer;
+  - Talisman: Postie and Binki;
+  - ANetBBS: Python, MIT.
+
+  The external binkd + hpt combination survives on older Linux setups. Python
+  has no maintained FTN or BinkP library: python-ftn is GPL-3 and archived,
+  and no Python BinkP implementation exists outside ANetBBS. ANetBBS keeps
+  its queue in the database rather than in BSO directories, as this design
+  does.
+- **The usual on-ramp** for a new BBS is fsxNet (zone 21). A node applies by
+  email. A node that only polls, with mail held at the hub, is accepted. Its
+  infopack forbids gating fsxNet traffic to another network without the zone
+  coordinator's approval.
+
+**Decision 1 — native BinkP, not an external mailer.** The node speaks
+binkp/1.0 with CRAM-MD5 and NR in-process. Rejected: binkd with BSO
+directories, which means a second program with its own configuration and
+passwords for the SysOp to keep in step. It is also awkward on Windows.
+
+**Decision 2 — the first version answers calls as well as polling.**
+Rejected: poll-only first. Answering needs an open port, so it stays a
+per-network switch, but hubs deliver crash mail sooner to a node that
+answers. Direct netmail (Decision 5) also needs it.
+
+**Decision 3 — a board is local, Linked or FTN, never two.** Rejected: both,
+opt-in behind a warning. fsxNet's gating rule forbids carrying its traffic
+onto Link, and Link would sign FTN posts as this node's own
+(`queue_board_post_if_linked`). Keeping them apart keeps the gateway at the
+boundary, as the issue asked.
+
+**Decision 4 — full caller netmail, in Mail.** Rejected:
+- AreaFix only;
+- AreaFix plus netmail for the SysOp alone.
+
+Netmail is personal mail with an FTN address. The To line takes
+`Name (zone:net/node)`, the form an FTN author already has on boards, since
+`@` names a Link identity. Rejected: a separate Netmail item with its own
+folder, which splits one inbox into two.
+
+**Decision 5 — netmail goes direct when it can.** The node processes the
+network's nodelist and calls a destination that lists a BinkP host. Anything
+else, and a failed direct call, goes to the uplink. Rejected: everything via
+the uplink. That needs no nodelist, but it is hours slower, through every hub
+on the way.
+
+**Decision 6 — sending netmail needs a minimum level, which starts at SysOp
+only.** Netmail leaves under the node's address, so the hub holds the SysOp
+answerable for it. Rejected: every account by default.
+
+**Decision 7 — netmail to an unknown name goes to the SysOp.** This is the
+usual FTN practice, and nothing is lost to a typo. Rejected: bouncing it to
+the sender, which loses a mistyped letter and can loop with a misconfigured
+node.
+
+**Defaults set alongside, without a separate question:**
+- one echo area per board, off by default, as MRC rooms are;
+- FTN authors shown as `Name (address)`, never trust-evaluated, through the
+  board's own moderation;
+- FTN dates kept;
+- duplicates dropped by MSGID;
+- SEEN-BY and PATH kept, and no re-export of FTN-sourced posts;
+- CP437 when the text fits, UTF-8 otherwise, named by `^ACHRS`;
+- file echoes, file requests, hub mode and QWK out of scope.
+
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
@@ -15498,9 +15669,7 @@ serve — not because SFTP would be convenient to have.
 - Community defaults as mandatory floors/ceilings.
 
 A deferred topic becomes normative only after an explicit design decision. Do
-not infer commitment from its appearance in this list. (FidoNet/BinkP
-gatewaying is tracked instead under issue #166, its own active scoping
-issue, not this list.)
+not infer commitment from its appearance in this list.
 
 ---
 
