@@ -11,7 +11,7 @@ calls the uplink when
   so a new post goes out within minutes without hammering the hub (fsxNet
   blocks a node that calls several times a minute).
 
-A call sends one packet of up to `MAX_MESSAGES_PER_PACKET` waiting
+A call sends one packet of up to `exchange.MAX_MESSAGES_PER_PACKET` waiting
 messages, receives whatever the hub holds, and tosses it: bare packets
 directly, ZIP bundles unpacked first; any other file is held for the
 SysOp. A message is marked sent only when the hub confirms the packet
@@ -34,34 +34,19 @@ import asyncio
 import contextlib
 import datetime
 import logging
-import secrets
 import time
 from dataclasses import dataclass
 
-from netbbs import __version__
-from netbbs.auth.users import is_usable_sysop, list_users
-from netbbs.config import get_node_display_name
-from netbbs.ftn import FtnFormatError
-from netbbs.ftn.binkp import BinkpError, OutgoingFile, ReceivedFile, SessionResult, SystemInfo, run_session
-from netbbs.ftn.bundle import archive_kind, extract_packets, packet_name
+from netbbs.ftn.binkp import BinkpError, OutgoingFile, SessionResult, SystemInfo, run_session
+from netbbs.ftn.exchange import outbound_packet, summary, system_info, toss_received
 from netbbs.ftn.networks import FtnNetwork, list_networks
-from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
-from netbbs.ftn.queue import (
-    count_pending_outbound,
-    hold_inbound,
-    mark_outbound_sent,
-    pending_outbound,
-    prune_seen_msgids,
-    prune_sent_outbound,
-)
-from netbbs.ftn.tosser import TossResult, toss_packet
+from netbbs.ftn.queue import count_pending_outbound, mark_outbound_sent, prune_seen_msgids, prune_sent_outbound
 
 _logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL = 60.0
 MIN_CALL_GAP = 300.0
 CONNECT_TIMEOUT = 30.0
-MAX_MESSAGES_PER_PACKET = 500
 MAINTENANCE_INTERVAL = 24 * 3600.0
 
 
@@ -143,14 +128,9 @@ class FtnMailer:
         """Call the uplink once; returns the network's updated status."""
         status = self.status.setdefault(network.id, PollStatus())
         status.last_attempt = self._clock()
-        messages = await self._lane.run(pending_outbound, network.id, limit=MAX_MESSAGES_PER_PACKET)
-        outgoing: list[OutgoingFile] = []
-        if messages:
-            header = PacketHeader(orig=network.our_address, dest=network.uplink_address,
-                                  created=datetime.datetime.now(), password=network.packet_password)
-            outgoing.append(OutgoingFile(packet_name(secrets.randbits(32)),
-                                         build_packet_from_packed(header, [m.packed for m in messages])))
-        system = await self._lane.run(_system_info)
+        packet, message_ids = await outbound_packet(self._lane, network)
+        outgoing = [packet] if packet is not None else []
+        system = await self._lane.run(system_info)
         try:
             result = await self._session(network, system, outgoing)
         except (OSError, asyncio.TimeoutError, BinkpError) as exc:
@@ -162,18 +142,15 @@ class FtnMailer:
         if result.plaintext_password:
             _logger.warning("FTN %s: the uplink offered no CRAM-MD5, so the session password crossed unhashed",
                             network.name)
-        sent = len(messages) if outgoing and outgoing[0].name in result.sent else 0
+        sent = len(message_ids) if packet is not None and packet.name in result.sent else 0
         if sent:
-            await self._lane.run(mark_outbound_sent, [m.id for m in messages])
-        tossed = TossResult()
-        for received in result.received:
-            await self._toss_received(network, received, result, tossed)
+            await self._lane.run(mark_outbound_sent, message_ids)
+        tossed = await toss_received(self._lane, network, result)
         status.failures = 0
         status.last_error = None
         status.last_success = status.last_attempt
         status.last_success_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-        status.last_summary = (f"sent {sent}, received {len(result.received)} files: {tossed.posts} posts, "
-                               f"{tossed.netmail} netmail, {tossed.duplicates} duplicates, {tossed.held} held")
+        status.last_summary = summary(sent, len(result.received), tossed)
         _logger.info("FTN %s: call to %s done -- %s", network.name, network.uplink_host, status.last_summary)
         return status
 
@@ -189,44 +166,3 @@ class FtnMailer:
             writer.close()
             with contextlib.suppress(OSError, asyncio.TimeoutError):
                 await asyncio.wait_for(writer.wait_closed(), 5)
-
-    async def _toss_received(self, network: FtnNetwork, received: ReceivedFile, result: SessionResult,
-                             tossed: TossResult) -> None:
-        remote = str(result.remote_addresses[0]) if result.remote_addresses else "?"
-        kind = archive_kind(received.data)
-        if kind == "pkt":
-            packets = [(received.name, received.data)]
-        elif kind == "zip":
-            try:
-                packets = await asyncio.to_thread(extract_packets, received.data)
-            except FtnFormatError as exc:
-                await self._hold(network, remote, received, f"bundle could not be unpacked: {exc}", tossed)
-                return
-        else:
-            await self._hold(network, remote, received, f"not a packet or ZIP bundle ({kind or 'unknown'})", tossed)
-            return
-        for name, data in packets:
-            one = await self._lane.run(toss_packet, network, data, secure=result.secure,
-                                       remote_address=remote, file_name=name)
-            tossed.posts += one.posts
-            tossed.netmail += one.netmail
-            tossed.duplicates += one.duplicates
-            tossed.held += one.held
-
-    async def _hold(self, network, remote, received: ReceivedFile, reason: str, tossed: TossResult) -> None:
-        kept = await self._lane.run(_hold, network.id, remote, received.name, received.data, reason)
-        if kept:
-            tossed.held += 1
-        else:
-            _logger.error("FTN %s: %s from %s was lost (held store full): %s", network.name, received.name,
-                          remote, reason)
-
-
-def _hold(db, network_id, remote, name, data, reason) -> bool:
-    return hold_inbound(db, network_id=network_id, remote_address=remote, file_name=name, content=data, reason=reason)
-
-
-def _system_info(db) -> SystemInfo:
-    sysops = sorted((user for user in list_users(db) if is_usable_sysop(user)), key=lambda user: user.id)
-    return SystemInfo(name=get_node_display_name(db), sysop=sysops[0].username if sysops else "SysOp",
-                      version=f"NetBBS/{__version__}")

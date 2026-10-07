@@ -37,6 +37,7 @@ from netbbs import __version__
 from netbbs.link.diagnostics import LINK_LOGGER_NAME, LinkDiagnosticLogHandler
 from netbbs.doors.registry import list_doors
 from netbbs.doors.services import DoorServiceManager
+from netbbs.ftn.listener import FtnListener
 from netbbs.ftn.mailer import FtnMailer
 from netbbs.mrc.bridge import MRC_LOGGER_NAME, MrcBridge
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
@@ -677,6 +678,7 @@ async def run(
     # Design doc §6.8: one FTN mailer per node. It calls only networks a
     # SysOp has enabled, read on every pass, so a node with none stays idle.
     ftn_mailer = FtnMailer(background_lane)
+    ftn_listener = FtnListener(background_lane)
     # Issue #466: every door service this node owns. Constructed here so the
     # session handlers below can close over it, but nothing is *started* until
     # inside the lifecycle try/finally -- a supervisor started before that
@@ -1298,6 +1300,7 @@ async def run(
         # never false merely because the listeners came up first.
         await mrc_bridge.start()
         await ftn_mailer.start()
+        await ftn_listener.start()
         # Issue #475: this node's file-transfer grants, and the gateway
         # that redeems them. Only meaningful with the web listener
         # running -- that HTTP server is where the endpoint lives -- so a
@@ -1639,6 +1642,7 @@ async def run(
         # gather the connector, reader, writer and keepalive tasks --
         # bounded internally, so a dead hub can't stall the drain.
         await mrc_bridge.close()
+        await ftn_listener.close()
         await ftn_mailer.close()
         foreground_lane.close()
         background_lane.close()
