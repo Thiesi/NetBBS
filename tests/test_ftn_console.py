@@ -185,3 +185,14 @@ def test_a_full_queue_is_said_on_the_areafix_screen(db, lane, sysop, monkeypatch
     session = FakeSession(["a", "%list", "b"])
     asyncio.run(ftn_status_screen(session, lane, sysop, _controls()))
     assert "already waiting" in _visible(_written_text(session))
+
+
+def test_the_cli_import_is_attributed_to_the_sysop_named_with_as(db, sysop, tmp_path):
+    _network(db)
+    path = tmp_path / "FSXNET.280"
+    path.write_bytes(b"Zone,21,Z,X,Y,-,300\r\n,110,Joe,X,Y,-,300,IBN:joe.example\r\n")
+    run_ftn_import_nodelist(db, "fsxNet", path, as_username="sysop")
+    (entry,) = [a for a in list_recent_actions(db, limit=10) if a.action == "import_ftn_nodelist"]
+    assert entry.actor_user_id == sysop.id
+    with pytest.raises(ValueError, match="not an active SysOp"):
+        run_ftn_import_nodelist(db, "fsxNet", path, as_username="nobody")

@@ -350,9 +350,16 @@ async def _prompt_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
         return None
 
 
-def run_ftn_import_nodelist(db: Database, network_name: str, path: Path) -> str:
+def run_ftn_import_nodelist(db: Database, network_name: str, path: Path, *, as_username: str | None = None) -> str:
     """`ftn-import-nodelist`: the outcome line, or `ValueError`/`OSError`
-    saying why nothing was imported (design doc §6.8)."""
+    saying why nothing was imported (design doc §6.8). `--as` names the
+    active SysOp the audit log attributes it to; without it, nobody."""
+    actor = None
+    if as_username is not None:
+        actor = next((u for u in list_users(db) if u.username == as_username and u.user_level >= SYSOP_LEVEL
+                      and u.disabled_at is None), None)
+        if actor is None:
+            raise ValueError(f"--as {as_username!r} is not an active SysOp-level account")
     from netbbs.ftn.networks import list_networks
     from netbbs.ftn.nodelist import MAX_NODELIST_BYTES, import_nodelist
     from netbbs.moderation.log import record_action
@@ -364,7 +371,7 @@ def run_ftn_import_nodelist(db: Database, network_name: str, path: Path) -> str:
     if path.stat().st_size > MAX_NODELIST_BYTES:
         raise ValueError(f"{path.name} is over {MAX_NODELIST_BYTES // (1024 * 1024)} MiB")
     count = import_nodelist(db, network.id, path.read_bytes().decode("cp437", errors="replace"))
-    record_action(db, actor=None, action="import_ftn_nodelist", detail=f"{network.name}: {count} nodes from {path.name}")
+    record_action(db, actor=actor, action="import_ftn_nodelist", detail=f"{network.name}: {count} nodes from {path.name}")
     return f"Imported {count} nodes for {network.name} from {path.name}."
 
 
@@ -497,7 +504,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "ftn-import-nodelist":
         try:
-            print_wrapped(run_ftn_import_nodelist(db, args.network, args.path))
+            print_wrapped(run_ftn_import_nodelist(db, args.network, args.path, as_username=args.as_username))
         except (OSError, ValueError) as exc:
             raise SystemExit(terminal_wrapped(f"Not imported: {exc}", stream=sys.stderr)) from exc
         finally:
