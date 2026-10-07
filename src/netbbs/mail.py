@@ -609,6 +609,39 @@ def send_system_mail_without_commit(
     return _row_to_message(row)
 
 
+def deliver_external_mail_without_commit(
+    db: Database, recipient: User, *, sender_label: str, subject: str, body: str, created_at: str,
+) -> MailMessage:
+    """Deliver a letter from outside NetBBS -- an FTN netmail (design doc
+    §6.8) -- to a local account. `sender_label` is the sender as shown and
+    as Reply addresses it (`Name (zone:net/node)`); it never contains `@`,
+    which names a Link address.
+
+    The shape of an inbound Link letter: no sender account, and no Sent
+    copy here, so the sender side is deleted from the start and the
+    recipient's delete removes the row. The same limits and cap as any
+    delivery: `MailRecipientRefused` for an account that takes no mail,
+    `MailboxFullError` for an inbox full of unread mail."""
+    if "@" in sender_label:
+        raise MailError("an external sender label cannot contain '@'")
+    subject = validate_mail_fields(subject, body)
+    refusal = mail_recipient_refusal(db, recipient)
+    if refusal is not None:
+        raise MailRecipientRefused(refusal)
+    _make_room_if_needed(db, recipient)
+    db.connection.execute(
+        """
+        INSERT INTO mail_messages
+            (sender_user_id, sender_label, recipient_user_id, subject, body, created_at, sender_deleted_at)
+        VALUES (NULL, ?, ?, ?, ?, ?, ?)
+        """,
+        (sender_label, recipient.id, subject, body, created_at, utc_now_iso()),
+    )
+    row = db.connection.execute("SELECT * FROM mail_messages WHERE id = last_insert_rowid()").fetchone()
+    index_mail_without_commit(db, row["id"])
+    return _row_to_message(row)
+
+
 def _make_room_if_needed(db: Database, recipient: User) -> None:
     if not make_room(db, recipient):
         raise MailboxFullError(

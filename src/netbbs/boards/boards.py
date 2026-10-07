@@ -251,6 +251,16 @@ def _read_back_by_name(db: Database, name: str):
     return _row_to_board(row)
 
 
+def get_board_by_id(db: Database, board_id: int) -> Board:
+    """A board by its local id, hidden or not: for a caller holding an id
+    from its own mapping (the FTN gateway's echo areas), not a caller's
+    choice from a list."""
+    row = db.connection.execute("SELECT * FROM boards WHERE id = ?", (board_id,)).fetchone()
+    if row is None:
+        raise BoardError(f"no board with id {board_id}")
+    return _row_to_board(row)
+
+
 def get_board_by_name(db: Database, name: str) -> Board:
     # Issue #683: a hidden (excluded) carried board is invisible here and in
     # `list_boards`, which every caller-facing and admin listing goes through.
