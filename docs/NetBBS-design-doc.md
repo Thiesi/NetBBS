@@ -1280,7 +1280,11 @@ Two rules follow from that, and are normative for any future list:
   caller who can open the resource sees it, a SysOp included, and a Linked
   resource shows the gates this node applies. It is one row at the session's
   layout width, cut with the session's ellipsis, with ` - ` between gates
-  for an ASCII caller (`netbbs.gate_summary`).
+  for an ASCII caller (`netbbs.gate_summary`). A gate the caller does not
+  meet is drawn in `ERROR_COLOR`, and an ASCII caller also reads
+  ` (not met)` after it (issue #1115): the same line says why they can read
+  a board but not post to it, so no second "Read only" line repeats the
+  level.
 - **A table that does not fit becomes prose again.** Below the width at which
   the name column stays readable, the row falls back to the flat description
   form. The decision is made per render against the live terminal width, not
@@ -2541,8 +2545,9 @@ The list:
   they came through (Community, "Message boards", category), newest or older
   posts, how many were new on arrival, and "Linked" or "linked from X".
 - Shows the board's description and, for a caller who can read but not post,
-  why ("Read only: posting needs level N", or a name that needs
-  verification).
+  why: the gate they do not meet is marked on its "Requires:" line (issue
+  #1115). Only a reason that is not a gate -- a Linked board whose origin
+  keeps posting to its own callers -- still gets a line of its own.
 - Marks a post `new` until the caller opens it (§6.6, issue #710): showing
   a post in the list does not count as reading it. `[M]ark all read` counts
   everything on the board as read; it is offered only while something is
@@ -15331,6 +15336,21 @@ the explanation from the callers it is for.
 channel entry carry the line. Lists keep their "needs verification" note and
 the console's gate column (§3.6); a row has no room for the full set, and a
 list's slot art (§3.2) is the SysOp's own drawing.
+
+**Decision 4 (issue #1115) — the caller's unmet gates are marked on the same
+line.** A caller who could read a board but not post saw "Requires: level
+255+ to post" and, below it, "Read only: posting needs level 255.", the same
+fact twice. The gates the caller fails, asked with the access checks
+themselves (`unmet_gates`), are drawn in `ERROR_COLOR`, with ` (not met)` for
+an ASCII caller, and the separate line is dropped wherever the marked gate
+explains it. The maintainer's wording was "the warning colour"; it is the
+error colour because `WARNING_COLOR` (amber, 214) sits next to `GATE_COLOR`
+(orange, 208) and the mark would not show. Rejected: keeping both lines and
+rewording the second, which still says one thing twice.
+When the line is too wide for the screen, the unmet gates move to its front,
+since it is cut from the end; and the separate line is dropped only when every
+unmet gate survives the cut whole (`unmet_gates_shown`), so a narrow screen
+keeps the reason.
 
 ### Issue #1110 — a SysOp corrects a caller's display name and birthdate — decided
 

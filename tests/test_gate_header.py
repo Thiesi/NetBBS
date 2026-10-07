@@ -204,3 +204,101 @@ def test_a_redrawn_empty_gated_file_area_keeps_its_gates(db, lane, alice):
     session = AreaSession([REDRAW_KEY, "b"])
     asyncio.run(file_flow._show_area(session, lane, area, alice))
     assert strip_ansi("".join(session.written)).count("Requires: level 30+ to upload") == 2
+
+
+# -- the caller's own unmet gates (issue #1115) ---------------------------------
+
+
+def _member(db, level=10):
+    return create_user(db, "member", password="hunter2pw", user_level=level)
+
+
+def test_unmet_gates_are_the_ones_the_caller_fails(db, alice):
+    from netbbs.gate_summary import unmet_gates
+
+    board = create_board(db, "news", creator=alice, min_write_level=255, min_age=18, age_requirement=VERIFIED)
+    member = _member(db)
+    assert unmet_gates(db, member, board) == {"age 18+ verified", "level 255+ to post"}
+    # A SysOp passes the age gate (#1096) and the level.
+    assert unmet_gates(db, alice, board) == frozenset()
+
+
+def test_an_unmet_gate_is_drawn_in_the_error_colour():
+    from netbbs.rendering.ansi import colored
+    from netbbs.rendering.theme import ERROR_COLOR, GATE_COLOR
+
+    line = gates_line(("age 18+", "level 255+ to post"), width=80, unmet={"level 255+ to post"})
+    assert colored("level 255+ to post", fg_color=ERROR_COLOR) in line
+    assert colored("age 18+", fg_color=GATE_COLOR) in line
+    assert strip_ansi(line) == "Requires: age 18+ · level 255+ to post"
+
+
+def test_ascii_says_not_met_in_words():
+    line = strip_ansi(gates_line(("level 255+ to post",), width=80, unicode_style=False, unmet={"level 255+ to post"}))
+    assert line == "Requires: level 255+ to post (not met)"
+
+
+@pytest.mark.parametrize("width", [80, 79, 30])
+def test_a_marked_line_still_fits(width):
+    gates = _long_gates()
+    line = gates_line(gates, width=width, unicode_style=False, unmet=set(gates[2:4]))
+    assert display_width(strip_ansi(line)) <= width
+    assert strip_ansi(line).endswith("...")
+
+
+def test_a_read_only_caller_sees_one_line_not_two(db, alice):
+    board = create_board(db, "news", creator=alice, min_write_level=255)
+    member = _member(db)
+    session = BoardSession(["b"])
+    asyncio.run(board_flow._show_board(session, db, board, member))
+    screen = session.visible()
+    assert "Requires: level 255+ to post" in screen
+    assert "Read only" not in screen
+    assert "[P]ost" not in screen
+
+
+def test_a_caller_who_can_post_sees_nothing_marked(db, alice):
+    from netbbs.rendering.theme import ERROR_COLOR
+
+    board = create_board(db, "club", creator=alice, min_write_level=5)
+    member = _member(db)
+    session = BoardSession(["b"])
+    asyncio.run(board_flow._show_board(session, db, board, member))
+    assert "Requires: level 5+ to post" in session.visible()
+    assert f"38;5;{ERROR_COLOR}m" not in "".join(session.written)
+
+
+def test_an_upload_level_the_caller_lacks_is_marked(db, lane, alice):
+    from netbbs.rendering.ansi import colored
+    from netbbs.rendering.theme import ERROR_COLOR
+
+    area = create_file_area(db, "pens", creator=alice, min_write_level=30)
+    member = _member(db)
+    session = AreaSession(["b"])
+    asyncio.run(file_flow._show_area(session, lane, area, member))
+    written = "".join(session.written)
+    assert "Requires: level 30+ to upload" in strip_ansi(written)
+    assert colored("level 30+ to upload", fg_color=ERROR_COLOR) in written
+
+
+def test_an_unmet_gate_comes_first_so_a_cut_line_keeps_it():
+    # Review on #1116: the line is cut from the end, and the gate that
+    # explains the refusal was always last.
+    gates = ("age 18+ verified", "verified name, shown", "level 250+ to post")
+    line = strip_ansi(gates_line(gates, width=44, unicode_style=False, unmet={"level 250+ to post"}))
+    assert line.startswith("Requires: level 250+ to post (not met)")
+
+
+def test_a_narrow_screen_keeps_the_read_only_line_when_the_mark_is_cut(db, alice):
+    from netbbs.gate_summary import unmet_gates_shown
+
+    gates = ("age 18+ verified", "level 255+ to post")
+    assert unmet_gates_shown(gates, {"level 255+ to post"}, width=80) is True
+    assert unmet_gates_shown(gates, {"level 255+ to post"}, width=20) is False
+
+    board = create_board(db, "news", creator=alice, min_write_level=255)
+    member = _member(db)
+    session = BoardSession(["b"])
+    session.terminal_width = 20
+    asyncio.run(board_flow._show_board(session, db, board, member))
+    assert "Read only" in session.visible()
