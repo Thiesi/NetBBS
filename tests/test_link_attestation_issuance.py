@@ -27,6 +27,7 @@ from netbbs.attestation import (
     AttestationError,
     attest_age,
     attest_name,
+    revoke_attestation,
     set_attestation_link_visible,
     withdraw_link_visibility,
 )
@@ -218,6 +219,21 @@ def test_a_deleted_account_is_revoked_rather_than_left_standing(db, node_identit
     changes = reconcile(db, node_identity, at=NOW + timedelta(hours=1))
 
     assert [(c.action, c.reason) for c in changes] == [("revoked", "account_removed")]
+    assert REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE in object_types(served(db))
+
+
+def test_a_revoked_verification_is_revoked_on_link_too(db, node_identity, alice):
+    """Issue #1115: revoking a verification the caller had shared needs no
+    Link step of its own. The next reconcile signs a revocation for the live
+    object, because the attestation behind it is gone."""
+    sysop = create_user(db, "sysop-r", password="password", user_level=SYSOP_LEVEL)
+    set_attestation_link_visible(db, alice, "age", True)
+    reconcile(db, node_identity)
+
+    assert revoke_attestation(db, alice, "age", actor=sysop) is True
+    changes = reconcile(db, node_identity, at=NOW + timedelta(hours=1))
+
+    assert [c.action for c in changes] == ["revoked"]
     assert REMOTE_ATTESTATION_REVOCATION_OBJECT_TYPE in object_types(served(db))
 
 

@@ -609,7 +609,10 @@ An entry marked **needs verification** asks for a verified name, or for a
 verified age when the birthdate in your profile is old enough but nobody has
 verified it. Opening it tells you which; the SysOp, or someone on the **Staff
 list** who verifies identity, can verify it for you. Your birthdate goes in
-**Your profile › Name & details**.
+**Your profile › Name & details**. That screen shows what this BBS verified
+("Verified by this node: born …") apart from what you entered yourself. Type
+`-` at your display name, location or birthdate to clear it; a verified value
+stays until whoever verified it revokes it.
 
 A SysOp-verified age or name stays on this BBS unless you switch on sharing
 over Link for it under **Profile**. Shared, it goes only to the other BBSes

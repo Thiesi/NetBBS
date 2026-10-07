@@ -15370,8 +15370,8 @@ display-name rules as the caller's own edit apply (the reserved `=` marker,
 the byte cap, the look-alike and staff-title checks of issues #835 and #843).
 A birthdate may be neither in the future nor before 1900-01-01, for the caller
 too: a typo such as `0198` would otherwise make anyone old enough for every
-age gate. Blank clears either field, which the caller's own screen does not
-offer and a SysOp needs.
+age gate. Blank clears either field, which a SysOp needs. (The caller's own
+screen could not clear them either; since issue #1115 it can, with `-`.)
 
 **Decision 3 — audited, without the birthdate.** Each edit is recorded in the
 account's admin history with who made it. A display name is shown to everyone,
@@ -15384,6 +15384,29 @@ attestation is not touched by these edits and still decides every gate; the
 account screen says so when one is on record. The caller's own visibility
 settings for both fields are left as they are. Display names do not travel
 over NetBBS Link, so nothing is carried.
+
+**Decision 5 (issue #1115) — revoking is an action of its own.** Clearing a
+birthdate left the verified age standing, which is Decision 4 working, but
+there was no way to take a verification back at all. Whoever may verify may
+now revoke (`revoke_attestation`): a SysOp from the account screen's
+`[V]erification: revoke`, offered only while one is on record, or anyone with
+"Can verify identity" from the verify screen's `[R]evoke`. It asks first,
+names the gates that will refuse the caller again, and is recorded in the
+account's history. A verification the caller had shared over Link needs no
+step of its own: the next sync signs a revocation for every live object whose
+attestation is gone (`reconcile_issued_attestations`). Clearing the plain
+field still never revokes. Rejected: clearing the birthdate or display name
+also revoking, which makes a typo fix withdraw a verification someone checked
+an ID for.
+
+**Decision 6 (issue #1115) — the caller sees both, and can clear their own.**
+A caller's Profile used to say only "Verified: age"; it now shows what this
+node verified, with the value ("Verified by this node: born 1980-01-01, real
+name …"), apart from the self-reported fields below it, so a caller who
+clears their own birthdate can see why an age still counts. Typing `-` at the
+display name, location or birthdate clears it; before, a caller could change
+these but never remove them. A birthdate still showing after a SysOp cleared
+it was a screen opened before the clear: the stored value was gone.
 
 ### Issue #1104 — Linked resources by colour — decided
 
