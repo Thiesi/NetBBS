@@ -352,6 +352,11 @@ class NodeControls:
     # bottom of the `netbbs.net` import graph) never imports the chat
     # stack; the real type is annotated at every consumer.
     mrc_bridge: Any = None
+    # Design doc §6.8: the node's `netbbs.ftn.mailer.FtnMailer` and
+    # `netbbs.ftn.listener.FtnListener`, for the console's FTN screens;
+    # `None` from the standalone CLI, typed `Any` like `mrc_bridge`.
+    ftn_mailer: Any = None
+    ftn_listener: Any = None
     # Issue #475: the node's one `netbbs.net.file_transfer.
     # TransferGrants`, from which the file screens mint HTTP
     # transfer links for callers whose terminal cannot speak
