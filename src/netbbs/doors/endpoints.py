@@ -85,6 +85,11 @@ def pty_endpoint(width, height):
     master, slave = pty.openpty()
     try:
         tty.setraw(slave)
+        # setraw also drops output processing; NetBSD curses moves to the next
+        # line with a bare LF and relies on the driver's CR (#1145).
+        mode = termios.tcgetattr(slave)
+        mode[1] |= termios.OPOST | termios.ONLCR
+        termios.tcsetattr(slave, termios.TCSANOW, mode)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
         return FdEndpoint(master), slave
     except BaseException:
