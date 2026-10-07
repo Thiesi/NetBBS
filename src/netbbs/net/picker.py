@@ -41,7 +41,16 @@ from typing import Awaitable, Callable, Mapping, Sequence, TypeVar
 from netbbs.net.art_prompt import clear_prompt_in_art, end_choice_line, mark_prompt_in_art
 from netbbs.digits import is_ascii_number
 from netbbs.net.art_pacing import write_paced_art, write_paced_art_text
-from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, Completer, EditorKey, EditorKeyKind
+from netbbs.net.char_input import (
+    CANCEL_KEY,
+    HELP_KEY,
+    REDRAW_KEY,
+    REFRESH_KEY,
+    Completer,
+    EditorKey,
+    EditorKeyKind,
+    help_key_label,
+)
 from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import move_cursor, strip_ansi
 from netbbs.rendering.art_slots import ListSlotRow, SlotArt, list_slot_fits, render_list_slot_art
@@ -686,7 +695,7 @@ async def pick_item(
                 header_lines=_header_lines(), width=width, height=height, on_create=on_create,
                 # Issue #538: the trailer is a real line too, and whether
                 # it takes one depends on these.
-                trailer=_trailer_text(_sort_label_text(), refresh is not None),
+                trailer=_trailer_text(_sort_label_text(), refresh is not None, help_key_label(session)),
                 unicode_style=unicode_style, shapes=shapes, live_nav=live_nav,
             )
 
@@ -805,7 +814,7 @@ async def pick_item(
         boilerplate = "or type a number to select; Ctrl-L: redraw"
         if refresh is not None:
             boilerplate += ", Ctrl-R: refresh"
-        boilerplate += ", Ctrl-H: help"
+        boilerplate += f", {help_key_label(session)}: help"
         return f"{line}; {boilerplate}" if line else boilerplate
 
     def _slot_nav_lines(
@@ -819,7 +828,7 @@ async def pick_item(
         nav = _render_nav(
             session, on_sort, "off", include_next=include_next, include_prev=include_prev,
             shapes=shapes, live_nav=live_nav, width=width, height=height, on_create=on_create,
-            trailer=_trailer_text(_sort_label_text(), refresh is not None), unicode_style=unicode_style,
+            trailer=_trailer_text(_sort_label_text(), refresh is not None, help_key_label(session)), unicode_style=unicode_style,
         )
         lines = nav.split("\r\n")
         trailer = _trailer_line()
@@ -1318,7 +1327,7 @@ async def pick_item(
         # descriptive-nav floor now weighs the trailer's rows too, so it
         # has to exist by the time that decision is made. The full
         # reasoning for what goes in it is below, where it is drawn.
-        trailer = _trailer_text(_sort_label_text(), refresh is not None)
+        trailer = _trailer_text(_sort_label_text(), refresh is not None, help_key_label(session))
         nav = _render_nav(
             session, on_sort, description_level,
             # From the offset, not the derived page number: they are
@@ -2150,7 +2159,7 @@ def _render_nav(
     return action_bar([e.label for e in entries], width=width)
 
 
-def _trailer_text(sort_label_text: str, has_refresh: bool) -> str:
+def _trailer_text(sort_label_text: str, has_refresh: bool, help_key: str = "Ctrl-H") -> str:
     """The instruction line that follows the nav row.
 
     Takes the already-read label rather than the callable, so the
@@ -2161,7 +2170,7 @@ def _trailer_text(sort_label_text: str, has_refresh: bool) -> str:
     boilerplate = "or type a number to select; Ctrl-L: redraw"
     if has_refresh:
         boilerplate += ", Ctrl-R: refresh"
-    boilerplate += ", Ctrl-H: help"
+    boilerplate += f", {help_key}: help"
     return f"{text}; {boilerplate}" if text else boilerplate
 
 

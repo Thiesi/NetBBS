@@ -226,6 +226,9 @@ _CSI_TILDE_TO_KEY: dict[bytes, str] = {
     b"2": "INSERT",
     b"5": "PAGE_UP",
     b"6": "PAGE_DOWN",
+    # F1, as SyncTERM sends it (CTerm manual, "Sequences sent by
+    # SyncTERM") and as older xterm/PuTTY settings do: help (issue #1119).
+    b"11": "F1",
 }
 
 
@@ -249,6 +252,7 @@ _SS3_TO_KEY: dict[str, str] = {
     "D": "LEFT",
     "H": "HOME",
     "F": "END",
+    "P": "F1",  # F1 in xterm's VT220-style encoding (issue #1119)
 }
 
 
@@ -1664,6 +1668,14 @@ async def _read_line_editable(
     return submitted
 
 
+def help_key_label(source: object) -> str:
+    """The help key to name on screen (issue #1119). Ctrl-H is the same
+    byte as Backspace, 0x08, and a terminal whose Backspace key sends it
+    (SyncTERM) reads it as Backspace everywhere, so its callers get help
+    from F1. Everyone else keeps Ctrl-H, and F1 works for them too."""
+    return "F1" if sends_syncterm_keys(source) else "Ctrl-H"
+
+
 async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> str:
     """
     Read a single character and return immediately — the character-mode
@@ -1697,13 +1709,20 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
             continue
 
         if b == _ESC:
-            await _read_escape_sequence(source)
+            # F1 is help on every terminal (issue #1119): on one whose
+            # Backspace sends 0x08, it is how help is reached at all.
+            if await _read_escape_sequence(source) == "F1":
+                return HELP_KEY
             continue
 
         if b == ord(REDRAW_KEY):
             return REDRAW_KEY
         if b == ord(REFRESH_KEY):
             return REFRESH_KEY
+        if b == _BS and sends_syncterm_keys(source):
+            # That terminal's Backspace key (issue #1119), not Ctrl-H:
+            # Backspace means nothing on a menu, as 0x7F doesn't above.
+            continue
         if b == ord(HELP_KEY):
             return HELP_KEY
         if b == ord(CANCEL_KEY):
@@ -1868,7 +1887,9 @@ async def read_editor_key(
                 await _consume_optional_lf_or_nul(source)
             return EditorKey(EditorKeyKind.ENTER)
 
-        if b == _BS and distinguish_ctrl_h:
+        if b == _BS and distinguish_ctrl_h and not sends_syncterm_keys(source):
+            # On a terminal whose Backspace key sends 0x08 (SyncTERM), the
+            # byte stays Backspace: help is F1 or [?] there (issue #1119).
             return EditorKey(EditorKeyKind.CTRL, char="h")
 
         if b == _DEL and sends_syncterm_keys(source):
@@ -1902,6 +1923,8 @@ async def read_editor_key(
             if isinstance(key, ColorCode):
                 if pasted_color is not None:
                     _type_pasted_color(source, key, pasted_color)
+            elif key == "F1" and distinguish_ctrl_h:
+                return EditorKey(EditorKeyKind.CTRL, char="h")  # help (issue #1119)
             elif key is not None:
                 kind = _SYMBOLIC_TO_EDITOR_KIND.get(key)
                 if kind is not None:

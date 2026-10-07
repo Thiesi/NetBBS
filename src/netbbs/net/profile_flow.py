@@ -1478,7 +1478,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             help=(
                 "Whether menu screens show a short explanation under each option. 'off' is "
                 "most compact; 'brief' adds a one-line hint per option; 'detailed' shows the "
-                "fullest explanation where a field also defines one, like this Ctrl-H text."
+                "fullest explanation where a field also defines one, like this help text."
             ),
             section="Display",
         ),
