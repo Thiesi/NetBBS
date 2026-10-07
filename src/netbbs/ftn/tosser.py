@@ -50,9 +50,11 @@ from netbbs.ftn.packet import PackedMessage, PacketHeader, build_packet, parse_p
 from netbbs.ftn.queue import hold_inbound, record_seen_msgid_without_commit
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
+    MAX_MAIL_SUBJECT_BYTES,
     MailboxFullError,
     MailError,
     deliver_external_mail_without_commit,
+    mail_recipient_refusal,
 )
 from netbbs.search import reindex_post
 from netbbs.storage.database import Database
@@ -105,7 +107,7 @@ def toss_packet(
                 _toss_netmail(db, network, message, packed, header, result)
         except (_Unstorable, FtnFormatError) as exc:
             db.connection.rollback()
-            _hold_message(db, network, header, packed, remote_address, file_name, str(exc), result)
+            _hold_message(db, network, header, packed, data, remote_address, file_name, str(exc), result)
     if result.unknown_areas or result.not_for_us or result.held or result.truncated_packet:
         _logger.warning(
             "FTN %s: packet %s from %s -- %d posts, %d netmail, %d duplicates, unknown areas %s, "
@@ -179,7 +181,7 @@ def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader
         deliver_external_mail_without_commit(
             db, recipient,
             sender_label=_label(message.from_name, netmail_origin(message, header)),
-            subject=message.subject.strip() or "(no subject)",
+            subject=_fit(message.subject.strip() or "(no subject)", MAX_MAIL_SUBJECT_BYTES, note=""),
             body=_fit(body, MAX_MAIL_BODY_BYTES),
             created_at=_written_at(message),
         )
@@ -197,8 +199,6 @@ def _netmail_recipient(db: Database, to_name: str) -> tuple[User, str | None]:
         user = get_user_by_username(db, name)
     except AuthError:
         user = None
-    from netbbs.mail import mail_recipient_refusal
-
     if user is not None and mail_recipient_refusal(db, user) is None:
         return user, None
     sysops = sorted((u for u in list_users(db) if is_usable_sysop(u)), key=lambda u: u.id)
@@ -285,12 +285,13 @@ def _written_at(message: FtnMessage) -> str:
     return utc_iso(moment)
 
 
-def _fit(text: str, max_bytes: int) -> str:
-    """`text`, cut with a note if its UTF-8 is over `max_bytes`."""
+def _fit(text: str, max_bytes: int, *, note: str = _CUT_NOTE) -> str:
+    """`text`, cut with `note` if its UTF-8 is over `max_bytes`. A CP437
+    subject of 71 bytes can be over 200 in UTF-8."""
     if len(text.encode("utf-8")) <= max_bytes:
         return text
-    room = max_bytes - len(_CUT_NOTE.encode("utf-8"))
-    return text.encode("utf-8")[:room].decode("utf-8", errors="ignore") + _CUT_NOTE
+    room = max_bytes - len(note.encode("utf-8"))
+    return text.encode("utf-8")[:room].decode("utf-8", errors="ignore") + note
 
 
 def _hold_packet(db, network, data, remote_address, file_name, reason, result: TossResult) -> TossResult:
@@ -304,8 +305,13 @@ def _hold_packet(db, network, data, remote_address, file_name, reason, result: T
     return result
 
 
-def _hold_message(db, network, header, packed, remote_address, file_name, reason, result: TossResult) -> None:
-    single = build_packet(header, [packed])
+def _hold_message(db, network, header, packed, data, remote_address, file_name, reason, result: TossResult) -> None:
+    try:
+        single = build_packet(header, [packed])
+    except (FtnFormatError, ValueError):
+        # What can't be written back as a packet of its own is held as the
+        # whole packet it came in; what was tossed from it is a duplicate then.
+        single = data
     if hold_inbound(db, network_id=network.id, remote_address=remote_address, file_name=file_name,
                     content=single, reason=reason):
         result.held += 1
