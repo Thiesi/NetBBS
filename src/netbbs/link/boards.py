@@ -266,6 +266,12 @@ def link_board(
     """
     if is_board_linked(db, board):
         raise LinkBoardsError(f"board {board.name!r} is already Linked")
+    # Design doc §6.8: a board is local, Linked or FTN, never two -- an FTN
+    # network may forbid gating its echoes, and Link would sign them as ours.
+    if db.connection.execute(
+        "SELECT 1 FROM boards WHERE id = ? AND ftn_network_id IS NOT NULL AND ftn_area_tag IS NOT NULL", (board.id,)
+    ).fetchone() is not None:
+        raise LinkBoardsError(f"board {board.name!r} carries an FTN echo; a board is Linked or FTN, not both")
     if default_max_post_age_days is not None and usable_max_age_days(default_max_post_age_days) is None:
         raise LinkBoardsError(
             f"recommended maximum post age must be at least 1 day, got {default_max_post_age_days}"
