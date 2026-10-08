@@ -1049,6 +1049,27 @@ the session's screen copy. While the answer fits it echoes character by
 character as before; the keystroke that would reach the edge hands over to the
 window. A masked answer stops showing `*` at the edge instead, so it never
 wraps either.
+**Keys that work everywhere** (issue #1158). A small set of keys means the
+same thing on every screen that takes hotkeys, and no screen binds one of them
+to anything else:
+
+| Key | Meaning |
+| --- | --- |
+| `[B]` or Esc | Back. Esc first drops a highlighted row or field, if there is one. |
+| `<` `>`, PgUp/PgDn | Previous / next page of a list, a long text or a form's sections. |
+| ←→ | The same paging on lists and long texts. On a form they step the highlighted field's value instead. |
+| `/` | Find, wherever a list can be searched. |
+| `?`, F1 or Ctrl-H | Help for this screen. Every hotkey screen has some. |
+| Enter | Choose the highlighted row or field. |
+
+`B` is the only letter in the set; every other letter is free for the screen's
+own actions. Paging is never on a letter, so `[N]ew scan`, `[P]rofile` and
+`[P]ost` keep theirs, and a list never asks the caller to tell "next" from
+"newer". Line prompts are not hotkey screens: there `/` starts a command where
+one is offered, and Esc keeps the value (above). Doors draw their own screens
+under their own contracts and are outside this rule. A test keeps it: no
+screen's hotkeys bind a reserved key to anything but its meaning here.
+
 A key a caller can press is highlighted wherever it is offered, not only on
 menus (issue #974): a prompt that lists its choices in running text
 ("Unsaved changes. [S]ave, [D]iscard, or [C]ancel?") and a detail-panel label
@@ -15563,6 +15584,49 @@ change these but never remove them; #1115 cleared them with a typed `-`, and
 the prompt that explained it left two columns of an 80-column screen to type
 a birthdate into, so it was replaced. A birthdate still showing after a SysOp cleared
 it was a screen opened before the clear: the stored value was gone.
+
+### Issue #1158 — keys that work everywhere — decided
+
+Every new setting meant hunting for a free letter: Profile had `j` and `z` left
+when #1156 needed one. Labels bracketed a letter mid-word where the first was
+taken (`Bl[o]cked`), and the same function sat on different keys on different
+screens (`[N]ext`/`[P]rev` in a picker, `[O]lder`/`[N]ewer` in a post list,
+where `P` meant `[P]ost`). Tracker #1158 settles it in three steps: reserved
+keys (this decision), the first-letter rule for menus, and two-digit numbered
+fields on settings screens. Normative description: §3.5, "Keys that work
+everywhere".
+
+**Decision 1 — reserved keys are punctuation plus `B`.** Paging is `<` `>`
+with PgUp/PgDn and ←→, find is `/`, help is `?` with F1 and Ctrl-H, back is
+`[B]` or Esc, and Enter chooses. Rejected: `N`/`P` reserved everywhere, which
+moves New scan, Profile and Post. Rejected: `N`/`P` reserved only on screens
+that page; nearly every busy screen pages, and a hybrid such as the post list
+makes "is this a list?" a judgement call for callers and for the enforcing
+test.
+
+**Decision 2 — ←→ step a value on forms.** On a draft editor ←→ already step
+the highlighted field's value, and they keep doing so; the form's sections
+page with `<` `>` and PgUp/PgDn. Everywhere else ←→ page. Rejected: ←→ paging
+on forms too, which loses the quickest way to change a value.
+
+**Decision 3 — Esc drops a highlight first.** With a row or field
+highlighted, Esc clears the highlight as before; with none it goes back like
+`[B]`. Rejected: Esc always back, which would leave the screen for a caller
+who only meant to clear the highlight.
+
+**Decision 4 — every hotkey screen has help.** `?`, F1 and Ctrl-H open the
+same help, and screens without any get some written in this step, so the keys
+never answer with a bell. F1 is decoded on Telnet, SSH and the browser
+terminal. Rejected: the keys only where help already exists.
+
+**Decision 5 — no global quit, and doors keep their own keys.** Log off stays
+`[L]ogoff` on the main menu; a key that ends the session from anywhere is too
+easy to hit in the middle of a form. Bundled doors keep their own action bars
+under their presentation contracts.
+
+**Decision 6 — callers are told once.** After the first login on the release
+that changes a key callers use, a short screen says that paging moved to `<`
+`>`, dismissed with any key. SysOps see it on the console too.
 
 ### Issue #1104 — Linked resources by colour — decided
 
