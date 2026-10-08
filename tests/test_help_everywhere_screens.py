@@ -236,7 +236,7 @@ def test_reading_a_post_has_help_and_back_still_leaves(db, alice):
 
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Hello", "World")
-    session = FakeSession(["1", HELP_KEY, _DISMISS, "b", "b"])
+    session = FakeSession(["0", "1", HELP_KEY, _DISMISS, "b", "b"])
     asyncio.run(_show_board(session, db, board, alice))
     text = session.squeezed()
     assert "Reading a post" in text and "One post at a time." in text
@@ -294,7 +294,7 @@ def test_a_post_version_has_help(db, alice, monkeypatch):
     post = create_post(db, board, alice, "Plans", "the first draft")
     edit_post(db, get_post(db, post.post_id), board, subject="Plans", body="the final text", edited_by=alice)
     # Open the post, [H]istory, the original (#02), help, then back out of all.
-    session = FakeSession(["1", "h", "0", "2", HELP_KEY, _DISMISS, "b", "b", "b", "b"])
+    session = FakeSession(["0", "1", "h", "0", "2", HELP_KEY, _DISMISS, "b", "b", "b", "b"])
     asyncio.run(_show_board(session, db, board, mod))
     text = session.squeezed()
     assert "Post version" in text and "One earlier version of the post" in text

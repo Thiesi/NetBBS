@@ -80,7 +80,7 @@ def _receipt(db, sender, message):
 
 
 def _open_first_sent(db, lane, sender, *, width=80):
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     session.terminal_width = width
     asyncio.run(browse_mail(session, lane, sender))
     return _visible_text(session)

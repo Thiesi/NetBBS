@@ -44,6 +44,9 @@ _LINES = [
     "[O]perators. In mail, [E]rase deletes, [K]ept keeps a letter and",
     "[V]iew Kept opens them. Switches such as [F]ollow show whether",
     "they are on: [F]ollow: on.",
+    "",
+    "Rows in a list are numbered 01, 02 and so on: type both digits,",
+    "or one digit and Enter.",
 ]
 
 

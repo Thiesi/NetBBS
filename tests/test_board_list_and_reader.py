@@ -150,16 +150,18 @@ def test_down_and_enter_open_the_highlighted_post(db, alice, monkeypatch):
     assert "Subject 1" in reader.split("\n")[0] + reader.split("\n")[1]
 
 
-def test_a_number_opens_its_post_and_back_returns_with_the_cursor_on_it(db, alice, monkeypatch):
+@pytest.mark.parametrize("number_keys", [["0", "3"], ["3", "ENTER"]], ids=["two-digits", "digit-enter"])
+def test_a_number_opens_its_post_and_back_returns_with_the_cursor_on_it(db, alice, monkeypatch, number_keys):
+    # `03`, or `3` and Enter (issue #1158).
     board = create_board(db, "general", creator=alice)
     _posts(db, board, alice, 3, monkeypatch)
-    session = FakeSession(["3", "b", "b"])
+    session = FakeSession([*number_keys, "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     screens = session.screens()
     assert "Body of post 2" in screens[1]
-    assert re.search(r">\s+3\s+Subject 2\b", screens[2])
+    assert re.search(r">\s+03\s+Subject 2\b", screens[2])
 
 
 def test_ctrl_h_shows_the_lists_keys(db, alice, monkeypatch):
@@ -187,7 +189,8 @@ def test_next_post_steps_into_the_newer_page(db, alice, monkeypatch):
     older = _listed(session.screens()[1])
     last_on_older = max(older)
 
-    session = FakeSession(["<", str(len(older)) if len(older) < 10 else "UP", *(["ENTER"] if len(older) >= 10 else []), "n", "b", "b"])
+    # The last row's number, as two digits (issue #1158).
+    session = FakeSession(["<", *f"{len(older):02d}", "n", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     readers = [screen for screen in session.screens() if "Body of post" in screen]
@@ -199,7 +202,7 @@ def test_a_long_post_pages_under_its_title(db, alice):
     board = create_board(db, "general", creator=alice)
     body = "\n\n".join(f"Paragraph {i}: " + "words " * 60 for i in range(12))
     create_post(db, board, alice, "Long one", body)
-    session = FakeSession(["1", "PGDN", "b", "b"])
+    session = FakeSession(["0", "1", "PGDN", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -216,7 +219,7 @@ def test_the_byline_says_whose_post_it_answers(db, alice, monkeypatch):
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(stamps))
     question = create_post(db, board, alice, "A question", "?")
     create_post(db, board, alice, "Re: A question", "!", parent_post_id=question.post_id)
-    session = FakeSession(["2", "b", "b"])
+    session = FakeSession(["0", "2", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -381,7 +384,7 @@ def test_a_reply_does_not_name_a_parent_the_feed_hides(db, alice, monkeypatch):
     create_post(db, board, alice, "Re: it", "!", parent_post_id=question.post_id)
     db.connection.execute("UPDATE posts SET status = 'expired' WHERE post_id = ?", (question.post_id,))
     db.connection.commit()
-    session = FakeSession(["1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -399,7 +402,7 @@ def test_a_reply_names_its_parents_current_subject(db, alice, monkeypatch):
     question = create_post(db, board, alice, "Old wording", "?")
     create_post(db, board, alice, "Re: it", "!", parent_post_id=question.post_id)
     edit_post(db, question, board, subject="New wording", body="?", edited_by=alice)
-    session = FakeSession(["2", "b", "b"])
+    session = FakeSession(["0", "2", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -446,7 +449,7 @@ def test_a_page_emptied_while_reading_leaves_no_cursor_to_crash_on(db, alice, mo
         return real_tombstone(*args, **kwargs)
 
     monkeypatch.setattr(board_flow, "tombstone_post", _tombstone)
-    session = FakeSession(["1", "t", "y", "ENTER", "b"])
+    session = FakeSession(["0", "1", "t", "y", "ENTER", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))  # no IndexError
 
@@ -515,7 +518,7 @@ def test_the_reader_stays_on_its_post_after_an_action_queues_a_notice(db, alice,
     # Row 1 is the oldest post on the newest page -- the one a shorter
     # refetch would drop. Cancel an edit of it, which announces "Edit
     # cancelled.", and see which post the reader comes back to.
-    session = FakeSession(["1", "e", "", "/cancel", "b", "b"])
+    session = FakeSession(["0", "1", "e", "", "/cancel", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -622,7 +625,7 @@ def test_a_reply_to_a_long_subject_keeps_the_reader_on_the_screen(db, alice, mon
     question = create_post(db, board, alice, "Question " * 30, "?")
     body = "\n\n".join(f"Paragraph {i}" for i in range(40))
     create_post(db, board, alice, "Re: Question", body, parent_post_id=question.post_id)
-    session = FakeSession(["2", "b", "b"], width=40, height=24)
+    session = FakeSession(["0", "2", "b", "b"], width=40, height=24)
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -651,7 +654,7 @@ def test_an_opened_post_loses_its_new_marker(db, alice, monkeypatch):
     board = create_board(db, "general", creator=alice)
     ensure_board_baseline(db, alice, board)
     _posts(db, board, alice, 3, monkeypatch)
-    session = FakeSession(["1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -726,7 +729,7 @@ def test_the_new_count_follows_posts_the_cap_gave_up(db, alice, monkeypatch):
     posts = _posts(db, board, alice, 8, monkeypatch)
     for index in (2, 4):
         record_post_opened(db, alice, board, posts[index])
-    session = FakeSession(["7", "b", "b"])  # row 7 is Subject 6
+    session = FakeSession(["0", "7", "b", "b"])  # row 07 is Subject 6
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -759,7 +762,7 @@ def test_the_reader_marks_a_post_new_on_the_screen_that_opens_it(db, alice, monk
     board = create_board(db, "general", creator=alice)
     ensure_board_baseline(db, alice, board)
     _posts(db, board, alice, 1, monkeypatch)
-    session = FakeSession(["1", "b", "1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -781,7 +784,7 @@ def _color_board(db, alice, *, allow_color):
 
 def test_a_board_that_allows_color_shows_it(db, alice):
     board = _color_board(db, alice, allow_color=True)
-    session = FakeSession(["1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -797,7 +800,7 @@ def test_a_reader_with_post_colors_off_gets_plain_text(db, alice):
 
     board = _color_board(db, alice, allow_color=True)
     set_post_colors_enabled(db, alice, False)
-    session = FakeSession(["1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -807,7 +810,7 @@ def test_a_reader_with_post_colors_off_gets_plain_text(db, alice):
 
 def test_a_board_without_color_shows_codes_as_typed(db, alice):
     board = _color_board(db, alice, allow_color=False)
-    session = FakeSession(["1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -851,7 +854,7 @@ def test_an_art_post_is_drawn_reviewed_and_published(db, alice):
     from netbbs.boards.posts import list_posts_page
 
     board = create_board(db, "general", creator=alice, allow_color=True)
-    session = FakeSession(["a", "Drawing", "H", "i", "CTRL+O", "p", "1", "b", "b"])
+    session = FakeSession(["a", "Drawing", "H", "i", "CTRL+O", "p", "0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -913,7 +916,7 @@ def test_an_art_post_too_big_for_the_terminal_is_not_opened_for_editing(db, alic
 
     board = create_board(db, "general", creator=alice, allow_color=True)
     post = create_post(db, board, alice, "Wide", "#" * 70, layout="art")
-    session = FakeSession(["1", "e", "b", "b"], width=50, height=24)
+    session = FakeSession(["0", "1", "e", "b", "b"], width=50, height=24)
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -954,7 +957,7 @@ def test_a_recovered_art_draft_too_big_for_the_terminal_is_kept_not_opened(db, a
 def test_a_drawing_the_editor_cannot_hold_is_not_reopened(db, alice):
     board = create_board(db, "general", creator=alice, allow_color=True)
     create_post(db, board, alice, "Snow", "\u2603 snow", layout="art")
-    session = FakeSession(["1", "e", "b", "b"])
+    session = FakeSession(["0", "1", "e", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -1005,7 +1008,7 @@ def test_a_signed_art_post_reopens_with_its_signature_kept_aside(db, alice, monk
         return initial_bytes.replace(b"\n", b"\r\n").decode("utf-8").encode("cp437")
 
     monkeypatch.setattr(board_flow, "edit_ansi_art", _editor)
-    session = FakeSession(["1", "e", "", "s", "b", "b"])
+    session = FakeSession(["0", "1", "e", "", "s", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -1016,7 +1019,7 @@ def test_a_signed_art_post_reopens_with_its_signature_kept_aside(db, alice, monk
 def test_a_drawing_with_underline_or_blink_is_not_reopened(db, alice):
     board = create_board(db, "general", creator=alice, allow_color=True)
     create_post(db, board, alice, "Blinky", "\x1b[5mblink\x1b[0m", layout="art")
-    session = FakeSession(["1", "e", "b", "b"])
+    session = FakeSession(["0", "1", "e", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -1026,7 +1029,7 @@ def test_a_drawing_with_underline_or_blink_is_not_reopened(db, alice):
 def test_tabs_count_when_sizing_a_drawing_for_the_editor(db, alice):
     board = create_board(db, "general", creator=alice, allow_color=True)
     create_post(db, board, alice, "Tabs", "A" + "\t" * 80, layout="art")
-    session = FakeSession(["1", "e", "b", "b"])
+    session = FakeSession(["0", "1", "e", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -1043,7 +1046,7 @@ def test_the_editor_gets_a_carried_drawing_filtered(db, alice, monkeypatch):
         return None
 
     monkeypatch.setattr(board_flow, "edit_ansi_art", _editor)
-    session = FakeSession(["1", "e", "", "b", "b"])
+    session = FakeSession(["0", "1", "e", "", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -1150,7 +1153,7 @@ def test_an_art_edit_checks_the_drawing_it_resumes_before_asking_anything(db, al
     canvas = ScreenBuffer(80, 5)
     parse_ansi_into_buffer("#" * 70, canvas)
     draft.write_bytes(encode_ansi_bytes(canvas))
-    session = FakeSession(["1", "e", "r", "b", "b"], width=50, height=24)
+    session = FakeSession(["0", "1", "e", "r", "b", "b"], width=50, height=24)
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 

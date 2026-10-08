@@ -98,7 +98,7 @@ def test_forward_from_sent_returns_to_the_list_on_the_letter_with_the_outcome(pe
     send_mail(db, alice, bob, "Plans", "Saturday?")
     # Sent, the letter, Forward to carol, Send -- then the list, not the
     # letter's view: one Back leaves Sent, one leaves mail.
-    session = FakeSession(keys=["s", "1", "f", "s", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "f", "s", "b", "b"], lines=["carol", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -117,7 +117,7 @@ def test_forward_from_sent_returns_to_the_list_on_the_letter_with_the_outcome(pe
 def test_a_cancelled_forward_from_sent_comes_back_to_the_letter(people):
     db_path, db, alice, bob, _carol = people
     send_mail(db, alice, bob, "Plans", "Saturday?")
-    session = FakeSession(keys=["s", "1", "f", "b", "b", "b", "b"], lines=["carol", "", "/done", "y"])
+    session = FakeSession(keys=["s", "0", "1", "f", "b", "b", "b", "b"], lines=["carol", "", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -152,7 +152,7 @@ def test_forward_from_the_inbox_still_comes_back_to_the_letter(people):
     forward, as after its Reply."""
     db_path, db, alice, bob, carol = people
     send_mail(db, bob, alice, "Plans", "Saturday?")
-    session = FakeSession(keys=["i", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["i", "0", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -168,7 +168,7 @@ def test_resend_marks_the_old_letter_resent_in_the_list_and_its_view(linked):
     set_redraw_in_place_enabled(db, alice, True)
     # Resend and Send; back on the list, open the old letter (now 2), then
     # Back out.
-    session = FakeSession(keys=["s", "1", "s", "s", "2", "b", "b", "b"], lines=["", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "s", "s", "0", "2", "b", "b", "b"], lines=["", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -180,7 +180,7 @@ def test_resend_marks_the_old_letter_resent_in_the_list_and_its_view(linked):
     # The list: the new letter pending on top, the old one resent.
     assert re.search(r"1  bob@Farpoint[^\n]*Plans +pending", text)
     # The cursor stays on the letter acted on.
-    assert re.search(r"> 2  bob@Farpoint[^\n]*Plans +resent", text)
+    assert re.search(r"> 02  bob@Farpoint[^\n]*Plans +resent", text)
     # Its view: the Resent line under Delivery, and the key says "again".
     view = text.split("Message sent.")[-1]
     assert re.search(r"Delivery: Bounced: .*\n\s*Resent: .+ \(the new copy is in Sent\)", view)
@@ -192,7 +192,7 @@ def test_resend_again_sends_another_copy_and_moves_the_time(linked):
     record_resend(db, alice, [_old_row(db, address)["id"]], [address])
     db.connection.execute("UPDATE mail_messages SET resent_at = '2020-01-01T00:00:00+00:00'")
     db.connection.commit()
-    session = FakeSession(keys=["s", "1", "s", "s", "b", "b"], lines=["", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "s", "s", "b", "b"], lines=["", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -205,7 +205,7 @@ def test_a_resend_sent_to_someone_else_marks_nothing(linked):
     """[T]o can send the resend elsewhere; the failed letter did not go
     again, so it stays a failure."""
     db_path, db, alice, link_context, _node, _remote, address = linked
-    session = FakeSession(keys=["s", "1", "s", "t", "s", "b", "b"], lines=["", "/done", "carol"])
+    session = FakeSession(keys=["s", "0", "1", "s", "t", "s", "b", "b"], lines=["", "/done", "carol"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -215,7 +215,7 @@ def test_a_resend_sent_to_someone_else_marks_nothing(linked):
 
 def test_a_cancelled_resend_marks_nothing(linked):
     db_path, db, alice, link_context, _node, _remote, address = linked
-    session = FakeSession(keys=["s", "1", "s", "b", "b", "b", "b"], lines=["", "/done", "y"])
+    session = FakeSession(keys=["s", "0", "1", "s", "b", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -273,7 +273,7 @@ def test_group_resend_marks_only_the_copies_it_reached(group):
     db_path, db, alice, link_context, carol_at, dave_at = group
     # Resend; To offers both failed copies; [T]o keeps carol only; Send.
     session = FakeSession(
-        keys=["s", "1", "s", "t", "s", "b", "b"], lines=["", "/done", f"carol@{carol_at.split('@')[1]}"],
+        keys=["s", "0", "1", "s", "t", "s", "b", "b"], lines=["", "/done", f"carol@{carol_at.split('@')[1]}"],
     )
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
@@ -289,7 +289,7 @@ def test_group_resend_goes_to_the_copies_not_yet_resent_then_again_to_all(group)
     db_path, db, alice, link_context, carol_at, dave_at = group
     record_resend(db, alice, [_old_row(db, carol_at)["id"]], [carol_at])
     # The key is plain [S]end again while dave's copy waits, and goes to dave only.
-    session = FakeSession(keys=["s", "1", "s", "s", "b", "b"], lines=["", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "s", "s", "b", "b"], lines=["", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -302,7 +302,7 @@ def test_group_resend_goes_to_the_copies_not_yet_resent_then_again_to_all(group)
     # view names each copy's resend and says "again".
     assert _group_row(db, alice).status == "resent"
     # The old letter is row 2, under the resend to dave.
-    session = FakeSession(keys=["s", "2", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "2", "b", "b", "b"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
     text = _visible_text(session)
@@ -340,7 +340,7 @@ def test_existing_letters_have_no_resend_recorded(people):
 def test_resend_again_bar_and_resent_line_fit(linked, width, height):
     db_path, db, alice, link_context, _node, _remote, address = linked
     record_resend(db, alice, [_old_row(db, address)["id"]], [address])
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     session.terminal_width, session.terminal_height = width, height
     _run(db_path, session, alice, link_context=link_context)
 

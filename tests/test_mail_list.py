@@ -150,7 +150,7 @@ def test_each_row_is_numbered_once_with_new_as_a_column(node):
     _run(session, lane, bob)
 
     screen = session.screens()[0]
-    assert re.search(r"> 1  new  alice +Hello +\S", screen)
+    assert re.search(r"> 01  new  alice +Hello +\S", screen)
     assert not re.search(r"^\W*01\. ", screen, re.MULTILINE)
     assert "(#" not in screen
     assert "[NEW]" not in screen
@@ -218,10 +218,10 @@ def test_a_long_link_address_is_cut_with_an_ellipsis():
     row = mail_flow._MailRow(
         message=_message(), name="x" * 60, subject="Hello", when="01.01.2026 00:00",
     )
-    widths = mail_flow._mail_column_widths([row], width=80, number_width=1, sent=False, show_status=False)
+    widths = mail_flow._mail_column_widths([row], width=80, sent=False, show_status=False)
     assert widths is not None
     lines = mail_flow._mail_list_rows(
-        [row], width=80, first_number=1, number_width=1, widths=widths, highlighted=None,
+        [row], width=80, first_number=1, widths=widths, highlighted=None,
         sent=False, show_status=False, accent=51,
     )
     visible = _SGR.sub("", lines[0])
@@ -311,14 +311,16 @@ def test_down_and_enter_open_the_highlighted_message(node):
     assert "The older one" in session.visible()
     assert "The newer one" not in session.visible()
     # Back on the list with the cursor on the message just read.
-    assert re.search(r"> 2 +alice +Older", session.screens()[-1])
+    assert re.search(r"> 02 +alice +Older", session.screens()[-1])
 
 
-def test_a_digit_opens_that_row(node):
+@pytest.mark.parametrize("number_keys", [["0", "2"], ["2", "\r"]], ids=["two-digits", "digit-enter"])
+def test_a_row_number_opens_that_row(node, number_keys):
+    """`02`, or `2` and Enter (issue #1158)."""
     db, lane, bob, alice, carol = node
     send_mail(db, alice, bob, "Older", "The older one")
     send_mail(db, carol, bob, "Newer", "The newer one")
-    session = FakeSession(["2", "b", "b"])
+    session = FakeSession([*number_keys, "b", "b"])
 
     _run(session, lane, bob)
 
@@ -328,7 +330,7 @@ def test_a_digit_opens_that_row(node):
 def test_received_mail_shows_whom_it_is_to(node):
     db, lane, bob, alice, _ = node
     send_mail(db, alice, bob, "Hello", "body")
-    session = FakeSession(["1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
 
     _run(session, lane, bob)
 
@@ -349,7 +351,7 @@ def test_pages_turn_and_number_from_one(node):
     second_listed = re.findall(r"Subject (\d+)\b", second)
     assert first_listed[0] == "39"
     assert int(second_listed[0]) == 39 - len(first_listed)
-    assert re.search(r"> +1 +new +alice +Subject " + second_listed[0], second)
+    assert re.search(r"> +01 +new +alice +Subject " + second_listed[0], second)
     assert "[<] Prev" in second
     assert re.findall(r"Subject (\d+)\b", back) == second_listed
 
@@ -360,14 +362,14 @@ def test_pages_turn_and_number_from_one(node):
 def test_unread_in_the_message_marks_it_unread_again(node):
     db, lane, bob, alice, _ = node
     message = send_mail(db, alice, bob, "Hello", "body")
-    session = FakeSession(["1", "u", "b"])
+    session = FakeSession(["0", "1", "u", "b"])
 
     _run(session, lane, bob)
 
     assert get_mail(db, bob, message.id).is_read is False
     last = session.screens()[-1]
     assert "Marked unread." in last
-    assert re.search(r"> 1  new  alice +Hello", last)
+    assert re.search(r"> 01  new  alice +Hello", last)
 
 
 def test_u_on_the_list_toggles_the_highlighted_message(node):
@@ -462,7 +464,7 @@ def test_sent_is_a_table_and_back_returns_to_the_inbox(node):
     assert "NetBBS › Mail › Sent" in sent
     # Local mail has a read receipt (issue #829), in the Status column.
     assert re.search(r"#\s+To\s+Subject\s+Status\s+Date", sent)
-    assert re.search(r"> 1  alice +Outgoing +not read", sent)
+    assert re.search(r"> 01  alice +Outgoing +not read", sent)
     assert "1 sent message" in sent
     assert "NetBBS › Mail › Inbox" in inbox_again
 

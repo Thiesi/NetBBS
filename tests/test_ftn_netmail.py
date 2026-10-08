@@ -197,7 +197,7 @@ def test_replying_to_a_netmail_writes_netmail_back(db, network, alice):
     data = build_packet(PacketHeader(orig=HUB, dest=NODE, created=None), [encode_message(letter)])
     toss_packet(db, network, data, secure=True, remote_address=str(HUB), file_name="a.pkt")
 
-    text = _browse(db, alice, keys=["r", "1", "r", "s", "b", "b"], lines=["", "Thanks!", ""])
+    text = _browse(db, alice, keys=["r", "0", "1", "r", "s", "b", "b"], lines=["", "Thanks!", ""])
 
     assert "Netmail queued." in text, text[-2000:]
     _, message = _queued(db, network)
@@ -210,7 +210,7 @@ def test_replying_from_sent_writes_netmail_to_the_same_address(db, network, alic
     send_netmail(db, alice, "Joe Bloggs (21:3/110)", "Plans", "Saturday?")
     queue.mark_outbound_sent(db, [q.id for q in queue.pending_outbound(db, network.id)])
 
-    session = FakeSession(keys=["s", "1", "r", "s", "b", "b"], lines=["", "Did you get this?", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "r", "s", "b", "b"], lines=["", "Did you get this?", "/done"])
     session.terminal_width = 200
     lane = DatabaseLane(db.path)
     try:

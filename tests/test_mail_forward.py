@@ -142,7 +142,7 @@ def people(tmp_path):
 def test_forward_from_the_inbox_sends_the_letter_on_to_the_typed_recipient(people):
     db_path, db, alice, bob, carol = people
     send_mail(db, alice, bob, "Hello", "How are you?\n-- \nAlice")
-    session = FakeSession(keys=["1", "f", "s", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["0", "1", "f", "s", "b", "b"], lines=["carol", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, bob)
 
@@ -164,7 +164,7 @@ def test_a_note_typed_in_the_line_editor_goes_above_the_letter_signed(people):
     db_path, db, alice, bob, carol = people
     set_signature(db, bob, "Bob")
     send_mail(db, alice, bob, "Hello", "How are you?\n-- \nAlice")
-    session = FakeSession(keys=["1", "f", "s", "b", "b"], lines=["carol", "", "FYI, see below.", "/done"])
+    session = FakeSession(keys=["0", "1", "f", "s", "b", "b"], lines=["carol", "", "FYI, see below.", "/done"])
     session.terminal_width = 200
     _run(db_path, session, bob)
 
@@ -199,7 +199,7 @@ def test_a_note_typed_in_the_fullscreen_editor_goes_above_the_letter(people):
 def test_forward_from_sent_names_the_caller_as_sender(people):
     db_path, db, alice, bob, carol = people
     send_mail(db, alice, bob, "Plans", "Saturday?")
-    session = FakeSession(keys=["s", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -217,7 +217,7 @@ def test_forward_of_sent_mail_to_a_deleted_account_names_it_as_sent_does(people)
     sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
     send_mail(db, alice, bob, "Plans", "Saturday?")
     delete_user(db, bob, deleted_by=sysop)
-    session = FakeSession(keys=["s", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -228,7 +228,7 @@ def test_forward_of_sent_mail_to_a_deleted_account_names_it_as_sent_does(people)
 def test_forward_asks_for_the_recipient_with_the_to_prompts_own_checks(people):
     db_path, db, alice, bob, carol = people
     send_mail(db, alice, bob, "Hello", "Hi")
-    session = FakeSession(keys=["1", "f", "s", "b", "b"], lines=["nobody", "carol", "", "/done"])
+    session = FakeSession(keys=["0", "1", "f", "s", "b", "b"], lines=["nobody", "carol", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, bob)
 
@@ -239,7 +239,7 @@ def test_forward_asks_for_the_recipient_with_the_to_prompts_own_checks(people):
 def test_system_mail_can_be_forwarded(people):
     db_path, db, alice, bob, carol = people
     send_system_mail(db, bob, "Your post was not approved", "It broke rule 3.")
-    session = FakeSession(keys=["1", "f", "s", "b", "b"], lines=["alice", "", "/done"])
+    session = FakeSession(keys=["0", "1", "f", "s", "b", "b"], lines=["alice", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, bob)
 
@@ -251,7 +251,7 @@ def test_system_mail_can_be_forwarded(people):
 def test_cancelling_at_to_sends_nothing(people):
     db_path, db, alice, bob, carol = people
     send_mail(db, alice, bob, "Hello", "Hi")
-    session = FakeSession(keys=["1", "f", "b", "b"], lines=[""])
+    session = FakeSession(keys=["0", "1", "f", "b", "b"], lines=[""])
     _run(db_path, session, bob)
 
     assert "Cancelled." in _visible_text(session)
@@ -263,7 +263,7 @@ def test_forward_of_a_letter_at_the_size_limit_is_refused_until_shortened(people
     characters, and Send refused (issue #812's rule)."""
     db_path, db, alice, bob, carol = people
     send_mail(db, alice, bob, "Big", "x" * (MAX_MAIL_BODY_BYTES - 1))
-    session = FakeSession(keys=["1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done", "y"])
+    session = FakeSession(keys=["0", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, bob)
 
@@ -285,7 +285,7 @@ def test_forward_is_refused_when_mail_closes_while_the_letter_is_open(people, mo
         return None if len(calls) == 1 else "Mail is closed on this BBS right now."
 
     monkeypatch.setattr(mail_flow, "caller_mail_refusal", refusal)
-    session = FakeSession(keys=["1", "f", "b", "b"])
+    session = FakeSession(keys=["0", "1", "f", "b", "b"])
     session.terminal_width = 200
     _run(db_path, session, bob)
 
@@ -299,17 +299,17 @@ def test_a_kept_forward_is_offered_when_forwarding_that_letter_again(people):
     db_path, db, alice, bob, carol = people
     send_mail(db, alice, bob, "Hello", "Hi")
     # Kept with /exit in the line editor...
-    session = FakeSession(keys=["1", "f", "b", "b"], lines=["carol", "", "/exit"])
+    session = FakeSession(keys=["0", "1", "f", "b", "b"], lines=["carol", "", "/exit"])
     session.terminal_width = 200
     _run(db_path, session, bob)
     assert "you'll be offered it when you forward this message again" in _visible_text(session)
     # ...and not offered to a reply to the same letter, which has a slot of its own.
-    session = FakeSession(keys=["1", "r", "b", "b", "b"], lines=["", "/done", "y"])
+    session = FakeSession(keys=["0", "1", "r", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, bob)
     assert "unfinished letter" not in _visible_text(session)
     # Forward again: offered, resumed, sent to whom it was for.
-    session = FakeSession(keys=["1", "f", "r", "s", "b", "b"], lines=["/done"])
+    session = FakeSession(keys=["0", "1", "f", "r", "s", "b", "b"], lines=["/done"])
     session.terminal_width = 200
     _run(db_path, session, bob)
     assert "You have an unfinished letter to carol: Fwd: Hello" in _visible_text(session)
@@ -330,7 +330,7 @@ def test_forward_hotkey_is_on_both_views_and_clashes_with_nothing(people, monkey
         return await real_show_detail(session, **kwargs)
 
     monkeypatch.setattr(mail_flow, "show_detail", recording_show_detail)
-    for user, keys in ((bob, ["1", "b", "b"]), (alice, ["s", "1", "b", "b", "b"])):
+    for user, keys in ((bob, ["0", "1", "b", "b"]), (alice, ["s", "0", "1", "b", "b", "b"])):
         session = FakeSession(keys=keys)
         session.terminal_width, session.terminal_height = width, height
         _run(db_path, session, user)
@@ -357,7 +357,7 @@ def test_link_mail_forwarded_to_a_local_user_names_its_sender_by_address(people)
     link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
     _receive_link_mail(db, alice, f"dave@{remote_identity.fingerprint}", subject="Hi", body="From afar")
 
-    session = FakeSession(keys=["1", "f", "s", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["0", "1", "f", "s", "b", "b"], lines=["carol", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -375,7 +375,7 @@ def test_local_mail_forwarded_to_a_link_address_goes_over_link(people):
     send_mail(db, bob, alice, "Hello", "Hi there")
 
     session = FakeSession(
-        keys=["1", "f", "s", "b", "b"], lines=[f"dave@{remote_identity.fingerprint}", "", "/done"],
+        keys=["0", "1", "f", "s", "b", "b"], lines=[f"dave@{remote_identity.fingerprint}", "", "/done"],
     )
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
@@ -397,7 +397,7 @@ def test_sent_link_mail_forwarded_names_its_recipient_by_address(people):
     )
     _run(db_path, session, alice, link_context=link_context)
 
-    session = FakeSession(keys=["s", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 

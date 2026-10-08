@@ -151,7 +151,7 @@ def test_post_shows_verified_and_displayed_real_name(tmp_path):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
 
     # The reader's byline carries the attested name in full (issue #679).
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
     asyncio.run(_show_board(session, db, board, alice))
 
     assert "(=Alice Smith=)" in session.output
@@ -354,7 +354,7 @@ def test_editing_a_post_on_a_linked_board_queues_a_board_post_edit(tmp_path):
     queue_board_post_if_linked(db, post, board, node_identity=node_identity)
 
     session = FakeSession(
-        keys=["1", "e", "s", "b", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
+        keys=["0", "1", "e", "s", "b", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
     )
     asyncio.run(_show_board(session, db, board, user, link_context=link_context))
 
@@ -373,7 +373,7 @@ def test_editing_a_post_without_link_context_never_queues_one(tmp_path):
     post = create_post(db, board, user, "Hello", "World")
 
     session = FakeSession(
-        keys=["1", "e", "s", "b", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
+        keys=["0", "1", "e", "s", "b", "b"], lines=["Hello (edited)", "/edit 1", "World, edited", ""]
     )
     asyncio.run(_show_board(session, db, board, user))
 
@@ -465,7 +465,7 @@ def test_jump_to_first_unread_opens_the_ordinary_page_when_it_is_there(tmp_path,
 
     assert _listed(session) == {0, 1, 2, 3}
     # ...and the cursor starts on the first unread, so Enter reads it.
-    assert re.search(r">\s+3\s+Subject 2\b", session.visible_output)
+    assert re.search(r">\s+03\s+Subject 2\b", session.visible_output)
     db.close()
 
 
@@ -487,7 +487,7 @@ def test_jump_to_first_unread_opens_on_the_post_right_after_the_cursor(tmp_path,
     assert 0 not in shown  # already-seen post is not on the jumped-to page
     assert 1 in shown  # first unread post is
     # ...and the cursor starts on it, so Enter reads what the jump was for.
-    assert re.search(r">\s+1\s+Subject 1\b", session.visible_output)
+    assert re.search(r">\s+01\s+Subject 1\b", session.visible_output)
     db.close()
 
 

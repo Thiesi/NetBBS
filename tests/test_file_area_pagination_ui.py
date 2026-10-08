@@ -213,7 +213,7 @@ def test_download_works_for_a_file_reached_by_paging_back_into_history(tmp_path,
     total = _PAGE_SIZE * 2
     area, user = _make_area_with_files(db, total, monkeypatch)
     # `<` pages back to the oldest page, where file0.txt is entry 1.
-    session = FakeSession(keys=["<", "1", "b"])
+    session = FakeSession(keys=["<", "0", "1", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))

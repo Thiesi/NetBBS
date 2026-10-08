@@ -186,7 +186,7 @@ def test_the_reader_says_why_an_earlier_guests_post_stays(db, sysop, guest):
     board = create_board(db, "general", creator=sysop)
     create_post(db, board, guest, "Hello", "an earlier guest's words")
     # Open the post, [W]ithdraw, back to the list, leave.
-    session = _as_guest(BoardSession(["1", "w", "b", "b"]))
+    session = _as_guest(BoardSession(["0", "1", "w", "b", "b"]))
 
     asyncio.run(board_flow._show_board(session, db, board, guest))
 
@@ -198,7 +198,7 @@ def test_a_guest_withdraws_what_it_posted_in_this_call(db, sysop, guest):
     board = create_board(db, "general", creator=sysop)
     # [P]ost, subject, body, finish, post it; open it, [W]ithdraw, confirm,
     # back to the list, leave.
-    session = _as_guest(BoardSession(["p", "Hello", "Body", "/done", "p", "1", "w", "y", "b", "b"]))
+    session = _as_guest(BoardSession(["p", "Hello", "Body", "/done", "p", "0", "1", "w", "y", "b", "b"]))
 
     asyncio.run(board_flow._show_board(session, db, board, guest))
 

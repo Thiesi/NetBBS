@@ -95,6 +95,7 @@ from netbbs.net.list_art import BOARD_LIST, list_slot_fields
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import NAME_GATE_NOTE
 from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, help_key_label, page_step, reject_unhandled_key
+from netbbs.net.row_numbers import ROW_NUMBER_WIDTH, read_row_number, row_number_label, row_range_label
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import (
     ReviewAction,
@@ -703,7 +704,7 @@ def _post_row_cells(db: Database, post: Post, *, name_requirement: str | None) -
 
 
 def _column_widths(
-    cells: list[tuple[str, str, str]], *, width: int, number_width: int
+    cells: list[tuple[str, str, str]], *, width: int
 ) -> tuple[int, int, int] | None:
     """(subject, author, date) widths that fit `width`, or `None` when no
     readable table fits and the rows should be prose instead. The author
@@ -712,7 +713,7 @@ def _column_widths(
     if width < _TABLE_MIN_WIDTH:
         return None
     date_width = max([display_width(w) for _, _, w in cells] + [len("Posted")])
-    available = width - number_width - _MARKER_WIDTH - date_width - _ROW_FURNITURE
+    available = width - ROW_NUMBER_WIDTH - _MARKER_WIDTH - date_width - _ROW_FURNITURE
     author_width = min(
         _AUTHOR_MAX_WIDTH,
         max([display_width(a) for _, a, _ in cells] + [len("Author")]),
@@ -739,16 +740,15 @@ def _post_list_rows(
     what a digit key opens; the highlighted row is drawn in reverse video,
     the way the file area draws its cursor."""
     cells = [_post_row_cells(db, post, name_requirement=name_requirement) for post in posts]
-    number_width = len(str(len(posts)))
     rows: list[str] = []
-    widths = _column_widths(cells, width=width, number_width=number_width)
+    widths = _column_widths(cells, width=width)
     if widths is None:
         for index, (post, (subject, author, when)) in enumerate(zip(posts, cells)):
             marker = _row_marker(post, new_ids, held_edits)
             marker = f"{marker} " if marker else ""
             # The date goes first when the row is this narrow: subject and
             # author say which post it is, and the reader shows the date.
-            plain = cut_to_width(f"{index + 1:>{number_width}} {marker}{subject} -- {author}", width - 1)
+            plain = cut_to_width(f"{row_number_label(index + 1)} {marker}{subject} -- {author}", width - 1)
             rows.append(
                 colored(plain, reverse=True) if index == highlighted
                 else colored(plain, fg_color=MUTED_COLOR if _dimmed(post) else None)
@@ -757,7 +757,7 @@ def _post_list_rows(
     subject_width, author_width, date_width = widths
     marker_width = _MARKER_WIDTH
     for index, (post, (subject, author, when)) in enumerate(zip(posts, cells)):
-        number = f"{index + 1:>{number_width}}"
+        number = row_number_label(index + 1)
         subject_cell = _pad(cut_to_width(subject, subject_width), subject_width)
         marker = _row_marker(post, new_ids, held_edits)
         marker_cell = _pad(marker, marker_width)
@@ -818,14 +818,13 @@ def _post_list_heading(posts: list[Post], *, width: int, db: Database, name_requ
     if not posts:
         return None
     cells = [_post_row_cells(db, post, name_requirement=name_requirement) for post in posts]
-    number_width = len(str(len(posts)))
-    widths = _column_widths(cells, width=width, number_width=number_width)
+    widths = _column_widths(cells, width=width)
     if widths is None:
         return None
     subject_width, author_width, date_width = widths
     marker_width = _MARKER_WIDTH
     text = (
-        f"  {'#':>{number_width}}  {_pad('Subject', subject_width)}  {' ' * marker_width}  "
+        f"  {'#':>{ROW_NUMBER_WIDTH}}  {_pad('Subject', subject_width)}  {' ' * marker_width}  "
         f"{_pad('Author', author_width)}  {_pad('Posted', date_width)}"
     )
     return colored(text.rstrip(), fg_color=LABEL_COLOR, bold=True)
@@ -847,8 +846,7 @@ def _list_options(
 ) -> list[MenuEntry]:
     options = []
     if row_count:
-        keys = "1" if row_count == 1 else f"1-{min(row_count, 9)}"
-        options.append(MenuEntry(label=menu_key(keys, "/Enter read"), brief="Read a post"))
+        options.append(MenuEntry(label=menu_key(row_range_label(row_count), "/Enter read"), brief="Read a post"))
     if page.has_older:
         options.append(MenuEntry(label=menu_key("<", " Older"), brief="Show older posts"))
     if page.has_newer:
@@ -904,7 +902,8 @@ async def _read_list_key(session: Session) -> tuple[EditorKey, bool]:
 
 _LIST_HELP = [
     "Up/Down      move the highlight",
-    "Enter, 1-9   read the highlighted post, or post number N",
+    "Enter, 01-99 read the highlighted post, or post number NN",
+    "             (or one digit and Enter)",
     "< / >        older / newer posts (also PgUp/PgDn, Left/Right)",
     "R            the newest page",
     "P            write a new post (when you may post here)",
@@ -1975,10 +1974,16 @@ async def _show_board(
             await _moved_on()
             highlighted = await _read_post(highlighted)
             await _render_fresh(page, highlighted)
-        elif len(char) == 1 and char in "123456789" and int(char) <= min(9, len(page.posts)):
-            await _moved_on()
-            highlighted = await _read_post(int(char) - 1)
-            await _render_fresh(page, highlighted)
+        elif len(char) == 1 and char.isascii() and char.isdigit():
+            # Two digits, or one and Enter (issue #1158).
+            number = await read_row_number(
+                session, char, row_count=len(page.posts), first_echoed=echoed,
+                read=lambda: _read_list_key(session),
+            )
+            if number is not None:
+                await session.write_line("")
+                highlighted = await _read_post(number - 1)
+                await _render_fresh(page, highlighted)
         elif (key.kind == EditorKeyKind.CTRL and key.char == "l") or char == REDRAW_KEY:
             page, highlighted = _refetch_keeping(page, highlighted)
             await _render_fresh(page, highlighted)

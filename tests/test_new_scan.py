@@ -208,8 +208,8 @@ def test_selecting_a_board_jumps_to_the_first_unread_post(db, lane, alice, monke
     # visit shows, read posts included and numbered as they always are
     # (issue #839), with the list's cursor on the first unread post.
     text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", _written_text(session))
-    assert re.search(r">\s+2\s+second\b", text)
-    assert re.search(r"\b1\s+first\b", text)
+    assert re.search(r">\s+02\s+second\b", text)
+    assert re.search(r"\b01\s+first\b", text)
 
 
 def test_selecting_a_file_area_jumps_to_the_first_unread_file(db, lane, alice, monkeypatch):

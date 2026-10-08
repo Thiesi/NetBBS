@@ -148,7 +148,7 @@ def test_upload_from_a_browser_session_offers_a_link_instead_of_zmodem(db, lane,
 def test_download_from_a_browser_session_offers_a_link(db, lane, alice, grants):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
-    session = BrowserSession(editor_keys=[_key("1")])
+    session = BrowserSession(editor_keys=[_key("0"), _key("1")])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -334,7 +334,7 @@ def test_a_browser_page_is_handed_the_transfer_rather_than_the_url(db, lane, ali
 def test_a_download_offered_to_the_page_names_the_file(db, lane, alice, grants):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "game.zip", b"payload")
-    session = PageSession(editor_keys=[_key("1")])
+    session = PageSession(editor_keys=[_key("0"), _key("1")])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -465,7 +465,7 @@ def test_an_upload_helper_that_reports_nothing_still_closes_the_screen(db, lane,
 def test_the_download_link_line_reads_as_a_sentence(db, lane, alice, grants):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "copperplate-guide-55deg.pdf", b"payload")
-    session = BrowserSession(editor_keys=[_key("1")])
+    session = BrowserSession(editor_keys=[_key("0"), _key("1")])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -608,7 +608,7 @@ class _NoZmodemClient(FakeSession):
 def test_a_failed_zmodem_download_stays_on_the_list_and_points_at_the_browser(db, lane, alice, grants):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "guide.pdf", b"payload")
-    session = _NoZmodemClient(editor_keys=[_key("1")])
+    session = _NoZmodemClient(editor_keys=[_key("0"), _key("1")])
 
     asyncio.run(_show_area(session, lane, area, alice, transfers=grants))
 
@@ -635,7 +635,7 @@ def test_a_failed_zmodem_upload_stays_on_the_list_and_points_at_the_browser(db, 
 def test_without_a_browser_route_the_failure_does_not_point_at_one(db, lane, alice):
     area = create_file_area(db, "downloads", creator=alice)
     upload_file(db, area, alice, "guide.pdf", b"payload")
-    session = _NoZmodemClient(editor_keys=[_key("1")])
+    session = _NoZmodemClient(editor_keys=[_key("0"), _key("1")])
 
     asyncio.run(_show_area(session, lane, area, alice))
 

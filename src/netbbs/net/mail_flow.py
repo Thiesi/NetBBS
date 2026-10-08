@@ -186,6 +186,7 @@ from netbbs.net.mail_recipients import (
     split_recipients,
 )
 from netbbs.net.notices import announce, announce_styled, pending_notice_rows, take_notices, write_notices
+from netbbs.net.row_numbers import ROW_NUMBER_WIDTH, read_row_number, row_number_label, row_range_label
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.shared_account import shared_account_refusal, signed_in_without_credential
 from netbbs.rendering.detail import Section, Styled
@@ -427,7 +428,8 @@ _IDENTITY_NOTE = (
 
 _LIST_HELP = [
     "Up/Down      move the highlight",
-    "Enter, 1-9   read the highlighted message, or row number N",
+    "Enter, 01-99 read the highlighted message, or row number NN",
+    "             (or one digit and Enter)",
     "< / >        previous page, next page (also PgUp/PgDn,",
     "             Left/Right)",
     "C            write a new message",
@@ -544,7 +546,7 @@ def _name_text(row: _MailRow) -> str:
 
 
 def _mail_column_widths(
-    rows: list[_MailRow], *, width: int, number_width: int, sent: bool, show_status: bool,
+    rows: list[_MailRow], *, width: int, sent: bool, show_status: bool,
 ) -> tuple[int, int, int] | None:
     """(name, subject, date) widths that fit `width`, or `None` when no
     readable table fits and the rows should be prose instead. The name
@@ -558,7 +560,7 @@ def _mail_column_widths(
     # The two-column lead ("> " or "  "), two spaces between columns, and
     # one column kept free: a row that reaches the last column makes many
     # terminals wrap the cursor onto the next row.
-    fixed = [number_width, date_width]
+    fixed = [ROW_NUMBER_WIDTH, date_width]
     if not sent:
         fixed.append(_MARKER_WIDTH)
     if show_status:
@@ -596,11 +598,11 @@ def _status_heading(rows: list[_MailRow]) -> str:
 
 
 def _mail_list_heading(
-    widths: tuple[int, int, int], *, number_width: int, sent: bool, show_status: bool,
+    widths: tuple[int, int, int], *, sent: bool, show_status: bool,
     status_heading: str = _DELIVERY_HEADING,
 ) -> str:
     name_width, subject_width, date_width = widths
-    parts = [f"{'#':>{number_width}}"]
+    parts = [f"{'#':>{ROW_NUMBER_WIDTH}}"]
     if not sent:
         parts.append(" " * _MARKER_WIDTH)
     parts.append(_pad("To" if sent else "From", name_width))
@@ -625,7 +627,6 @@ def _mail_list_rows(
     *,
     width: int,
     first_number: int,
-    number_width: int,
     widths: tuple[int, int, int] | None,
     highlighted: int | None,
     sent: bool,
@@ -643,7 +644,7 @@ def _mail_list_rows(
     styled_mark = colored(_MARK, fg_color=WARNING_COLOR, bold=True)
     for index, row in enumerate(rows):
         is_marked = row.message.id in marked
-        number = f"{first_number + index:>{number_width}}"
+        number = row_number_label(first_number + index)
         unread = not sent and not row.message.is_read
         marker = _NEW_MARKER if unread else ""
         status = _STATUS_LABELS[row.status] if row.status else ""
@@ -962,9 +963,16 @@ class _MailboxScreen:
         elif (key.kind == EditorKeyKind.ENTER or char in ("\r", "\n")) and self.highlighted is not None:
             await moved_on()
             await self._open(self.highlighted)
-        elif len(char) == 1 and char in "123456789" and int(char) <= min(9, self.shown_count):
-            await moved_on()
-            await self._open(self.shown_top + int(char) - 1)
+        elif len(char) == 1 and char.isascii() and char.isdigit():
+            # Two digits, or one and Enter (issue #1158).
+            number = await read_row_number(
+                session, char, row_count=self.shown_count, first_echoed=echoed,
+                read=lambda: _read_list_key(session),
+            )
+            if number is None:
+                return False
+            await session.write_line("")
+            await self._open(self.shown_top + number - 1)
         elif (key.kind == EditorKeyKind.CTRL and key.char == "l") or char == REDRAW_KEY:
             await self._reload()
             await self._render()
@@ -1326,8 +1334,7 @@ class _MailboxScreen:
         )
         options: list[MenuEntry] = []
         if row_count:
-            keys = "1" if row_count == 1 else f"1-{min(row_count, 9)}"
-            options.append(MenuEntry(label=menu_key(keys, "/Enter read"), brief="Read a message"))
+            options.append(MenuEntry(label=menu_key(row_range_label(row_count), "/Enter read"), brief="Read a message"))
         if has_previous:
             options.append(MenuEntry(label=menu_key("<", " Prev"), brief="Show the previous page"))
         if has_next:
@@ -1487,19 +1494,18 @@ class _MailboxScreen:
             lines.append("")
         if page_rows:
             show_status = self._show_status()
-            number_width = len(str(len(page_rows)))
             widths = _mail_column_widths(
-                page_rows, width=width, number_width=number_width, sent=self.sent, show_status=show_status,
+                page_rows, width=width, sent=self.sent, show_status=show_status,
             )
             if widths is not None:
                 lines.append(_mail_list_heading(
-                    widths, number_width=number_width, sent=self.sent, show_status=show_status,
+                    widths, sent=self.sent, show_status=show_status,
                     status_heading=_status_heading(self.all_rows),
                 ))
             if roomy:
                 lines.append(rule)
             lines.extend(_mail_list_rows(
-                page_rows, width=width, first_number=1, number_width=number_width, widths=widths,
+                page_rows, width=width, first_number=1, widths=widths,
                 highlighted=self.highlighted - top if self.highlighted is not None else None,
                 sent=self.sent, show_status=show_status, accent=self.accent,
                 ellipsis=ellipsis_for(self.session, unicode_style=self.unicode_style), marked=self.marked,

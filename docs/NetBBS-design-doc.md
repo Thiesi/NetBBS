@@ -1206,7 +1206,10 @@ highlighted row, or asks for its number on the page.
 
 A row number is two digits, or one digit and Enter (issue #840): the first
 field test's newcomer typed "3" and Enter where "03" was wanted, and nothing
-happened. A whole word typed at a one-key prompt ("Communities", "no") acts on
+happened. Every list numbers its rows this way, `01` to `99`: the picker, a
+board's posts, the mailbox and a file area (issue #1158,
+`netbbs.net.row_numbers`). The three that draw their own screen used to take
+one digit, `1`-`9`, so a row past the ninth had no number to type. A whole word typed at a one-key prompt ("Communities", "no") acts on
 its first letter only: after a main-menu key or a yes/no answer, letters that
 follow within 0.6 seconds of each other, and the Enter that ends them, are
 dropped rather than read by the next screen as keys (`char_input.
@@ -15673,6 +15676,9 @@ key inside the label.
   `[R]ecent callers` and `Moder[a]tion` becomes `[A]pprovals`.
 - **Settings and field screens are left to step 3**, which numbers them, so
   their fields are not reworded twice.
+- **Row numbers are two digits on every list**, as decided for the tracker:
+  a board's posts, the mailbox and a file area took one digit and now read
+  `01`-`99` like the picker (two digits, or one and Enter).
 
 ### Issue #1156 — how an MRC sender's styled name is shown — decided
 

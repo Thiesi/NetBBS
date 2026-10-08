@@ -279,7 +279,7 @@ def test_a_moderator_opens_an_earlier_version_from_the_reader(db, clock, board, 
     _edit(db, board, post, "the final text", alice)
     # Open the post, [H]istory, pick #02 (the original: newest is #01),
     # [B]ack from it, [B]ack out of the versions, the reader, the list.
-    session = FakeSession(["1", "h", "0", "2", "b", "b", "b", "b"])
+    session = FakeSession(["0", "1", "h", "0", "2", "b", "b", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, mod))
     text = session.visible()
     assert "[H]istory" in text
@@ -292,7 +292,7 @@ def test_readers_and_authors_get_no_history(db, clock, board, alice, reader):
     post = create_post(db, board, alice, "Plans", "v1")
     _edit(db, board, post, "v2", alice)
     for caller in (reader, alice):
-        session = FakeSession(["1", "b", "b"])
+        session = FakeSession(["0", "1", "b", "b"])
         asyncio.run(board_flow._show_board(session, db, board, caller))
         assert "[H]istory" not in session.visible()
 
@@ -302,7 +302,7 @@ def test_a_moderator_sees_a_removed_never_edited_post(db, clock, board, alice, m
     review on #789)."""
     post = create_post(db, board, alice, "Plans", "what was removed")
     tombstone_post(db, get_post(db, post.post_id), board, tombstoned_by=mod)
-    session = FakeSession(["1", "h", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["0", "1", "h", "0", "1", "b", "b", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, mod))
     text = session.visible()
     assert "no earlier versions" not in text
@@ -313,13 +313,13 @@ def test_a_moderator_sees_a_removed_never_edited_post(db, clock, board, alice, m
 def test_the_author_withdraws_from_the_reader(db, clock, board, alice, reader):
     create_post(db, board, alice, "Plans", "what I regret")
     # Open, [W]ithdraw, confirm, back to the list, leave.
-    session = FakeSession(["1", "w", "y", "b", "b"])
+    session = FakeSession(["0", "1", "w", "y", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = session.visible()
     assert "Post withdrawn." in text
     assert WITHDRAWN_PLACEHOLDER in text
     # Nobody else is offered it.
-    session = FakeSession(["1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, reader))
     assert "[W]ithdraw" not in session.visible()
 

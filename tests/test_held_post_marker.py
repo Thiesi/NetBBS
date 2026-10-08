@@ -101,7 +101,7 @@ def test_a_moderators_held_edit_is_theirs_not_the_authors(db, sysop, alice, boar
 def test_the_list_marks_it_held_and_the_reader_offers_nothing_but_leaving(db, alice, board):
     create_post(db, board, alice, "Mine", "what I wrote")
 
-    session = _FakeSession(keys=["1", "b", "b"])
+    session = _FakeSession(keys=["0", "1", "b", "b"])
     asyncio.run(_show_board(session, db, board, alice))
     text = session.visible_output
 
@@ -116,7 +116,7 @@ def test_the_reader_says_an_edit_awaits_approval(db, sysop, alice, board):
     post = approve_post(db, create_post(db, board, alice, "Hello", "approved text"), approved_by=sysop)
     edit_post(db, post, board, subject="Hello", body="new text", edited_by=alice)
 
-    session = _FakeSession(keys=["1", "b", "b"])
+    session = _FakeSession(keys=["0", "1", "b", "b"])
     asyncio.run(_show_board(session, db, board, alice))
     text = session.visible_output
 

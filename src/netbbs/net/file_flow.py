@@ -129,6 +129,7 @@ from netbbs.net.list_art import FILE_AREA, list_slot_fields
 from netbbs.net.chat_flow import NAME_GATE_NOTE
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.notices import announce, announce_styled, write_notices
+from netbbs.net.row_numbers import read_row_number, row_number_label, row_range_label
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.gate_summary import gates_line, resource_gates, unmet_gates
@@ -670,8 +671,7 @@ def _area_page_menus(
     n_files = len(page.entries)
     hints = []
     if n_files > 0:
-        num_label = f"1-{n_files}" if n_files > 1 else "1"
-        hints.append(MenuEntry(label=menu_key(num_label, f" — {_receive_how}")))
+        hints.append(MenuEntry(label=menu_key(row_range_label(n_files), f" — {_receive_how}")))
         hints.append(MenuEntry(label=menu_key("D", "ownload"), brief=_receive_one))
     if can_write:
         hints.append(MenuEntry(label=menu_key("U", "pload"), brief=_send_how))
@@ -781,16 +781,7 @@ def _key_action(
     of to a second dialect of this screen.
     """
     lowered = char.lower()
-    if char.isascii() and char.isdigit():
-        # `isascii()` as well as `isdigit()`: `str.isdigit` is true for
-        # characters `int()` then refuses -- `'²'.isdigit()` is `True`
-        # and `int('²')` raises `ValueError` -- and AltGr+2 on a German
-        # keyboard sends exactly that, which would have taken the
-        # session down from a keystroke on this screen.
-        index = int(char)
-        if 1 <= index <= len(page.entries):
-            return ("download", page.entries[index - 1], None)
-        return None
+    # A row number is two keys, read by `_numbered_download` before this.
     if lowered in _NAV_KEYS:
         return (_NAV_KEYS[lowered], None, highlighted)
     if lowered == "d":
@@ -815,6 +806,26 @@ def _key_action(
     if lowered == "q":
         return ("queue", None, highlighted)
     return None
+
+
+def _is_digit(char: str) -> bool:
+    # `isascii()` as well as `isdigit()`: `str.isdigit` is true for
+    # characters `int()` then refuses -- `'²'.isdigit()` is `True` and
+    # `int('²')` raises `ValueError` -- and AltGr+2 on a German keyboard
+    # sends exactly that, which would have taken the session down from a
+    # keystroke on this screen.
+    return len(char) == 1 and char.isascii() and char.isdigit()
+
+
+async def _numbered_download(
+    session: Session, page: FileEntryPage, first: str, highlighted: int | None, *, first_echoed: bool, read,
+) -> tuple[str, FileEntry | None, int | None]:
+    """A file by its row number: two digits, or one and Enter (issue #1158)."""
+    number = await read_row_number(session, first, row_count=len(page.entries), first_echoed=first_echoed, read=read)
+    if number is None:
+        return ("none", None, highlighted)
+    await session.write_line("")
+    return ("download", page.entries[number - 1], None)
 
 
 async def _read_file_choice(
@@ -905,6 +916,14 @@ async def _read_file_choice(
                     return ("none", None, highlighted)
                 await session.write_line("")
                 return action
+            elif key.kind == EditorKeyKind.CHAR and key.char and _is_digit(key.char):
+
+                async def _read_structured() -> tuple[EditorKey, bool]:
+                    return await read_editor_key(distinguish_ctrl_h=True), False
+
+                return await _numbered_download(
+                    session, page, key.char, highlighted, first_echoed=False, read=_read_structured,
+                )
             elif key.kind == EditorKeyKind.CHAR and key.char:
                 action = _key_action(key.char, page, highlighted)
                 if action is None:
@@ -945,6 +964,12 @@ async def _read_file_choice(
         return ("refresh", None, highlighted)
     if char == HELP_KEY:
         return ("help", None, highlighted)
+    if _is_digit(char):
+
+        async def _read_plain() -> tuple[EditorKey, bool]:
+            return EditorKey(EditorKeyKind.CHAR, char=await session.read_key()), True
+
+        return await _numbered_download(session, page, char, highlighted, first_echoed=True, read=_read_plain)
     action = _key_action(char, page, highlighted)
     if action is None:
         await session.write(reject_unhandled_key(char))
@@ -2030,7 +2055,7 @@ async def _render_file_page(
             await session.write_line(colored(" ".join(divider_cols), fg_color=divider_color))
         is_highlighted = highlighted == (position - 1)
         marker = ">" if is_highlighted else " "
-        idx_label = f"{marker}[{position:2d}]"
+        idx_label = f"{marker}[{row_number_label(position)}]"
 
         name_clean = sanitize_text(entry.filename)
         if entry.pinned:
