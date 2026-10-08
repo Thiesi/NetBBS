@@ -4242,4 +4242,21 @@ MIGRATIONS = [
             SELECT id, 'keys_notice_1158', 'pending' FROM users;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1165: `first_contact_at` on link_peers -- when this node first heard from "
+            "a peer itself, which the www.netbbs.org node pages show as 'known since' "
+            "(design doc §8.13). Set once and never moved. Existing rows start from the "
+            "earliest time already on file for them, a date by which this node certainly "
+            "knew the peer."
+        ),
+        sql="""
+        ALTER TABLE link_peers ADD COLUMN first_contact_at TEXT;
+        UPDATE link_peers SET first_contact_at = MIN(
+            updated_at,
+            COALESCE(last_direct_contact_at, updated_at),
+            COALESCE(descriptor_first_stored_at, updated_at)
+        );
+        """,
+    ),
 ]

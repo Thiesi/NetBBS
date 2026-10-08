@@ -410,7 +410,9 @@ def record_direct_contact(db: Database, fingerprint: str, at: str | None = None)
     which real-time admission lets in without a hello -- its
     `link_introduced_identities` row. It is never promoted to a peer: a row
     in `link_peers` means a completed hello (§8.11). Never moves the time
-    backwards, and does nothing for a node with neither row.
+    backwards, and does nothing for a node with neither row. A peer row
+    heard from for the first time also gets its `first_contact_at` (issue
+    #1165).
     """
     when = at or utc_now_iso()
     for table in ("link_peers", "link_introduced_identities"):
@@ -419,6 +421,10 @@ def record_direct_contact(db: Database, fingerprint: str, at: str | None = None)
                 WHERE fingerprint = ? AND (last_direct_contact_at IS NULL OR last_direct_contact_at < ?)""",
             (when, fingerprint, when),
         )
+    db.connection.execute(
+        "UPDATE link_peers SET first_contact_at = ? WHERE fingerprint = ? AND first_contact_at IS NULL",
+        (when, fingerprint),
+    )
     db.connection.commit()
 
 
@@ -457,6 +463,8 @@ def save_peer(db: Database, peer: PeerRecord, *, direct_contact: bool = True) ->
     persisting what it learned about the peer from someone else -- its
     descriptor in another node's peer list, its mail picked up from a
     relay -- passes `False`, and the peer's last contact stays as it was.
+    The first save that follows contact also sets `first_contact_at`,
+    which no later save moves (issue #1165).
 
     Also deletes any on-disk candidate row for the same fingerprint --
     mirrors `LinkNode.handle_hello`'s own in-memory
@@ -474,15 +482,16 @@ def save_peer(db: Database, peer: PeerRecord, *, direct_contact: bool = True) ->
         """
         INSERT INTO link_peers
             (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at, last_direct_contact_at,
-             descriptor_first_stored_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+             descriptor_first_stored_at, first_contact_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(fingerprint) DO UPDATE SET
             root_public_key = excluded.root_public_key,
             transitions_json = excluded.transitions_json,
             descriptor_json = excluded.descriptor_json,
             updated_at = excluded.updated_at,
             last_direct_contact_at = COALESCE(excluded.last_direct_contact_at, link_peers.last_direct_contact_at),
-            descriptor_first_stored_at = excluded.descriptor_first_stored_at
+            descriptor_first_stored_at = excluded.descriptor_first_stored_at,
+            first_contact_at = COALESCE(link_peers.first_contact_at, excluded.first_contact_at)
         """,
         (
             peer.fingerprint,
@@ -492,6 +501,7 @@ def save_peer(db: Database, peer: PeerRecord, *, direct_contact: bool = True) ->
             now,
             now if direct_contact else None,
             first_stored,
+            now if direct_contact else None,
         ),
     )
     db.connection.execute("DELETE FROM link_peer_candidates WHERE fingerprint = ?", (peer.fingerprint,))

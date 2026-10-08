@@ -395,6 +395,30 @@ def run_ftn_import_nodelist(db: Database, network_name: str, path: Path, *, as_u
     return f"Imported {count} nodes for {network.name} from {path.name}."
 
 
+def run_export_node_map(db: Database, identity_dir: Path, output: Path | None) -> str | None:
+    """Issue #1165: the caller's node map as JSON (design doc §8.13), for
+    the www.netbbs.org node pages. Printed, or written to `output` through
+    a temporary file and a rename, so a reader never sees half a file.
+    Returns the line to print, or `None` when the JSON itself went to
+    standard output."""
+    import json
+    import os
+
+    from netbbs.link.node_identity import read_node_fingerprint
+    from netbbs.link.node_map_export import export_node_map
+
+    document = export_node_map(db, own_fingerprint=read_node_fingerprint(identity_dir))
+    # ASCII with \u escapes, so no terminal or locale encoding can fail it.
+    text = json.dumps(document, indent=2) + "\n"
+    if output is None:
+        sys.stdout.write(text)
+        return None
+    staging = output.with_name(output.name + ".tmp")
+    staging.write_text(text, encoding="utf-8")
+    os.replace(staging, output)
+    return f"Wrote {len(document['nodes'])} nodes to {output}."
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The tool's argument parser, separate from `main()` so its shape
     can be tested without a terminal. With no subcommand the tool opens
@@ -487,6 +511,26 @@ def build_parser() -> argparse.ArgumentParser:
     nodelist.add_argument("network", help="the network's name, as in Settings, FTN networks")
     nodelist.add_argument("path", type=Path, help="the nodelist file, e.g. FSXNET.123")
     _add_common(nodelist, defaults=False)
+    export_map = subcommands.add_parser(
+        "export-node-map",
+        help="print the node map as a caller sees it, as JSON",
+        description=(
+            "Print the node map as a caller on this node sees it, as JSON: each node's name, "
+            "how this node knows it, when it was first and last heard from, its dial-in "
+            "addresses and its www.netbbs.org page setting. Nothing a caller cannot see is in "
+            "it. The www.netbbs.org node pages are built from Reliable Link's copy. Safe while "
+            "the node runs."
+        ),
+    )
+    export_map.add_argument(
+        "--identity-dir", type=Path, default=_DEFAULT_IDENTITY_DIR,
+        help=f"the node's identity directory, for its own fingerprint (default: {_DEFAULT_IDENTITY_DIR})",
+    )
+    export_map.add_argument(
+        "--output", type=Path, default=None,
+        help="write the JSON to this file, replacing it whole, instead of printing it",
+    )
+    _add_common(export_map, defaults=False)
     return parser
 
 
@@ -529,6 +573,19 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(terminal_wrapped(f"Not imported: {exc}", stream=sys.stderr)) from exc
         finally:
             db.close()
+        return
+
+    if args.command == "export-node-map":
+        from netbbs.link.node_identity import NodeIdentityError
+
+        try:
+            line = run_export_node_map(db, args.identity_dir, args.output)
+        except (OSError, ValueError, NodeIdentityError) as exc:
+            raise SystemExit(terminal_wrapped(f"Not exported: {exc}", stream=sys.stderr)) from exc
+        finally:
+            db.close()
+        if line is not None:
+            print_wrapped(line)
         return
 
     if args.command in ("last", "levels"):
