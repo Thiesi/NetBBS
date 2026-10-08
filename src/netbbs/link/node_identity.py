@@ -266,6 +266,21 @@ def finish_interrupted_rotation(directory: Path, identity: NodeIdentity) -> None
             staged.unlink()
 
 
+def read_node_fingerprint(directory: Path) -> str:
+    """The node's fingerprint, read from the public half of its root key
+    file without loading any private key, so it needs no passphrase and
+    changes nothing (issue #1165: the node map export). Raises
+    `NodeIdentityError` when there is no readable root key file."""
+    path = directory / _ROOT_FILENAME
+    try:
+        fingerprint = json.loads(path.read_text()).get("fingerprint")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise NodeIdentityError(f"could not read the node's root key at {path}: {exc}") from exc
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise NodeIdentityError(f"{path} names no fingerprint")
+    return fingerprint
+
+
 def bootstrap_node_identity(label: str) -> NodeIdentity:
     """
     Generate a brand-new node identity: a fresh root key, plus initial

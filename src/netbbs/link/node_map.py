@@ -105,6 +105,9 @@ class NodeMapEntry:
     we_relay_for_it: bool = False
     it_relays_for_us: bool = False
     reliability: float | None = None
+    # When this node first heard from a met node itself (issue #1165); `None`
+    # for every other source.
+    first_contact: datetime | None = None
 
     @property
     def trust_hidden(self) -> bool:
@@ -131,6 +134,7 @@ class _Known:
     last_direct_contact_at: str | None = None
     introduced_by: str | None = None
     first_named_at: str | None = None
+    first_contact_at: str | None = None
 
 
 def unknown_node_label(fingerprint: str) -> str:
@@ -306,11 +310,13 @@ def _gather(db: Database, own_fingerprint: str, *, include_candidates: bool) -> 
             known[item.fingerprint] = item
 
     for row in db.connection.execute(
-        "SELECT fingerprint, descriptor_json, descriptor_first_stored_at, last_direct_contact_at FROM link_peers"
+        "SELECT fingerprint, descriptor_json, descriptor_first_stored_at, last_direct_contact_at, "
+        "first_contact_at FROM link_peers"
     ):
         _offer(_Known(
             row["fingerprint"], MET, row["descriptor_json"], row["descriptor_first_stored_at"],
             last_direct_contact_at=row["last_direct_contact_at"],
+            first_contact_at=row["first_contact_at"],
         ))
     for row in db.connection.execute(
         "SELECT fingerprint, descriptor_json, descriptor_first_stored_at, introduced_by, "
@@ -445,6 +451,7 @@ def build_node_map(
             is_origin=fingerprint in origins,
             trust=trust[fingerprint],
             descriptor_payload=payload,
+            first_contact=_parse(item.first_contact_at) if item.source == MET else None,
             **extra,
         ))
     entries.sort(key=lambda e: (e.friendly_name.casefold(), e.dns_name or "", e.fingerprint))

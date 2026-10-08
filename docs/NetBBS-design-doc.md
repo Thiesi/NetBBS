@@ -5946,7 +5946,13 @@ states, and every node quarantined or blocked there. The friendly name and
 `dial_in` addresses are read from the node's signed descriptor by the same
 validating readers the node map uses, and are remote text, escaped where they
 are written. "Known to Reliable Link since" is the first direct contact
-Reliable Link has on record; "last heard" is the node map's (§8.12).
+Reliable Link has on record (`link_peers.first_contact_at`; for a peer met
+before that column existed, the earliest time its row already held, a date by
+which Reliable Link certainly knew it); "last heard" is the node map's
+(§8.12). Reliable Link writes the caller's map as JSON with `python -m
+netbbs.admin export-node-map`, which copies a fixed list of fields from each
+entry, so a field added to the map later stays off the pages until it is
+listed there.
 
 **What it never shows.** The address the managed-DNS service last saw, which
 is where the node's operator lives as often as where the board does; the

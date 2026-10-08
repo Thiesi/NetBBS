@@ -1350,6 +1350,11 @@ hidden from search engines (the default), shown and indexed, or off. Your node
 signs the choice into what it sends Reliable Link, so a change takes effect at
 the next contact.
 
+`python -m netbbs.admin export-node-map [--output FILE]` prints your own node
+map as your callers see it, as JSON: the same document Reliable Link builds the
+pages from. It reads the node's fingerprint from `--identity-dir` (default
+`netbbs_identity`), needs no passphrase, and is safe while the node runs.
+
 If you also run the managed-DNS service itself, `[managed_dns] admin_token` in
 `netbbs.toml` adds **[A]dminister service** to the DNS screen: the service's
 registrations as a table, each in full, and revocation with a reason and a
