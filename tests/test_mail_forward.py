@@ -263,12 +263,12 @@ def test_forward_of_a_letter_at_the_size_limit_is_refused_until_shortened(people
     characters, and Send refused (issue #812's rule)."""
     db_path, db, alice, bob, carol = people
     send_mail(db, alice, bob, "Big", "x" * (MAX_MAIL_BODY_BYTES - 1))
-    session = FakeSession(keys=["1", "f", "s", "c", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["1", "f", "s", "b", "b", "b"], lines=["carol", "", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, bob)
 
     text = _visible_text(session)
-    assert "too long -- shorten it with [B]ody." in text
+    assert "too long -- shorten it with [E]dit body." in text
     assert "Message sent." not in text
     assert list_inbox(db, carol) == []
 
@@ -304,7 +304,7 @@ def test_a_kept_forward_is_offered_when_forwarding_that_letter_again(people):
     _run(db_path, session, bob)
     assert "you'll be offered it when you forward this message again" in _visible_text(session)
     # ...and not offered to a reply to the same letter, which has a slot of its own.
-    session = FakeSession(keys=["1", "r", "c", "b", "b"], lines=["", "/done"])
+    session = FakeSession(keys=["1", "r", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, bob)
     assert "unfinished letter" not in _visible_text(session)

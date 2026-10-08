@@ -117,7 +117,7 @@ def test_forward_from_sent_returns_to_the_list_on_the_letter_with_the_outcome(pe
 def test_a_cancelled_forward_from_sent_comes_back_to_the_letter(people):
     db_path, db, alice, bob, _carol = people
     send_mail(db, alice, bob, "Plans", "Saturday?")
-    session = FakeSession(keys=["s", "1", "f", "c", "b", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["s", "1", "f", "b", "b", "b", "b"], lines=["carol", "", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -215,7 +215,7 @@ def test_a_resend_sent_to_someone_else_marks_nothing(linked):
 
 def test_a_cancelled_resend_marks_nothing(linked):
     db_path, db, alice, link_context, _node, _remote, address = linked
-    session = FakeSession(keys=["s", "1", "s", "c", "b", "b", "b"], lines=["", "/done"])
+    session = FakeSession(keys=["s", "1", "s", "b", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 

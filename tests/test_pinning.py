@@ -541,7 +541,7 @@ def test_keep_on_an_older_file_page_stays_on_that_page(tmp_path, monkeypatch):
     lane = DatabaseLane(path)
     try:
         # Older page (f0-f2), highlight its first row, keep it, leave.
-        session = FileSession(["o", "DOWN", "k", "b"])
+        session = FileSession(["<", "DOWN", "k", "b"])
         asyncio.run(_show_area(session, lane, area, mod))
     finally:
         lane.close()

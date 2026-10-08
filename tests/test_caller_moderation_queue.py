@@ -224,13 +224,13 @@ def test_leaving_the_queue_keeps_the_board_page_the_caller_was_on(db, sysop, ali
         approve_post(db, create_post(db, board, alice, f"Subject {i:02d}", "x"), approved_by=sysop)
     create_post(db, board, alice, "Held", "x")
 
-    # o: an older page; q, then b out of the unchanged queue; b out of the board.
-    session = _FakeSession(["o", "q", "b", "b"])
+    # <: an older page; q, then b out of the unchanged queue; b out of the board.
+    session = _FakeSession(["<", "q", "b", "b"])
     asyncio.run(_show_board(session, db, board, mod))
     after_queue = session.text.rsplit("Pending posts in", 1)[1]
 
     # Still an older page: the newest has nothing newer to offer.
-    assert "[N]ewer" in after_queue
+    assert "[>] Newer" in after_queue
 
 
 def test_backing_out_of_the_queue_on_an_empty_area_stays_on_one_screen(db, sysop, alice, mod):

@@ -228,8 +228,8 @@ def test_a_netmail_address_added_on_the_review_screen_is_refused_in_a_list(db, n
     """[T]o on the review screen settles the new list without the To
     prompt's checks; Send still refuses a netmail address in company."""
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
-    session = FakeSession(keys=["c", "t", "s", "c", "b"],
-                          lines=["bob", "Hello", "Body", "/done", "bob, Joe (21:3/110)"])
+    session = FakeSession(keys=["c", "t", "s", "b", "b"],
+                          lines=["bob", "Hello", "Body", "/done", "bob, Joe (21:3/110)", "y"])
     lane = DatabaseLane(db.path)
     try:
         asyncio.run(browse_mail(session, lane, alice))

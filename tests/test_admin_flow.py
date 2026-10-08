@@ -2961,7 +2961,7 @@ def test_area_and_channel_screens_fit_80x24_and_the_board_screen_80x25(db, lane,
         session.terminal_height = height
         asyncio.run(screen(session, lane, sysop, existing=None))
         text = _visible(_written_text(session))
-        assert "PgUp/PgDn" not in text, f"{screen.__name__} unexpectedly paginated"
+        assert "< > switches" not in text, f"{screen.__name__} unexpectedly paginated"
 
 
 def test_link_this_board_screen_keeps_the_draft_after_a_bad_field_entry(db, lane, sysop):
@@ -8736,7 +8736,7 @@ def test_link_status_screen_draws_the_whole_panel_before_offering_to_acknowledge
     panel = text[text.index("Operations › Link status"):]
     first_page = panel[: panel.index("Choice: ")]
     assert "[P]eers" in first_page and "[A]cknowledge identity changes" in first_page
-    assert "[>] Next page" in first_page
+    assert "[>] Next" in first_page
     # The rest of the panel was drawn without answering anything first.
     assert panel.index("Identity changes observed") < panel.index("Known events:")
     assert "Identity changes acknowledged." not in panel
@@ -11334,8 +11334,8 @@ def test_a_sysop_clears_observed_equivocation_from_the_subject_screen(db, lane, 
     subject = TrustSubject.node(subject_fingerprint)
     assert len(list_local_observations(db, subject)) == 1
 
-    # [N]ext page: the subject screen pages, and what was observed is on page 2.
-    session = FakeSession(["s", "p", "s", "0", "1", "n", "l", "y", "b", "b", "b", "b", "b", "b"])
+    # [>] Next: the subject screen pages, and what was observed is on page 2.
+    session = FakeSession(["s", "p", "s", "0", "1", ">", "l", "y", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert list_local_observations(db, subject) == []

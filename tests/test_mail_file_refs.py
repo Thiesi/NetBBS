@@ -440,8 +440,8 @@ def test_file_lines_that_push_a_link_letter_over_the_limit_are_caught_on_review(
     _file(db, alice)
     long_line = "x" * (MAX_MAIL_BODY_BYTES - 10)
     session = FakeSession(
-        keys=["c", "a", "0", "1", "0", "1", "s", "c", "b"],
-        lines=["carol@Farpoint", "Look", long_line, "/done"],
+        keys=["c", "a", "0", "1", "0", "1", "s", "b", "b"],
+        lines=["carol@Farpoint", "Look", long_line, "/done", "y"],
     )
     session.terminal_width = 200
 

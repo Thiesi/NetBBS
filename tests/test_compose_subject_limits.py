@@ -195,11 +195,12 @@ def test_a_board_post_over_the_limit_is_said_on_review_and_not_published(tmp_pat
     user = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=user)
     set_signature(db, user, "A signature of some length")
-    session = FakeSession(["Hello", "Body", "/done"], keys=["p", "p", "c", "b"])
+    # Back from review asks "Discard this draft?" before leaving (issue #1158).
+    session = FakeSession(["Hello", "Body", "/done", "y"], keys=["p", "p", "b", "b"])
 
     asyncio.run(_show_board(session, db, board, user))
 
-    assert "The post is" in session.text and "characters too long -- shorten it with [B]ody." in session.text
+    assert "The post is" in session.text and "characters too long -- shorten it with [E]dit body." in session.text
     assert "bytes" not in session.text
     assert list_posts_page(db, board, user).posts == []
     db.close()

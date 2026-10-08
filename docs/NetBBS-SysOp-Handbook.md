@@ -420,10 +420,13 @@ before telling anyone the address:
    ([Join and share](#join-and-share)).
 
 Quick actions lead to the same screens. Use the displayed keys rather than
-old menu letters from release notes. **Back** leaves a screen. Draft editors
-keep changes local until **Save**; Back discards the draft. Arrow keys move
-between fields, and Enter or Space opens the selected field. Where available,
-**Ctrl+H** explains fields.
+old menu letters from release notes. A few keys mean the same on every
+screen: **[B]ack** or Esc leaves it (Esc first clears a highlighted row or
+field), **<** **>** or PgUp/PgDn turn a page or a form's section, **/** finds,
+and **?**, F1 or Ctrl+H show help. On a list Left/Right turn the page too; on
+a form they step the highlighted field's value. Draft editors keep changes
+local until **Save**; Back discards the draft after asking. Up/Down move
+between fields, and Enter or Space opens the selected field.
 
 In current field prompts, the existing value is already in the input line:
 Enter accepts it, Escape cancels the field edit, and deleting all text clears
@@ -764,7 +767,8 @@ fields says what the screen is about: a board's posts and latest activity, its
 place in the list and whether it is Linked; a channel's MRC room; a door's
 compatibility. Longer details follow the fields: a Linked board's or area's
 **NetBBS Link** section, a channel's **Sharing**, a door's companion service.
-When the screen is paged with PgUp/PgDn, they are on the last page. The
+When the screen is paged with **<** **>** or PgUp/PgDn, they are on the last
+page. The
 resource's actions keep their letters (**Up**, **Down**, **Remove**, **Pending
 posts**, **History**, **Link**, **Restrictions**, **Compatibility**, the
 service controls and the rest) and are offered while nothing waits to be

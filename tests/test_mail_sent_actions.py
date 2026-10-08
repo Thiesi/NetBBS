@@ -139,8 +139,8 @@ def test_reply_from_sent_is_refused_when_the_recipient_blocked_the_caller(people
 def test_a_cancelled_reply_comes_back_to_the_letter(people):
     db_path, db, alice, bob = people
     send_mail(db, alice, bob, "Plans", "Saturday?")
-    # Cancel on review: back on the letter's view, then Back, Back, Back.
-    session = FakeSession(keys=["s", "1", "r", "c", "b", "b", "b"], lines=["", "/done"])
+    # Back on review, discarding it: back on the letter's view, then Back, Back, Back.
+    session = FakeSession(keys=["s", "1", "r", "b", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -245,8 +245,8 @@ def test_resend_checks_the_recipient_again_at_send(linked, monkeypatch):
         return "Mail to Farpoint is closed on this BBS."
 
     monkeypatch.setattr(mail_flow, "_check_link_reply_address", check)
-    # Send is refused and review is shown again; Cancel.
-    session = FakeSession(keys=["s", "1", "s", "s", "c", "b", "b", "b"], lines=["", "/done"])
+    # Send is refused and review is shown again; Back, and discard it.
+    session = FakeSession(keys=["s", "1", "s", "s", "b", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -280,7 +280,7 @@ def test_a_kept_resend_has_its_own_draft_slot(linked):
     _run(db_path, session, alice, link_context=link_context)
     assert "you'll be offered it when you resend this message again" in _visible_text(session)
     # ...not offered to a reply to the same letter...
-    session = FakeSession(keys=["s", "1", "r", "c", "b", "b", "b"], lines=["", "/done"])
+    session = FakeSession(keys=["s", "1", "r", "b", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
     assert "unfinished letter" not in _visible_text(session)

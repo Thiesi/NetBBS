@@ -38,8 +38,14 @@ When typing text, use Enter to submit it.
 **Ctrl+U** clears the line you are typing, and at a field that allows it,
 Esc leaves it without changing anything.
 Follow the action bar on the current screen: letters can mean different
-things in different places. **[B]ack** leaves most screens and goes one level
-up: from a board to the list you picked it from, and from there to the menu.
+things in different places. A few keys mean the same on every screen:
+
+| Key | What it does |
+| --- | --- |
+| **[B]** or Esc | Back, one level up: from a board to the list you picked it from, and from there to the menu. Esc first clears a highlighted row, if there is one |
+| **<** **>** | The previous or next page of a list or a long text; PgUp/PgDn do the same, and so do Left/Right on a list |
+| **/** | Find, wherever a list can be searched |
+| **?** | Help for the screen you are on; F1 and Ctrl-H do the same |
 
 | Main-menu choice | What it does |
 | --- | --- |
@@ -190,8 +196,9 @@ The fullscreen editor shows what you are writing above the text: the
 recipient or board, and the subject. Nothing is
 sent or posted until you choose to on the review screen, which keeps To and
 Subject at the top and shows a long message a page at a time. Turn the
-pages with PgUp/PgDn or **[N]ext page**/**[P]rev page**. On a board, where
-**P** posts, the page keys are **[>]** and **[<]**.
+pages with **<** **>** or PgUp/PgDn. **[E]dit body** reopens the text, and
+**[B]ack** (or Esc) leaves without sending, after asking first if you have
+written anything.
 
 A post or message needs a subject. Leave it empty and mail asks again;
 press Esc there to cancel the message. A subject that is too long is caught
@@ -265,8 +272,8 @@ into a door game or an editor while you are in it; the notice waits until you
 leave.
 Each row shows who a message is from, its subject and its date, with `new`
 beside mail you have not opened yet. Move with Up/Down and press Enter, or
-press a row's number, to read a message. On a long list, **[N]ext page** and
-**[P]rev page** (or PgDn and PgUp) turn the page. The other keys:
+press a row's number, to read a message. On a long list, **<** and **>** (or
+PgUp and PgDn) turn the page. The other keys:
 
 - **[S]ent** lists the mail you have sent. **[B]ack** there returns to the
   Inbox.
@@ -293,7 +300,7 @@ press a row's number, to read a message. On a long list, **[N]ext page** and
   (`Re:` and `Fwd:` aside), the conversation with the newest letter first and
   its earlier letters indented under it. In Sent it switches between newest
   first and by conversation. Your choice is remembered.
-- **[F]ind** shows only mail with a word in the name or the subject. An empty
+- **[/] Find** shows only mail with a word in the name or the subject. An empty
   line shows everything again.
 - **[U]nread** marks the highlighted message unread, or read without opening
   it. While you read a message, its own **[U]nread** does the same.
@@ -336,7 +343,7 @@ under what subject. What you type goes above it, as a note, and your
 signature goes under the note; in the line editor, `/end` writes at the end
 instead. A letter
 already at the size limit is too long to forward as it is: the review screen
-says by how much, and **[B]ody** lets you shorten it. Mail from **System**
+says by how much, and **[E]dit body** lets you shorten it. Mail from **System**
 can be forwarded too.
 
 Mail from **System** was sent by the BBS itself, not by a person -- for

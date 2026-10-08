@@ -340,7 +340,7 @@ def test_pages_turn_and_number_from_one(node):
     db, lane, bob, alice, _ = node
     for i in range(40):
         send_mail(db, alice, bob, f"Subject {i}", "body")
-    session = FakeSession(["n", "PGDN", "p", "b"])
+    session = FakeSession([">", "PGDN", "<", "b"])
 
     _run(session, lane, bob)
 
@@ -350,7 +350,7 @@ def test_pages_turn_and_number_from_one(node):
     assert first_listed[0] == "39"
     assert int(second_listed[0]) == 39 - len(first_listed)
     assert re.search(r"> +1 +new +alice +Subject " + second_listed[0], second)
-    assert "[P]rev page" in second
+    assert "[<] Prev" in second
     assert re.findall(r"Subject (\d+)\b", back) == second_listed
 
 
@@ -411,7 +411,7 @@ def test_find_matches_the_name_or_the_subject(node):
     send_mail(db, alice, bob, "Lunch", "body")
     send_mail(db, carol, bob, "Dinner", "body")
     send_mail(db, carol, bob, "Breakfast with alice", "body")
-    session = FakeSession(["f", "ALICE", "f", "", "b"])
+    session = FakeSession(["/", "ALICE", "/", "", "b"])
 
     _run(session, lane, bob)
 
@@ -427,7 +427,7 @@ def test_find_does_not_match_the_new_marker(node):
     unread message."""
     db, lane, bob, alice, _ = node
     send_mail(db, alice, bob, "Hello", "body")
-    session = FakeSession(["f", "new", "b"])
+    session = FakeSession(["/", "new", "b"])
 
     _run(session, lane, bob)
 
@@ -439,7 +439,7 @@ def test_find_does_not_match_the_new_marker(node):
 def test_esc_at_find_keeps_the_list(node):
     db, lane, bob, alice, _ = node
     send_mail(db, alice, bob, "Hello", "body")
-    session = FakeSession(["f", ESC, "b"])
+    session = FakeSession(["/", ESC, "b"])
 
     _run(session, lane, bob)
 
@@ -499,12 +499,12 @@ def test_unread_mail_stays_unread_until_opened(node):
 
 def test_an_outcome_notice_does_not_shift_the_page(node):
     """Review on #877: a notice takes a row from one render's budget; the
-    page must stay where it was, and [N]ext page must go on from the rows
+    page must stay where it was, and [>] Next must go on from the rows
     on screen rather than land on the same page again."""
     db, lane, bob, alice, _ = node
     for i in range(60):
         send_mail(db, alice, bob, f"Subject {i}", "body")
-    session = FakeSession(["n", "u", "n", "b"])
+    session = FakeSession([">", "u", ">", "b"])
 
     _run(session, lane, bob)
 

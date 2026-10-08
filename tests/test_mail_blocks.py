@@ -220,7 +220,7 @@ def test_the_to_prompt_refuses_a_recipient_who_blocked_you_and_asks_again(node):
 
 def test_send_refuses_a_recipient_who_blocked_you_while_you_wrote(node, monkeypatch):
     db, lane, bob, alice = node
-    session = LineSession(keys=["c", "s", "c", "y", "b", "b"], lines=["bob", "Hello", "Hi there", "/done"])
+    session = LineSession(keys=["c", "s", "b", "b"], lines=["bob", "Hello", "Hi there", "/done", "y"])
     real_send = mail_module.send_mail
 
     def block_then_send(db_, sender, recipient, subject, body, **kwargs):

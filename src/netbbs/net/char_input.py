@@ -1772,6 +1772,19 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
         return char
 
 
+def page_step(key: "EditorKey", *, arrows: bool = True) -> int | None:
+    """-1 for a key that turns to the previous page, +1 for the next, else
+    `None` (issue #1158): `<` `>`, PgUp/PgDn, and ←→ unless `arrows` is
+    False -- a form, where ←→ step the highlighted field's value instead."""
+    if key.kind == EditorKeyKind.CHAR:
+        return {PREVIOUS_PAGE_KEY: -1, NEXT_PAGE_KEY: 1}.get(key.char or "")
+    if key.kind == EditorKeyKind.PAGE_UP or (arrows and key.kind == EditorKeyKind.LEFT):
+        return -1
+    if key.kind == EditorKeyKind.PAGE_DOWN or (arrows and key.kind == EditorKeyKind.RIGHT):
+        return 1
+    return None
+
+
 async def read_any_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> str:
     """
     Wait for literally one keystroke -- Enter included -- and return.

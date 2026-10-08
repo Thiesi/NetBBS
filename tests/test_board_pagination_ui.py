@@ -98,7 +98,7 @@ def test_opening_a_multi_page_board_shows_only_the_newest_page(tmp_path, monkeyp
     shown = _listed(session)
     assert 0 < len(shown) < total
     assert shown == set(range(total - len(shown), total))
-    assert "lder" in session.output  # "[O]lder" offered -- there's more history
+    assert "lder" in session.output  # "[<] Older" offered -- there's more history
     assert "ewer" not in session.output  # already on the newest page
     db.close()
 
@@ -107,12 +107,12 @@ def test_older_key_navigates_to_the_previous_page(tmp_path, monkeypatch):
     db = Database(tmp_path / "node.db")
     total = _PAGE_SIZE * 2
     board, user = _make_board_with_posts(db, total, monkeypatch)
-    session = FakeSession(keys=["o", "b"])  # view newest page, go older, then back out
+    session = FakeSession(keys=["<", "b"])  # view newest page, go older, then back out
 
     asyncio.run(_show_board(session, db, board, user))
 
     # The older page's posts (subjects 0..PAGE_SIZE-1) must appear;
-    # confirms "O" actually re-queried and re-rendered, not a no-op.
+    # confirms "<" actually re-queried and re-rendered, not a no-op.
     for i in range(0, _PAGE_SIZE):
         assert f"Subject {i}" in session.output
     db.close()
@@ -125,7 +125,7 @@ def test_recent_key_jumps_straight_back_to_the_newest_page(tmp_path, monkeypatch
     # Page back twice, then jump straight to "recent" -- if this only
     # moved one page forward instead of jumping all the way, the
     # newest subject wouldn't be the last thing rendered.
-    session = FakeSession(keys=["o", "o", "r", "b"])
+    session = FakeSession(keys=["<", "<", "r", "b"])
 
     asyncio.run(_show_board(session, db, board, user))
 
@@ -221,7 +221,7 @@ def test_single_page_board_offers_no_older_newer_recent_options(tmp_path, monkey
 
     asyncio.run(_show_board(session, db, board, user))
 
-    assert "lder" not in session.output  # "[O]lder" -- not shown, nothing to page to
+    assert "lder" not in session.output  # "[<] Older" -- not shown, nothing to page to
     assert "ewer" not in session.output
     assert "ecent" not in session.output
     assert "ack" in session.output  # "[B]ack" is still always offered
@@ -426,7 +426,7 @@ def test_paging_to_an_older_page_does_not_regress_the_cursor(tmp_path, monkeypat
     board, alice = _make_board_with_posts(db, total, monkeypatch)
     bob = create_user(db, "bob", password="hunter2", user_level=10)
 
-    session = FakeSession(keys=["o", "b"])  # newest page, then page backward into history
+    session = FakeSession(keys=["<", "b"])  # newest page, then page backward into history
     asyncio.run(_show_board(session, db, board, bob))
 
     assert unread_post_count(db, bob, board) == 0  # still fully caught up, not regressed

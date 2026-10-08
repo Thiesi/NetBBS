@@ -167,7 +167,8 @@ def test_a_draft_kept_before_814_becomes_the_new_letter(node):
 
 def test_cancelling_a_letter_in_review_forgets_its_draft(node):
     _, lane, alice, _, _ = node
-    session = FakeSession(keys=["c", "c", "b"], lines=["bob", "Lunch?", "Body", "/done"])
+    # Back on review, then yes to "Discard this draft?" (issue #1158).
+    session = FakeSession(keys=["c", "b", "b"], lines=["bob", "Lunch?", "Body", "/done", "y"])
     asyncio.run(browse_mail(session, lane, alice))
 
     path = _letter_draft_path(lane, alice)
@@ -231,7 +232,7 @@ def test_a_kept_letter_keeps_the_to_and_subject_review_changed(node):
     db, lane, alice, _, _ = node
     set_fullscreen_editor_enabled(db, alice, True)
     session = FullscreenSession(
-        ["c", "bob", "Lunch?"] + _type("Body") + ["CTRL+O", "t", "carol", "u", "Dinner?", "b", "END"]
+        ["c", "bob", "Lunch?"] + _type("Body") + ["CTRL+O", "t", "carol", "u", "Dinner?", "e", "END"]
         + _type("!") + ["CTRL+X", "k", "b"]
     )
 

@@ -308,7 +308,8 @@ def test_show_help_wraps_long_lines_inside_frame():
 # ============================================================================
 
 def test_review_composition_body_framed_with_dividers():
-    session = FakeSession(keys=["c"], width=80)  # 'c' for cancel
+    # 'b' for Back, then yes to "Discard this draft?" (issue #1158).
+    session = FakeSession(keys=["b"], lines=["y"], width=80)
     action = asyncio.run(
         review_composition(
             session,
@@ -330,7 +331,7 @@ def test_review_composition_body_framed_with_dividers():
 
 
 def test_review_composition_dividers_ascii_fallback():
-    session = FakeSession(keys=["c"], width=80)
+    session = FakeSession(keys=["b"], lines=["y"], width=80)
     action = asyncio.run(
         review_composition(
             session,

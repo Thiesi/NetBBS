@@ -94,7 +94,7 @@ from netbbs.net.art_pacing import art_speed
 from netbbs.net.list_art import BOARD_LIST, list_slot_fields
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.chat_flow import NAME_GATE_NOTE
-from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, help_key_label, reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, help_key_label, page_step, reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import (
     ReviewAction,
@@ -850,9 +850,9 @@ def _list_options(
         keys = "1" if row_count == 1 else f"1-{min(row_count, 9)}"
         options.append(MenuEntry(label=menu_key(keys, "/Enter read"), brief="Read a post"))
     if page.has_older:
-        options.append(MenuEntry(label=menu_key("O", "lder"), brief="Show older posts"))
+        options.append(MenuEntry(label=menu_key("<", " Older"), brief="Show older posts"))
     if page.has_newer:
-        options.append(MenuEntry(label=menu_key("N", "ewer"), brief="Show newer posts"))
+        options.append(MenuEntry(label=menu_key(">", " Newer"), brief="Show newer posts"))
         options.append(MenuEntry(label=menu_key("R", "ecent"), brief="Jump to the newest page"))
     if can_post:
         options.append(MenuEntry(label=menu_key("P", "ost"), brief="Write a new post"))
@@ -905,14 +905,16 @@ async def _read_list_key(session: Session) -> tuple[EditorKey, bool]:
 _LIST_HELP = [
     "Up/Down      move the highlight",
     "Enter, 1-9   read the highlighted post, or post number N",
-    "O / N / R    older posts, newer posts, the newest page",
+    "< / >        older / newer posts (also PgUp/PgDn, Left/Right)",
+    "R            the newest page",
     "P            write a new post (when you may post here)",
     "A            draw a post in the ANSI art editor (boards with color)",
     "D            resume or discard a saved draft",
     "M            count every post on this board as read",
     "F            follow this board: New scan lists it first",
     "Ctrl-L       redraw the list",
-    "B            back to the list of boards",
+    "B or Esc     back to the list of boards (Esc first clears",
+    "             a highlighted row)",
     "",
     "Pinned posts are listed first, marked \"pin\". A moderator pins",
     "and unpins a post, and keeps it from expiring, while reading it.",
@@ -1921,7 +1923,15 @@ async def _show_board(
             if echoed:
                 await session.write_line("")
 
-        if key.kind in (EditorKeyKind.UP, EditorKeyKind.DOWN) and page.posts:
+        step = page_step(key)
+        if key.kind == EditorKeyKind.ESCAPE:
+            # Esc drops the highlight, then is Back (issue #1158).
+            if highlighted is not None:
+                highlighted = None
+                await _render(page, highlighted)
+            else:
+                return
+        elif key.kind in (EditorKeyKind.UP, EditorKeyKind.DOWN) and page.posts:
             step = -1 if key.kind == EditorKeyKind.UP else 1
             if highlighted is None:
                 highlighted = 0 if step == 1 else len(page.posts) - 1
@@ -1948,13 +1958,13 @@ async def _show_board(
                 header_color=effective_header_color_256(db), unicode_style=unicode_style,
             )
             await _render(page, highlighted)
-        elif char == "o" and page.has_older and page.oldest_cursor is not None:
+        elif step == -1 and page.has_older and page.oldest_cursor is not None:
             await _moved_on()
             page_anchor = ("before", page.oldest_cursor)
             page = _refetch_current_page()
             highlighted = None
             await _render_fresh(page)
-        elif char == "n" and page.has_newer and page.newest_cursor is not None:
+        elif step == 1 and page.has_newer and page.newest_cursor is not None:
             await _moved_on()
             page_anchor = ("after", page.newest_cursor)
             page = _refetch_current_page()
@@ -2309,7 +2319,7 @@ def _file_lines_too_long(link_body: str) -> str | None:
     if over:
         return (
             f"{too_long_message('With the file lines added for other BBSes, the post is', over)}"
-            " -- shorten it with [B]ody or [R]emove a file."
+            " -- shorten it with [E]dit body or [R]emove a file."
         )
     return None
 
@@ -2335,7 +2345,7 @@ def _too_long_to_post(subject: str, body: str) -> str | None:
         return f"{too_long_message('The subject is', over)} -- shorten it with [U]pdate subject."
     over = characters_over(body, MAX_BODY_BYTES)
     if over:
-        return f"{too_long_message('The post is', over)} -- shorten it with [B]ody."
+        return f"{too_long_message('The post is', over)} -- shorten it with [E]dit body."
     return None
 
 

@@ -744,7 +744,7 @@ lost its quote to it, and "Keep draft & exit" answered "Message cancelled."
 
 A letter's To and Subject are kept beside its text in a `.fields` file (JSON:
 `to`, `reply_address`, `subject`), written before the editor opens and again
-before review's `[B]ody` reopens it, so the letter resumes addressed as it was
+before review's `[E]dit body` reopens it, so the letter resumes addressed as it was
 left -- a Link reply to its stored `user@<fingerprint>`. The mail screen shows a
 kept new letter ("You have an unfinished letter to bob: Lunch?") and a
 `[D]raft` entry (resume, delete, or leave it); `[C]ompose` while one exists,
@@ -3806,7 +3806,7 @@ only at the forwarded letter's own.
   stay, so it reads as the original did.
 - Nothing extra bounds it: a letter at the body limit is over it once the
   header is added, and the review screen says so in characters and refuses
-  Send until `[B]ody` shortens it (issue #812), as for any over-limit letter.
+  Send until `[E]dit body` shortens it (issue #812), as for any over-limit letter.
 - System mail can be forwarded. Passing a moderation notice on -- to the SysOp,
   say -- harms no one, and the header says it came from System.
 - `caller_mail_refusal` is checked when the key is pressed. Each letter's
@@ -15629,7 +15629,14 @@ under their presentation contracts.
 
 **Decision 6 — callers are told once.** After the first login on the release
 that changes a key callers use, a short screen says that paging moved to `<`
-`>`, dismissed with any key. SysOps see it on the console too.
+`>`, dismissed with any key. SysOps see it on the console too. Only an account
+that knew the old keys sees it: the migration that ships with the change marks
+every account existing then (`keys_notice_1158 = pending`), and the screen
+(`netbbs.net.keys_notice`) is shown at that account's next login, after the
+previous-callers screen, then marked seen. An account made later has no mark,
+and a guest, signed in to a shared account, is never shown it. Rejected:
+counting logins, which would also show it to an account made after the
+upgrade on its second login.
 
 ### Issue #1156 — how an MRC sender's styled name is shown — decided
 

@@ -136,7 +136,8 @@ def test_a_refused_post_is_reported_on_the_review_screen_it_returns_to(db, alice
     monkeypatch.setattr(board_flow, "MAX_BODY_BYTES", 30)
     set_signature(db, alice, "A signature of some length")
     board = create_board(db, "general", creator=alice)
-    session = FakeSession(["p", "Hello", "Body", "/done", "p", "c", "b"])
+    # Back from review, yes to "Discard this draft?" (issue #1158).
+    session = FakeSession(["p", "Hello", "Body", "/done", "p", "b", "y", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -213,7 +214,7 @@ def test_a_refused_mail_is_reported_on_the_review_screen_it_returns_to(db, alice
     monkeypatch.setattr(netbbs.mail, "MAX_MAIL_PER_RECIPIENT", 0)
     lane = DatabaseLane(db.path)
     try:
-        session = FakeSession(["bob", "Subject", "Body", "/done", "s", "c"])
+        session = FakeSession(["bob", "Subject", "Body", "/done", "s", "b", "y"])
         asyncio.run(mail_flow._compose_mail(session, lane, alice))
     finally:
         lane.close()

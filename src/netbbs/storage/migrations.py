@@ -4230,4 +4230,16 @@ MIGRATIONS = [
             CHECK (mrc_handle IS NULL OR external_source IS 'mrc');
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1158: paging moved from letters to < > on every screen. Every account "
+            "that exists now learned the old keys, so each is marked to see the one-time "
+            "'keys that work everywhere' screen at its next login "
+            "(netbbs.net.keys_notice). Accounts made later have no mark and never see it."
+        ),
+        sql="""
+        INSERT OR IGNORE INTO user_preferences (user_id, key, value)
+            SELECT id, 'keys_notice_1158', 'pending' FROM users;
+        """,
+    ),
 ]

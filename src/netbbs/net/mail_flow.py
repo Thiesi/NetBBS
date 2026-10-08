@@ -145,7 +145,8 @@ from netbbs.net.file_ref_view import (
 )
 from netbbs.net.file_transfer import TransferGrants
 from netbbs.net.char_input import (
-    HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, InputCancelled, help_key_label, reject_unhandled_key,
+    HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, InputCancelled, help_key_label, page_step,
+    reject_unhandled_key,
 )
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import (
@@ -427,7 +428,8 @@ _IDENTITY_NOTE = (
 _LIST_HELP = [
     "Up/Down      move the highlight",
     "Enter, 1-9   read the highlighted message, or row number N",
-    "N / P        next page, previous page (also PgDn/PgUp)",
+    "< / >        previous page, next page (also PgUp/PgDn,",
+    "             Left/Right)",
     "C            write a new message",
     "D            resume or delete your unfinished letter",
     "S            your sent mail; B there comes back to the Inbox",
@@ -440,9 +442,10 @@ _LIST_HELP = [
     "R            delete every read message in the Inbox",
     "O            order: newest first, unread first (not in Sent),",
     "             or by conversation",
-    "F            show only mail with a word in its name or subject",
+    "/            find: only mail with a word in its name or subject",
     "Ctrl-L       redraw the list",
-    "B            back to the main menu",
+    "B or Esc     back to the main menu (Esc first clears a",
+    "             highlighted row)",
     "",
     "\"new\" marks mail you have not opened. Opening a message marks",
     "it read; [U]nread in the message or on the list takes that back.",
@@ -941,8 +944,15 @@ class _MailboxScreen:
             current = self.highlighted if self.highlighted is not None else (-1 if step == 1 else 0)
             self.highlighted = (current + step) % len(self.rows)
             await self._render()
-        elif key.kind in (EditorKeyKind.PAGE_UP, EditorKeyKind.PAGE_DOWN) or char in ("n", "p"):
-            forward = key.kind == EditorKeyKind.PAGE_DOWN or char == "n"
+        elif key.kind == EditorKeyKind.ESCAPE:
+            # Esc drops the highlight, then is Back (issue #1158).
+            if self.highlighted is not None:
+                self.highlighted = None
+                await self._render()
+                return False
+            return await self._handle(EditorKey(EditorKeyKind.CHAR, char="b"), "b", echoed=False)
+        elif page_step(key) is not None:
+            forward = page_step(key) == 1
             if not self._turn_page(forward):
                 await self._reject(key, echoed)
                 return False
@@ -1018,7 +1028,7 @@ class _MailboxScreen:
             announce(session, _ORDER_ANNOUNCEMENTS[self.order], tone="muted")
             await self._reload()
             await self._render()
-        elif char == "f" and self.all_rows:
+        elif char == "/" and self.all_rows:
             await moved_on()
             await self._find()
             await self._render()
@@ -1317,10 +1327,10 @@ class _MailboxScreen:
         if row_count:
             keys = "1" if row_count == 1 else f"1-{min(row_count, 9)}"
             options.append(MenuEntry(label=menu_key(keys, "/Enter read"), brief="Read a message"))
-        if has_next:
-            options.append(MenuEntry(label=menu_key("N", "ext page"), brief="Show the next page"))
         if has_previous:
-            options.append(MenuEntry(label=menu_key("P", "rev page"), brief="Show the previous page"))
+            options.append(MenuEntry(label=menu_key("<", " Prev"), brief="Show the previous page"))
+        if has_next:
+            options.append(MenuEntry(label=menu_key(">", " Next"), brief="Show the next page"))
         options.append(MenuEntry(label=menu_key("C", "ompose"), brief="Write a new message"))
         if self.has_draft:
             options.append(MenuEntry(label=menu_key("D", "raft"), brief="Resume or delete your unfinished letter"))
@@ -1362,7 +1372,7 @@ class _MailboxScreen:
                 }[self._next_order()],
             ))
             options.append(MenuEntry(
-                label=menu_key("F", "ind"), brief=f"Find by {'recipient' if self.sent else 'sender'} or subject",
+                label=menu_key("/", " Find"), brief=f"Find by {'recipient' if self.sent else 'sender'} or subject",
             ))
         options.append(MenuEntry(
             label=menu_key("B", "ack"),
@@ -3172,7 +3182,7 @@ async def _compose_mail(
     while True:
         # Before Review, not at Send (issue #812): an editor stops the
         # body at the limit, but the signature is added afterwards and can
-        # carry it over. Said on the review screen, where [B]ody and
+        # carry it over. Said on the review screen, where [E]dit body and
         # [U]pdate subject fix it; Send is refused until then.
         to_another_bbs = (link_enabled and (
             reply_address is not None or any("@" in entry for entry in split_recipients(recipient_text))
@@ -3825,7 +3835,7 @@ def _file_lines_too_long(link_body: str) -> str | None:
     if over:
         return (
             f"{too_long_message('With the file lines added for someone on another BBS, the message is', over)}"
-            " -- shorten it with [B]ody or [R]emove a file."
+            " -- shorten it with [E]dit body or [R]emove a file."
         )
     return None
 
@@ -3839,7 +3849,7 @@ def _too_long_to_send(subject: str, body: str) -> str | None:
         return f"{too_long_message('The subject is', over)} -- shorten it with [U]pdate subject."
     over = characters_over(body, MAX_MAIL_BODY_BYTES)
     if over:
-        return f"{too_long_message('The message is', over)} -- shorten it with [B]ody."
+        return f"{too_long_message('The message is', over)} -- shorten it with [E]dit body."
     return None
 
 

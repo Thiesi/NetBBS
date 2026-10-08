@@ -102,7 +102,7 @@ def test_a_panel_that_fits_is_one_page_with_no_paging_keys():
     assert _show(session, sections=_sections(2)) == ("b", 0)
     screen = "\n".join(session.on_terminal())
     assert "GROUP 0" in screen and "GROUP 1" in screen
-    assert "Page " not in screen and "[N]ext" not in screen
+    assert "Page " not in screen and "[>] Next" not in screen
 
 
 @pytest.mark.parametrize("height", [12, 24, 40])
@@ -122,14 +122,19 @@ def test_paging_reaches_every_group_and_wraps_around():
     _key, page = _show(session, sections=_sections(3))
     everything = _SGR.sub("", "".join(session.written))
     assert all(f"GROUP {index}" in everything for index in range(3))
-    assert "(Page 1 of 3 -- PgUp/PgDn to switch)" in everything
+    assert "(Page 1 of 3: < > turns)" in everything
     assert page == 0  # three pages, three PgDn: back where it started
 
 
-def test_n_and_p_page_when_the_screen_does_not_use_them_itself():
-    session = ScriptedSession(["n", "p", "p", "b"], height=14)
+def test_angle_brackets_page_and_n_and_p_do_not():
+    """`<` `>` page on every panel (issue #1158); `n`/`p` are no longer
+    page keys, even on a screen that does not use them itself."""
+    session = ScriptedSession(["n", "p", ">", "<", "<", "b"], height=14)
     _key, page = _show(session, sections=_sections(3))
-    assert "[N]ext page" in _SGR.sub("", "".join(session.written))
+    bar = _SGR.sub("", "".join(session.written))
+    assert "[>] Next" in bar and "[<] Prev" in bar
+    assert "[N]ext page" not in bar
+    assert bar.count("\a") == 2  # n and p ring the bell
     assert page == 2
 
 
@@ -138,7 +143,7 @@ def test_a_screen_that_owns_p_keeps_it_and_pages_with_angle_brackets():
     key, page = _show(session, sections=_sections(3), actions=[("p", menu_key("P", "eers")), _BACK])
     assert (key, page) == ("p", 1)
     bar = _SGR.sub("", "".join(session.written))
-    assert "[>] Next page" in bar and "[N]ext page" not in bar
+    assert "[>] Next" in bar and "[N]ext page" not in bar
 
 
 def test_a_key_the_screen_does_not_offer_bells_and_redraws_nothing():

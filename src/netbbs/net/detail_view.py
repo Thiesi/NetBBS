@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from netbbs.net.char_input import EditorKey, EditorKeyKind, reject_unhandled_key
+from netbbs.net.char_input import EditorKey, EditorKeyKind, page_step, reject_unhandled_key
 from netbbs.net.session import Session, write_laid_out_row, write_prompt
 from netbbs.rendering import MUTED_COLOR, action_bar, clear_screen, colored, menu_key
 from netbbs.rendering.detail import Section, paginate, render_sections
@@ -74,7 +74,6 @@ async def show_detail(
     left."""
     width = max(1, session.terminal_width)
     keys = {key.lower() for key, _label in actions}
-    next_key, prev_key = ("n", "p") if not keys & {"n", "p"} else (">", "<")
 
     title_rows = _rows(title, width)
     preamble_rows = [row for line in preamble for row in _rows(line, width)]
@@ -84,10 +83,9 @@ async def show_detail(
     def _bar(paged: bool) -> list[str]:
         labels = [label for _key, label in actions]
         if paged:
-            paging = [
-                menu_key(next_key.upper(), "ext page" if next_key == "n" else " Next page"),
-                menu_key(prev_key.upper(), "rev page" if prev_key == "p" else " Prev page"),
-            ]
+            # `<` `>` on every screen (issue #1158): the panel's own
+            # actions keep every letter.
+            paging = [menu_key("<", " Prev"), menu_key(">", " Next")]
             labels = [*labels[:-1], *paging, *labels[-1:]]
         return action_bar(labels, width=width).split("\r\n")
 
@@ -108,7 +106,7 @@ async def show_detail(
         rows = [*title_rows, *preamble_rows, "", *pages[page], ""]
         rows.extend(_bar(paged))
         if paged:
-            rows.append(colored(f"(Page {page + 1} of {len(pages)} -- PgUp/PgDn to switch)", fg_color=MUTED_COLOR))
+            rows.append(colored(f"(Page {page + 1} of {len(pages)}: < > turns)", fg_color=MUTED_COLOR))
         # Directly above the prompt, where the eye already is -- and where a
         # self-drawn console screen shows its own (`admin_flow._choice_prompt`).
         rows.extend(message_rows)
@@ -122,14 +120,13 @@ async def show_detail(
         while True:
             key, echoed = await _read_key(session)
             char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
-            if paged and (key.kind == EditorKeyKind.PAGE_DOWN or char == next_key):
-                step = 1
-            elif paged and (key.kind == EditorKeyKind.PAGE_UP or char == prev_key):
-                step = -1
-            elif char in keys:
-                await session.write_line("")
-                return char, page
-            else:
+            step = page_step(key) if paged else None
+            if key.kind == EditorKeyKind.ESCAPE and "b" in keys:
+                char = "b"  # Esc is Back (issue #1158); nothing is highlighted here
+            if step is None:
+                if char in keys:
+                    await session.write_line("")
+                    return char, page
                 await session.write(reject_unhandled_key(key.char) if echoed and key.char else "\a")
                 continue
             page = (page + step) % len(pages)

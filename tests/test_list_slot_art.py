@@ -199,11 +199,11 @@ def test_a_page_fills_the_region_and_the_prompt_goes_below_the_art():
     assert screen[6].startswith("| 05. Restoration")
     text = "".join(session.written)
     after_art = text[text.rfind(ESC + "[9;1H"):]
-    assert "[N]ext" in strip_ansi(after_art) and "Choice:" in after_art
+    assert "[>] Next" in strip_ansi(after_art) and "Choice:" in after_art
 
 
 def test_a_page_holds_as_many_entries_as_the_region_has_rows():
-    _, session = _pick(["n", "b"])
+    _, session = _pick([">", "b"])
     screen = _last_screen(session)
     assert "2/2" in screen[1]
     assert screen[2].startswith("| 01. Trading Post")
@@ -213,7 +213,7 @@ def test_a_page_holds_as_many_entries_as_the_region_has_rows():
 def test_numbers_and_the_cursor_pick_as_on_the_generated_list():
     assert _pick(["0", "3"])[0] == "Nibs"
     assert _pick([DOWN, DOWN, ENTER])[0] == "Inks"
-    assert _pick(["n", "0", "2"])[0] == "Calligraphy"
+    assert _pick([">", "0", "2"])[0] == "Calligraphy"
 
 
 def test_the_highlighted_entry_is_reversed_in_the_art():

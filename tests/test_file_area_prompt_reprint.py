@@ -151,7 +151,7 @@ def test_rejected_keys_never_run_prompts_together_on_one_line(tmp_path, monkeypa
 
 
 def test_nav_key_refused_at_the_edge_reprints_the_prompt(tmp_path, monkeypatch):
-    """The other half of the rule: `o` echoes itself and a newline
+    """The other half of the rule: `<` echoes itself and a newline
     before this screen discovers there is no older page, so the prompt
     it scrolled away has to come back."""
     db_path = tmp_path / "node.db"
@@ -159,7 +159,7 @@ def test_nav_key_refused_at_the_edge_reprints_the_prompt(tmp_path, monkeypatch):
     area, user = _setup_area(db, monkeypatch=monkeypatch)
 
     keys = [
-        EditorKey(EditorKeyKind.CHAR, char="o"),  # no older page exists
+        EditorKey(EditorKeyKind.CHAR, char="<"),  # no older page exists
         EditorKey(EditorKeyKind.CHAR, char="b"),
     ]
     session = FakeInteractiveSession(editor_keys=keys)
@@ -198,7 +198,7 @@ def test_unhandled_key_without_editor_support_leaves_the_prompt_alone(tmp_path, 
 
 
 def test_refused_hotkey_without_editor_support_reprints_the_prompt(tmp_path, monkeypatch):
-    """The other half, again without editor keys: `o` is a key this
+    """The other half, again without editor keys: `<` is a key this
     screen does handle, so it echoes a newline before the screen
     discovers there is no older page. That scrolled the prompt away,
     so the refusal puts it back.
@@ -211,7 +211,7 @@ def test_refused_hotkey_without_editor_support_reprints_the_prompt(tmp_path, mon
     db = Database(db_path)
     area, user = _setup_area(db, monkeypatch=monkeypatch)
 
-    session = FakeSession(keys=["o", "b"])
+    session = FakeSession(keys=["<", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))

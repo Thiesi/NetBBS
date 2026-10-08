@@ -896,8 +896,10 @@ def test_escape_cancels_cursor_navigation_without_leaving_the_screen():
     assert "\a" not in _written_text(session)
 
 
-def test_escape_with_nothing_selected_is_a_noop_bell():
-    session = NavigableFakeSession(["ESCAPE", "s"])
+def test_escape_with_nothing_selected_goes_back():
+    """Esc with no highlight to drop is Back, as on every screen (issue
+    #1158) -- it used to only ring the bell here."""
+    session = NavigableFakeSession(["ESCAPE"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -907,8 +909,8 @@ def test_escape_with_nothing_selected_is_a_noop_bell():
             save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
         )
     )
-    assert result["name"] == "lobby"
-    assert "\a" in _written_text(session)
+    assert result is None
+    assert "\a" not in _written_text(session)
 
 
 def test_ctrl_h_and_ctrl_c_still_work_through_the_navigable_session():
@@ -1532,7 +1534,7 @@ def test_sectioned_compact_menu_row_falls_back_to_flat_when_it_would_not_fit():
         )
     )
     text = _visible(_written_text(session))
-    assert "PgUp/PgDn" not in text  # confirms this scenario genuinely isn't paginated
+    assert "< > switches" not in text  # confirms this scenario genuinely isn't paginated
     # Once (the value list's own heading) rather than twice (heading
     # repeated as the sectioned menu row's own group title) confirms
     # the menu row fell back to the flat form instead.
@@ -1597,7 +1599,7 @@ def test_mixed_sectioned_and_unsectioned_fields_never_paginate_or_crash():
         )
     )  # must not raise
     text = _visible(_written_text(session))
-    assert "PgUp/PgDn" not in text
+    assert "< > switches" not in text
     assert draft["unsectioned"] == "typed"
 
 
@@ -1667,7 +1669,7 @@ def test_dense_sectioned_screen_paginates_instead_of_scrolling_off():
         )
     )
     text = _visible(_written_text(session))
-    assert "Section 1 of 6 -- PgUp/PgDn to switch" in text
+    assert "(Section 1 of 6: < > switches)" in text
     # Only page 1's own two fields/section render -- not all twelve.
     assert "GROUP0" in text
     assert "GROUP1" not in text
@@ -1807,7 +1809,7 @@ def test_page_up_down_bell_rejects_when_not_paginated():
     )
     text = _written_text(session)
     assert text.count("\a") == 2
-    assert "PgUp/PgDn" not in _visible(text)
+    assert "< > switches" not in _visible(text)
 
 
 class InlineSession(NavigableFakeSession):
