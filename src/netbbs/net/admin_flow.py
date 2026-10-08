@@ -10153,7 +10153,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
                                               brief="Move to a different name"))
             if status in _MANAGED_DNS_ACTIVE_STATUSES:
                 help_entries.append(MenuEntry(label=menu_key("W", "eb page"),
-                                              brief="Show, index or hide this node's page"))
+                                              brief="Show, index or hide the web page"))
             if admin_token is not None:
                 help_entries.append(MenuEntry(label=menu_key("A", "dminister service"),
                                               brief="Every name the service holds"))
