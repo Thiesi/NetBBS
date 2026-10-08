@@ -1173,7 +1173,7 @@ def test_description_level_brief_falls_back_to_compact_menu_row_when_the_screen_
     async def save(draft):
         return "saved"
 
-    many_fields = [_brief_field(f"f{i}", chr(ord("A") + i), f"Field{i}") for i in range(10)]
+    many_fields = [_brief_field(f"f{i}", _letter(i).upper(), f"Field{i}") for i in range(10)]
     session = FakeSession(["s"])
     result = asyncio.run(
         edit_resource_draft(
@@ -1459,13 +1459,20 @@ def test_sectioned_fields_group_the_compact_fallback_menu_row_too():
     assert identity_menu_index < text.index("[N]ame") < display_menu_index < text.index("[P]inned")
 
 
+def _letter(index: int) -> str:
+    """A field's hotkey by position: a, c, d... -- `b` is Back on every screen
+    (issue #1158) and FieldSpec refuses it, so its place goes to `y`."""
+    letter = chr(ord("a") + index)
+    return "y" if letter == "b" else letter
+
+
 def _many_sectioned_fields() -> list[FieldSpec]:
     fields = []
     for i in range(6):
         section = f"Group{i}"
         for j in range(2):
             key = f"f{i}_{j}"
-            hotkey = chr(ord("a") + i * 2 + j)
+            hotkey = _letter(i * 2 + j)
             fields.append(
                 FieldSpec(
                     key=key, hotkey=hotkey, menu_text=menu_key(hotkey.upper(), "x"),
@@ -1490,7 +1497,7 @@ def _many_single_field_sections() -> list[FieldSpec]:
     fields = []
     for i in range(6):
         key = f"f{i}"
-        hotkey = chr(ord("a") + i)
+        hotkey = _letter(i)
         fields.append(
             FieldSpec(
                 key=key, hotkey=hotkey, menu_text=menu_key(hotkey.upper(), "x"),
@@ -1970,7 +1977,7 @@ def test_labels_and_wrapped_values_share_a_column_across_sections(width):
 @pytest.mark.parametrize("long_value", [False, True])
 def test_off_page_hotkey_draws_its_field_before_reading_even_when_the_form_overflows(long_value):
     session = InlineSession(["z", "s"], width=40, height=12)
-    fields = [FieldSpec(str(i), chr(97 + i), "Field", "Long label", lambda d: "x", text_field(str(i)),
+    fields = [FieldSpec(str(i), _letter(i), "Field", "Long label", lambda d: "x", text_field(str(i)),
                         section="First") for i in range(10)]
     fields.append(FieldSpec("target", "z", "Target", "Target", lambda d: d["target"], text_field("target"), section="Second"))
     value = "many words " * 80 if long_value else "value"

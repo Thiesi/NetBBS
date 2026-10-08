@@ -259,6 +259,20 @@ class FieldSpec:
     # activating the field says so instead of opening its prompt.
     locked: str | None = None
 
+    def __post_init__(self) -> None:
+        _refuse_reserved_hotkey(self.hotkey, self.label)
+
+
+#: The keys that mean the same on every screen (issue #1158, design doc §3.5):
+#: Back, the page keys, Find and Help. A field or action never takes one --
+#: a computed hotkey included, which no test of a label could catch.
+RESERVED_HOTKEYS = frozenset({"b", "<", ">", "/", "?"})
+
+
+def _refuse_reserved_hotkey(hotkey: str, what: str) -> None:
+    if hotkey.lower() in RESERVED_HOTKEYS:
+        raise ValueError(f"{what!r} cannot use {hotkey!r}: it is a key that works everywhere (issue #1158)")
+
 
 @dataclass(frozen=True)
 class DetailAction:
@@ -272,6 +286,9 @@ class DetailAction:
     menu_text: str
     run: Callable[[Session, DatabaseLane], Awaitable[bool]]
     brief: str | None = None
+
+    def __post_init__(self) -> None:
+        _refuse_reserved_hotkey(self.hotkey, self.menu_text)
 
 
 @dataclass

@@ -706,6 +706,23 @@ raise the editor's designated error so the draft stays open. See design
 [section 3.5](NetBBS-design-doc.md#35-interaction-model-for-screens-issue-282)
 for confirmation and draft behavior.
 
+A few keys mean the same on every hotkey screen (issue #1158, §3.5 "Keys that
+work everywhere"): `B` and Esc go back, `<` `>` turn a page, `/` finds, and
+`?`, F1 and Ctrl-H show help. A new screen:
+
+- never gives one of them another meaning. `FieldSpec` and `DetailAction`
+  refuse them as hotkeys;
+- answers help. A hotkey read returns `HELP_KEY`, a structured read
+  `EditorKey(CTRL, "h")`. `help_overlay.show_menu_help` builds the page from
+  the screen's own menu entries and a sentence about the screen. A
+  `show_detail` panel only passes `help_title` and `help_about`;
+- pages with `char_input.page_step`, not letters.
+
+`tests/test_reserved_keys_enforced.py` checks the first two across the source.
+A key-reading function that is a question rather than a screen (a yes/no, an
+editor's "Save, Discard or Cancel?") goes on its exception list, with the
+reason.
+
 For bundled door presentation, inspect real renders, not just width tests.
 [door_gallery.py](../scripts/door_gallery.py) renders Voidrunner and War Dialer;
 add appropriate walks/fixtures for changed screens and attach pictures to the
