@@ -23,7 +23,7 @@ from netbbs.net.art_prompt import clear_prompt_in_art, end_choice_line, mark_pro
 from netbbs.auth.users import (
     SYSOP_LEVEL, User, current_account, describe_staff_permissions, is_usable_sysop, list_users,
 )
-from netbbs.net.help_overlay import show_help
+from netbbs.net.help_overlay import show_help, show_menu_help
 from netbbs.chat import (
     ChatHub,
     DirectChatInvites,
@@ -1456,7 +1456,7 @@ async def _how_this_board_works(session: Session, db: Database, user: User) -> N
         + (" Clicking a [letter] works too." if web else ""),
         "Lists number their rows: type the number (03, or 3 and Enter), or move with the arrow keys and press Enter.",
         "[B]ack goes one level up. [N]ew scan shows what is new since your last visit, one place after another.",
-        f"{help_key_label(session)} or ? shows help on most screens.",
+        f"{help_key_label(session)} or ? shows help on every screen.",
         "",
         _contact_line(sysops, caller_mail_refusal(session, db, user)),
         "",
@@ -1647,6 +1647,16 @@ async def _community_page(
                 node_controls=node_controls, lane=lane, link_context=link_context,
                 direct_invites=direct_invites,
                 title_prefix=community.name, **scope,
+            )
+        elif choice == HELP_KEY:
+            # The loop draws the page again.
+            await show_menu_help(
+                session, "Community help", option_list,
+                about=(
+                    "The boards, chat channels, file areas and games this community gathers in one place. "
+                    "Each entry says how many are open to you."
+                ),
+                header_color=effective_header_color_256(db), unicode_style=unicode_style,
             )
         else:
             await session.write(reject_unhandled_key(choice))

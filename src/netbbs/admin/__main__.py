@@ -67,7 +67,8 @@ from netbbs.net.local_cli import LocalCLISession
 from netbbs.net.local_terminal import raw_terminal
 from netbbs.net.node_theme import effective_accent_color_256
 from netbbs.net.picker import pick_item
-from netbbs.net.char_input import reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, reject_unhandled_key
+from netbbs.net.help_overlay import show_help
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import action_bar, menu_key
 from netbbs.rendering.reflow import print_wrapped, terminal_wrapped
@@ -251,6 +252,16 @@ async def _resolve_actor(session: Session, lane: DatabaseLane, as_username: str 
     return selected
 
 
+_FIRST_SYSOP_CREDENTIAL_HELP = [
+    "The first SysOp account of this node. Choose how it signs in; you can add",
+    "the other one later from Your profile.",
+    "",
+    f"  {menu_key('P', 'assword')}  Type a password, twice",
+    f"  {menu_key('K', 'ey')}       Paste an ed25519 public key, for SSH",
+    f"  {menu_key('T', 'wo')}       Both; either one signs in",
+]
+
+
 async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
     """No SysOp account exists yet on this node -- create the first
     one. Skips `_resolve_actor`'s normal --as/auto-select/picker logic
@@ -278,6 +289,13 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
         )
         await write_prompt(session, "Sign in with: ")
         choice = (await session.read_key()).lower()
+        if choice == HELP_KEY:
+            # Not the generated menu help: its "B or Esc goes back" is
+            # untrue on this one question.
+            await session.write_line("")
+            await show_help(session, "Sign-in help", _FIRST_SYSOP_CREDENTIAL_HELP)
+            await session.write_line("")
+            continue
         if choice not in ("p", "k", "t"):
             await session.write(reject_unhandled_key(choice))
             continue

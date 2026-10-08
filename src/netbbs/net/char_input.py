@@ -1984,6 +1984,11 @@ async def read_editor_key(
             if char is None:
                 continue  # malformed/interrupted multi-byte sequence
 
+        if char == "?" and distinguish_ctrl_h:
+            # `?` is help on every hotkey screen (issue #1158). Only screens
+            # of keys ask for Ctrl-H as help; no text editor does, so a `?`
+            # typed into a post is still a `?`.
+            return EditorKey(EditorKeyKind.CTRL, char="h")
         return EditorKey(EditorKeyKind.CHAR, char=char)
 
 

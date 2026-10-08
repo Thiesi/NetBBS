@@ -69,8 +69,9 @@ from netbbs.rendering import (
     VALUE_COLOR, WARNING_COLOR, action_bar, colored, menu_key, sanitize_text, wrap_to_width,
 )
 from netbbs.rendering.detail import Field, Section, render_sections
-from netbbs.rendering.layout import screen_title
-from netbbs.net.char_input import reject_unhandled_key
+from netbbs.rendering.layout import MenuEntry, screen_title
+from netbbs.net.char_input import HELP_KEY, reject_unhandled_key
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
 
@@ -946,6 +947,19 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
 
         while True:
             choice = (await session.read_key()).lower()
+            if choice == HELP_KEY:
+                help_entries = []
+                if row.status != "revoked":
+                    help_entries.append(MenuEntry(
+                        label=menu_key("R", "evoke"),
+                        brief="Take the name out of DNS and keep it from its holder; asks for a reason first",
+                    ))
+                await show_menu_help(
+                    session, "Registration help", help_entries,
+                    about="One name the managed-DNS service holds, as the service reports it.",
+                    header_color=presentation["header_color"], unicode_style=presentation["unicode_style"],
+                )
+                break  # drawn again
             if choice == "b":
                 await session.write_line("")
                 return

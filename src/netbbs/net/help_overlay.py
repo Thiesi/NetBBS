@@ -104,3 +104,74 @@ async def show_help(
     await session.write_line(continue_prompt())
     await session.discard_buffered_input()
     await session.read_any_key()
+
+
+# -- help built from a screen's own keys (issue #1158) -------------------------
+#
+# Every hotkey screen answers `?`, F1 and Ctrl-H (design doc §3.5, "Keys
+# that work everywhere"). Most screens already describe each key in the
+# `brief` their menu shows when descriptions are on, so their help is those
+# same words, one key per row, under a line about the screen, with the keys
+# that work everywhere at the end. A screen with more to explain passes
+# `about` and keeps the rest generated.
+
+_EVERYWHERE = (
+    ("B or Esc", "Back (Esc first clears a highlighted row)"),
+    ("? F1 Ctrl-H", "This help"),
+)
+_PAGING = ("< > PgUp/PgDn", "Previous / next page (Left/Right too)")  # only show_detail pages here
+_MAX_KEY_COLUMN = 26
+
+
+def _entry_parts(entry: object) -> tuple[str, str]:
+    """`(plain label, description)` of one menu entry: a `MenuEntry`, a
+    `(key, label)` pair as `show_detail` takes them, or a bare label."""
+    from netbbs.rendering.ansi import strip_ansi
+    from netbbs.rendering.layout import MenuEntry
+
+    if isinstance(entry, MenuEntry):
+        return strip_ansi(entry.label), entry.detailed or entry.brief or ""
+    if isinstance(entry, tuple):
+        return strip_ansi(entry[-1]), ""
+    return strip_ansi(str(entry)), ""
+
+
+def menu_help_lines(
+    entries, *, about: str | None = None, paged: bool = False,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
+) -> list[str]:
+    """The lines of a screen's help: `about`, then each of `entries` with
+    its description, then the keys that work everywhere. A `[B]ack` entry
+    is left to the everywhere block, which says what Esc adds to it."""
+    rows = [
+        (label, text) for label, text in map(_entry_parts, entries)
+        if label.strip().lower() not in ("[b]ack", "")
+    ]
+    everywhere = [*_EVERYWHERE, *((_PAGING,) if paged else ())]
+    width = min(_MAX_KEY_COLUMN, max(visible_width(label) for label, _ in [*rows, *everywhere]))
+    lines: list[str] = []
+    if about:
+        lines.extend([about, ""])
+    if rows:
+        lines.append(colored("Keys on this screen", fg_color=header_color, bold=True))
+        for label, text in rows:
+            pad = " " * max(1, width - visible_width(label) + 2)
+            lines.append(f"  {label}{pad}{text}".rstrip())
+        lines.append("")
+    lines.append(colored("Keys that work everywhere", fg_color=header_color, bold=True))
+    for label, text in everywhere:
+        lines.append(f"  {label}{' ' * max(1, width - visible_width(label) + 2)}{text}")
+    return lines
+
+
+async def show_menu_help(
+    session: Session, title: str, entries, *, about: str | None = None, paged: bool = False,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR, unicode_style: bool = False,
+) -> None:
+    """`show_help` with `menu_help_lines`: the help a screen gets for free
+    from its own menu. The caller redraws afterwards, as with `show_help`."""
+    await session.write_line("")
+    await show_help(
+        session, title, menu_help_lines(entries, about=about, paged=paged, header_color=header_color),
+        header_color=header_color, unicode_style=unicode_style,
+    )

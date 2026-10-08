@@ -117,7 +117,7 @@ from netbbs.net.file_ref_view import (
     ref_rows,
 )
 from netbbs.net.file_transfer import TransferGrants
-from netbbs.net.help_overlay import show_help
+from netbbs.net.help_overlay import show_help, show_menu_help
 from netbbs.net.mail_flow import (
     caller_mail_refusal, mail_blocked_notice, mail_someone, post_reply_key, split_link_address,
 )
@@ -1392,6 +1392,11 @@ async def _show_board(
                 page=detail_page,
                 preamble=byline,
                 message="\r\n".join(take_notices(session)) or None,
+                help_title="Reading a post",
+                help_about=(
+                    "One post at a time. Next and Previous step to the posts around it, "
+                    "across pages of the board."
+                ),
             )
             if key == "b":
                 return index
@@ -1725,24 +1730,37 @@ async def _show_board(
                 await _compose_new_post()
                 return True
             return False
-        await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
-        await session.write_line(
-            menu_row(
-                [
-                    MenuEntry(label=menu_key("R", "esume"), brief="Open it in the editor"),
-                    MenuEntry(
-                        label=menu_key("D", "iscard"),
-                        brief="Delete it, then start a new post" if from_post else "Delete the draft",
-                    ),
-                    MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
-                ],
-                width=session.terminal_width, height=session.terminal_height,
-                description_level=description_level,
+        entries = [
+            MenuEntry(label=menu_key("R", "esume"), brief="Open it in the editor"),
+            MenuEntry(
+                label=menu_key("D", "iscard"),
+                brief="Delete it, then start a new post" if from_post else "Delete the draft",
+            ),
+            MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
+        ]
+
+        async def _draw_choices() -> None:
+            await session.write_line(
+                menu_row(
+                    entries, width=session.terminal_width, height=session.terminal_height,
+                    description_level=description_level,
+                )
             )
-        )
-        await write_prompt(session, "Choice: ")
+            await write_prompt(session, "Choice: ")
+
+        await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
+        await _draw_choices()
         while True:
             choice = (await session.read_key()).lower()
+            if choice == HELP_KEY:
+                await show_menu_help(
+                    session, "Saved draft help", entries,
+                    about="A post you started on this board earlier was saved. Pick it up again or let it go.",
+                    header_color=effective_header_color(session, db), unicode_style=unicode_style,
+                )
+                await session.write_line("")
+                await _draw_choices()
+                continue
             if choice == "b":
                 await session.write_line("")
                 return False
@@ -1837,6 +1855,18 @@ async def _show_board(
                 await session.write_line(colored(f"\r\n{read_only_reason}", fg_color=MUTED_COLOR))
             if has_draft:
                 await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
+            options = _empty_board_options(has_draft)
+            await session.write_line(
+                "\r\n" + menu_row(
+                    options, width=session.terminal_width, height=session.terminal_height,
+                    description_level=description_level,
+                )
+            )
+            await write_notices(session)
+            await session.write("Choice: ")
+            return has_draft
+
+        def _empty_board_options(has_draft: bool) -> list[MenuEntry]:
             options = []
             if can_post:
                 options.append(MenuEntry(label=menu_key("P", "ost"), brief="Write the first post"))
@@ -1855,15 +1885,7 @@ async def _show_board(
                 else MenuEntry(label=menu_key("F", "ollow"), brief="List this board first in New scan")
             )
             options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
-            await session.write_line(
-                "\r\n" + menu_row(
-                    options, width=session.terminal_width, height=session.terminal_height,
-                    description_level=description_level,
-                )
-            )
-            await write_notices(session)
-            await session.write("Choice: ")
-            return has_draft
+            return options
 
         # Redrawn after composing (the review screen replaced it), never
         # after a stray key: `reject_unhandled_key` leaves the prompt as it
@@ -1905,6 +1927,14 @@ async def _show_board(
                     # loop below, same post-then-refresh behavior the
                     # non-empty case's own [P]ost option already has.
                     break
+                has_draft = await _draw_empty_board()
+                continue
+            if choice == HELP_KEY:
+                await show_menu_help(
+                    session, "Message board help", _empty_board_options(has_draft),
+                    about="This board has no posts yet. Its first post starts the conversation here.",
+                    header_color=header_color, unicode_style=unicode_style,
+                )
                 has_draft = await _draw_empty_board()
                 continue
             await session.write(reject_unhandled_key(choice))
@@ -2484,21 +2514,35 @@ async def _art_draft_choice(session: Session, db: Database, user: User, draft_pa
     to an unlabeled default (Codex review on #753)."""
     if not draft_path.exists():
         return "none"
+    entries = [
+        MenuEntry(label=menu_key("R", "esume"), brief="Open it in the art editor"),
+        MenuEntry(label=menu_key("D", "iscard"), brief="Delete it and start over"),
+        MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
+    ]
+
+    async def _draw_choices() -> None:
+        await session.write_line(menu_row(
+            entries, width=session.terminal_width, height=session.terminal_height,
+            description_level=menu_description_level(db, user),
+        ))
+        await write_prompt(session, "Choice: ")
+
     await session.write_line(colored(
         "\r\nYou have a saved drawing from an earlier session.", fg_color=MUTED_COLOR
     ))
-    await session.write_line(menu_row(
-        [
-            MenuEntry(label=menu_key("R", "esume"), brief="Open it in the art editor"),
-            MenuEntry(label=menu_key("D", "iscard"), brief="Delete it and start over"),
-            MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
-        ],
-        width=session.terminal_width, height=session.terminal_height,
-        description_level=menu_description_level(db, user),
-    ))
-    await write_prompt(session, "Choice: ")
+    await _draw_choices()
     while True:
         choice = (await session.read_key()).lower()
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Saved drawing help", entries,
+                about="A drawing you started earlier was saved. Pick it up again or let it go.",
+                header_color=effective_header_color(session, db),
+                unicode_style=unicode_style_enabled(db, user),
+            )
+            await session.write_line("")
+            await _draw_choices()
+            continue
         if choice == "r":
             await session.write_line("")
             return "resume"
@@ -2749,6 +2793,8 @@ async def _show_history(
                 unicode_style=unicode_style,
                 page=page,
                 preamble=byline,
+                help_title="Post version",
+                help_about="One earlier version of the post, as it read then. Nothing here can be changed.",
             )
             if key == "b":
                 break

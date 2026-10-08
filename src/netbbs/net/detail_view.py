@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from netbbs.net.char_input import EditorKey, EditorKeyKind, page_step, reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, EditorKey, EditorKeyKind, page_step, reject_unhandled_key
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.session import Session, write_laid_out_row, write_prompt
 from netbbs.rendering import MUTED_COLOR, action_bar, clear_screen, colored, menu_key
 from netbbs.rendering.detail import Section, paginate, render_sections
@@ -60,6 +61,8 @@ async def show_detail(
     page: int = 0,
     preamble: Sequence[str] = (),
     message: str | None = None,
+    help_title: str | None = None,
+    help_about: str | None = None,
 ) -> tuple[str, int]:
     """Show `sections` a page at a time and return `(hotkey, page)` once the
     SysOp presses one of `actions`' keys.
@@ -71,7 +74,11 @@ async def show_detail(
     styled, `\r\n` between several) is the one-off outcome of whatever the
     SysOp just did, shown directly above the prompt until a page is turned.
     `page` lets a caller that redraws after an action come back to the page it
-    left."""
+    left.
+
+    `?`, F1 and Ctrl-H show this panel's keys (issue #1158): its `actions`,
+    the page keys when it is paged, and `help_about` above them, a sentence
+    on what the panel is for, under `help_title`."""
     width = max(1, session.terminal_width)
     keys = {key.lower() for key, _label in actions}
 
@@ -121,6 +128,12 @@ async def show_detail(
             key, echoed = await _read_key(session)
             char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
             step = page_step(key) if paged else None
+            if (key.kind == EditorKeyKind.CTRL and key.char == "h") or char == HELP_KEY:
+                await show_menu_help(
+                    session, help_title or "Keys on this screen", actions,
+                    about=help_about, paged=paged, unicode_style=unicode_style,
+                )
+                break  # the outer loop redraws the page
             if key.kind == EditorKeyKind.ESCAPE and "b" in keys:
                 char = "b"  # Esc is Back (issue #1158); nothing is highlighted here
             if step is None:

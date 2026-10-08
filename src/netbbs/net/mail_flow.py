@@ -169,7 +169,7 @@ from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
-from netbbs.net.help_overlay import show_help
+from netbbs.net.help_overlay import show_help, show_menu_help
 from netbbs.net.post_color_preference import post_colors_enabled
 from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.detail_view import show_detail
@@ -1735,10 +1735,11 @@ async def _show_message(
     actions: list[tuple[str, str]],
     page: int,
     copies: list[MailMessage] | None = None,
+    help_about: str | None = None,
 ) -> tuple[str, int]:
     """One message on `show_detail`: returns the action key and the page
     it was pressed on. `copies` are the Sent copies of a letter to several
-    people (issue #827)."""
+    people (issue #827). `help_about` is the sentence its help opens with."""
     unicode_style = await lane.run(unicode_style_enabled, user)
     title, preamble, body_rows = await _message_view(
         session, lane, user, message=message, to_label=to_label,
@@ -1756,6 +1757,8 @@ async def _show_message(
         page=page,
         preamble=preamble,
         message="\r\n".join(take_notices(session)) or None,
+        help_title="Reading a letter",
+        help_about=help_about,
     )
 
 
@@ -1854,7 +1857,10 @@ async def _show_inbox_message(
             blocked = await lane.run(is_blocked, user, block_target)
             actions.append(("k", menu_key("k", " sender", prefix="Unbloc" if blocked else "Bloc")))
         actions.append(("b", menu_key("B", "ack")))
-        choice, page = await _show_message(session, lane, user, message, to_label=None, actions=actions, page=page)
+        choice, page = await _show_message(
+            session, lane, user, message, to_label=None, actions=actions, page=page,
+            help_about="A letter sent to you. Delete removes it from your mailbox; nothing reaches the sender.",
+        )
         if choice == "b":
             return
         if choice == "k":
@@ -2244,7 +2250,10 @@ async def _show_sent_message(
     actions += [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
     page = 0
     while True:
-        choice, page = await _show_message(session, lane, user, message, to_label=to_label, actions=actions, page=page)
+        choice, page = await _show_message(
+            session, lane, user, message, to_label=to_label, actions=actions, page=page,
+            help_about="A letter you sent. Delete removes your copy only; the recipient keeps theirs.",
+        )
         if choice == "b":
             return
         if choice == "f":
@@ -2297,6 +2306,10 @@ async def _show_sent_group(
     while True:
         choice, page = await _show_message(
             session, lane, user, message, to_label=to_label, actions=actions, page=page, copies=copies,
+            help_about=(
+                "A letter you sent to several people, shown once for all its copies. "
+                "Delete removes every copy from Sent; the recipients keep theirs."
+            ),
         )
         if choice == "b":
             return
@@ -3479,23 +3492,38 @@ async def _letter_draft_choice(
     the caller's [C]ompose or [R]eply, where [D]iscard deletes the kept
     letter and then starts afresh; from [D]raft it only deletes it."""
     description_level = await lane.run(menu_description_level, user)
-    await session.write_line(colored(f"\r\n{_letter_draft_notice(draft)}", fg_color=MUTED_COLOR))
-    await session.write_line(
-        _menu_row(
-            [
-                MenuEntry(label=menu_key("R", "esume"), brief="Open it where you left off"),
-                MenuEntry(
-                    label=menu_key("D", "iscard"),
-                    brief="Delete it, then start again" if starting_new else "Delete the draft",
-                ),
-                MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
-            ],
-            width=session.terminal_width, height=session.terminal_height, description_level=description_level,
+    entries = [
+        MenuEntry(label=menu_key("R", "esume"), brief="Open it where you left off"),
+        MenuEntry(
+            label=menu_key("D", "iscard"),
+            brief="Delete it, then start again" if starting_new else "Delete the draft",
+        ),
+        MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
+    ]
+
+    async def _draw_choices() -> None:
+        await session.write_line(
+            _menu_row(
+                entries, width=session.terminal_width, height=session.terminal_height,
+                description_level=description_level,
+            )
         )
-    )
-    await write_prompt(session, "Choice: ")
+        await write_prompt(session, "Choice: ")
+
+    await session.write_line(colored(f"\r\n{_letter_draft_notice(draft)}", fg_color=MUTED_COLOR))
+    await _draw_choices()
     while True:
         choice = (await session.read_key()).lower()
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Saved letter help", entries,
+                about="A letter you started earlier was kept. Pick it up again or let it go.",
+                header_color=await lane.run(effective_header_color_256),
+                unicode_style=await lane.run(unicode_style_enabled, user),
+            )
+            await session.write_line("")
+            await _draw_choices()
+            continue
         if choice in ("r", "d", "b"):
             await session.write_line("")
             return {"r": "resume", "d": "discard", "b": "back"}[choice]
