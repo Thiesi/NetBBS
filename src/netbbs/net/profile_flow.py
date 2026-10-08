@@ -262,7 +262,7 @@ def _render_previous_callers_panel(
 ) -> list[str]:
     """The framed caller roll, as rendered rows, drawn identically for
     both places it appears (issue #592): the post-login splash and the
-    main menu's own `P[r]evious callers` entry. One renderer, so the
+    main menu's own `[R]ecent callers` entry. One renderer, so the
     name-visibility policy and the column measurement below can never
     drift between the two.
     """
@@ -2255,7 +2255,7 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
     name = get_attestation(db, subject, "name")
     if age is not None and name is not None:
         while True:
-            await write_prompt(session, highlight_hotkeys("Revoke which: [A]ge, real [N]ame, or [B]ack? "))
+            await write_prompt(session, highlight_hotkeys("Revoke which: [A]ge, [N]ame, or [B]ack? "))
             which = (await session.read_key()).lower()
             if which != HELP_KEY:
                 break
@@ -2263,8 +2263,7 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
                 session, "Revoke help",
                 [
                     MenuEntry(label=menu_key("A", "ge"), brief="Withdraw the verified age"),
-                    MenuEntry(label=menu_key("N", "ame", prefix="real ", capitalize=True),
-                              brief="Withdraw the verified real name"),
+                    MenuEntry(label=menu_key("N", "ame"), brief="Withdraw the verified real name"),
                 ],
                 about=(
                     f"{sanitize_text(subject.username)} has both a verified age and a verified real name. "
@@ -2360,8 +2359,8 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
             + (sanitize_text(existing_name.attested_value) if existing_name is not None else "(not attested)")
         )
         actions = [
-            menu_key("A", "ttest age"),
-            menu_key("N", "ame", prefix="Attest ", capitalize=True),
+            menu_key("A", "ge"),
+            menu_key("N", "ame"),
         ]
         # Issue #1115: whoever may verify may also withdraw a verification.
         if existing_age is not None or existing_name is not None:
@@ -2417,9 +2416,8 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
             await _draw()
         elif choice == HELP_KEY:
             entries = [
-                MenuEntry(label=menu_key("A", "ttest age"), brief="Record the birthdate you checked"),
-                MenuEntry(label=menu_key("N", "ame", prefix="Attest ", capitalize=True),
-                          brief="Record the real name you checked"),
+                MenuEntry(label=menu_key("A", "ge"), brief="Attest the birthdate you checked"),
+                MenuEntry(label=menu_key("N", "ame"), brief="Attest the real name you checked"),
             ]
             if get_attestation(db, subject, "age") is not None or get_attestation(db, subject, "name") is not None:
                 entries.append(MenuEntry(label=menu_key("R", "evoke"), brief="Withdraw a verification"))

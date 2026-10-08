@@ -53,15 +53,15 @@ things in different places. A few keys mean the same on every screen:
 | **Chat** | Every chat channel |
 | **Files** | Every file area |
 | **Games** | Door games, when the SysOp has set some up |
-| **Communities** (key **O**) | Topics the SysOp set up, each with its own boards, chat channels, file areas and games |
+| **Topics** | The node's Communities: topics the SysOp set up, each with its own boards, chat channels, file areas and games |
 | **New scan** | See unread activity and resources you have not visited; Back from each one brings you back with the next new one ready for Enter, **[R]eplies** opens the replies to your posts, and **[E]-mail** opens your mailbox, whose unread count is shown above the list |
 | **Find** (key **/**) | Search your own mail (your Inbox and Sent, never anyone else's) and the posts, files and retained chat on this node. Mail results come first, up to 20 of each kind. A letter opens as it does in the mailbox, and Back returns to the results. Mail is left out where the SysOp has not opened mail to you |
 | **E-mail** | Read and send persistent NetBBS mail, from the level the SysOp chose; not offered to the guest account |
 | **Who's online** | See callers and available ways to contact them |
 | **Profile** | Change your public profile and personal preferences |
-| **Moderation** (key **A**) | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
+| **Approvals** | Posts and uploads waiting for your decision, if the SysOp made you a moderator |
 | **Staff** | Your staff console, if the SysOp gave you staff permissions |
-| **Staff list** (key **T**) | Who runs this node: the SysOps, staff and moderators, when each was last on, and who is away |
+| **Operators** | Who runs this node: the SysOps, staff and moderators, when each was last on, and who is away |
 
 Lists of boards and file areas keep the SysOp's order, so the number you
 remember for a board still picks it next time. **[O]rder** in a list sorts it
@@ -277,8 +277,9 @@ PgUp and PgDn) turn the page. The other keys:
 
 - **[S]ent** lists the mail you have sent. **[B]ack** there returns to the
   Inbox.
-- **[K]ept** lists the letters you keep. **K[e]ep** in the Inbox (on the list
-  or in a letter) moves a letter there, and **Mov[e] to Inbox** moves it back.
+- **[V]iew Kept** lists the letters you keep. **[K]ept: no** in the Inbox (on
+  the list or in a letter) moves a letter there, and **[K]ept: yes** in Kept
+  moves it back.
   The mailbox never removes a kept letter to make room, and kept letters do
   not count toward the Inbox's 500. Kept has its own limit instead: it holds
   100 letters, and its header counts them, for example `40 of 100`. When it
@@ -288,12 +289,13 @@ PgUp and PgDn) turn the page. The other keys:
   and you are told how many more Kept has room for. The Inbox header says how
   many are in Kept.
 - **[C]ompose** writes a new message.
-- **[M]ark** (or Space) marks the highlighted message with `*` and moves to
-  the next, so you can mark a run of them; press it again on a marked one to
-  unmark it. **De[l]ete** then deletes the marked messages, after one
-  question that says how many; with nothing marked it deletes the highlighted
-  one. In the Inbox, **K[e]ep** moves the marked messages to Kept the same way.
-- **Delete [r]ead** in the Inbox deletes every message you have read, after
+- **[M]arked: no** (or Space) marks the highlighted message with `*` and
+  moves to the next, so you can mark a run of them; on a marked one it reads
+  **[M]arked: yes** and unmarks it. **[E]rase** then deletes the marked
+  messages, after one question that says how many; with nothing marked it
+  deletes the highlighted one. In the Inbox, **[K]ept** moves the marked
+  messages to Kept the same way.
+- **[P]urge read** in the Inbox deletes every message you have read, after
   one question that says how many. Unread and kept mail stays.
 - **[O]rder** switches between newest first, unread first, and by
   conversation, which groups the letters with one person under one subject
@@ -302,8 +304,9 @@ PgUp and PgDn) turn the page. The other keys:
   first and by conversation. Your choice is remembered.
 - **[/] Find** shows only mail with a word in the name or the subject. An empty
   line shows everything again.
-- **[U]nread** marks the highlighted message unread, or read without opening
-  it. While you read a message, its own **[U]nread** does the same.
+- **[U]nread: no** marks the highlighted message unread; on an unread one it
+  reads **[U]nread: yes** and marks it read without opening it. While you
+  read a message, its own **[U]nread: no** marks it unread again.
 
 You can also write to someone from where you found them, without typing
 their address. The compose screen opens with **To** filled in:
@@ -386,7 +389,7 @@ Delivery line when you open it:
   in 14 days; it may still have arrived, and if an answer turns up later,
   Sent shows it as delivered or bounced after all.
 - **Resent**: it bounced or expired, and you sent it again with
-  **Re[s]end**. The new copy is a letter of its own in Sent, with its own
+  **[S]end again**. The new copy is a letter of its own in Sent, with its own
   state.
 
 A letter shows the way its writer typed it: each line stays a line, and
@@ -397,11 +400,11 @@ reads as plain text.
 
 When mail bounces or expires you are told at the main menu, once, even if it
 happened while you were away. Opening the message in Sent counts as being
-told. To try again, open it in Sent and press **Re[s]end**: the compose
+told. To try again, open it in Sent and press **[S]end again**: the compose
 screen opens with the same recipient, subject and text, ready to send as a
 new letter. Once it is sent you are back on the Sent list, and the old
 letter reads **resent** there; opening it shows when, on a `Resent:` line
-under its Delivery line, and the key reads **Re[s]end again**. If you sent
+under its Delivery line, and the key reads **[S]end another copy**. If you sent
 the resend to someone else instead, the old letter stays as it was. If the
 reason it failed still applies on this side -- for example your SysOp has
 since stopped mail to that node -- you are told so when you press the key
@@ -413,13 +416,13 @@ the Sent list once the new letter is sent.
 A letter to several people is one row in Sent, with everyone's names under
 To. Opening it shows a Delivery line for each person on another node, and
 the list shows the one that needs you most -- a bounce before a letter still
-on its way. **Re[s]end** there sends the letter again only to those whose
+on its way. **[S]end again** there sends the letter again only to those whose
 copy bounced or expired and was not resent yet; the list reads **resent**
-once every one of them was, and the key then reads **Re[s]end again**.
-**[R]eply** writes to them all again; **[D]elete**
+once every one of them was, and the key then reads **[S]end another copy**.
+**[R]eply** writes to them all again; **[E]rase**
 removes it from Sent for everyone it went to (their copies stay theirs).
 When you receive such a letter, its To line shows everyone it went to, and
-**Reply [a]ll** writes to its sender and everyone else on it, where
+**[A]nswer all** writes to its sender and everyone else on it, where
 **[R]eply** writes to the sender alone. Anyone who can't be written to any
 more is left out, and you are told who.
 
@@ -445,8 +448,9 @@ the result above the prompt (or on Find's results, if you opened the letter
 from there).
 
 To stop someone's mail and live messages, open a letter from them and
-press **Bloc[k] sender**, or pick them on **Who's online** and press
-**Bloc[k]**; the same key, now **Unbloc[k]**, takes it back. It works for
+press **[S]ender blocked: no**, or pick them on **Who's online** and press
+the same key there; it then reads **[S]ender blocked: yes**, and pressing it
+again takes the block back. It works for
 someone on this board and for someone on a linked node, who is blocked by
 their address there, so a node changing its name does not undo it.
 **Profile → Blocked people** lists everyone you block, blocks someone by
@@ -618,7 +622,7 @@ Signed in as the board's guest, you share one account with every other
 guest, so Profile won't change anything other callers see of it: the bio,
 signature, name and details, who it blocks, whether it takes messages, or its
 MRC settings. Each of those says so when you press it, and so do `/nick` and
-`/mrc register`, `identify` or `send` in chat and **Bloc[k]** in Who's online. Display
+`/mrc register`, `identify` or `send` in chat and **[S]ender blocked** in Who's online. Display
 settings still change, for this call only: character set, color depth, redraw
 style, banners, editor, colors and sort orders go back to the account's own
 the next time anyone signs in as the guest. Register an account of your own to

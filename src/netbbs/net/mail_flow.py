@@ -380,7 +380,7 @@ _THREAD_INDENT = "  "
 _EMPTY_INBOX = "Your inbox is empty. New mail will appear here."
 _EMPTY_SENT = "You haven't sent any mail. [C]ompose writes a new message."
 _EMPTY_KEPT = (
-    f"Nothing kept. K[e]ep in the Inbox moves a letter here, where the mailbox cap never removes it. "
+    f"Nothing kept. [K]ept in the Inbox moves a letter here, where the mailbox cap never removes it. "
     f"Kept holds {MAX_KEPT_PER_RECIPIENT} letters."
 )
 def kept_capacity_note(kept: int) -> str | None:
@@ -389,7 +389,7 @@ def kept_capacity_note(kept: int) -> str | None:
     if kept < MAX_KEPT_PER_RECIPIENT:
         return None
     return (
-        f"Kept is full ({MAX_KEPT_PER_RECIPIENT} letters): K[e]ep in the Inbox is refused until you move "
+        f"Kept is full ({MAX_KEPT_PER_RECIPIENT} letters): [K]ept in the Inbox is refused until you move "
         "some back to the Inbox or delete them."
     )
 
@@ -433,13 +433,14 @@ _LIST_HELP = [
     "C            write a new message",
     "D            resume or delete your unfinished letter",
     "S            your sent mail; B there comes back to the Inbox",
-    "K            your kept mail; B there comes back to the Inbox",
+    "V            your kept mail; B there comes back to the Inbox",
     "U            mark the highlighted message unread, or read",
     "M, Space     mark the highlighted message, or unmark it",
-    "L            delete the marked messages, or the highlighted one",
-    "E            keep the marked (or highlighted) messages, or in",
+    "E            erase (delete) the marked messages, or the",
+    "             highlighted one",
+    "K            keep the marked (or highlighted) messages, or in",
     "             Kept, move them back to the Inbox",
-    "R            delete every read message in the Inbox",
+    "P            purge: delete every read message in the Inbox",
     "O            order: newest first, unread first (not in Sent),",
     "             or by conversation",
     "/            find: only mail with a word in its name or subject",
@@ -449,7 +450,7 @@ _LIST_HELP = [
     "",
     "\"new\" marks mail you have not opened. Opening a message marks",
     "it read; [U]nread in the message or on the list takes that back.",
-    "* marks a message for Delete or Keep. Kept mail is never removed",
+    "* marks a message for Erase or Kept. Kept mail is never removed",
     "to make room, but still counts toward the mailbox's size.",
     "By conversation groups mail with one person under one subject,",
     "Re: and Fwd: aside, newest conversation first.",
@@ -985,7 +986,7 @@ class _MailboxScreen:
         elif char == "s" and self.folder == _INBOX:
             await moved_on()
             await self._switch(_SENT)
-        elif char == "k" and self.folder == _INBOX:
+        elif char == "v" and self.folder == _INBOX:
             await moved_on()
             await self._switch(_KEPT)
         elif char == "b":
@@ -998,15 +999,15 @@ class _MailboxScreen:
             await moved_on()
             self._toggle_mark()
             await self._render()
-        elif char == "l" and self.highlighted is not None:
+        elif char == "e" and self.highlighted is not None:
             await moved_on()
             await self._delete()
             await self._render()
-        elif char == "e" and not self.sent and self.highlighted is not None:
+        elif char == "k" and not self.sent and self.highlighted is not None:
             await moved_on()
             await self._keep()
             await self._render()
-        elif char == "r" and self._read_count():
+        elif char == "p" and self._read_count():
             await moved_on()
             await self._delete_read()
             await self._render()
@@ -1112,14 +1113,14 @@ class _MailboxScreen:
         return [self.rows[self.highlighted]]
 
     def _read_count(self) -> int:
-        """How many letters `Delete [r]ead` would delete: the read ones in
+        """How many letters `[P]urge read` would delete: the read ones in
         the Inbox. Kept mail is kept, and unread mail has not been seen."""
         if self.folder != _INBOX:
             return 0
         return sum(1 for row in self.all_rows if row.message.is_read)
 
     async def _delete(self) -> None:
-        """De[l]ete: the marked letters, or the highlighted one, after one
+        """[E]rase: the marked letters, or the highlighted one, after one
         confirmation. Each goes from the caller's own side only
         (`netbbs.mail.delete_letters`)."""
         targets = self._targets()
@@ -1142,7 +1143,7 @@ class _MailboxScreen:
         await self._reload()
 
     async def _delete_read(self) -> None:
-        """Delete [r]ead: every read letter in the Inbox, after one
+        """[P]urge read: every read letter in the Inbox, after one
         confirmation that says how many. Unread mail and Kept stay."""
         count = self._read_count()
         if not await prompt_yes_no(
@@ -1159,8 +1160,8 @@ class _MailboxScreen:
         await self._reload()
 
     async def _keep(self) -> None:
-        """K[e]ep in the Inbox moves the marked letters, or the highlighted
-        one, to Kept; Mov[e] to Inbox in Kept moves them back. Nothing is
+        """[K]ept in the Inbox moves the marked letters, or the highlighted
+        one, to Kept; [K]ept in Kept moves them back. Nothing is
         lost either way, so nothing is asked."""
         targets = self._targets()
         try:
@@ -1336,32 +1337,32 @@ class _MailboxScreen:
             options.append(MenuEntry(label=menu_key("D", "raft"), brief="Resume or delete your unfinished letter"))
         if self.folder == _INBOX:
             options.append(MenuEntry(label=menu_key("S", "ent"), brief="Review mail you've sent"))
-            options.append(MenuEntry(label=menu_key("K", "ept"), brief="Mail you keep from the mailbox cap"))
+            options.append(MenuEntry(label=menu_key("V", "iew Kept"), brief="Mail you keep from the mailbox cap"))
         if row_count:
+            # A toggle shows its state (issue #1158); "yes" is the longer
+            # label, which the page budget measures.
             if not measuring and (highlighted is None or highlighted.message.id not in self.marked):
-                options.append(MenuEntry(label=menu_key("M", "ark"), brief="Mark the highlighted message"))
+                options.append(MenuEntry(label=menu_key("M", "arked: no"), brief="Mark the highlighted message"))
             else:
-                # Un[m]ark is the longer label, which the page budget measures.
-                options.append(MenuEntry(label=menu_key("m", "ark", prefix="Un"), brief="Unmark it"))
+                options.append(MenuEntry(label=menu_key("M", "arked: yes"), brief="Unmark it"))
             options.append(MenuEntry(
-                label=menu_key("l", "ete", prefix="De"),
+                label=menu_key("E", "rase"),
                 brief="Delete the marked messages" if self.marked else "Delete the highlighted message",
             ))
             if self.folder == _INBOX:
                 options.append(MenuEntry(
-                    label=menu_key("e", "ep", prefix="K"), brief="Move to Kept, safe from the mailbox cap",
+                    label=menu_key("K", "ept: no"), brief="Move to Kept, safe from the mailbox cap",
                 ))
             elif self.kept:
-                options.append(MenuEntry(label=menu_key("e", " to Inbox", prefix="Mov"), brief="Move back to the Inbox"))
+                options.append(MenuEntry(label=menu_key("K", "ept: yes"), brief="Move back to the Inbox"))
             if not self.sent:
-                if measuring or highlighted is None or highlighted.message.is_read:
-                    # The longer label, which the page budget measures.
-                    options.append(MenuEntry(label=menu_key("U", "nread"), brief="Mark the highlighted message unread"))
+                if measuring or (highlighted is not None and not highlighted.message.is_read):
+                    options.append(MenuEntry(label=menu_key("U", "nread: yes"), brief="Mark the highlighted message read"))
                 else:
-                    options.append(MenuEntry(label=menu_key("U", " Read"), brief="Mark the highlighted message read"))
+                    options.append(MenuEntry(label=menu_key("U", "nread: no"), brief="Mark the highlighted message unread"))
         if self.folder == _INBOX and (measuring or self._read_count()):
             options.append(MenuEntry(
-                label=menu_key("r", "ead", prefix="Delete "), brief="Delete every read message in the Inbox",
+                label=menu_key("P", "urge read"), brief="Delete every read message in the Inbox",
             ))
         if self.all_rows:
             options.append(MenuEntry(
@@ -1840,22 +1841,22 @@ async def _show_inbox_message(
         # and the view says why.
         actions = [] if message.from_system else [("r", menu_key("R", "eply"))]
         if len(reply_all) > 1:
-            actions.append(("a", menu_key("a", "ll", prefix="Reply ")))
+            actions.append(("a", menu_key("A", "nswer all")))
         actions += [
             # Offered on system mail too (issue #822): passing a notice on
             # to someone -- the SysOp, say -- harms no one.
             ("f", menu_key("F", "orward")),
             *([("g", menu_key("G", "et file"))] if refs else []),
-            ("u", menu_key("U", "nread")),
+            ("u", menu_key("U", "nread: no")),
             # Issue #828: to the Kept folder, which the cap never evicts
             # from, and back; Kept has its own limit (issue #921).
-            ("e", menu_key("e", " to Inbox", prefix="Mov") if message.kept_at else menu_key("e", "ep", prefix="K")),
-            ("d", menu_key("D", "elete")),
+            ("k", menu_key("K", "ept: yes" if message.kept_at else "ept: no")),
+            ("e", menu_key("E", "rase")),
         ]
         if block_target is not None:
             # Issue #817: a toggle, labelled by what it will do.
             blocked = await lane.run(is_blocked, user, block_target)
-            actions.append(("k", menu_key("k", " sender", prefix="Unbloc" if blocked else "Bloc")))
+            actions.append(("s", menu_key("S", "ender blocked: yes" if blocked else "ender blocked: no")))
         actions.append(("b", menu_key("B", "ack")))
         choice, page = await _show_message(
             session, lane, user, message, to_label=None, actions=actions, page=page,
@@ -1863,7 +1864,7 @@ async def _show_inbox_message(
         )
         if choice == "b":
             return
-        if choice == "k":
+        if choice == "s":
             text, tone = await lane.run(toggle_block, user, block_target)
             announce(session, text, tone=tone)
             continue
@@ -1885,7 +1886,7 @@ async def _show_inbox_message(
                 link_context=link_context, reply_key=_reply_all_key(message),
             )
             continue
-        if choice == "e":
+        if choice == "k":
             keep = message.kept_at is None
             try:
                 await lane.run(set_kept, user, [message.id], kept=keep)
@@ -1901,7 +1902,7 @@ async def _show_inbox_message(
             await lane.run(mark_unread, user, message)
             announce(session, "Marked unread.", tone="muted")
             return
-        if choice == "d":
+        if choice == "e":
             if not await prompt_yes_no(session, "Delete this message?", default=False):
                 continue
             await lane.run(delete_for_recipient, user, message)
@@ -2027,7 +2028,7 @@ def _decode_files(text: str | None) -> list[FileRef]:
 
 # -- blocked people (issues #817, #925) ----------------------------------------
 #
-# A caller blocks someone from a letter they received (`Bloc[k] sender` on
+# A caller blocks someone from a letter they received (`[S]ender blocked` on
 # its view, a toggle), from Who's online (`Bloc[k]`, the same toggle), or by
 # name from Profile > Blocked people, which lists them and unblocks. Local
 # accounts are blocked by account id, Link users by their `user@<fingerprint>`
@@ -2226,7 +2227,7 @@ async def _show_sent_message(
     *, link_context: LinkContext | None = None,
 ) -> None:
     """A letter the caller sent. `[R]eply` writes to its recipient again (a
-    follow-up, issue #825); `Re[s]end`, on Link mail that bounced or
+    follow-up, issue #825); `[S]end again`, on Link mail that bounced or
     expired, sends the same letter again as a new one, and the old one then
     shows as resent (issue #919). A letter sent from either, or from
     `[F]orward` (issue #919), returns to the Sent list, where it now is,
@@ -2245,9 +2246,8 @@ async def _show_sent_message(
         # Only a letter that did not arrive (issue #825): one that did, or
         # may yet, would reach its reader twice. Once resent, the key says
         # it would be another copy (issue #919).
-        again = " again" if message.resent_at is not None else ""
-        actions.append(("s", menu_key("s", "end" + again, prefix="Re")))
-    actions += [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
+        actions.append(("s", menu_key("S", "end another copy" if message.resent_at is not None else "end again")))
+    actions += [("f", menu_key("F", "orward")), ("e", menu_key("E", "rase")), ("b", menu_key("B", "ack"))]
     page = 0
     while True:
         choice, page = await _show_message(
@@ -2281,7 +2281,7 @@ async def _show_sent_group(
 ) -> None:
     """A letter the caller sent to several people (issue #827), shown once
     for all its copies: To names everyone, and each Link copy's delivery is
-    on a line of its own. `[R]eply` writes to them all again; `Re[s]end`
+    on a line of its own. `[R]eply` writes to them all again; `[S]end again`
     sends the letter again to those whose copy bounced or expired, and to
     no one else; `[D]elete` removes every copy from Sent. Mail to all
     callers has no Reply or Resend: it is sent from the SysOp console."""
@@ -2298,9 +2298,9 @@ async def _show_sent_group(
     if not to_all:
         actions.append(("r", menu_key("R", "eply")))
         if failed:
-            again = " again" if all(copy.resent_at is not None for copy in failed) else ""
-            actions.append(("s", menu_key("s", "end" + again, prefix="Re")))
-    actions += [("f", menu_key("F", "orward")), ("d", menu_key("D", "elete")), ("b", menu_key("B", "ack"))]
+            resent = all(copy.resent_at is not None for copy in failed)
+            actions.append(("s", menu_key("S", "end another copy" if resent else "end again")))
+    actions += [("f", menu_key("F", "orward")), ("e", menu_key("E", "rase")), ("b", menu_key("B", "ack"))]
     to_label = await _display_recipient_label(lane, message)
     page = 0
     while True:
@@ -2355,7 +2355,7 @@ async def _write_to_recipient(
     session: Session, lane: DatabaseLane, user: User, message: MailMessage,
     *, resend: bool, link_context: LinkContext | None,
 ) -> bool:
-    """[R]eply or Re[s]end on a sent letter (issue #825): a new letter to
+    """[R]eply or [S]end again on a sent letter (issue #825): a new letter to
     the one it went to, by `mail_someone`, so every check a letter to them
     makes is made before anything is written, and again at Send.
 

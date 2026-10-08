@@ -5,7 +5,7 @@ tests/test_session_history.py), and for the profile toggle that governs
 what one of them shows.
 
 `[H]istory` (issue #100, narrowed to its own menu description by issue
-#592) is the viewer's own call record. `P[r]evious callers` (issue #592)
+#592) is the viewer's own call record. `[R]ecent callers` (issue #592)
 is the node-wide roll -- the same panel the post-login splash draws, on
 its own main-menu hotkey -- and is where every name-visibility rule now
 lives, since it is the only one of the two that other callers appear in.
@@ -341,14 +341,14 @@ def test_previous_callers_menu_screen_shows_another_caller(tmp_path):
     database.close()
 
 
-def test_previous_callers_menu_entry_is_offered(tmp_path):
+def test_recent_callers_menu_entry_is_offered(tmp_path):
     database = db_(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
     session = FakeSession(["l", "y"])
 
     asyncio.run(_run_main_menu(session, database, alice))
 
-    assert "P[r]evious callers" in _visible(session)
+    assert "[R]ecent callers" in _visible(session)
     database.close()
 
 

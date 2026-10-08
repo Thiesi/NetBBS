@@ -416,7 +416,7 @@ def test_a_board_is_followed_from_its_own_list(db, lane, alice):
     text = _visible_text(session)
     assert "Following this board: New scan lists it first." in text
     assert "No longer following this board." in text
-    assert "Un[f]ollow" in text
+    assert "[F]ollow: on" in text
     assert not is_following(db, alice, "board", board.id)
 
 
@@ -441,7 +441,7 @@ def test_an_empty_board_can_be_followed(db, lane, alice):
     asyncio.run(_show_board(session, db, board, alice))
     text = _visible_text(session)
     assert "Following this board: New scan lists it first." in text
-    assert "Un[f]ollow" in text  # the redrawn bar
+    assert "[F]ollow: on" in text  # the redrawn bar
     assert is_following(db, alice, "board", board.id)
 
 
@@ -454,7 +454,7 @@ def test_an_empty_file_area_can_be_followed(db, lane, alice):
     asyncio.run(_show_area(session, lane, area, alice))
     text = _visible_text(session)
     assert "Following this file area: New scan lists it first." in text
-    assert "Un[f]ollow" in text
+    assert "[F]ollow: on" in text
     assert is_following(db, alice, "file_area", area.id)
 
 

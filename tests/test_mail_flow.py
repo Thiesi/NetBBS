@@ -251,7 +251,7 @@ def test_inbox_delete_removes_message(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "body")
 
-    session = FakeSession(keys=["1", "d", "b"], lines=["y"])
+    session = FakeSession(keys=["1", "e", "b"], lines=["y"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -273,7 +273,7 @@ def test_inbox_delete_declined_at_the_confirmation_keeps_the_message(tmp_path):
     # Bare Enter at the confirmation selects its default (No, per
     # `prompt_yes_no(..., default=False)`) -- back to the message view,
     # then "b"/"b" out entirely.
-    session = FakeSession(keys=["1", "d", "b", "b"], lines=[""])
+    session = FakeSession(keys=["1", "e", "b", "b"], lines=[""])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -330,7 +330,7 @@ def test_sent_lists_recipient_and_delete_removes_it(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "body")
 
-    session = FakeSession(keys=["s", "1", "d", "b", "b"], lines=["y"])
+    session = FakeSession(keys=["s", "1", "e", "b", "b"], lines=["y"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
 

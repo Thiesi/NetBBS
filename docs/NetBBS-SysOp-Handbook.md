@@ -1713,25 +1713,33 @@ the menu as you see it, then as a level-0 caller sees it. The gallery's
 colours with characters classic terminals have; applying one switches the mode
 for you.
 
-You can also draw the menu's items into the art yourself, such as `[B]oards`
-or `Moder[a]tion`, instead of leaving all of them to `{menu}`:
+You can also draw the menu's items into the art yourself, such as
+`[M]essage boards` or `[A]pprovals`, instead of leaving all of them to
+`{menu}`:
 - **Any bracketed key is an item.** You don't need a token. The item is the
   text around the key, up to two spaces or a frame character on either side,
   which is also what a browser caller can click. Put at least two spaces or
-  a frame character such as `│` between items: `[B]oards [E]-mail` with one
-  space is one item, blanked only for a caller who can use neither key, and
-  a browser click on it always means `[B]`, while `[B]oards│ [E]-mail` is
-  two.
+  a frame character such as `│` between items: `[M]essage boards [E]-mail`
+  with one space is one item, blanked only for a caller who can use neither
+  key, and a browser click on it always means `[M]`, while
+  `[M]essage boards│ [E]-mail` is two.
 - **Items a caller can't use are blanked.** A level-20 caller doesn't see your
   drawn `[S]ysOp console` at all: its cells are painted over in the colour
   behind them, so your frame and fill stay whole. Putting staff-only items on
   their own row keeps the gap tidy. A staff member's `[S]` opens the Staff
   console, so they don't see a drawn `[S]ysOp` either: their `[S]taff` goes
   into `{menu}` instead.
-- **Items you didn't draw go into `{menu}`.** Games, Communities, Who's online,
-  Moderation and Invitations appear only for some callers. Leave a `{menu}`
+- **Items you didn't draw go into `{menu}`.** Games, Topics, Who's online,
+  Approvals and Invitations appear only for some callers. Leave a `{menu}`
   region for them: without one, a caller with an item you didn't draw gets the
   normal menu.
+- **Redraw items whose key moved.** Every main-menu key is now its label's
+  first letter, so Communities moved from `[O]` to `[T]opics` and the staff
+  list from `[T]` to `[O]perators`. Art that still draws `C[o]mmunities` or
+  `S[t]aff list` would send a caller to the wrong screen, so those drawn items
+  are blanked and the real ones go into `{menu}` until you redraw them.
+  `P[r]evious callers` and `Moder[a]tion` keep working (now `[R]ecent callers`
+  and `[A]pprovals`), but read better redrawn.
 - **Other bracketed text stays as drawn.** `[x] marks the spot` is decoration,
   since X is no menu key.
 

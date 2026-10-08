@@ -15641,7 +15641,8 @@ under their presentation contracts.
 
 **Decision 6 — callers are told once.** After the first login on the release
 that changes a key callers use, a short screen says that paging moved to `<`
-`>`, dismissed with any key. SysOps see it on the console too. Only an account
+`>` and which menu keys were renamed (Decision 7 ships in the same release),
+dismissed with any key. SysOps see it on the console too. Only an account
 that knew the old keys sees it: the migration that ships with the change marks
 every account existing then (`keys_notice_1158 = pending`), and the screen
 (`netbbs.net.keys_notice`) is shown at that account's next login, after the

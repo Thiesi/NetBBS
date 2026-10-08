@@ -577,7 +577,7 @@ def test_verify_identity_has_help(db, sysop, alice):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_verify_user(session, db, sysop, alice))
     text = session.squeezed()
-    assert "Verify identity help" in text and "[A]ttest age Record the birthdate you checked" in text
+    assert "Verify identity help" in text and "[A]ge Attest the birthdate you checked" in text
     assert "[R]evoke" not in text.split("Verify identity help")[1].split("Keys that work everywhere")[0]
     assert text.count("Verifying alice") == 2
     assert session.leftover == []

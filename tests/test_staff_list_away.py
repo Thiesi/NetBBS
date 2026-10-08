@@ -200,8 +200,8 @@ def test_every_member_but_the_guest_is_offered_the_staff_list(db, sysop):
         asyncio.run(_draw_main_menu(session, db, MessageMailbox(), user))
         return _visible(_written_text(session))
 
-    assert "S[t]aff list" in menu(carol)
-    assert "S[t]aff list" not in menu(guest)
+    assert "[O]perators" in menu(carol)
+    assert "[O]perators" not in menu(guest)
 
 
 # -- pending callers --------------------------------------------------------------

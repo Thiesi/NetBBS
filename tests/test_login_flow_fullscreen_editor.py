@@ -666,7 +666,7 @@ def test_tombstone_option_hidden_without_delete_permission(db, alice):
     asyncio.run(board_flow._show_board(session, db, board, alice))
     # alice owns the post but holds no BoardPermission.DELETE grant --
     # unlike [E]dit, there is no author bypass for removing a post.
-    assert "Remove pos[t]" not in _visible(session)
+    assert "[T]ake down" not in _visible(session)
 
 
 def test_tombstone_existing_post_via_plain_line_flow(db, alice):

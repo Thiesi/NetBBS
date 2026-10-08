@@ -866,8 +866,8 @@ def _list_options(
         options.append(_queue_entry(queue_count))
     # Issue #675: a followed board is listed first in [N]ew scan.
     options.append(
-        MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this board") if following
-        else MenuEntry(label=menu_key("F", "ollow"), brief="List this board first in New scan")
+        MenuEntry(label=menu_key("F", "ollow: on"), brief="Stop following this board") if following
+        else MenuEntry(label=menu_key("F", "ollow: off"), brief="List this board first in New scan")
     )
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
     return options
@@ -911,16 +911,16 @@ _LIST_HELP = [
     "A            draw a post in the ANSI art editor (boards with color)",
     "D            resume or discard a saved draft",
     "M            count every post on this board as read",
-    "F            follow this board: New scan lists it first",
+    "F            follow this board, or stop: New scan lists it first",
     "Ctrl-L       redraw the list",
     "B or Esc     back to the list of boards (Esc first clears",
     "             a highlighted row)",
     "",
-    "Pinned posts are listed first, marked \"pin\". A moderator pins",
-    "and unpins a post, and keeps it from expiring, while reading it.",
+    "Pinned posts are listed first, marked \"pin\". A moderator puts",
+    "a post on top, and keeps it from expiring, while reading it.",
     "",
     "Reading a post: Reply, Mail author (a private reply), Edit,",
-    "Withdraw, Remove, Next and Previous post live there,",
+    "Withdraw, Take down, Next and Previous post live there,",
     "and PgUp/PgDn page a long post. A post counts as read once you",
     "open it; the list marks the ones you have not opened as new.",
 ]
@@ -1138,9 +1138,9 @@ async def _show_board(
         options = _list_options(
             current_page, can_post=can_post, has_draft=has_draft,
             row_count=len(current_page.posts) if row_count is None else row_count,
-            # The page budget measures the longer Un[f]ollow, so following
-            # never changes how many posts fit (Codex review on #788).
-            has_unread=unread["menu"], can_draw=can_draw, following=follows["on"] or measuring,
+            # The page budget measures the longer `[F]ollow: off`, so
+            # following never changes how many posts fit (Codex review on #788).
+            has_unread=unread["menu"], can_draw=can_draw, following=follows["on"] and not measuring,
             queue_count=_queue_count(),
         )
         # Descriptions double the action bar. Where they would leave the
@@ -1368,15 +1368,15 @@ async def _show_board(
                 actions.append(("e", menu_key("E", "dit")))
             can_tombstone = not held and _can_tombstone_post(db, post, user)
             if can_tombstone:
-                actions.append(("t", menu_key("t", prefix="Remove pos")))
+                actions.append(("t", menu_key("T", "ake down")))
             can_pin = not held and _can_pin_post(db, post, user)
             if can_pin:
-                actions.append(("i", menu_key("i", "n", prefix="Unp" if post.pinned else "P")))
+                # Toggles show their state (issue #1158); `P` is Previous post.
+                actions.append(("o", menu_key("O", "n top: yes" if post.pinned else "n top: no")))
                 # Keeping a post only means something where posts expire,
                 # or where one was kept before the board stopped expiring.
                 if board.max_post_age_days is not None or post.exempt_from_expiry:
-                    actions.append(("k", menu_key("k", "eep", prefix="Un") if post.exempt_from_expiry
-                                    else menu_key("K", "eep")))
+                    actions.append(("k", menu_key("K", "ept: yes" if post.exempt_from_expiry else "ept: no")))
             if has_next:
                 actions.append(("n", menu_key("N", "ext post")))
             if has_previous:
@@ -1463,7 +1463,7 @@ async def _show_board(
                     page = _refetch_current_page()
                     return None
                 continue
-            if (key == "e" and can_edit) or (key == "t" and can_tombstone) or (key in ("i", "k") and can_pin):
+            if (key == "e" and can_edit) or (key == "t" and can_tombstone) or (key in ("o", "k") and can_pin):
                 root = post.root_post_id
                 if key == "e":
                     await _edit_existing_post(
@@ -1473,7 +1473,7 @@ async def _show_board(
                 elif key == "t":
                     await _tombstone_existing_post(session, db, board, post, user, link_context=link_context)
                 else:
-                    _toggle_post_flag(session, db, post, user, pin=key == "i")
+                    _toggle_post_flag(session, db, post, user, pin=key == "o")
                 # The same number of rows as the page the reader is on: an
                 # outcome notice now pending takes a row from a fresh budget,
                 # and a page one post shorter could drop the post just acted
@@ -1484,7 +1484,7 @@ async def _show_board(
                     page = _refetch_current_page()
                     return None
                 found = next((i for i, p in enumerate(page.posts) if p.root_post_id == root), None)
-                if found is None and key in ("i", "k"):
+                if found is None and key in ("o", "k"):
                     # Unpinned off this page: its dated place is on an
                     # older one. Back to the list, rather than showing some
                     # other post as if it were this one (Codex review on
@@ -1880,9 +1880,9 @@ async def _show_board(
             # An empty board can be followed too, to be told of its first
             # post (Codex review on #788).
             options.append(
-                MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this board")
+                MenuEntry(label=menu_key("F", "ollow: on"), brief="Stop following this board")
                 if follows["on"]
-                else MenuEntry(label=menu_key("F", "ollow"), brief="List this board first in New scan")
+                else MenuEntry(label=menu_key("F", "ollow: off"), brief="List this board first in New scan")
             )
             options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
             return options
