@@ -401,7 +401,7 @@ def test_edit_profile_invalid_key_is_rejected_and_the_screen_stays_functional(tm
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["z", "v", "b"])
+    session = FakeSession(keys=["%", "v", "b"])  # no screen binds %
 
     asyncio.run(_edit_profile(session, lane, user))
 

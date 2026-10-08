@@ -1454,6 +1454,25 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
+            key="mrc_names", hotkey="z", menu_text=menu_key("z", "ed MRC names", prefix="Styli"),
+            label="Stylized MRC names",
+            render=lambda d: _MRC_NAME_STYLE_LABELS[d["mrc_names"]],
+            prompt=live_choice_field(
+                "mrc_names", list(MRC_NAME_STYLES),
+                persist=lambda lane, v: lane.run(set_mrc_name_style, user, v),
+            ),
+            brief="How a styled MRC name such as +Nick+[TAG] is shown",
+            help=(
+                "Some MRC users' software puts a styled name in front of their lines, such as "
+                "+Nick+[CASTLE BBS]. Combined: the styled name replaces the plain one in "
+                "<name@BBS>, and the rest follows in brackets: <+Nick+@Castle_BBS (CASTLE BBS)>. "
+                "Both: the plain <Nick@Castle_BBS>, then the styled name as sent. Label only: "
+                "just <Nick@Castle_BBS>. The BBS name always comes from the network, never from "
+                "the styled name. Lines from before this setting existed look the same in all three."
+            ),
+            section="Communication",
+        ),
+        FieldSpec(
             key="history_name_visible", hotkey="h", menu_text=menu_key("H", "istory visibility"),
             label="Name shown to other callers",
             render=lambda d: "yes" if d["history_name_visible"] else "no (hidden)",
@@ -1597,25 +1616,6 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Every line you send to the Multi Relay Chat network carries your handle in front "
                 "of it, in this color -- one of the sixteen CGA colors MRC clients understand. "
                 "Each press moves to the next color. Applies the next time you enter an MRC room."
-            ),
-            section="Display",
-        ),
-        FieldSpec(
-            key="mrc_names", hotkey="z", menu_text=menu_key("z", "ed MRC names", prefix="Styli"),
-            label="Stylized MRC names",
-            render=lambda d: _MRC_NAME_STYLE_LABELS[d["mrc_names"]],
-            prompt=live_choice_field(
-                "mrc_names", list(MRC_NAME_STYLES),
-                persist=lambda lane, v: lane.run(set_mrc_name_style, user, v),
-            ),
-            brief="How a styled MRC name such as +Nick+[TAG] is shown",
-            help=(
-                "Some MRC users' software puts a styled name in front of their lines, such as "
-                "+Nick+[CASTLE BBS]. Combined: the styled name replaces the plain one in "
-                "<name@BBS>, and the rest follows in brackets: <+Nick+@Castle_BBS (CASTLE BBS)>. "
-                "Both: the plain <Nick@Castle_BBS>, then the styled name as sent. Label only: "
-                "just <Nick@Castle_BBS>. The BBS name always comes from the network, never from "
-                "the styled name. Lines from before this setting existed look the same in all three."
             ),
             section="Display",
         ),
