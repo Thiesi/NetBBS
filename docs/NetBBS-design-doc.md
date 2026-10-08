@@ -5929,7 +5929,9 @@ met Reliable Link gets a page at `https://www.netbbs.org/~<name>`. The page
 says what the project knows about the node: its friendly name, its DNS name,
 how callers dial in, when its name was registered, how long Reliable Link has
 known it, when it was last heard, and its technical identity. A `/nodes/`
-index lists every page. The pages are the project's publication, not a
+index lists every page, and each page offers a badge (`/~<name>/badge.svg`,
+"member since" and the state, with no text the node supplied) for the
+board's own website. The pages are the project's publication, not a
 node's: they are built by the project, from two sources the project runs.
 
 **Who gets a page.** A node whose managed-DNS registration is matured and whose

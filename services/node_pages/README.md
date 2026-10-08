@@ -51,5 +51,10 @@ holds the real ones.
 beside it and swapped in by two renames, so the generator needs write access
 to the directory that contains `--out`, and nothing else may live in `--out`.
 Apache serves it as `/nodes/` and maps `/~<name>` to `<out>/<name>/index.html`
-itself (an `AliasMatch`, so `mod_userdir` does not answer). A run that cannot
+and `/~<name>/badge.svg` to `<out>/<name>/badge.svg` itself (`AliasMatch`, so
+`mod_userdir` does not answer).
+
+Each page directory also holds `badge.svg`: "NetBBS Link · member since
+<month> · <state>", for a SysOp to put on their own website with the snippet
+the page shows. It carries no text the node supplied. A run that cannot
 read either source exits 1, prints why, and leaves the current site as it is.

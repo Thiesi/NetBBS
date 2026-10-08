@@ -274,6 +274,10 @@ ul.nodes a.row:hover{border-color:#3a4256;}
 .row .who{display:grid;gap:.15rem;min-width:0;}
 .row .who strong{overflow-wrap:anywhere;}
 .row .who span{color:var(--sub);font-size:.9rem;overflow-wrap:anywhere;}
+.card.badge{margin-top:1rem;}
+.card.badge h2{margin-top:0;}
+.card.badge pre{background:var(--bg);border:1px solid var(--line-soft);border-radius:8px;padding:.75rem;
+white-space:pre-wrap;overflow-wrap:anywhere;font-size:.82rem;color:var(--sub);margin:.75rem 0 0;}
 @media (max-width:520px){dl.facts{grid-template-columns:1fr;gap:.15rem;} dl.facts dd{margin-bottom:.6rem;}
 .card{padding:1.25rem;}}
 """
@@ -342,6 +346,10 @@ def render_node_page(page: NodePage, now: datetime) -> str:
         "<p class=\"note\">The technical identity is this board's permanent key. If its SysOp shows you the "
         "same one, you are talking to the same board.</p>\n"
         "</section>\n"
+        "<section class=\"card badge\">\n<h2>For this board's own website</h2>\n"
+        f"<p><img src=\"/~{_E(page.name)}/badge.svg\" alt=\"NetBBS Link: {_E(_badge_text(page))}\"></p>\n"
+        f"<pre class=\"mono\">{_E(_badge_snippet(page))}</pre>\n"
+        "</section>\n"
         "<p class=\"about\">This board runs <a href=\"/\">NetBBS</a> and is part of NetBBS Link, the network "
         "that carries boards, mail and chat between NetBBS systems. The facts above are what Reliable Link, "
         "the project's own node, knows about it; the name and dial-in addresses are the board's own signed "
@@ -353,6 +361,50 @@ def render_node_page(page: NodePage, now: datetime) -> str:
         "index, follow" if page.indexed else "noindex",
         f"{SITE}/~{page.name}",
         body,
+    )
+
+
+_BADGE_COLORS = {ACTIVE: "#54d6a8", QUIET: "#8b8fff", LEFT: "#6b7286"}
+# Monospace, so a width per character is exact enough without measuring.
+_BADGE_CHAR = 7.2
+
+
+def _badge_text(page: NodePage) -> str:
+    since = page.member_since
+    return f"member since {since:%b %Y}" if since is not None else "member"
+
+
+def render_badge(page: NodePage) -> str:
+    """A small SVG for the SysOp's own website: "NetBBS Link", since when
+    the board has been a member, and its state. It holds no text the node
+    supplied, only dates and fixed words."""
+    left_text = "NetBBS Link"
+    right_text = f"{_badge_text(page)} · {page.state}"
+    left = round(len(left_text) * _BADGE_CHAR + 20)
+    right = round(len(right_text) * _BADGE_CHAR + 34)
+    width = left + right
+    label = f"NetBBS Link: {right_text}"
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="22" viewBox="0 0 {width} 22" '
+        f'role="img" aria-label="{_E(label)}">'
+        f"<title>{_E(label)}</title>"
+        f'<rect width="{width}" height="22" rx="5" fill="#12161f"/>'
+        f'<rect width="{left}" height="22" rx="5" fill="#232838"/>'
+        f'<rect x="{left - 5}" width="5" height="22" fill="#232838"/>'
+        '<g font-family="IBM Plex Mono,DejaVu Sans Mono,Consolas,monospace" font-size="12" fill="#eef0f6">'
+        f'<text x="10" y="15">{left_text}</text>'
+        f'<circle cx="{left + 12}" cy="11" r="3.5" fill="{_BADGE_COLORS[page.state]}"/>'
+        f'<text x="{left + 22}" y="15">{_E(right_text)}</text>'
+        # An outline, so the badge holds its shape on a dark page too.
+        f'</g><rect x="0.5" y="0.5" width="{width - 1}" height="21" rx="4.5" fill="none" stroke="#3a4256"/></svg>\n'
+    )
+
+
+def _badge_snippet(page: NodePage) -> str:
+    """The HTML a SysOp pastes into their own site."""
+    return (
+        f'<a href="{SITE}/~{page.name}"><img src="{SITE}/~{page.name}/badge.svg" '
+        f'alt="NetBBS Link: {_badge_text(page)}"></a>'
     )
 
 
@@ -406,6 +458,7 @@ def write_site(out: Path, pages: list[NodePage], now: datetime) -> None:
         directory.mkdir()
         directory.chmod(0o755)
         _write(directory / "index.html", render_node_page(page, now))
+        _write(directory / "badge.svg", render_badge(page))
     _write(staging / "index.html", render_index(pages, now))
     if out.exists():
         os.replace(out, retired)
