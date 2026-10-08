@@ -678,8 +678,8 @@ text's, never the status line's, and it gives them up before the text drops
 below four rows: the rule first, then the title, then fields from the last.
 Review keeps its title, To and Subject on every page and pages the body with
 the detail-panel machinery `show_detail` uses (`render_sections`/`paginate`),
-turned with `PgUp`/`PgDn` and `[N]ext`/`[P]rev page` (`[>]`/`[<]` where the
-commit key is already `P`). It stays its own loop rather than becoming a
+turned with `<` `>`, PgUp/PgDn or ←→ (the keys that work everywhere, §3.5).
+It stays its own loop rather than becoming a
 `show_detail` caller, because it keeps its `>` cursor over To/Subject/Body and
 its Ctrl-H field help. Once the body is paged, the menu is the packed action
 bar, the rule §3.5 sets for a detail screen with a described menu. An outcome
@@ -967,9 +967,9 @@ screen and flags any that is too tall, and `tests/
 test_sysop_console_presentation.py` holds the same list of screens to the
 terminal's size. A panel that does not fit is
 paged (`netbbs.net.detail_view.show_detail`): whole groups are kept together, a
-group taller than a page repeats its heading where it continues, `PgUp`/`PgDn`
-always turn the page, and `[N]ext`/`[P]rev` join the action bar — `[>]`/`[<]`
-on a screen that already uses those letters. A list that grows without bound
+group taller than a page repeats its heading where it continues, and `<` `>`,
+PgUp/PgDn and ←→ turn the page (§3.5), so the panel's own actions keep every
+letter. A list that grows without bound
 (an account's admin actions, trust configuration history) is a screen of its
 own rather than the tail of another. A detail screen that keeps its own
 described menu gives the menu only the rows the panel leaves, and falls back to
@@ -1049,6 +1049,28 @@ the session's screen copy. While the answer fits it echoes character by
 character as before; the keystroke that would reach the edge hands over to the
 window. A masked answer stops showing `*` at the edge instead, so it never
 wraps either.
+
+**Keys that work everywhere** (issue #1158). A small set of keys means the
+same thing on every screen that takes hotkeys, and no screen binds one of them
+to anything else:
+
+| Key | Meaning |
+| --- | --- |
+| `[B]` or Esc | Back. Esc first drops a highlighted row or field, if there is one. |
+| `<` `>`, PgUp/PgDn | Previous / next page of a list, a long text or a form's sections. |
+| ←→ | The same paging on lists and long texts. On a form they step the highlighted field's value instead. |
+| `/` | Find, wherever a list can be searched. |
+| `?`, F1 or Ctrl-H | Help for this screen. Every hotkey screen has some. |
+| Enter | Choose the highlighted row or field. |
+
+`B` is the only letter in the set; every other letter is free for the screen's
+own actions. Paging is never on a letter, so `[N]ew scan`, `[P]rofile` and
+`[P]ost` keep theirs, and a list never asks the caller to tell "next" from
+"newer". Line prompts are not hotkey screens: there `/` starts a command where
+one is offered, and Esc keeps the value (above). Doors draw their own screens
+under their own contracts and are outside this rule. A test keeps it: no
+screen's hotkeys bind a reserved key to anything but its meaning here.
+
 A key a caller can press is highlighted wherever it is offered, not only on
 menus (issue #974): a prompt that lists its choices in running text
 ("Unsaved changes. [S]ave, [D]iscard, or [C]ancel?") and a detail-panel label
@@ -2569,8 +2591,8 @@ be settled in Phase 3; only presentation refinements may wait until Phase 7.
 
 The list:
 - Shows one row per post: number, subject, a `new` marker, author and date.
-- Fits as many rows as the terminal holds and pages with
-  `[O]lder`/`[N]ewer`/`[R]ecent`.
+- Fits as many rows as the terminal holds and pages with `<` (older) and `>`
+  (newer), PgUp/PgDn or ←→ (§3.5); `[R]ecent` jumps to the newest page.
 - Has a cursor: Up/Down, and Enter or a digit to open a post.
 - Follows §3.6: display-width columns. Below readable width, a row becomes
   "subject -- author". Author gives way to subject first, because the reader
@@ -2594,7 +2616,8 @@ A post opens on `show_detail`:
 - The post's own actions live there, offered only when they would succeed:
   `[R]eply`, `[H]istory`, `[E]dit`, `[W]ithdraw`, `Remove pos[t]`,
   `P[i]n`/`[K]eep` (§5.3), and `[N]ext post`/`[P]revious post`, which cross
-  page boundaries.
+  page boundaries. These move to another post, not another page of this one,
+  so they are the screen's own actions rather than the paging keys of §3.5.
 - `[B]ack` returns to the list with the cursor on the post last read.
 
 **Revision history** (issue #675). `[H]istory` lists a post's versions,
@@ -3371,8 +3394,8 @@ The list:
   leave. It has no fixed cap, because a Link address carries its node's
   name, and the message view shows it in full. Below 60 columns a row
   becomes prose: "N new name: subject".
-- Fits as many rows as the terminal holds and pages with `[N]ext page` and
-  `[P]rev page` (PgDn/PgUp). A mailbox is bounded (§14), so the whole folder
+- Fits as many rows as the terminal holds and pages with `<` `>`, PgUp/PgDn
+  or ←→ (§3.5). A mailbox is bounded (§14), so the whole folder
   is loaded and paged in memory. Below 16 rows the blank rows and rules go,
   and each note above the list is cut to one row, so the 40x12 floor keeps
   three rows of mail.
@@ -11350,7 +11373,8 @@ handles no reference client writes but users choose, such as
 the sender's handle, so a first word that names `from_user` is peeled too,
 with only punctuation touching the name. The word runs to the first
 whitespace outside brackets, because a tag may hold a space. A body that is
-nothing but that word, or has an unbalanced bracket, stays whole. Decisions
+nothing but that word, or has an unbalanced bracket, stays whole. How each
+caller sees the peeled handle is their choice (issue #1156, §16). Decisions
 taken with it:
 
 - **Color codes are content, not markup.** `|00`-`|23` survive in a
@@ -15563,6 +15587,82 @@ change these but never remove them; #1115 cleared them with a typed `-`, and
 the prompt that explained it left two columns of an 80-column screen to type
 a birthdate into, so it was replaced. A birthdate still showing after a SysOp cleared
 it was a screen opened before the clear: the stored value was gone.
+
+### Issue #1158 — keys that work everywhere — decided
+
+Every new setting meant hunting for a free letter: Profile had `j` and `z` left
+when #1156 needed one. Labels bracketed a letter mid-word where the first was
+taken (`Bl[o]cked`), and the same function sat on different keys on different
+screens (`[N]ext`/`[P]rev` in a picker, `[O]lder`/`[N]ewer` in a post list,
+where `P` meant `[P]ost`). Tracker #1158 settles it in three steps: reserved
+keys (this decision), the first-letter rule for menus, and two-digit numbered
+fields on settings screens. Normative description: §3.5, "Keys that work
+everywhere".
+
+**Decision 1 — reserved keys are punctuation plus `B`.** Paging is `<` `>`
+with PgUp/PgDn and ←→, find is `/`, help is `?` with F1 and Ctrl-H, back is
+`[B]` or Esc, and Enter chooses. Rejected: `N`/`P` reserved everywhere, which
+moves New scan, Profile and Post. Rejected: `N`/`P` reserved only on screens
+that page; nearly every busy screen pages, and a hybrid such as the post list
+makes "is this a list?" a judgement call for callers and for the enforcing
+test.
+
+**Decision 2 — ←→ step a value on forms.** On a draft editor ←→ already step
+the highlighted field's value, and they keep doing so; the form's sections
+page with `<` `>` and PgUp/PgDn. Everywhere else ←→ page. Rejected: ←→ paging
+on forms too, which loses the quickest way to change a value.
+
+**Decision 3 — Esc drops a highlight first.** With a row or field
+highlighted, Esc clears the highlight as before; with none it goes back like
+`[B]`. Rejected: Esc always back, which would leave the screen for a caller
+who only meant to clear the highlight.
+
+**Decision 4 — every hotkey screen has help.** `?`, F1 and Ctrl-H open the
+same help, and screens without any get some written in this step, so the keys
+never answer with a bell. F1 is decoded on Telnet, SSH and the browser
+terminal. Rejected: the keys only where help already exists.
+
+**Decision 5 — no global quit, and doors keep their own keys.** Log off stays
+`[L]ogoff` on the main menu; a key that ends the session from anywhere is too
+easy to hit in the middle of a form. Bundled doors keep their own action bars
+under their presentation contracts.
+
+**Decision 6 — callers are told once.** After the first login on the release
+that changes a key callers use, a short screen says that paging moved to `<`
+`>`, dismissed with any key. SysOps see it on the console too.
+
+### Issue #1156 — how an MRC sender's styled name is shown — decided
+
+Since #1152 a decorated sender handle (`+Nick+[CASTLE BBS]`, `^Nick<tag>`) is
+peeled off an MRC line. The maintainer asked for a per-caller choice instead
+of one fixed rendering. The #298 body convention describes the peeling; this
+records how a peeled handle is shown.
+
+**Decision — three styles, combined by default.** A Profile setting
+(`mrc_names`): *combined* puts the handle's styled name in place of the plain
+one in the `<nick@site>` label and shows the rest of the handle as a tag in
+round brackets inside it, `<+Nick+@Castle_BBS (CASTLE BBS)>`; *both* shows the
+plain label and then the handle as sent (v7.17.0); *label only* shows the label
+alone (v7.17.1). It applies to room lines, live and on replay, and to MRC
+private and broadcast lines.
+
+- **The site is never taken from the handle.** The label keeps the packet's
+  `from_site`; only the name part changes.
+- **The label's own characters stay out of it.** The name part is the sender's
+  name plus the ASCII marks `+^!#$%&-_.` directly against it. Everything else
+  in the handle becomes the tag, with `( ) [ ] { } < > @ | ~ * =` removed,
+  punctuation trimmed from its ends, and a cap of 24 columns. These are the
+  characters #916 keeps out of local aliases, for the same reason: inside
+  `<…@…>` they make a label ambiguous.
+- **The handle is stored, the choice is not.** `channel_messages.mrc_handle`
+  keeps the raw handle, colour codes included, only for a decorated one, so a
+  change of setting re-renders scrollback. Older lines have none and look the
+  same in every style. Nothing about it travels over Link.
+
+Rejected: the handle as sent inside the label
+(`<+Nick+[CASTLE BBS]@Castle_BBS>`), and the alias shape
+`<+Nick+[CASTLE BBS] (Nick)@Castle_BBS>`, because both put user-chosen
+brackets inside NetBBS's own label.
 
 ### Issue #1104 — Linked resources by colour — decided
 

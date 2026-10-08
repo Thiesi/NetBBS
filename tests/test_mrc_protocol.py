@@ -289,6 +289,40 @@ def test_split_sender_prefix_keeps_a_body_whole_when_the_first_word_is_not_the_h
     assert split_sender_prefix(body, "Alice") == ("message", body)
 
 
+def test_sender_handle_is_kept_only_for_a_decorated_handle():
+    """Issue #1156: the word #1152 peels, as sent, so a viewer can choose."""
+    assert protocol.sender_handle("|11+Michael_Nln+|08[CASTLE BBS]|07 hello", "Michael_Nln") == (
+        "|11+Michael_Nln+|08[CASTLE BBS]|07"
+    )
+    assert protocol.sender_handle("^Johnny5<grAvY> hey", "johnny5") == "^Johnny5<grAvY>"
+    # A reference client's plain shape, and a body naming nobody, keep nothing.
+    assert protocol.sender_handle("|03<|11Alice|03> hi", "Alice") is None
+    assert protocol.sender_handle("Alice hi", "Alice") is None
+    assert protocol.sender_handle("+Bob+ hi", "Alice") is None
+
+
+@pytest.mark.parametrize(
+    "handle, sender, parts",
+    [
+        ("|11+Michael_Nln+|08[CASTLE BBS]|07", "Michael Nln", ("+Michael_Nln+", "CASTLE BBS")),
+        ("^Johnny5<grAvY>", "johnny5", ("^Johnny5", "grAvY")),
+        ("[TAG]-Alice-", "Alice", ("-Alice-", "TAG")),
+        # Sentence punctuation is not decoration, and a punctuation-only tag is dropped.
+        ("Alice:", "Alice", ("Alice", "")),
+        ("Alice.:[X]", "Alice", ("Alice.", "X")),
+        # The label's own characters never reach the tag.
+        ("^Alice<@evil~SysOp*>", "Alice", ("^Alice", "evil SysOp")),
+        ("+Alice+[A very long tag that goes on and on]", "Alice", ("+Alice+", "A very long tag that go…")),
+    ],
+)
+def test_handle_parts_split_a_handle_for_the_combined_label(handle, sender, parts):
+    assert protocol.handle_parts(handle, sender) == parts
+
+
+def test_handle_parts_needs_the_senders_name():
+    assert protocol.handle_parts("+Bob+[TAG]", "Alice") is None
+
+
 def test_house_style_bodies_and_their_budget():
     assert format_room_body("alice", "hi") == "|08<|14alice|08>|16|07 hi"
     assert format_action_body("alice", "waves") == "|15* |13alice waves"

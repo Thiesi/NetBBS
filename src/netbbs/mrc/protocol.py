@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.pipe_codes import strip_non_color_pipe_codes, strip_pipe_codes
 from netbbs.rendering.sanitize import sanitize_text
+from netbbs.rendering.width import display_width, truncate_to_width
 
 SEPARATOR = "~"
 MAX_LINE = 512
@@ -131,7 +132,7 @@ _OPENERS, _CLOSERS = "([{<", ")]}>"
 _NAME_CHAR_RE = re.compile(r"[0-9A-Za-z_]")
 
 
-def _decorated_handle(body: str, from_user: str) -> tuple[str, int] | None:
+def _decorated_handle(body: str, from_user: str) -> tuple[str, int, int] | None:
     """Issue #1152: a sender handle no template knows, such as
     `+Michael_Nln+[CASTLE BBS]` or `^Johnny5<grAvY>`. The MRC spec makes
     the body's first word the sender's handle, so that word is peeled
@@ -140,7 +141,7 @@ def _decorated_handle(body: str, from_user: str) -> tuple[str, int] | None:
     The word then runs to the first whitespace outside brackets, since a
     tag may hold a space. Pipe codes are zero width. An unbalanced bracket,
     or nothing after the word, leaves the body whole. Returns `(text,
-    index of the name in body)`."""
+    index of the name in body, index where the word ends)`."""
     if not from_user:
         return None
     visible: list[tuple[str, int]] = []  # (character, index in body)
@@ -173,7 +174,7 @@ def _decorated_handle(body: str, from_user: str) -> tuple[str, int] | None:
                     return None
             elif char.isspace() and depth == 0 and index >= name_end:
                 text = body[at:].lstrip()
-                return (text, visible[name_start][1]) if strip_pipe_codes(text).strip() else None
+                return (text, visible[name_start][1], at) if strip_pipe_codes(text).strip() else None
         return None
     return None
 
@@ -582,6 +583,59 @@ def split_sender_prefix(body: str, from_user: str) -> tuple[str, str]:
         if decorated is not None:
             return "message", decorated[0]
     return "message", body
+
+
+def sender_handle(body: str, from_user: str) -> str | None:
+    """The decorated handle `split_sender_prefix` peeled off `body`, pipe
+    codes and all, or `None` when there was none or it was a reference
+    client's plain shape (issue #1156: kept so each viewer can choose how
+    it is shown)."""
+    if not from_user:
+        return None
+    for _kind, pattern in _sender_prefix_patterns(from_user):
+        if pattern.match(body) is not None:
+            return None
+    decorated = _decorated_handle(body, from_user)
+    return body[:decorated[2]].strip() if decorated is not None else None
+
+
+#: Marks that may stay against the name in a combined label (issue
+#: #1156), as in `+Nick+` or `^Nick`. Not the label's own characters or
+#: what #916 keeps out of aliases, and not sentence punctuation: a
+#: client writing `Nick:` means a colon, not a decoration.
+_HANDLE_DECORATION = frozenset("+^!#$%&-_.")
+#: Removed from a tag, which is shown in round brackets inside the label.
+_LABEL_CHARACTERS = "()[]{}<>@|~*="
+MAX_HANDLE_TAG_COLUMNS = 24
+_TAG_EDGE_RE = re.compile(r"^[\W_]+|[\W_]+$")
+
+
+def handle_parts(handle: str, from_user: str) -> tuple[str, str] | None:
+    """`handle` (as `sender_handle` returned it) split for a combined
+    label (issue #1156): the sender's name with the plain punctuation
+    against it (`+Michael_Nln+`, `^Johnny5`), and the rest as a tag with
+    the label's own characters taken out (`CASTLE BBS`, `grAvY`), capped
+    at `MAX_HANDLE_TAG_COLUMNS`. `None` if the name is not in it."""
+    plain = strip_pipe_codes(handle)
+    lowered = plain.lower()
+    name = from_user.lower()
+    for spelling in sorted({name, name.replace("_", " "), name.replace(" ", "_")}):
+        start = lowered.find(spelling)
+        if not spelling or start == -1:
+            continue
+        end = start + len(spelling)
+        while start and plain[start - 1] in _HANDLE_DECORATION:
+            start -= 1
+        while end < len(plain) and plain[end] in _HANDLE_DECORATION:
+            end += 1
+        rest = plain[:start] + " " + plain[end:]
+        tag = " ".join(rest.translate({ord(char): " " for char in _LABEL_CHARACTERS}).split())
+        # `:` or `.:` around a tag is punctuation, not part of what the sender is called.
+        tag = _TAG_EDGE_RE.sub("", tag)
+        if display_width(tag) > MAX_HANDLE_TAG_COLUMNS:
+            tag = truncate_to_width(tag, MAX_HANDLE_TAG_COLUMNS, ellipsis="…")
+        return plain[start:end], tag
+    return None
 
 
 def sender_color(body: str, from_user: str) -> int | None:
