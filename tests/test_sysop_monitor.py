@@ -459,7 +459,7 @@ def test_the_node_menu_opens_the_monitor(db, lane, sysop):
             viewer.inputs.put_nowait(key)
         await admin_menu(viewer, lane, sysop, node_controls=controls)
         text = viewer.text()
-        assert "M[o]nitor" in text
+        assert "[O]bserve live" in text
         assert "DOING" in text
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

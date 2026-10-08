@@ -107,7 +107,7 @@ def test_order_command_resorts_the_flat_area_list_and_persists_globally(db, lane
     _set_created_at(db, "apple", "2026-01-01T00:00:00.000000Z")
     _set_created_at(db, "zebra", "2026-01-02T00:00:00.000000Z")
 
-    session = FakeSession(["o", "l", "g", "b"])
+    session = FakeSession(["o", "n", "g", "b"])
     asyncio.run(file_flow.browse_file_areas(session, lane, alice))
     text = _visible_text(session)
     assert "Sort: Alphabetical" in text
@@ -121,7 +121,7 @@ def test_order_command_choosing_just_this_time_does_not_persist(db, lane, alice)
     _set_created_at(db, "apple", "2026-01-01T00:00:00.000000Z")
     _set_created_at(db, "zebra", "2026-01-02T00:00:00.000000Z")
 
-    session = FakeSession(["o", "l", "j", "b"])
+    session = FakeSession(["o", "n", "j", "b"])
     asyncio.run(file_flow.browse_file_areas(session, lane, alice))
     assert get_effective_sort_mode(db, alice, "file_area") == "sysop"  # unchanged
 
@@ -133,7 +133,7 @@ def test_order_command_in_the_mixed_categories_view_only_reorders_areas(db, lane
     _set_created_at(db, "apple", "2026-01-01T00:00:00.000000Z")
     _set_created_at(db, "zebra", "2026-01-02T00:00:00.000000Z")
 
-    session = FakeSession(["o", "l", "j", "b"])
+    session = FakeSession(["o", "n", "j", "b"])
     asyncio.run(file_flow.browse_file_areas(session, lane, alice))
     text = _visible_text(session)
     assert re.search(r"01\.\s*\[Vintage\]", text)
@@ -150,7 +150,7 @@ def test_community_scoped_order_offers_a_whole_community_save_option(db, lane, a
         min_age=None, name_requirement=None, community_id=community.id, changed_by=alice,
     )
 
-    session = FakeSession(["o", "l", "w", "b"])
+    session = FakeSession(["o", "n", "w", "b"])
     asyncio.run(
         file_flow.browse_file_areas(session, lane, alice, community_id=community.id, community_scoped=True)
     )

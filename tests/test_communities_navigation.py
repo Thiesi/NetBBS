@@ -1,7 +1,7 @@
 """
 Tests for the main menu's content entries and the Communities path
 (design doc §16, issue #838): [M]essage boards/[C]hat/[F]iles/[G]ames
-over the whole node, C[o]mmunities with each Community's own page, and
+over the whole node, [T]opics with each Community's own page, and
 category leak prevention. The
 underlying data model/core logic (netbbs.communities) is covered
 separately in tests/test_communities.py; these drive the real
@@ -145,7 +145,7 @@ def test_main_menu_shows_communities_when_one_exists(tmp_path):
 
     _run_main_menu(session, db, bob)
 
-    assert "C[o]mmunities" in _visible_text(session)
+    assert "[T]opics" in _visible_text(session)
     db.close()
 
 
@@ -157,7 +157,7 @@ def test_main_menu_hides_communities_that_are_all_hidden_from_a_regular_user(tmp
 
     _run_main_menu(session, db, bob)
 
-    assert "C[o]mmunities" not in _visible_text(session)
+    assert "[T]opics" not in _visible_text(session)
     db.close()
 
 
@@ -169,7 +169,7 @@ def test_main_menu_shows_hidden_community_to_a_sysop(tmp_path):
 
     _run_main_menu(session, db, sysop)
 
-    assert "C[o]mmunities" in _visible_text(session)
+    assert "[T]opics" in _visible_text(session)
     db.close()
 
 
@@ -250,7 +250,7 @@ def test_community_page_offers_only_kinds_it_holds_with_counts(tmp_path):
     create_board(db, "amiga", community_id=community.id, creator=bob)
     create_board(db, "c64", community_id=community.id, creator=bob)
     # No channel or file area in this Community.
-    session = FakeSession(keys=["o", "0", "1", "b", "b", "l"])
+    session = FakeSession(keys=["t", "0", "1", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -272,7 +272,7 @@ def test_back_from_a_community_page_returns_to_the_communities_list(tmp_path):
     create_board(db, "amiga", community_id=vintage.id, creator=bob)
     create_community(db, "Politics", creator=bob)
     # Listed in the SysOp's order, a new one last: Vintage is #01.
-    session = FakeSession(keys=["o", "0", "1", "b", "b", "l"])
+    session = FakeSession(keys=["t", "0", "1", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -294,7 +294,7 @@ def test_community_scoped_board_browsing_excludes_other_communities_and_uncatego
     create_board(db, "general", creator=bob)  # no Community
 
     # Listed in the SysOp's order, a new one last: Politics is #02.
-    session = FakeSession(keys=["o", "0", "2", "m", "b", "b", "b", "l"])
+    session = FakeSession(keys=["t", "0", "2", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -311,7 +311,7 @@ def test_community_scoped_board_browsing_shows_community_name_in_title(tmp_path)
     community = create_community(db, "Vintage Computing", creator=bob)
     create_board(db, "amiga", community_id=community.id, creator=bob)
 
-    session = FakeSession(keys=["o", "0", "1", "m", "b", "b", "b", "l"])
+    session = FakeSession(keys=["t", "0", "1", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -341,7 +341,7 @@ def test_category_used_only_by_another_communitys_board_does_not_leak(tmp_path):
 
     # Enter `vintage` specifically: Communities are listed in the SysOp's
     # order, and a new one goes last (issue #838), so vintage is #01.
-    session = FakeSession(keys=["o", "0", "1", "m", "b", "b", "b", "l"])
+    session = FakeSession(keys=["t", "0", "1", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -358,7 +358,7 @@ def test_category_used_by_a_board_in_this_community_is_shown(tmp_path):
     category = create_board_category(db, "Hardware", created_by=bob)
     create_board(db, "amiga", community_id=community.id, category_id=category.id, creator=bob)
 
-    session = FakeSession(keys=["o", "0", "1", "m", "b", "b", "b", "l"])
+    session = FakeSession(keys=["t", "0", "1", "m", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 
@@ -378,7 +378,7 @@ def test_community_scoped_channel_and_area_browsing_are_filtered_too(tmp_path):
     create_file_area(db, "amiga-files", community_id=community.id, creator=bob)
     create_file_area(db, "general-files", creator=bob)  # no Community
 
-    session = FakeSession(keys=["o", "0", "1", "c", "b", "f", "b", "b", "b", "l"])
+    session = FakeSession(keys=["t", "0", "1", "c", "b", "f", "b", "b", "b", "l"])
 
     _run_main_menu(session, db, bob)
 

@@ -169,3 +169,19 @@ def test_the_counts_are_fresh_after_link_status_inside_operations(db, lane, syso
     last_dashboard = " ".join(_visible(_written_text(session)).split()).rsplit("ATTENTION", 1)[1]
 
     assert "Offered: 1" not in last_dashboard
+
+
+def test_exclude_on_an_offer_excludes_it(db, lane, sysop, remote, own):
+    """`[E]xclude` on an offer's screen does what it says (review of #1164:
+    the key moved from `x` and its handler had not)."""
+    from netbbs.link.carry import EXCLUDED, OFFERED, count_carry_decisions
+    from netbbs.net.admin_flow import _carry_decisions_screen
+
+    _carry(db, remote, own, cap=0)
+    session = FakeSession(["1", "\r", "e", "b", "b"])
+
+    asyncio.run(_carry_decisions_screen(session, lane, sysop, link_context=_link_context(), state=OFFERED))
+
+    assert "[E]xclude" in _visible(_written_text(session))
+    assert count_carry_decisions(db, OFFERED) == 0
+    assert count_carry_decisions(db, EXCLUDED) == 1

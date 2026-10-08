@@ -129,8 +129,8 @@ def test_a_started_node_records_its_bootstrap_configuration(tmp_path):
 
 
 def _open_screen_keys():
-    # Settings, Network & login limits, Node configuration, then unwind.
-    return ["s", "w", "o", "b", "b", "b", "b"]
+    # Settings, Operating limits, Node configuration, then unwind.
+    return ["s", "o", "n", "b", "b", "b", "b"]
 
 
 def test_the_screen_before_any_start_says_so(db, lane, sysop):
@@ -151,7 +151,7 @@ def test_the_screen_shows_values_and_their_sources_but_no_secret(db, lane, sysop
     record_startup_bootstrap(db, config)
 
     # Page through every page, then leave.
-    session = FakeSession(["s", "w", "o", ">", ">", ">", "b", "b", "b", "b"])
+    session = FakeSession(["s", "o", "n", ">", ">", ">", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _normalized_visible(_written_text(session))
 

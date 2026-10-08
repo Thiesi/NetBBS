@@ -1,6 +1,6 @@
 """
 The main menu: its own draw/dispatch loop, the direct-chat-invite race
-(design doc §6.3), and the `C[o]mmunities` path -- the Communities list
+(design doc §6.3), and the `[T]opics` path -- the Communities list
 and each Community's own page (design doc §16, issue #838).
 
 Split out of `netbbs.net.login_flow` (that module's own maintenance
@@ -126,20 +126,20 @@ _MENU_ACTIVITY = {
     "c": "Chat",
     "f": "Files",
     "g": "Games",
-    "o": "Communities",
+    "t": "Topics",
     "n": "New scan",
     "/": "Find",
     "d": "Directory",
     "p": "Profile",
     "e": "Mail",
     "h": "History",
-    "r": "Previous callers",
+    "r": "Recent callers",
     "w": "Who's online",
     "i": "Invitations",
     "v": "Verify",
     "s": "SysOp",
-    "a": "Moderation",
-    "t": "Staff list",
+    "a": "Approvals",
+    "o": "Operators",
     "l": "Logging off",
 }
 
@@ -157,6 +157,14 @@ _LABEL_KEY = re.compile(r"\[([^\]\s])\]")
 #: such a key is that caller's item only when it names their meaning.
 ROLE_KEYS = {"s": frozenset({"sysop", "staff"})}
 
+#: Keys whose item changed when menu keys became their label's first letter
+#: (issue #1158, design doc §16 Decision 7): `[T]` was the Staff list and is
+#: Communities ("Topics") now, `[O]` the other way round. Art drawn before
+#: that still says `C[o]mmunities` or `S[t]aff list`; such a drawn item is
+#: not the caller's, so it is blanked and the real item listed instead,
+#: rather than `O` drawn as Communities opening the staff list.
+STALE_KEY_WORDS = {"o": frozenset({"communities"}), "t": frozenset({"staff"})}
+
 
 def offers_verify(user: User) -> bool:
     """Whether `user` gets the main menu's [V]erify: a SysOp always
@@ -170,8 +178,9 @@ def offers_verify(user: User) -> bool:
 
 def key_word(text: str, key: str) -> str:
     """The word a bracketed `key` sits in within `text`, lowercased and
-    without the brackets: `sysop` for `[S]ysOp console`, `moderation` for
-    `Moder[a]tion (3)`, `e` for `[E]-mail`. Empty when `key` isn't there."""
+    without the brackets: `sysop` for `[S]ysOp console`, `communities` for
+    `C[o]mmunities` (art drawn before issue #1158), `e` for `[E]-mail`.
+    Empty when `key` isn't there."""
     match = re.search(r"([A-Za-z]*)\[" + re.escape(key) + r"\]([A-Za-z]*)", text, re.IGNORECASE)
     return (match.group(1) + key + match.group(2)).lower() if match else ""
 
@@ -221,8 +230,8 @@ def main_menu_entries(
         explore_options.append(MenuEntry(label=menu_key("G", "ames"), brief="Play a door game"))
     if _has_visible_communities(db, user):
         explore_options.append(MenuEntry(
-            label=menu_key("o", "mmunities", prefix="C"),
-            brief="This node's topic spaces",
+            label=menu_key("T", "opics"),
+            brief="This node's Communities",
             detailed="Browse Communities -- the SysOp's topics, each with its own boards, chat and files.",
         ))
     explore_options.extend(
@@ -257,7 +266,7 @@ def main_menu_entries(
             *([MenuEntry(label=menu_key("E", mail_label), brief="Read and send private mail")] if has_mail else []),
             MenuEntry(label=menu_key("H", "istory"), brief="Your recent sessions"),
             MenuEntry(
-                label=menu_key("R", "evious callers", prefix="P"),
+                label=menu_key("R", "ecent callers"),
                 brief="Who else called this node",
                 detailed=(
                     "The node's recent callers -- the same roll shown after login, "
@@ -271,7 +280,7 @@ def main_menu_entries(
         )
     if sees_staff_list(db, user):
         # Issue #836 (design doc §5.6): who runs the node, and who is away.
-        personal_options.append(MenuEntry(label=menu_key("t", "aff list", prefix="S"), brief="Who runs this node"))
+        personal_options.append(MenuEntry(label=menu_key("O", "perators"), brief="Who runs this node"))
     if list_pending_invitations_for_user(db, user):
         personal_options.append(
             MenuEntry(label=menu_key("I", "nvitations"), brief="Pending invitations for you")
@@ -290,7 +299,7 @@ def main_menu_entries(
         # for them, and a staff member reaches their own console.
         if has_moderation_scope(db, user):
             system_options.append(MenuEntry(
-                label=menu_key("a", f"tion ({count_moderation_items(db, user)})", prefix="Moder"),
+                label=menu_key("A", f"pprovals ({count_moderation_items(db, user)})"),
                 brief="Held posts and uploads to decide",
             ))
         if is_staff(user):
@@ -375,7 +384,7 @@ async def _draw_main_menu(
     where callers who know other BBSes look. A board outside every
     Community is simply a board there; "Uncategorized" is an internal
     term and never a menu entry. `[G]ames` is shown only while at least
-    one door is visible, and `C[o]mmunities` only while at least one
+    one door is visible, and `[T]opics` only while at least one
     Community is -- the topic-first path, next to the flat one. `[?]`
     is kept free for the help entry (issue #840).
 
@@ -584,6 +593,8 @@ def plan_slot_main_menu(
                 word = key_word(item.text, key)
                 if word in ROLE_KEYS[key] and word != meaning[key]:
                     continue
+            if key_word(item.text, key) in STALE_KEY_WORDS.get(key, ()):
+                continue
             keys.add(key)
         return keys
 
@@ -1147,7 +1158,7 @@ async def _main_menu_loop(
                     community_id=None, community_scoped=False, title_prefix=None,
                 )
                 redraw = True
-            elif choice == "o" and _has_visible_communities(db, user):
+            elif choice == "t" and _has_visible_communities(db, user):
                 await end_choice_line(session)
                 await _enter_communities(
                     session, db, hub, presence, mailbox, history, user,
@@ -1290,7 +1301,7 @@ async def _main_menu_loop(
                 else:
                     announce(session, "SysOp menu is not available in this context.", tone="muted")
                 redraw = True
-            elif choice == "t" and sees_staff_list(db, user):
+            elif choice == "o" and sees_staff_list(db, user):
                 await end_choice_line(session)
                 if lane is not None:
                     await staff_list_screen(session, lane, user)
@@ -1676,7 +1687,7 @@ async def _enter_communities(
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
 ) -> None:
-    """`C[o]mmunities` entry point -- pick one via the shared picker,
+    """`[T]opics` entry point -- pick one via the shared picker,
     then that Community's page. Leaving the page comes back to this
     list, on the Community just left (issue #838): the caller went one
     level down, so Back goes one level up, not to the main menu."""

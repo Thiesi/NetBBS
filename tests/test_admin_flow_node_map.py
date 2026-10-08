@@ -77,7 +77,7 @@ def test_the_sysop_sees_candidates_and_blocked_nodes_callers_do_not(db, lane, sy
 
     # s, l: Link status; p: the node map; 01: Alpha Blocked; b: back to the
     # map; 02: Beta Candidate; b, b: back to Link status; b, b, b: out.
-    session = FakeSession(["s", "l", "p", "0", "1", "b", "0", "2", "b", "b", "b", "b", "b"])
+    session = FakeSession(["o", "l", "p", "0", "1", "b", "0", "2", "b", "b", "b", "b", "b"])
     session.terminal_height = 60  # each detail on one page
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -107,7 +107,7 @@ def test_the_sysop_sees_an_origin_only_node_with_unknown_fields(db, lane, sysop)
         default_min_read_level=200,
     ), own_fingerprint=link_context.node_identity.fingerprint)
 
-    session = FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
+    session = FakeSession(["o", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
     session.terminal_height = 60
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -125,8 +125,8 @@ def test_the_sysop_sees_an_origin_only_node_with_unknown_fields(db, lane, sysop)
 
 
 def test_the_node_map_level_is_a_limits_setting(db, lane, sysop):
-    # s: Settings, s: Limits & retention, n: node map level, 30, s: save.
-    session = FakeSession(["s", "s", "n", "30", "s", "b", "b", "b"])
+    # s: Settings, l: Limits & retention, n: node map level, 30, s: save.
+    session = FakeSession(["s", "l", "n", "30", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     assert get_node_map_min_level(db) == 30
@@ -137,7 +137,7 @@ def test_the_node_map_level_is_a_limits_setting(db, lane, sysop):
 
 
 def test_the_node_map_level_refuses_a_level_above_sysop(db, lane, sysop):
-    session = FakeSession(["s", "s", "n", "300", "s", "b", "y", "b", "b"])
+    session = FakeSession(["s", "l", "n", "300", "s", "b", "y", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     assert "Node map level must be 0-255." in _visible(_written_text(session))
@@ -154,7 +154,7 @@ def test_the_sysop_detail_shows_dial_in_addresses_and_drops_bad_ones(db, lane, s
     "https://harbor.example.org/web",
 ]))
 
-    session = FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
+    session = FakeSession(["o", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
     session.terminal_height = 60
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -174,7 +174,7 @@ def test_a_candidate_that_is_also_an_origin_is_described_as_callers_see_it(db, l
         board_id="b-both", name="Carried", created_at="2026-09-01T00:00:00+00:00",
     ), own_fingerprint=link_context.node_identity.fingerprint)
 
-    session = FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
+    session = FakeSession(["o", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
     session.terminal_height = 60
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
