@@ -5298,7 +5298,9 @@ async def _set_trust_override_screen(
                     menu_key("P", "robationary"),
                     menu_key("E", "stablished"),
                     menu_key("Q", "uarantined"),
-                    menu_key("B", "locked"),
+                    # `B` is Back on every screen (issue #1158).
+                    menu_key("k", "ed", prefix="Bloc"),
+                    menu_key("B", "ack"),
                 ],
                 width=session.terminal_width,
             )
@@ -5306,7 +5308,7 @@ async def _set_trust_override_screen(
         await _choice_prompt(session)
         state = {
             "p": TrustState.PROBATIONARY, "e": TrustState.ESTABLISHED,
-            "q": TrustState.QUARANTINED, "b": TrustState.BLOCKED,
+            "q": TrustState.QUARANTINED, "k": TrustState.BLOCKED,
         }.get((await session.read_key()).lower())
         await session.write_line("")
         if state is not None:
@@ -24636,13 +24638,14 @@ async def _pick_moderator_scope(
     # in this codebase uses); routing through it here instead of a raw
     # write() fixes this the same way, not a one-off patch.
     scope_options = [
-        menu_key("b", "oard", prefix="message "),
+        menu_key("m", "essage board"),  # `b` is Back (issue #1158)
         menu_key("a", "rea", prefix="file "),
         menu_key("n", "nel", prefix="chat cha"),
         menu_key("x", "", prefix="blanket across all boards "),
         menu_key("y", "", prefix="blanket across all areas "),
         menu_key("z", "", prefix="blanket across all channels "),
         menu_key("e", "verything", prefix="blanket across "),
+        menu_key("B", "ack"),
     ]
     await session.write_line("Scope:")
     await write_prompt(session, f"{action_bar(scope_options, width=session.terminal_width)}: ")
@@ -24651,6 +24654,8 @@ async def _pick_moderator_scope(
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
     if scope_key == "b":
+        return None  # Back: nothing chosen, nothing said
+    if scope_key == "m":
         board = await pick_item(
             session, await lane.run(list_boards, order_by="alphabetical"),
             name_of=lambda b: b.name, stable_id_of=lambda b: b.id,

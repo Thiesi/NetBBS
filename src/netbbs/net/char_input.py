@@ -86,6 +86,21 @@ REFRESH_KEY = "\x12"  # Ctrl-R
 # (see _read_line_editable's unchanged _BS handling) -- this carve-out
 # is read_key()-only, the same way REDRAW_KEY/REFRESH_KEY already are.
 HELP_KEY = "\x08"  # Ctrl-H
+
+#: Issue #1158: what a hotkey read (`read_key`) returns for the keys that
+#: work on every screen. Esc is Back; PgUp and Left are the previous page,
+#: PgDn and Right the next; `?` and F1 are help (`HELP_KEY`). A menu that
+#: already answers `b`, `<`, `>` or Ctrl-H therefore answers these too,
+#: with no change of its own.
+BACK_KEY = "b"
+PREVIOUS_PAGE_KEY = "<"
+NEXT_PAGE_KEY = ">"
+_SYMBOLIC_TO_HOTKEY = {
+    "PAGE_UP": PREVIOUS_PAGE_KEY,
+    "LEFT": PREVIOUS_PAGE_KEY,
+    "PAGE_DOWN": NEXT_PAGE_KEY,
+    "RIGHT": NEXT_PAGE_KEY,
+}
 # Issue #157: Ctrl-C, adopted incrementally -- confirmed with Thiesi as
 # the same "return a distinct sentinel, let call sites opt in" shape
 # REDRAW_KEY/REFRESH_KEY/HELP_KEY already use, not a single sweeping
@@ -1709,10 +1724,22 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
             continue
 
         if b == _ESC:
+            # A bare Esc is Back (issue #1158): nothing follows it within
+            # the window `read_editor_key` uses to tell the two apart.
+            peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
+            if peek is None:
+                await write(BACK_KEY if echo else "*")
+                return BACK_KEY
+            _push_back(source, peek)
+            key = await _read_escape_sequence(source)
             # F1 is help on every terminal (issue #1119): on one whose
             # Backspace sends 0x08, it is how help is reached at all.
-            if await _read_escape_sequence(source) == "F1":
+            if key == "F1":
                 return HELP_KEY
+            hotkey = _SYMBOLIC_TO_HOTKEY.get(key) if isinstance(key, str) else None
+            if hotkey is not None:
+                await write(hotkey if echo else "*")
+                return hotkey
             continue
 
         if b == ord(REDRAW_KEY):
@@ -1730,6 +1757,9 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
 
         if b < 0x20:
             continue
+
+        if b == ord("?"):
+            return HELP_KEY  # help on every screen (issue #1158)
 
         if b < 0x80:
             char = chr(b)

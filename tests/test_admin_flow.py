@@ -527,7 +527,7 @@ def test_sysop_can_apply_reasoned_override_through_real_menu_path(db, lane, syso
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",  # choose the only subject
-            "o", "d", "r", "t", "b", "r", "resource abuse reviewed", "s",
+            "o", "d", "r", "t", "k", "r", "resource abuse reviewed", "s",
             "b", "b", "b", "b",
         ]
     )
@@ -564,7 +564,7 @@ def test_warned_node_requires_technical_identity_confirmation_for_trust_override
     register_subject(db, subject, first_accepted_at="2026-09-04T09:01:00.000000Z")
     session = FakeSession([
         "s", "p", "s", "0", "1",
-        "o", "d", "r", "t", "b", "r", "reviewed but identity changed", "s", "n",
+        "o", "d", "r", "t", "k", "r", "reviewed but identity changed", "s", "n",
         "b", "y",  # leave the editor, confirming the discard of the unsaved draft
         "b", "b", "b", "b",
     ])
@@ -619,7 +619,7 @@ def test_trust_override_reconfirms_when_identity_warning_changes_during_prompt(
     monkeypatch.setattr(admin_flow, "prompt_yes_no", confirm)
     # [D]imension -> resource, S[t]ate -> blocked, [R]eason, [S]ave; the
     # declined re-confirmation leaves the draft, so [B]ack + "y" discards.
-    session = FakeSession(["d", "r", "t", "b", "r", "identity changed again", "s", "b", "y"])
+    session = FakeSession(["d", "r", "t", "k", "r", "identity changed again", "s", "b", "y"])
 
     asyncio.run(admin_flow._set_trust_override_screen(session, lane, sysop, subject))
 
@@ -893,7 +893,7 @@ def test_trust_override_rejected_save_keeps_the_draft(db, lane, sysop):
     session = FakeSession([
         "s", "p", "s", "0", "1",
         "o", "r", "resource abuse reviewed", "s",  # reason only -> rejected
-        "d", "r", "t", "b", "s",                    # add dimension + state, save
+        "d", "r", "t", "k", "s",                    # add dimension + state, save
         "b", "b", "b", "b",
     ])
     _run(session, lane, sysop)
@@ -3860,7 +3860,7 @@ def test_grant_and_revoke_moderator_flow(db, lane, sysop):
 
     # [U]ser -> alice, [O]n -> message board General, [P]reset once -> the
     # limited (approver-only) preset, [S]ave.
-    grant_inputs = ["m", "g", "u", "0", "1", "o", "b", "0", "1", "p", "s", "b", "b"]
+    grant_inputs = ["m", "g", "u", "0", "1", "o", "m", "0", "1", "p", "s", "b", "b"]  # sc[o]pe: [m]essage board
     session = FakeSession(grant_inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)

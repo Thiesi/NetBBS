@@ -54,6 +54,7 @@ from aiohttp import WSCloseCode, web, web_fileresponse
 
 from netbbs.net import char_input
 from netbbs.net.char_input import (
+    BACK_KEY,
     HELP_KEY,
     KILL_LINE_KEY,
     REDRAW_KEY,
@@ -80,6 +81,7 @@ from netbbs.net.char_input import (
     kill_line,
     move_cursor,
     redraw_tail,
+    _SYMBOLIC_TO_HOTKEY,
 )
 from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, secret_input
 from netbbs.rendering.pipe_codes import PastedColor
@@ -129,7 +131,7 @@ _MAX_WS_MESSAGE_SIZE = 16 * 1024
 _MAX_KEY_EVENT_LENGTH = 4096
 # What a click may send (issue #840): one menu key or a two-digit row number,
 # or Enter from an "[Enter] Continue" pause (issue #1083).
-_CLICK_KEY = re.compile(r"[a-z0-9?/\r]|[0-9]{2}")
+_CLICK_KEY = re.compile(r"[a-z0-9?/<>\r]|[0-9]{2}")  # `<` `>`: paging (issue #1158)
 _MAX_QUEUED_CHARS = 8192
 
 # Recognized escape sequences, mirroring netbbs.net.char_input's
@@ -141,8 +143,11 @@ _MAX_QUEUED_CHARS = 8192
 # table -- this decoder is independently maintained, not shared code,
 # so both need updating together (see read_editor_key's docstring).
 _CSI_FINAL_TO_KEY = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT", "H": "HOME", "F": "END"}
-_CSI_TILDE_TO_KEY = {"1": "HOME", "4": "END", "3": "DELETE", "2": "INSERT", "5": "PAGE_UP", "6": "PAGE_DOWN"}
-_SS3_TO_KEY = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT", "H": "HOME", "F": "END"}
+_CSI_TILDE_TO_KEY = {
+    "1": "HOME", "4": "END", "3": "DELETE", "2": "INSERT", "5": "PAGE_UP", "6": "PAGE_DOWN",
+    "11": "F1",  # help (issues #1119, #1158), as char_input decodes it
+}
+_SS3_TO_KEY = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT", "H": "HOME", "F": "END", "P": "F1"}
 
 # netbbs.net.char_input.EditorKeyKind equivalents for every _SpecialKey
 # name this module's own decoder can produce.
@@ -979,7 +984,25 @@ class WebSession(Session):
         # -- same narrow carve-out netbbs.net.char_input.read_key makes,
         # for the same reason (see that function's own docstring).
         while True:
-            char = await self._read_char()
+            item = await self._read_item()
+            if isinstance(item, _SpecialKey):
+                # The keys that work everywhere (issue #1158), mapped the
+                # way `char_input.read_key` maps them.
+                if item.name == "F1":
+                    return HELP_KEY
+                hotkey = _SYMBOLIC_TO_HOTKEY.get(item.name)
+                if hotkey is not None:
+                    await self.write(hotkey if echo else "*")
+                    return hotkey
+                continue
+            if not isinstance(item, str):
+                continue
+            char = item
+            if char == _ESC:
+                await self.write(BACK_KEY if echo else "*")
+                return BACK_KEY
+            if char == "?":
+                return HELP_KEY
             if char == _BS:
                 # Ctrl-H: xterm.js sends DEL for Backspace, so 0x08 here is
                 # the help key, as `char_input.read_key` returns it (#840).
@@ -1060,6 +1083,8 @@ class WebSession(Session):
                         return EditorKey(EditorKeyKind.WORD_BACKSPACE)
                     continue  # not a key this editor surfaces, same as INSERT below
                 if isinstance(item, _SpecialKey):
+                    if item.name == "F1" and distinguish_ctrl_h:
+                        return EditorKey(EditorKeyKind.CTRL, char="h")  # help (issues #1119, #1158)
                     kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
                     if kind is not None:
                         return EditorKey(kind)
