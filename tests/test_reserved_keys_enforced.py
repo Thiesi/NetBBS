@@ -100,16 +100,35 @@ def test_a_field_or_action_refuses_a_reserved_hotkey(key):
         DetailAction(hotkey=key, menu_text=f"[{key}]x", run=run)
 
 
+_NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
 def _own_nodes(function: ast.AST):
-    """The nodes of `function`, not of the functions defined inside it."""
-    stack = list(function.body)
+    """The nodes of `function`, not of the functions defined inside it --
+    a helper defined straight in its body included. Each of those is
+    checked on its own."""
+    stack = [node for node in function.body if not isinstance(node, _NESTED)]
     while stack:
         node = stack.pop()
         yield node
-        stack.extend(
-            child for child in ast.iter_child_nodes(node)
-            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
-        )
+        stack.extend(child for child in ast.iter_child_nodes(node) if not isinstance(child, _NESTED))
+
+
+def _is_ctrl_h_check(node: ast.AST) -> bool:
+    """`key.kind == EditorKeyKind.CTRL and key.char == "h"`: help on a
+    structured read. A bare `"h"` elsewhere (a hotkey, a dict key) is not."""
+    if not (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And)):
+        return False
+    ctrl = char_h = False
+    for value in node.values:
+        if not isinstance(value, ast.Compare):
+            continue
+        sides = (value.left, *value.comparators)
+        if any(_name(side) == "CTRL" for side in sides):
+            ctrl = True
+        if any(_name(side) == "char" for side in sides) and any(_constant(side) == "h" for side in sides):
+            char_h = True
+    return ctrl and char_h
 
 
 def _answers_help_or_is_no_hotkey_screen(function: ast.AST) -> bool:
@@ -119,8 +138,8 @@ def _answers_help_or_is_no_hotkey_screen(function: ast.AST) -> bool:
     for node in _own_nodes(function):
         if isinstance(node, (ast.Call, ast.Name, ast.Attribute)):
             names.add(_name(node.func if isinstance(node, ast.Call) else node))
-        if _constant(node) == "h":
-            ctrl_h = True  # `key.char == "h"` with CTRL: help on a structured read
+        if _is_ctrl_h_check(node):
+            ctrl_h = True
         if isinstance(node, ast.Compare):
             for side in (node.left, *node.comparators):
                 for leaf in ast.walk(side):
@@ -170,3 +189,36 @@ def test_the_help_check_notices_a_screen_without_help():
     ).body[0]
     assert not _answers_help_or_is_no_hotkey_screen(screen)
     assert _answers_help_or_is_no_hotkey_screen(with_help)
+
+
+def test_the_help_check_is_not_fooled_by_a_helper_or_an_h_hotkey():
+    """Review of #1163: a helper's help is the helper's, and `h` bound to
+    History is not Ctrl-H."""
+    helper_has_help = ast.parse(
+        "async def screen(session):\n"
+        "    def _hint():\n"
+        "        return show_menu_help\n"
+        "    while True:\n"
+        "        choice = await session.read_key()\n"
+        "        if choice == 'a': pass\n"
+        "        elif choice == 'b': return\n"
+    ).body[0]
+    h_is_history = ast.parse(
+        "async def screen(session):\n"
+        "    while True:\n"
+        "        key = await session.read_editor_key()\n"
+        "        if key.char == 'h': pass\n"
+        "        elif key.char == 'a': pass\n"
+        "        elif key.char == 'b': return\n"
+    ).body[0]
+    ctrl_h = ast.parse(
+        "async def screen(session):\n"
+        "    while True:\n"
+        "        key = await session.read_editor_key()\n"
+        "        if key.kind == EditorKeyKind.CTRL and key.char == 'h': pass\n"
+        "        elif key.char == 'a': pass\n"
+        "        elif key.char == 'b': return\n"
+    ).body[0]
+    assert not _answers_help_or_is_no_hotkey_screen(helper_has_help)
+    assert not _answers_help_or_is_no_hotkey_screen(h_is_history)
+    assert _answers_help_or_is_no_hotkey_screen(ctrl_h)
