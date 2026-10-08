@@ -24,7 +24,7 @@ def test_a_communitys_screen_opens_on_its_fields_with_its_actions(db, lane, syso
     create_community(db, "Pens", creator=sysop)
     create_community(db, "Paper", creator=sysop)
     # Content > Communities > List > 02: its screen, then Back out.
-    session = FakeSession(["m", "o", "l", "0", "2", "b", "b", "b", "b", "b"])
+    session = FakeSession(["m", "t", "l", "0", "2", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     screen = _screen_with(_visible(_written_text(session)), "Place 2 of 2")
     assert "in the callers' Communities list" in screen
@@ -40,7 +40,7 @@ def test_a_changed_community_offers_only_save_and_back(db, lane, sysop):
     # 02; Down twice to Hidden, Right steps it; "u" is refused while it
     # waits; Save; then Up runs; Back out.
     session = FakeSession([
-        "m", "o", "l", "0", "2", "DOWN", "DOWN", "RIGHT", "u", "s", "u", "b", "b", "b", "b", "b",
+        "m", "t", "l", "0", "2", "DOWN", "DOWN", "RIGHT", "u", "s", "u", "b", "b", "b", "b", "b",
     ])
     _run(session, lane, sysop)
     changed = _screen_with(_visible(_written_text(session)), r"Hidden:\s+yes")
@@ -100,7 +100,7 @@ def test_a_file_areas_screen_opens_on_its_fields_with_its_actions(db, lane, syso
     _run(session, lane, sysop)
     screen = _screen_with(_visible(_written_text(session)), "0 files")
     assert "place 1 of 1" in screen and "> Name:" in screen
-    for action in ("[R]emove", "[P]ending files", "E[x]pired files", "[H]istory"):
+    for action in ("[R]emove", "[P]ending files", "[E]xpired files", "[H]istory"):
         assert action in screen
     assert "[E]dit" not in screen
 
@@ -110,7 +110,7 @@ def test_a_chat_channels_screen_opens_on_its_fields_with_its_actions(db, lane, s
 
     create_channel(db, "Lobby", creator=sysop)
     # Content > Chat channels > List > 01, Back out.
-    session = FakeSession(["m", "n", "l", "0", "1", "b", "b", "b", "b", "b"])
+    session = FakeSession(["m", "l", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     screen = _screen_with(_visible(_written_text(session)), "no MRC room")
     assert "> Name:" in screen
@@ -143,7 +143,7 @@ def test_a_doors_screen_opens_on_its_fields_and_a_changed_one_hides_delete(db, l
 
 def test_a_renamed_community_and_category_are_titled_by_their_new_name(db, lane, sysop):
     create_community(db, "Politics", creator=sysop)
-    session = FakeSession(["m", "o", "l", "0", "1", "ENTER", "Civics", "s", "b", "b", "b", "b", "b"])
+    session = FakeSession(["m", "t", "l", "0", "1", "ENTER", "Civics", "s", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     saved = _screen_with(_visible(_written_text(session)), "Updated 'Civics'")
     assert "› Civics" in saved and "Politics" not in saved
@@ -174,7 +174,7 @@ def test_a_renamed_channel_and_door_are_titled_by_their_new_names(db, lane, syso
     from netbbs.doors import create_door
 
     create_channel(db, "Lobby", creator=sysop)
-    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lounge", "s", "b", "b", "b", "b", "b"])
+    session = FakeSession(["m", "l", "l", "0", "1", "ENTER", "Lounge", "s", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     saved = _screen_with(_visible(_written_text(session)), "Updated 'Lounge'")
     assert "› Lounge" in saved and "Lobby" not in saved

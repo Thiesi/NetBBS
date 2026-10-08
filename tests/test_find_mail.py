@@ -304,7 +304,7 @@ def test_find_opens_a_sent_letter_in_the_sent_view(db, lane, alice, bob):
 def test_a_letter_deleted_in_the_view_leaves_the_results(db, lane, alice, bob):
     send_mail(db, bob, alice, "zeppelin letter", "body")
 
-    session = _run_main_menu(db, lane, alice, ["/", "zeppelin", "0", "1", "d", "y", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "zeppelin", "0", "1", "e", "y", "b", "l", "y"])
     text = _visible_text(session)
 
     assert list_inbox(db, alice) == []

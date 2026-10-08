@@ -1,6 +1,6 @@
 """
 Reply and Resend on the Sent view (issue #825): `[R]eply` writes to a sent
-letter's recipient again, local or over Link; `Re[s]end`, on Link mail that
+letter's recipient again, local or over Link; `[S]end again`, on Link mail that
 bounced or expired, sends the same letter again as a new one. Both return to
 the Sent list with the outcome above its prompt.
 """
@@ -166,7 +166,7 @@ def test_reply_from_sent_link_mail_goes_back_over_link(linked):
     assert rows[1]["body"] == "alice wrote:\n> Saturday?\n\nWell?"
 
 
-# -- Re[s]end: the same letter again ---------------------------------------------
+# -- [S]end again: the same letter again ----------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -205,7 +205,7 @@ def test_resend_is_not_offered_for_mail_that_arrived_or_may_yet(linked, status):
     _run(db_path, session, alice, link_context=link_context)
 
     text = _visible_text(session)
-    assert "Re[s]end" not in text
+    assert "[S]end again" not in text
     assert len(_remote_rows(db)) == 1
 
 
@@ -226,7 +226,7 @@ def test_resend_still_refused_says_why_before_anything_is_written(linked):
 
     text = _visible_text(session)
     assert f"Mail to {_FARPOINT} is closed on this BBS." in text
-    assert "Resend" not in text.replace("Re[s]end", "")
+    assert "Resend" not in text
     assert len(_remote_rows(db)) == 1
 
 
@@ -316,9 +316,9 @@ def test_sent_view_bar_fits_and_clashes_with_nothing(linked, monkeypatch, width,
     text = _visible_text(session)
     bar_rows = [
         line for line in text.replace("\r", "").split("\n")
-        if any(label in line for label in ("[R]eply", "Re[s]end", "[F]orward", "[D]elete"))
+        if any(label in line for label in ("[R]eply", "[S]end again", "[F]orward", "[E]rase"))
     ]
     assert bar_rows and all(len(line) <= width for line in bar_rows)
-    assert bars == [["r", "s", "f", "d", "b"]]
+    assert bars == [["r", "s", "f", "e", "b"]]
     # The pager's own keys stay N and P.
     assert not {"n", "p"} & set(bars[0])

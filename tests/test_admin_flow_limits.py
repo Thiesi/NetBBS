@@ -52,12 +52,12 @@ MIB = 1024 * 1024
 def test_settings_menu_offers_limits_and_retention(db, lane, sysop):
     session = FakeSession(["s", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
-    assert "Limit[s] & retention" in _visible(_written_text(session))
+    assert "[L]imits & retention" in _visible(_written_text(session))
 
 
 def test_limits_screen_shows_the_defaults(db, lane, sysop):
-    # s: Settings, s: Limits & retention, b: back out of everything.
-    session = FakeSession(["s", "s", "b", "b", "b"])
+    # s: Settings, l: Limits & retention, b: back out of everything.
+    session = FakeSession(["s", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _visible(_written_text(session))
     assert "Limits & retention" in text
@@ -68,7 +68,7 @@ def test_limits_screen_shows_the_defaults(db, lane, sysop):
 
 def test_limits_screen_saves_all_four_and_audits_the_change(db, lane, sysop):
     session = FakeSession([
-        "s", "s", "u", "250", "g", "14", "i", "", "c", "500", "s", "b", "b", "b",
+        "s", "l", "u", "250", "g", "14", "i", "", "c", "500", "s", "b", "b", "b",
     ])
     asyncio.run(admin_menu(session, lane, sysop))
     assert get_max_upload_bytes(db) == 250 * MIB
@@ -84,7 +84,7 @@ def test_limits_screen_saves_all_four_and_audits_the_change(db, lane, sysop):
 def test_limits_screen_rejects_an_out_of_range_value_and_writes_nothing(db, lane, sysop):
     # A zero scrollback is refused at Save; the draft stays open with the
     # message, and backing out (b, y: discard) writes none of the fields.
-    session = FakeSession(["s", "s", "g", "30", "c", "0", "s", "b", "y", "b", "b"])
+    session = FakeSession(["s", "l", "g", "30", "c", "0", "s", "b", "y", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert "Chat scrollback must be 1-10000 messages." in _visible(_written_text(session))
     assert get_scrollback_limit(db) == 100
@@ -96,7 +96,7 @@ def test_limits_screen_keeps_an_odd_byte_upload_cap_unless_it_is_edited(db, lane
     # A cap that is not a whole MiB (only reachable through the dev
     # script) must not be rounded away by saving an unrelated field.
     set_config(db, "max_upload_bytes", str(5 * MIB + 123))
-    session = FakeSession(["s", "s", "g", "3", "s", "b", "b", "b"])
+    session = FakeSession(["s", "l", "g", "3", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert get_max_upload_bytes(db) == 5 * MIB + 123
     assert get_expiry_grace_period_days(db) == 3
@@ -106,7 +106,7 @@ def test_limits_screen_applies_the_floored_mib_when_the_sysop_chooses_it(db, lan
     # Codex review: entering the number already shown for an odd-byte cap
     # is a choice of exactly that many MiB, not "unchanged".
     set_config(db, "max_upload_bytes", str(5 * MIB + 123))
-    session = FakeSession(["s", "s", "u", "5", "s", "b", "b", "b"])
+    session = FakeSession(["s", "l", "u", "5", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert get_max_upload_bytes(db) == 5 * MIB
 
@@ -125,7 +125,7 @@ def test_getters_clamp_values_stored_before_the_ceilings(db):
 
 
 def test_limits_screen_save_with_nothing_changed_writes_no_audit(db, lane, sysop):
-    session = FakeSession(["s", "s", "s", "b", "b", "b"])
+    session = FakeSession(["s", "l", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert "Nothing changed." in _visible(_written_text(session))
     assert not [a for a in list_recent_actions(db, limit=10) if a.action == "set_limits_and_retention"]

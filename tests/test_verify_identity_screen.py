@@ -2,7 +2,7 @@
 Tests for the `[V]erify` main-menu screen's per-user page
 (`netbbs.net.profile_flow._verify_user`) -- previously untested, and
 reshaped by issue #282 from two gating yes/no questions into a status
-panel with `[A]ttest age` / `Attest [N]ame` / `[B]ack`.
+panel with `[A]ge` / `[N]ame` / `[B]ack`.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def test_back_shows_status_and_asks_nothing(db, sysop, alice):
     assert "Attested real name: (not attested)" in text
     assert "Attest a birthdate?" not in text
     assert "Attest a real name?" not in text
-    assert "[A]ttest age" in text and "Attest [N]ame" in text and "[B]ack" in text
+    assert "[A]ge" in text and "[N]ame" in text and "[B]ack" in text
     assert "Verifying alice" in text
     assert get_attestation(db, alice, "age") is None
     assert get_attestation(db, alice, "name") is None

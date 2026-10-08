@@ -90,14 +90,14 @@ async def prompt_sort_change(
     not have one.
     """
     volume_hotkey = volume_label[0].lower()
-    mode_keys = {"a": "activity", "l": "alphabetical", "r": "recent", volume_hotkey: "volume"}
+    mode_keys = {"a": "activity", "n": "alphabetical", "r": "recent", volume_hotkey: "volume"}
     if sysop_order:
         mode_keys["s"] = "sysop"
     mode_nav = "  ".join(
         [
             *([menu_key("S", "ysOp's order")] if sysop_order else []),
             menu_key("A", "ctivity"),
-            menu_key("L", "phabetical", prefix="A"),
+            menu_key("N", "ame"),
             menu_key("R", "ecent"),
             menu_key(volume_label[0].upper(), volume_label[1:]),
             menu_key("B", "ack"),
@@ -106,7 +106,7 @@ async def prompt_sort_change(
     mode_help = [
         *([MenuEntry(label=menu_key("S", "ysOp's order"), brief="The order the SysOp arranged")] if sysop_order else []),
         MenuEntry(label=menu_key("A", "ctivity"), brief="Most recent activity first"),
-        MenuEntry(label=menu_key("L", "phabetical", prefix="A"), brief="By name, A to Z"),
+        MenuEntry(label=menu_key("N", "ame"), brief="By name, A to Z"),
         MenuEntry(label=menu_key("R", "ecent"), brief="Newest first, by when each was added"),
         MenuEntry(
             label=menu_key(volume_label[0].upper(), volume_label[1:]),

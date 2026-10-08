@@ -321,7 +321,7 @@ def test_who_is_online_offers_nothing_but_a_block_to_someone_who_blocks_you(db, 
     assert "[M]essage" not in text and "[I]nvite" not in text
     assert "[E]-mail" not in text
     # Blocking them back stays on offer: their block does not stop their mail to you.
-    assert "Bloc[k]" in text
+    assert "[S]ender blocked: no" in text
 
 
 def test_who_is_online_still_offers_mail_when_no_one_is_blocked(db, lane, alice, bob):
@@ -343,7 +343,7 @@ def test_who_is_online_shows_a_sysop_who_blocks_you_with_only_back(db, lane, ali
     text = " ".join(_visible(session).split())
     assert "sysop does not accept messages or mail from you." in text
     assert "[B]ack" in text
-    assert "[E]-mail" not in text and "Bloc[k]" not in text and "[M]essage" not in text
+    assert "[E]-mail" not in text and "[S]ender blocked" not in text and "[M]essage" not in text
 
 
 def test_who_is_online_does_not_promise_mail_to_someone_who_opted_out_and_blocks_you(db, lane, alice, bob):
@@ -360,13 +360,13 @@ def test_who_is_online_does_not_promise_mail_to_someone_who_opted_out_and_blocks
 
 
 def test_who_is_online_blocks_and_unblocks_a_local_caller(db, lane, alice, bob):
-    session = KeySession(keys=["0", "1", "k", "0", "1", "k", "b"])
+    session = KeySession(keys=["0", "1", "s", "0", "1", "s", "b"])
 
     _run_who(db, lane, alice, session)
 
     screens = _screens(session)
-    assert "Bloc[k]" in _visible(session)
-    assert "Unbloc[k]" in _visible(session)
+    assert "[S]ender blocked: no" in _visible(session)
+    assert "[S]ender blocked: yes" in _visible(session)
     assert any("Blocked bob: their mail and live messages are refused" in " ".join(s.split()) for s in screens)
     assert "Unblocked bob" in screens[-1]
     assert not blocks_local_sender(db, alice, bob)
@@ -378,7 +378,7 @@ def test_who_is_online_offers_no_block_for_the_sysop(db, lane, alice):
 
     _run_who(db, lane, alice, session, online=("sysop",))
 
-    assert "Bloc[k]" not in _visible(session)
+    assert "[S]ender blocked" not in _visible(session)
 
 
 def test_who_is_online_blocks_a_linked_caller_by_address(tmp_path):
@@ -391,7 +391,7 @@ def test_who_is_online_blocks_a_linked_caller_by_address(tmp_path):
             _FakeBridge({REMOTE: {"erin": "erin"}}), direct_chat=_FakeDirectChat(), known_fingerprints=(REMOTE,),
         )
         lane = DatabaseLane(database.path)
-        session = WhoSession(["w", "0", "1", "k", "b", "l", "y"])
+        session = WhoSession(["w", "0", "1", "s", "b", "l", "y"])
         node_controls.session_registry.enter(session)
         node_controls.session_registry.mark_authenticated(session, "alice")
         try:
@@ -402,7 +402,7 @@ def test_who_is_online_blocks_a_linked_caller_by_address(tmp_path):
         return _written_text(session)
 
     text = asyncio.run(scenario())
-    assert "Bloc[k]" in strip_ansi(text)
+    assert "[S]ender blocked: no" in strip_ansi(text)
     assert "Blocked erin@" in " ".join(strip_ansi(text).split())
     assert blocks_link_sender(database, alice, f"erin@{REMOTE}")
     database.close()
