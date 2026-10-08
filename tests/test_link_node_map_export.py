@@ -268,3 +268,11 @@ def test_the_command_refuses_without_an_identity(tmp_path):
     with pytest.raises(SystemExit) as raised:
         admin_main(["export-node-map", "--db", str(tmp_path / "node.db"), "--identity-dir", str(tmp_path / "none")])
     assert "Not exported" in str(raised.value)
+
+
+def test_an_output_path_without_a_name_is_refused_cleanly(tmp_path, monkeypatch):
+    _node_on_disk(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as raised:
+        admin_main(["export-node-map", "--db", "node.db", "--identity-dir", "identity", "--output", "."])
+    assert "Not exported" in str(raised.value)
