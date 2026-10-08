@@ -1340,6 +1340,16 @@ default, so a bare `myboard.netbbs.org` reaches your board only through a
 port-forward or proxy in front of it. The DNS screen states this against your
 configured listeners; the service cannot check it for you.
 
+A node with a managed name also gets a public page at
+`https://www.netbbs.org/~<name>` once Reliable Link has met it: its name, the
+dial-in addresses it publishes, when the name was registered, how long Reliable
+Link has known it and when it was last heard. Nothing on it is more than a
+caller on Reliable Link can see, and never the address the DNS service sees.
+The DNS screen's **[W]eb page** steps through the three settings: shown but
+hidden from search engines (the default), shown and indexed, or off. Your node
+signs the choice into what it sends Reliable Link, so a change takes effect at
+the next contact.
+
 If you also run the managed-DNS service itself, `[managed_dns] admin_token` in
 `netbbs.toml` adds **[A]dminister service** to the DNS screen: the service's
 registrations as a table, each in full, and revocation with a reason and a
