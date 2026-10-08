@@ -580,7 +580,7 @@ def main(argv: list[str] | None = None) -> None:
 
         try:
             line = run_export_node_map(db, args.identity_dir, args.output)
-        except (OSError, NodeIdentityError) as exc:
+        except (OSError, ValueError, NodeIdentityError) as exc:
             raise SystemExit(terminal_wrapped(f"Not exported: {exc}", stream=sys.stderr)) from exc
         finally:
             db.close()
