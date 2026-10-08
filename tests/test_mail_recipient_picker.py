@@ -557,7 +557,7 @@ def test_an_address_send_refuses_is_still_shown_by_its_nodes_name(db, db_path):
     link_context = _link_context_with_known_peer(db, node_identity, farpoint)
     _link_context_with_known_peer(db, node_identity, newcomer, friendly_name="Newcomer", established=False)
     session = FakeSession(
-        keys=["c", "t", "s", "c", "b"], lines=["bob@Farpoint", "Hello", "Body", "/done", "bob@Newcomer"],
+        keys=["c", "t", "s", "b", "b"], lines=["bob@Farpoint", "Hello", "Body", "/done", "bob@Newcomer", "y"],
     )
     session.terminal_width = 200
     lane = DatabaseLane(db_path)

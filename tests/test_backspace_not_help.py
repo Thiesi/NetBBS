@@ -162,7 +162,7 @@ def _from_disk(data: bytes, terminal_types: tuple[str, ...]) -> tuple[object, st
     return chosen, "".join(session.written)
 
 
-_HELP_MARK = "Move one page forward/back"  # a line only the list's help screen shows
+_HELP_MARK = "Move one page back/forward"  # a line only the list's help screen shows
 
 
 def test_syncterms_backspace_on_the_from_disk_list_does_not_open_help():

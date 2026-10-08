@@ -136,7 +136,7 @@ def test_older_command_navigates_to_the_previous_page(tmp_path, monkeypatch):
     db = Database(db_path)
     total = _PAGE_SIZE * 2
     area, user = _make_area_with_files(db, total, monkeypatch)
-    session = FakeSession(keys=["o", "b"])  # newest page, then older, then back out
+    session = FakeSession(keys=["<", "b"])  # newest page, then older, then back out
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -152,7 +152,7 @@ def test_recent_command_jumps_straight_back_to_the_newest_page(tmp_path, monkeyp
     db = Database(db_path)
     total = _PAGE_SIZE * 3
     area, user = _make_area_with_files(db, total, monkeypatch)
-    session = FakeSession(keys=["o", "o", "r", "b"])
+    session = FakeSession(keys=["<", "<", "r", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -204,7 +204,7 @@ def test_empty_area_has_a_guided_empty_state(tmp_path):
 def test_download_works_for_a_file_reached_by_paging_back_into_history(tmp_path, monkeypatch):
     """A file from deep history is still downloadable from this screen,
     which is what pagination itself put at risk -- but the way there is
-    now `[O]lder` until the file is on the page and then its number,
+    now `[<] Older` until the file is on the page and then its number,
     not a `/download <filename>` lookup across the whole area. (The
     one-step reach that lookup gave is `[/] Find`'s job now, and belongs
     to its own tests.)"""
@@ -212,8 +212,8 @@ def test_download_works_for_a_file_reached_by_paging_back_into_history(tmp_path,
     db = Database(db_path)
     total = _PAGE_SIZE * 2
     area, user = _make_area_with_files(db, total, monkeypatch)
-    # `o` pages back to the oldest page, where file0.txt is entry 1.
-    session = FakeSession(keys=["o", "1", "b"])
+    # `<` pages back to the oldest page, where file0.txt is entry 1.
+    session = FakeSession(keys=["<", "1", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -354,7 +354,7 @@ def test_paging_to_an_older_page_does_not_regress_the_cursor(tmp_path, monkeypat
     record_file_area_seen(db, bob, area, newest_page.entries[-1])
     lane = DatabaseLane(db_path)
 
-    session = FakeSession(keys=["o", "b"])  # newest page already recorded above, then page backward
+    session = FakeSession(keys=["<", "b"])  # newest page already recorded above, then page backward
     asyncio.run(_show_area(session, lane, area, bob))
 
     assert unread_file_count(db, bob, area) == 0  # still caught up, not regressed

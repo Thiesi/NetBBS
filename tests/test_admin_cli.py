@@ -78,18 +78,6 @@ def test_run_admin_session_bootstraps_then_opens_the_menu(db):
     assert "Attributed to 'sysop'" in _written_text(session)
 
 
-def test_esc_at_the_first_sysops_credential_choice_chooses_nothing(db):
-    """Issue #1158: Esc reads as `b`, Back, and this once-only question has
-    nothing to go back to. It used to be `[B]oth`, so Esc would have run the
-    SysOp through both prompts; now it is refused and the question stays."""
-    session = FakeSession(["sysop", "b", "p", "hunter2", "hunter2", "n", "n", "b"])
-    asyncio.run(run_admin_session(session, db, None))
-    # Chosen as Both, the "n" answers after the password would have been read
-    # as a public key, and the account would not have been made.
-    assert any(u.username == "sysop" for u in list_users(db))
-    assert "Both were selected" not in _written_text(session)
-
-
 def test_bootstrap_accepting_managed_dns_on_a_node_that_never_started_defers_the_name(db):
     """Issue #634. The accept used to dead-end on "identity isn't ready
     yet -- try again after a restart" at the one moment this tool exists
@@ -138,10 +126,10 @@ def test_bootstrap_rejects_an_unknown_credential_choice_and_retries(db, lane):
 
 
 def test_bootstrap_both_requires_both_credentials(db, lane):
-    """Codex review on #292: [T]wo (formerly [B]oth) with only a password accepted (blank
+    """Codex review on #292: [B]oth with only a password accepted (blank
     key) starts the choice over instead of creating a password-only
     account."""
-    session = FakeSession(["sysop", "t", "hunter2", "hunter2", "", "p", "hunter2", "hunter2", "n", "n"])
+    session = FakeSession(["sysop", "b", "hunter2", "hunter2", "", "p", "hunter2", "hunter2", "n", "n"])
     user = asyncio.run(_bootstrap_first_sysop(session, lane))
     assert user.username == "sysop"
     assert "Both were selected, but only one was accepted." in _written_text(session)

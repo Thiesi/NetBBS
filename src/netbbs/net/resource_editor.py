@@ -39,6 +39,7 @@ from netbbs.net.char_input import (
     InputCancelled,
     MAX_LINE_LENGTH as _MAX_LINE_LENGTH,
     help_key_label,
+    page_step,
     reject_unhandled_key,
 )
 from netbbs.net.confirm import prompt_yes_no
@@ -833,7 +834,7 @@ async def edit_resource_draft(
                 label_fields=fields, positions=positions,
             )
             page_number = section_names.index(current_page) + 1
-            page_hint = f"(Section {page_number} of {len(section_names)} -- PgUp/PgDn to switch)"
+            page_hint = f"(Section {page_number} of {len(section_names)}: < > switches)"
             # The section after the fields goes with the last page only, so
             # every page keeps its rows for its own fields.
             shown_after = after_text if current_page == section_names[-1] else ""
@@ -940,9 +941,12 @@ async def edit_resource_draft(
             else:
                 selected = 0 if selected is None else (selected + 1) % len(fields)
             continue
-        if paginated and key.kind in (EditorKeyKind.PAGE_UP, EditorKeyKind.PAGE_DOWN):
+        # Sections turn with `<` `>` and PgUp/PgDn (issue #1158); on a form
+        # the arrows step the highlighted value instead, just below.
+        section_step = page_step(key, arrows=False) if paginated else None
+        if section_step is not None:
             page_pos = section_names.index(current_page)
-            step = 1 if key.kind == EditorKeyKind.PAGE_DOWN else -1
+            step = section_step
             current_page = section_names[(page_pos + step) % len(section_names)]
             # Same "any working-set change drops the highlight" precedent
             # netbbs.net.picker.pick_item's own paging already established
@@ -974,8 +978,9 @@ async def edit_resource_draft(
             if selected is not None and detail_state is None:
                 selected = None
                 continue
-            await session.write("\a")
-            continue
+            # With nothing to drop, Esc is Back, as on every screen (issue
+            # #1158): it takes the [B]ack path below, discard question and all.
+            key = EditorKey(EditorKeyKind.CHAR, char=back_hotkey)
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_field_help(
                 session, fields, selected=help_selected(), header_color=header_color, unicode_style=unicode_style,

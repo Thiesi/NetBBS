@@ -182,12 +182,12 @@ def test_next_post_steps_into_the_newer_page(db, alice, monkeypatch):
     _posts(db, board, alice, 40, monkeypatch)
     # Older page first, so the last row of that page has a newer neighbour
     # on the page after it.
-    session = FakeSession(["o", "b"])
+    session = FakeSession(["<", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     older = _listed(session.screens()[1])
     last_on_older = max(older)
 
-    session = FakeSession(["o", str(len(older)) if len(older) < 10 else "UP", *(["ENTER"] if len(older) >= 10 else []), "n", "b", "b"])
+    session = FakeSession(["<", str(len(older)) if len(older) < 10 else "UP", *(["ENTER"] if len(older) >= 10 else []), "n", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     readers = [screen for screen in session.screens() if "Body of post" in screen]
@@ -337,10 +337,10 @@ def test_the_board_list_shows_activity_and_linked_and_gate_notes(db, alice):
 @pytest.mark.parametrize(("width", "height"), [(60, 24), (70, 24), (80, 24)])
 def test_a_middle_page_fits_the_terminal_with_every_action_shown(db, alice, monkeypatch, width, height):
     """The page budget was measured without the read entry, so a page with
-    [O]lder, [N]ewer, [R]ecent *and* the read entry overran the terminal."""
+    [<] Older, [>] Newer, [R]ecent *and* the read entry overran the terminal."""
     board = create_board(db, "general", creator=alice)
     _posts(db, board, alice, 80, monkeypatch)
-    session = FakeSession(["o", "b"], width=width, height=height)
+    session = FakeSession(["<", "b"], width=width, height=height)
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -361,7 +361,7 @@ def test_stepping_into_the_next_page_marks_only_the_post_shown(db, alice, monkey
     )
     # Older page, cursor to its last row, open it, then [N]ext post across
     # the page boundary.
-    session = FakeSession(["o", "UP", "ENTER", "n", "b", "b"])
+    session = FakeSession(["<", "UP", "ENTER", "n", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     readers = [screen for screen in session.screens() if "Body of post" in screen]
@@ -465,7 +465,7 @@ def test_every_post_shown_in_the_reader_is_recorded_as_it_is_shown(db, alice, mo
     )
     # Across the page boundary with [N]ext post, then one more step inside
     # the page the list never drew.
-    session = FakeSession(["o", "UP", "ENTER", "n", "n", "b", "b"])
+    session = FakeSession(["<", "UP", "ENTER", "n", "n", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     shown = [

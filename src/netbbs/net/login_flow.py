@@ -56,6 +56,7 @@ from netbbs.net.logoff_banner import load_logoff_banner
 from netbbs.net.mail_arrivals import watch_for_mail
 from netbbs.net.main_menu import _main_menu
 from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
+from netbbs.net.keys_notice import show_keys_notice_once
 from netbbs.net.onboarding_flow import offer_onboarding
 from netbbs.net.profile_flow import _show_logoff_summary_screen, _show_previous_callers_screen
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
@@ -901,6 +902,11 @@ async def _run_signed_in(
         first_run.announce_rest(last_paragraph=False)
         await _show_previous_callers_screen(
             session, db, user, current_history_id=history_id
+        )
+        # Issue #1158: once, for an account that knew the old keys.
+        await show_keys_notice_once(
+            session, db, user,
+            header_color=effective_header_color_256(db), unicode_style=unicode_style_enabled(db, user),
         )
         intentional_logoff = await _main_menu(
             session, db, hub, presence, mailbox, history, user,

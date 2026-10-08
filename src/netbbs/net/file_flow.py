@@ -116,7 +116,7 @@ from netbbs.link.files import (
 )
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
-from netbbs.net.char_input import REDRAW_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
+from netbbs.net.char_input import REDRAW_KEY, EditorKey, EditorKeyKind, page_step, reject_unhandled_key
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
@@ -610,9 +610,9 @@ async def _render_area_page(
     )
     options = []
     if page.has_older:
-        options.append(MenuEntry(label=menu_key("O", "lder"), brief="Show older files"))
+        options.append(MenuEntry(label=menu_key("<", " Older"), brief="Show older files"))
     if page.has_newer:
-        options.append(MenuEntry(label=menu_key("N", "ewer"), brief="Show newer files"))
+        options.append(MenuEntry(label=menu_key(">", " Newer"), brief="Show newer files"))
         options.append(MenuEntry(label=menu_key("R", "ecent"), brief="Jump to the newest page"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
     await session.write_line(
@@ -732,7 +732,9 @@ async def _reject_after_echo(session: Session) -> None:
     await _write_choice_prompt(session)
 
 
-_NAV_KEYS = {"b": "back", "o": "older", "n": "newer", "r": "recent"}
+# Paging is `<` `>` on every screen (issue #1158); a hotkey read turns
+# PgUp/PgDn and the arrows into the same two characters.
+_NAV_KEYS = {"b": "back", "<": "older", ">": "newer", "r": "recent"}
 
 
 def _queue_entry(count: int) -> MenuEntry:
@@ -865,8 +867,14 @@ async def _read_file_choice(
             elif key.kind == EditorKeyKind.ESCAPE:
                 if highlighted is not None:
                     return ("highlight", None, None)
-                await session.write("\a")
-                return ("none", None, highlighted)
+                return ("back", None, highlighted)  # Esc is Back (issue #1158)
+            elif key.kind != EditorKeyKind.CHAR and page_step(key) is not None:
+                action = _key_action("<" if page_step(key) < 0 else ">", page, highlighted)
+                if action is None:
+                    await session.write("\a")
+                    return ("none", None, highlighted)
+                await session.write_line("")
+                return action
             elif key.kind == EditorKeyKind.CHAR and key.char:
                 action = _key_action(key.char, page, highlighted)
                 if action is None:
@@ -927,7 +935,7 @@ async def _show_area(
     issue #10's file-area follow-up to the board-post pagination) —
     mirrors `netbbs.net.board_flow._show_board`'s
     pagination *semantics* exactly: same newest-first default, same
-    `[O]lder`/`[N]ewer`/`[R]ecent`/`[B]ack` options, same reasoning for
+    `[<] Older`/`[>] Newer`/`[R]ecent`/`[B]ack` options, same reasoning for
     both (see that function's docstring, not repeated here) — including
     only redrawing the listing on an actual page change, and `b` (not a
     bare Enter, which used to also work here but no longer does) as the

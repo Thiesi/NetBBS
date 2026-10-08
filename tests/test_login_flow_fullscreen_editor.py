@@ -491,7 +491,7 @@ def test_compose_post_review_can_revise_subject_and_submitted_body_line(db, alic
         [
             "p",
             "Original subject", "first", "second", "/done",
-            "u", "Revised subject", "b", "/edit 2", "SECOND", "/done", "p", "b",
+            "u", "Revised subject", "e", "/edit 2", "SECOND", "/done", "p", "b",
         ]
     )
 
@@ -505,9 +505,10 @@ def test_compose_post_review_can_revise_subject_and_submitted_body_line(db, alic
 
 def test_compose_post_review_cancel_persists_nothing(db, alice):
     board = create_board(db, "general", creator=alice)
-    # A cancelled compose leaves the board still empty, so the [P]ost/
+    # Back on review, yes to "Discard this draft?" (issue #1158). A
+    # cancelled compose leaves the board still empty, so the [P]ost/
     # [B]ack choice reprompts -- trailing "b" exits it.
-    session = FakeSession(["p", "Subject", "Body", "/done", "c", "b"])
+    session = FakeSession(["p", "Subject", "Body", "/done", "b", "y", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -518,7 +519,7 @@ def test_compose_post_review_cancel_persists_nothing(db, alice):
 def test_fullscreen_post_save_still_requires_review_confirmation(db, alice):
     set_fullscreen_editor_enabled(db, alice, True)
     board = create_board(db, "general", creator=alice)
-    session = FakeSession(["p", "Subject"] + _type("Saved draft") + ["CTRL+O", "c", "b"])
+    session = FakeSession(["p", "Subject"] + _type("Saved draft") + ["CTRL+O", "b", "y", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -796,7 +797,7 @@ def test_saving_an_unchanged_edit_says_nothing_changed(db, alice):
 def test_an_edit_is_reviewed_before_it_is_saved(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "/done", "c", "b", "b"])
+    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "/done", "b", "y", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     text = _visible(session)
     assert "Review composition" in text
@@ -892,7 +893,7 @@ def test_editing_a_post_names_it_in_the_editor(db, alice):
     set_fullscreen_editor_enabled(db, alice, True)
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Original subject", "Original body")
-    session = FakeSession(["1", "e", "", "CTRL+O", "c", "b", "b"])
+    session = FakeSession(["1", "e", "", "CTRL+O", "b", "y", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     assert "Edit post" in _visible(session)

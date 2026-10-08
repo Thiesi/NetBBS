@@ -246,9 +246,9 @@ def test_review_ctrl_h_narrows_to_the_highlighted_field():
 def test_review_arrow_nav_activates_the_highlighted_field():
     # Dogfood feature request, issue #160's cursor-navigation follow-up
     # (item 2 of the prioritized list): Down twice from nothing
-    # highlighted lands on "b" (Body), the second of the two
-    # arrow-selectable fields when there's no recipient (u, b); Space
-    # then activates it exactly like pressing "b" directly would.
+    # highlighted lands on "e" (Edit body), the second of the two
+    # arrow-selectable fields when there's no recipient (u, e); Space
+    # then activates it exactly like pressing "e" directly would.
     session = NavigableFakeSession(keys=("DOWN", "DOWN", " "))
     action = asyncio.run(
         review_composition(
@@ -273,8 +273,9 @@ def test_review_escape_clears_the_cursor_highlight_without_acting():
 
 def test_review_ctrl_c_is_an_alias_for_cancel():
     """Dogfood feature request, issue #157: an incremental Ctrl-C
-    alias for this screen's own [C]ancel action."""
-    session = FakeSession(keys=(CANCEL_KEY,))
+    alias for this screen's own [B]ack action -- which, with a body
+    written, asks "Discard this draft?" first (issue #1158)."""
+    session = FakeSession(keys=(CANCEL_KEY,), lines=("y",))
     action = asyncio.run(
         review_composition(
             session, recipient=None, subject="Subject", body="Body", commit_key="p", commit_label="ost",
@@ -424,7 +425,7 @@ def _long_body(count: int = 40) -> str:
 
 
 def test_review_pages_a_long_body_and_turns_with_page_keys():
-    session = NavigableFakeSession(keys=("n", "n", "p", "c"))
+    session = NavigableFakeSession(keys=(">", ">", "<", "b", "y"))
     action = asyncio.run(
         review_composition(
             session, recipient="Alice", subject="Long", body=_long_body(), commit_key="s", commit_label="end",
@@ -456,7 +457,7 @@ def test_review_pages_with_arrows_when_the_commit_key_is_p():
     )
     assert action is ReviewAction.COMMIT
     text = _visible(session)
-    assert "[>] Next page" in text and "[<] Prev page" in text
+    assert "[>] Next" in text and "[<] Prev" in text
     assert "(Page 2 of" in text
 
 
@@ -468,7 +469,7 @@ def test_review_page_down_turns_the_page():
                 return EditorKey(EditorKeyKind.PAGE_DOWN)
             return EditorKey(EditorKeyKind.CHAR, char=raw)
 
-    session = PagingSession(keys=("PAGE_DOWN", "c"))
+    session = PagingSession(keys=("PAGE_DOWN", "b", "y"))
     asyncio.run(
         review_composition(
             session, recipient=None, subject="Long", body=_long_body(), commit_key="p", commit_label="ost",
@@ -483,7 +484,7 @@ def test_a_carried_error_is_wrapped_and_kept_above_the_prompt():
     screen still fits."""
     from netbbs.net.notices import announce
 
-    session = NavigableFakeSession(keys=("c",), width=40)
+    session = NavigableFakeSession(keys=("b", "y"), width=40)
     announce(session, "More than one linked node goes by that name. " * 4, tone="error")
     asyncio.run(
         review_composition(
@@ -499,7 +500,7 @@ def test_a_carried_error_is_wrapped_and_kept_above_the_prompt():
 
 
 def test_review_breadcrumb_says_what_is_being_reviewed():
-    session = FakeSession(keys=("c",))
+    session = FakeSession(keys=("b",), lines=("y",))
     asyncio.run(
         review_composition(
             session, recipient="bob", subject="Hi", body="Body", commit_key="s", commit_label="end",
@@ -516,7 +517,7 @@ def test_review_fits_the_terminal_at_every_body_length_with_a_described_menu():
     for level in ("off", "brief", "detailed"):
         for count in range(1, 45):
             for recipient in ("bob", None):
-                session = NavigableFakeSession(keys=("c",))
+                session = NavigableFakeSession(keys=("b", "y"))
                 asyncio.run(
                     review_composition(
                         session, recipient=recipient, subject="Hi", body=_long_body(count),

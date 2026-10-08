@@ -1,5 +1,5 @@
 """
-Generic paginated item picker: browse via [N]ext/[P]rev, [/] Find,
+Generic paginated item picker: browse via [<] Prev/[>] Next (issue #1158), [/] Find,
 [B]ack, or a 2-digit number to select an item on the current
 page -- plus an Up/Down-highlight-then-Enter path (issue #171) purely
 additive alongside the numbered selection, not a replacement for it.
@@ -50,6 +50,7 @@ from netbbs.net.char_input import (
     EditorKey,
     EditorKeyKind,
     help_key_label,
+    page_step,
 )
 from netbbs.net.help_overlay import show_help
 from netbbs.rendering.ansi import move_cursor, strip_ansi
@@ -1517,16 +1518,41 @@ async def pick_item(
             return selected_item
 
         if key.kind == EditorKeyKind.ESCAPE:
-            # Dogfood-request precedent from edit_resource_draft: Esc
-            # cancels cursor-navigation (drops the highlight) rather
-            # than leaving the screen -- [B]ack/Ctrl-C already own
-            # "actually leave." A no-op bell when nothing is
-            # highlighted -- there is no cursor-nav state to cancel.
+            # Esc drops the highlight first (the edit_resource_draft
+            # precedent); with nothing highlighted it is Back, as on every
+            # screen (issue #1158).
             if highlighted is not None:
                 highlighted = None
                 page_items = await _render()
+                continue
+            await end_choice_line(session)
+            return None
+
+        step = page_step(key)
+        if step == 1:
+            if page_end < len(working_set):
+                await end_choice_line(session)
+                page_history.append(page_start)
+                page_start = page_end
+                highlighted = None
+                page_items = await _render()
             else:
-                await session.write("\a")
+                await session.write(reject_keystroke())
+            continue
+        if step == -1:
+            if page_start > 0:
+                await end_choice_line(session)
+                # The start this page was reached from, not a
+                # subtraction: the size may have changed since, and the
+                # arithmetic then lands between two pages rather than on
+                # the one the caller was just looking at.
+                page_start = page_history.pop() if page_history else max(
+                    0, page_start - _sized_page_size()
+                )
+                highlighted = None
+                page_items = await _render()
+            else:
+                await session.write(reject_keystroke())
             continue
 
         if key.kind != EditorKeyKind.CHAR or key.char is None:
@@ -1549,33 +1575,6 @@ async def pick_item(
         if char_lower == "b":
             await end_choice_line(session)
             return None
-
-        if char_lower == "n":
-            if page_end < len(working_set):
-                await end_choice_line(session)
-                page_history.append(page_start)
-                page_start = page_end
-                highlighted = None
-                page_items = await _render()
-            else:
-                await session.write(reject_keystroke())
-            continue
-
-        if char_lower == "p":
-            if page_start > 0:
-                await end_choice_line(session)
-                # The start this page was reached from, not a
-                # subtraction: the size may have changed since, and the
-                # arithmetic then lands between two pages rather than on
-                # the one the caller was just looking at.
-                page_start = page_history.pop() if page_history else max(
-                    0, page_start - _sized_page_size()
-                )
-                highlighted = None
-                page_items = await _render()
-            else:
-                await session.write(reject_keystroke())
-            continue
 
         if char == "/":
             if not items:
@@ -1664,7 +1663,7 @@ async def pick_item(
             # its features with the thing they asked for.
             #
             # Checked *after* this screen's own keys, so a caller cannot
-            # shadow `[N]ext` or `[B]ack` by accident.
+            # shadow `[/] Find` or `[B]ack` by accident.
             new_items = await live_keys[char_lower]()
             if new_items is not None:
                 items = new_items
@@ -1834,8 +1833,11 @@ async def _show_picker_help(
     row, with `[O]rder`/Ctrl-R included only when this caller actually
     offers them (matching `_nav_entries`' own conditional inclusion)."""
     lines = [
-        colored("Next / Prev", fg_color=header_color, bold=True),
-        "  Move one page forward/back through the list.",
+        colored("< > (or PgUp/PgDn, Left/Right)", fg_color=header_color, bold=True),
+        "  Move one page back/forward through the list, on every list (issue #1158).",
+        "",
+        colored("B or Esc", fg_color=header_color, bold=True),
+        "  Back. Esc first clears a highlighted row, if there is one.",
         "",
         colored("Up / Down / Enter", fg_color=header_color, bold=True),
         "  Move a highlight up or down one row, then Enter selects it -- a lighter-weight "
@@ -1965,11 +1967,13 @@ def _nav_entries(
     # shown) -- the real nav render passed below can only ever be shorter
     # than that reservation, never longer, so page size never fluctuates as
     # the caller pages through.
+    # Paging is on `<` `>` (and PgUp/PgDn, ←→) on every screen (issue
+    # #1158), so `N` and `P` are free for a caller's own keys.
     entries = []
-    if include_next:
-        entries.append(MenuEntry(label=menu_key("N", "ext"), brief="Next page"))
     if include_prev:
-        entries.append(MenuEntry(label=menu_key("P", "rev"), brief="Previous page"))
+        entries.append(MenuEntry(label=menu_key("<", " Prev"), brief="Previous page"))
+    if include_next:
+        entries.append(MenuEntry(label=menu_key(">", " Next"), brief="Next page"))
     # `/` as on the main menu (issue #1083): one key and one word for
     # searching everywhere. `S` is free again for a screen's own use.
     entries.append(MenuEntry(label=menu_key("/", " Find"), brief="Find by name"))

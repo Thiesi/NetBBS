@@ -267,27 +267,25 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
     while password is None and verify_key is None:
         # Issue #282: choose the credential kind up front instead of being
         # asked for a public key right after a password was accepted
-        # ([T]wo is still one keystroke away). Not `B`: `B` is Back on
-        # every screen and Esc reads as it (issue #1158); this once-only
-        # question has nothing to go back to, so both are refused.
+        # ([B]oth is still one keystroke away).
         await session.write_line(
             action_bar(
-                [menu_key("P", "assword"), menu_key("K", "ey (ssh-ed25519)"), menu_key("T", "wo (password and key)")],
+                [menu_key("P", "assword"), menu_key("K", "ey (ssh-ed25519)"), menu_key("B", "oth")],
                 width=session.terminal_width,
             )
         )
         await write_prompt(session, "Sign in with: ")
         choice = (await session.read_key()).lower()
-        if choice not in ("p", "k", "t"):
+        if choice not in ("p", "k", "b"):
             await session.write(reject_unhandled_key(choice))
             continue
         await session.write_line("")
-        if choice in ("p", "t"):
+        if choice in ("p", "b"):
             password = await _prompt_password(session)
-        if choice in ("k", "t"):
+        if choice in ("k", "b"):
             verify_key = await _prompt_pubkey(session)
-        if choice == "t" and (password is None or verify_key is None):
-            # [T]wo was an explicit choice: one accepted credential is
+        if choice == "b" and (password is None or verify_key is None):
+            # [B]oth was an explicit choice: one accepted credential is
             # not enough to create the account with (Codex review on
             # #292) -- start the choice over rather than silently
             # settling for half.

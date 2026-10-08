@@ -20,8 +20,10 @@ from netbbs.net.char_input import (
     EditorKeyKind,
     InputCancelled,
     help_key_label,
+    page_step,
     reject_unhandled_key,
 )
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import take_notices, write_notices
@@ -632,7 +634,7 @@ async def _read_review_key(session: Session) -> EditorKey:
 _REVIEW_HELP: dict[str, tuple[str, str]] = {
     "t": ("To", "The recipient this will be sent to."),
     "u": ("Subject", "A short one-line summary, shown wherever this ends up listed."),
-    "b": (
+    "e": (
         "Body",
         "The message text itself. Reopens whichever editor you're currently using (the "
         "simple line-by-line editor, or the fullscreen editor if you've turned it on in "
@@ -695,7 +697,7 @@ async def review_composition(
     `extra_rows` and `extra_actions` are a caller's own additions (issue
     #830: mail's attached files): rows, already styled, shown under the
     Subject on every page, and `(key, label, brief)` actions placed after
-    `[B]ody`, the label already styled with `menu_key`. Pressing one returns
+    `[E]dit body`, the label already styled with `menu_key`. Pressing one returns
     its key, lower-cased, instead of a `ReviewAction`. Both count toward the
     page budget like the screen's own rows. Neither given, the screen is
     what it always was.
@@ -722,11 +724,11 @@ async def review_composition(
     keeping its lines, or ``lines`` for mail, wrapped at words.
 
     Dogfood feature request, issue #160's cursor-navigation follow-up
-    (item 2 of the prioritized list): `[T]o`/`[U]pdate subject`/`[B]ody`
+    (item 2 of the prioritized list): `[T]o`/`[U]pdate subject`/`[E]dit body`
     are also reachable by moving a `>` cursor with Up/Down and
     activating the highlighted one with Space or Enter -- purely
     additive, every hotkey letter keeps working exactly as before. The
-    commit action and `[C]ancel` are never arrow-selectable, the same
+    commit action and `[B]ack` are never arrow-selectable, the same
     "always hotkey-only" treatment `edit_resource_draft` gives Save/Back.
 
     The body is paged the way `netbbs.net.detail_view.show_detail` pages a
@@ -736,13 +738,15 @@ async def review_composition(
     where the commit key already is `P` (a board's `[P]ost`). Printed whole,
     a long letter scrolled its own To and Subject off the screen before the
     menu appeared. `breadcrumb` is the path after the node's name."""
-    field_order = (("t",) if recipient is not None else ()) + ("u", "b")
+    # `B` is Back on every screen (issue #1158), so the body is `[E]dit body`.
+    field_order = (("t",) if recipient is not None else ()) + ("u", "e")
     actions = {
         commit_key.lower(): ReviewAction.COMMIT,
         "u": ReviewAction.EDIT_SUBJECT,
-        "b": ReviewAction.EDIT_BODY,
-        "c": ReviewAction.CANCEL,
-        # Issue #157: Ctrl-C as an incremental alias for [C]ancel.
+        "e": ReviewAction.EDIT_BODY,
+        # Back, Esc and Ctrl-C all leave without sending (issues #157,
+        # #1158); `_confirm_discard` asks first once there is a body.
+        "b": ReviewAction.CANCEL,
         CANCEL_KEY: ReviewAction.CANCEL,
     }
     if recipient is not None:
@@ -751,7 +755,6 @@ async def review_composition(
 
     selected: str | None = None
     width = max(1, session.terminal_width)
-    next_key, prev_key = (">", "<") if {"n", "p"} & (set(actions) | extra_keys) else ("n", "p")
     if body_mode is None:
         body_rows = _preview_body(body, width).split("\n")
     else:
@@ -773,21 +776,15 @@ async def review_composition(
             options.append(MenuEntry(label=menu_key("T", "o"), brief="Change the recipient"))
         options.extend([
             MenuEntry(label=menu_key("U", "pdate subject"), brief="Change the subject"),
-            MenuEntry(label=menu_key("B", "ody"), brief="Edit the body text"),
+            MenuEntry(label=menu_key("E", "dit body"), brief="Edit the body text"),
         ])
         options.extend(MenuEntry(label=label, brief=brief) for _key, label, brief in extra_actions)
         if paged:
             options.extend([
-                MenuEntry(
-                    label=menu_key(next_key.upper(), "ext page" if next_key == "n" else " Next page"),
-                    brief="Show the next page of the body",
-                ),
-                MenuEntry(
-                    label=menu_key(prev_key.upper(), "rev page" if prev_key == "p" else " Prev page"),
-                    brief="Show the previous page of the body",
-                ),
+                MenuEntry(label=menu_key("<", " Prev"), brief="Show the previous page of the body"),
+                MenuEntry(label=menu_key(">", " Next"), brief="Show the next page of the body"),
             ])
-        options.append(MenuEntry(label=menu_key("C", "ancel"), brief="Discard this draft"))
+        options.append(MenuEntry(label=menu_key("B", "ack"), brief="Leave without sending (asks first)"))
         # A described menu takes the rows a long body needs: a body it does
         # not leave room for gets the packed bar instead, before any paging
         # (design doc §3.5's rule for a detail screen with a described menu).
@@ -824,7 +821,7 @@ async def review_composition(
             rows.extend(_rows(extra, width))
         rows.append(
             colored("> Body", fg_color=accent_color, bold=True)
-            if selected == "b"
+            if selected == "e"
             else colored("  Body", fg_color=MUTED_COLOR, bold=True)
         )
         return rows
@@ -856,7 +853,7 @@ async def review_composition(
     async def draw() -> None:
         rows = [*_head(), preview_rule, *pages[page], preview_rule, "", *_menu(paged, packed)]
         if paged:
-            rows.append(colored(f"(Page {page + 1} of {len(pages)} -- PgUp/PgDn to switch)", fg_color=MUTED_COLOR))
+            rows.append(colored(f"(Page {page + 1} of {len(pages)}: < > turns)", fg_color=MUTED_COLOR))
         rows.append(colored(f"({help_key_label(session)} for help on these fields)", fg_color=MUTED_COLOR))
         # A refused commit ("Could not create post: ...") returns here, and
         # this redraw would erase a line written before it (issue #680).
@@ -873,8 +870,8 @@ async def review_composition(
         key = await _read_review_key(session)
 
         char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
-        if paged and (key.kind in (EditorKeyKind.PAGE_DOWN, EditorKeyKind.PAGE_UP) or char in (next_key, prev_key)):
-            step = 1 if key.kind == EditorKeyKind.PAGE_DOWN or char == next_key else -1
+        step = page_step(key) if paged else None
+        if step is not None:
             page = (page + step) % len(pages)
             # A one-off result belongs to the render that produced it.
             message_rows = []
@@ -891,12 +888,12 @@ async def review_composition(
             await draw()
             continue
         if key.kind == EditorKeyKind.ESCAPE:
+            # Esc drops the highlight, then is Back (issue #1158).
             if selected is not None:
                 selected = None
                 await draw()
                 continue
-            await session.write("\a")
-            continue
+            key = EditorKey(EditorKeyKind.CHAR, char="b")
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_review_help(
                 session, field_order=field_order, selected=selected, header_color=header_color,
@@ -931,6 +928,14 @@ async def review_composition(
             continue
 
         action = actions.get(choice)
+        if action is ReviewAction.CANCEL and body.strip():
+            # Back discards the draft: asked first now that Esc is Back too
+            # (issue #1158), so a stray key never throws away a long post.
+            await session.write_line("")
+            if not await prompt_yes_no(session, "Discard this draft?", default=False):
+                await draw()
+                continue
+            return action
         if action is not None:
             await session.write_line("")
             return action

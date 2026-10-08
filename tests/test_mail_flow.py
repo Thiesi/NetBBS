@@ -583,14 +583,14 @@ def test_compose_a_signature_that_overflows_the_body_is_caught_before_send(tmp_p
     set_signature(db, alice, "Alice of the Long Signature")
 
     session = FakeSession(
-        keys=["c", "s", "b", "s", "b"],
+        keys=["c", "s", "e", "s", "b"],
         lines=["bob", "Hello", "Twenty characters!!", "/done", "/delete 1", "/list", "/done"],
     )
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
 
     text = _visible_text(session)
-    assert "The message is" in text and "characters too long -- shorten it with [B]ody." in text
+    assert "The message is" in text and "characters too long -- shorten it with [E]dit body." in text
     assert "bytes" not in text
     inbox = list_inbox(db, bob)
     assert len(inbox) == 1
@@ -625,7 +625,8 @@ def test_compose_reports_bounce_when_mailbox_is_full(tmp_path, monkeypatch):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "First", "body")  # left unread -- fills the (patched) cap
 
-    session = FakeSession(keys=["c", "s", "c", "b"], lines=["bob", "Second", "body", ""])
+    # Back from review asks "Discard this draft?" first (issue #1158).
+    session = FakeSession(keys=["c", "s", "b", "b"], lines=["bob", "Second", "body", "", "", "y"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
 
@@ -643,7 +644,7 @@ def test_compose_review_can_revise_recipient_subject_and_submitted_body_lines(tm
     carol = create_user(db, "carol", password="hunter2pw", user_level=10)
 
     session = FakeSession(
-        keys=["c", "t", "u", "b", "s", "b"],
+        keys=["c", "t", "u", "e", "s", "b"],
         lines=[
             "bob", "Original subject", "first", "second", "/done",
             "carol", "Revised subject", "/edit 1", "FIRST", "/delete 2", "/done",
@@ -666,7 +667,8 @@ def test_compose_review_cancel_persists_nothing(tmp_path):
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
-    session = FakeSession(keys=["c", "c", "b"], lines=["bob", "Subject", "Body", ""])
+    # Back from review asks "Discard this draft?" first (issue #1158).
+    session = FakeSession(keys=["c", "b", "b"], lines=["bob", "Subject", "Body", "", "", "y"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(browse_mail(session, lane, alice))
@@ -903,8 +905,8 @@ def test_compose_refuses_a_probationary_peer_chosen_from_the_review_screen(tmp_p
     _link_context_with_known_peer(db, node_identity, newcomer, friendly_name="Newcomer", established=False)
 
     session = FakeSession(
-        keys=["c", "t", "s", "c", "b"],
-        lines=["bob@Farpoint", "Hello", "Body", "/done", "bob@Newcomer"],
+        keys=["c", "t", "s", "b", "b"],
+        lines=["bob@Farpoint", "Hello", "Body", "/done", "bob@Newcomer", "y"],
     )
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
@@ -1062,7 +1064,7 @@ def test_compose_checks_an_address_changed_from_the_review_screen(tmp_path):
         ("Bob Case@Farpoint", "'Bob Case' is not a user name."),
     ):
         session = FakeSession(
-            keys=["c", "t", "s", "c", "b"], lines=["bob@Farpoint", "Hello", "Body", "/done", changed],
+            keys=["c", "t", "s", "b", "b"], lines=["bob@Farpoint", "Hello", "Body", "/done", changed, "y"],
         )
         session.terminal_width = 200
         lane = DatabaseLane(db_path)
@@ -1270,7 +1272,7 @@ def test_reply_to_link_mail_refused_when_the_peer_changes_while_it_is_written(tm
 
     monkeypatch.setattr(mail_flow, "_link_mail_refusal", refusal_after_the_first_check)
     session = FakeSession(
-        keys=["1", "r", "s", "c", "b", "b"], lines=["", "Back at you", ""]
+        keys=["1", "r", "s", "b", "b", "b"], lines=["", "Back at you", "", "", "y"]
     )
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
@@ -1532,7 +1534,7 @@ def test_reply_opens_on_a_reply_screen_that_names_the_recipient(tmp_path):
     alice = create_user(db, "Alice", password="hunter2pw", user_level=10)
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "body")
-    session = FakeSession(keys=["1", "r", "c", "b", "b"], lines=["", "Reply text", ""])
+    session = FakeSession(keys=["1", "r", "b", "b", "b"], lines=["", "Reply text", "", "", "y"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -1552,7 +1554,7 @@ def test_review_pages_a_long_letter_and_keeps_to_and_subject_on_every_page(tmp_p
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     set_redraw_in_place_enabled(db, alice, True)
     body_lines = [f"item {n}" for n in range(1, 31)]
-    session = FakeSession(keys=["c", "n", "n", "s", "b"], lines=["bob", "Shopping", *body_lines, ""])
+    session = FakeSession(keys=["c", ">", ">", "s", "b"], lines=["bob", "Shopping", *body_lines, ""])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
 
@@ -1567,7 +1569,7 @@ def test_review_pages_a_long_letter_and_keeps_to_and_subject_on_every_page(tmp_p
         assert screen[: screen.index("Choice: ")].count("\n") < session.terminal_height
     assert "Page 1 of" in reviews[0] and "item 1\n" in reviews[0] and "item 30" not in reviews[0]
     assert "Page 2 of" in reviews[1] and "item 1\n" not in reviews[1]
-    assert "[N]ext page" in reviews[0]
+    assert "[>] Next" in reviews[0]
     # Paged, the menu is the packed bar: a described one would take the
     # body's rows.
     assert "Send this message" not in reviews[0]
@@ -1581,13 +1583,13 @@ def test_a_short_letter_is_not_paged(tmp_path):
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     create_user(db, "bob", password="hunter2pw", user_level=10)
-    session = FakeSession(keys=["c", "n", "s", "b"], lines=["bob", "Hi", "Short", ""])
+    session = FakeSession(keys=["c", ">", "s", "b"], lines=["bob", "Hi", "Short", ""])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
 
     text = _visible_text(session)
     assert "Page 1 of" not in text
-    assert "ext page" not in text
+    assert "[>] Next" not in text
     assert "Message sent." in text
     lane.close()
     db.close()
@@ -1860,7 +1862,7 @@ def test_the_review_screen_keeps_the_lines_and_shows_color_as_the_reader_will(tm
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     create_user(db, "bob", password="hunter2pw", user_level=10)
     session = FakeSession(
-        keys=["c", "c", "b"], lines=["bob", "Hello", "Hi Bob,", "|12red|07 news", "Alice", ""]
+        keys=["c", "b", "b"], lines=["bob", "Hello", "Hi Bob,", "|12red|07 news", "Alice", "", "", "y"]
     )
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
@@ -1967,7 +1969,7 @@ def test_the_line_editor_keeps_pasted_color_in_mail(tmp_path):
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     create_user(db, "bob", password="hunter2pw", user_level=10)
-    session = FakeSession(keys=["c", "c", "b"], lines=["bob", "Hello", "body", ""])
+    session = FakeSession(keys=["c", "s", "b"], lines=["bob", "Hello", "body", ""])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
     lane.close()

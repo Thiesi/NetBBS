@@ -125,12 +125,12 @@ def test_masthead_appears_above_a_refreshable_empty_list():
 
 def test_masthead_persists_across_an_internal_redraw_from_paging():
     # 40 items at the default page size forces at least two pages;
-    # "n" (next page) triggers _render() a second time from *inside*
+    # ">" (next page) triggers _render() a second time from *inside*
     # pick_item's own loop, not a fresh top-level call -- proving the
     # masthead is threaded through the closure, not just written once
     # before the first render.
     items = [f"item{i}" for i in range(40)]
-    session = FakeSession(["n", "b"])
+    session = FakeSession([">", "b"])
 
     asyncio.run(
         pick_item(

@@ -84,7 +84,7 @@ def test_the_typed_number_is_the_rows_place_on_this_page_not_its_id():
         acted_on.append(item)
         return None
 
-    session = FakeSession(["n", "m", "01", "b"])
+    session = FakeSession([">", "m", "01", "b"])
     asyncio.run(pick_item(
         session, names,
         name_of=lambda item: item,
@@ -176,7 +176,7 @@ def test_shifting_the_window_for_the_acted_on_row_skips_no_row():
     from netbbs.net.notices import announce
 
     names = [f"item {i:02d}" for i in range(60)]
-    session = FakeSession(["n", "UP", "m", "p", "b"])
+    session = FakeSession([">", "UP", "m", "<", "b"])
 
     async def _mark(item: str):
         announce(session, f"{item}: done.")

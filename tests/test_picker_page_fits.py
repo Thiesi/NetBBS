@@ -168,7 +168,7 @@ def test_the_second_page_fits_too(level, width):
     """Page 1 draws no `[P]rev`, so its nav is one entry shorter than the
     worst case the budget reserves. That slack hid the shortfall with
     descriptions on until somebody pressed [N]."""
-    session = _render(width, 24, description_level=level, keys=["n", "b"])
+    session = _render(width, 24, description_level=level, keys=[">", "b"])
     assert session.rows_on_screen() <= 24
 
 
@@ -191,7 +191,7 @@ def test_a_trailer_on_its_own_line_costs_every_row_it_takes():
     from netbbs.net.picker import _trailer_rows, _trailer_text
 
     trailer = _trailer_text("", False)
-    nav = "[N]ext  [P]rev  [/] Find  [G]oto #  [B]ack"
+    nav = "[<] Prev  [>] Next  [/] Find  [G]oto #  [B]ack"
     assert _trailer_rows(nav, trailer, width=80, unicode_style=False, description_level="off") == 1
     assert _trailer_rows(nav, trailer, width=50, unicode_style=False, description_level="off") == 2
 
@@ -239,7 +239,7 @@ def test_the_tallest_nav_is_the_one_reserved_for(width, height):
     fuller list is the shorter layout. Reserving from entry count alone
     accepted the descriptive nav on a four-row estimate and then drew
     ten."""
-    session = _render(width, height, description_level="brief", keys=["n", "b"])
+    session = _render(width, height, description_level="brief", keys=[">", "b"])
     assert session.rows_on_screen() <= height
 
 
@@ -383,7 +383,7 @@ def test_a_single_page_list_keeps_its_descriptions(width, height):
 def test_a_paginated_list_still_fits(width, height):
     """The other half of the same trade: the moment a list needs pages,
     it is priced against the nav those pages will draw."""
-    session = FakeSession(width, height, ["n", "b"])
+    session = FakeSession(width, height, [">", "b"])
     asyncio.run(
         pick_item(
             session, list(range(1, 80)),
@@ -406,7 +406,7 @@ def test_a_shorter_last_page_does_not_keep_a_highlight_beyond_it():
         "Activity, newest first, with every archived entry and every note included as well",
         "Activity",
     ])
-    session = FakeSession(80, 24, ["n", "UP", "ENTER"])
+    session = FakeSession(80, 24, [">", "UP", "ENTER"])
     result = asyncio.run(
         pick_item(
             session, list(range(1, 21)),
@@ -456,7 +456,7 @@ def test_paging_never_repeats_or_skips_a_row_when_the_page_size_changes():
         "Activity",
         "Activity, newest first, with every archived entry and every note as well",
     ])
-    session = FakeSession(80, 24, ["n", "n", "b"])
+    session = FakeSession(80, 24, [">", ">", "b"])
     asyncio.run(
         pick_item(
             session, list(range(1, 41)),
@@ -511,7 +511,7 @@ def test_next_advances_past_the_page_that_was_actually_drawn():
             self.terminal_height = 22
             return await FakeSession.read_editor_key(self)
 
-    session = Shrinking(80, 24, ["n", "b"])
+    session = Shrinking(80, 24, [">", "b"])
     asyncio.run(
         pick_item(
             session, list(range(1, 41)),
@@ -538,7 +538,7 @@ def test_prev_returns_to_the_page_it_came_from():
         "Activity",
         "Activity, newest first, with every archived entry and every note as well",
     ])
-    session = FakeSession(80, 24, ["n", "p", "b"])
+    session = FakeSession(80, 24, [">", "<", "b"])
     asyncio.run(
         pick_item(
             session, list(range(1, 41)),
@@ -564,7 +564,7 @@ def test_the_page_number_counts_pages_walked_not_rows_divided():
             self.terminal_height = 24
             return await FakeSession.read_editor_key(self)
 
-    session = Growing(80, 22, ["n", "b"])
+    session = Growing(80, 22, [">", "b"])
     asyncio.run(
         pick_item(
             session, list(range(1, 21)),
@@ -593,7 +593,7 @@ def test_opening_on_a_stored_item_leaves_prev_a_trail():
             self.terminal_height = 24
             return await FakeSession.read_editor_key(self)
 
-    session = Growing(80, 22, ["p", "b"])
+    session = Growing(80, 22, ["<", "b"])
     asyncio.run(
         pick_item(
             session, list(range(1, 41)),
@@ -630,7 +630,7 @@ def test_the_denominator_agrees_with_whether_next_is_offered():
             self.terminal_height = 24
             return await FakeSession.read_editor_key(self)
 
-    session = Growing(80, 22, ["n", "b"])
+    session = Growing(80, 22, [">", "b"])
     asyncio.run(
         pick_item(
             session, list(range(1, 32)),
@@ -647,7 +647,7 @@ def test_the_denominator_agrees_with_whether_next_is_offered():
             continue
         checked += 1
         current, total = int(label.group(1)), int(label.group(2))
-        offers_next = "[N]ext" in block
+        offers_next = "[>] Next" in block
         assert (current < total) == offers_next, (
             f"page {current}/{total} "
             f"{'offers' if offers_next else 'does not offer'} [N]ext"

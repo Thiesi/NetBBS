@@ -264,7 +264,7 @@ def test_mail_first_keeps_its_cap_the_notice_and_the_numbering(db, lane, alice, 
         send_mail(db, bob, alice, f"zeppelin letter {i:02d}", "body")
 
     # Page 1 holds the first letters, page 2 the rest and then the post.
-    session = _run_main_menu(db, lane, alice, ["/", "zeppelin", "n", "0", "5", "\r", "b", "b", "b", "l", "y"])
+    session = _run_main_menu(db, lane, alice, ["/", "zeppelin", ">", "0", "5", "\r", "b", "b", "b", "l", "y"])
     text = _visible_text(session)
     rows = _result_rows(text.split("postviewmarker")[0])
 

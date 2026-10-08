@@ -811,7 +811,7 @@ def test_pagination_adapts_to_negotiated_terminal_height():
             assert "item01" in text1 and "item04" in text1
             assert "item05" not in text1
 
-            writer.write(b"n")
+            writer.write(b">")
             await writer.drain()
             text2 = (await _read_until_quiet(reader)).decode()
             assert "item05" in text2 and "item08" in text2
@@ -980,7 +980,7 @@ def test_prev_on_first_page_sounds_bell_and_stays_in_picker():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"p")
+            writer.write(b"<")
             await writer.drain()
             data = await _read_until_quiet(reader)
             # No redraw, no notice message -- just a bell (nothing about
@@ -1015,7 +1015,7 @@ def test_next_on_last_page_sounds_bell_and_stays_in_picker():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
-            writer.write(b"n")  # already on (only) last page with default-size terminal
+            writer.write(b">")  # already on (only) last page with default-size terminal
             await writer.drain()
             data = await _read_until_quiet(reader)
             # No redraw, no notice message -- just a bell (nothing about
@@ -1056,8 +1056,8 @@ def test_next_and_prev_are_hidden_on_a_single_page_list():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await skip_initial_negotiation(reader, writer)
             text = (await _read_until_quiet(reader)).decode()
-            assert "ext" not in text  # the "ext" tail of "[N]ext" -- see menu_key
-            assert "rev" not in text  # the "rev" tail of "[P]rev"
+            assert "Next" not in text  # "[>] Next" (issue #1158)
+            assert "Prev" not in text  # "[<] Prev"
             assert "Find" in text  # [/] Find stays -- unaffected by paging state
             writer.write(b"b")
             await writer.drain()
@@ -1097,7 +1097,7 @@ def test_next_is_hidden_but_prev_shown_on_the_last_page_of_a_multi_page_list():
             current, total = _current_and_total_page(text)
             assert total > 1  # the scenario is only meaningful with several pages
             for _ in range(total - current):
-                writer.write(b"n")
+                writer.write(b">")
                 await writer.drain()
                 text = (await _read_until_quiet(reader)).decode()
 
@@ -1431,7 +1431,7 @@ def test_highlight_resets_to_unhighlighted_after_paging():
             data = _visible(await _read_until_quiet(reader))
             assert b"> 16." in data
 
-            writer.write(b"n")  # page to page 2 (item17 onward)
+            writer.write(b">")  # page to page 2 (item17 onward)
             await writer.drain()
             data = _visible(await _read_until_quiet(reader))
             assert b"> 01." not in data  # no stale highlight carried onto the new page
@@ -1640,7 +1640,7 @@ def test_second_page_numbers_restart_at_one():
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
 
-            writer.write(b"n")
+            writer.write(b">")
             await writer.drain()
             data = await _read_until_quiet(reader)
             writer.write(b"b")
@@ -1897,7 +1897,7 @@ def test_ctrl_r_refresh_resets_page_index_and_clears_search_filter():
             await skip_initial_negotiation(reader, writer)
             await _read_until_quiet(reader)
 
-            writer.write(b"n")  # page 2
+            writer.write(b">")  # page 2
             await writer.drain()
             await _read_until_quiet(reader)
 
