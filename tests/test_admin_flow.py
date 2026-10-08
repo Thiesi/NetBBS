@@ -5619,13 +5619,14 @@ def test_door_gallery_reselecting_a_registered_entry_offers_a_choice(db, lane, s
 
     create_door(db, "Retro Trivia", "/usr/bin/python3", creator=sysop)
 
-    session = FakeSession(["c", "d", "g", "0", "1", "c", "b", "b", "b", "b"])
+    session = FakeSession(["c", "d", "g", "0", "1", "b", "b", "b", "b", "b"])  # [B]ack at the name collision
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "'Retro Trivia' is already registered as a door." in text
     assert "ew instance" in text
     assert "dit the existing one" in text
-    assert "ancel" in text
+    from netbbs.rendering.ansi import strip_ansi
+    assert "dit the existing one  [B]ack" in strip_ansi(text)  # [B]ack, not [C]ancel (issue #1158)
 
 
 def test_door_gallery_reselecting_and_cancelling_leaves_the_registry_untouched(db, lane, sysop):
@@ -5633,7 +5634,7 @@ def test_door_gallery_reselecting_and_cancelling_leaves_the_registry_untouched(d
 
     create_door(db, "Retro Trivia", "/usr/bin/python3", creator=sysop)
 
-    session = FakeSession(["c", "d", "g", "0", "1", "c", "b", "b", "b", "b"])
+    session = FakeSession(["c", "d", "g", "0", "1", "b", "b", "b", "b", "b"])  # [B]ack at the name collision
     _run(session, lane, sysop)
     doors = list_doors(db)
     assert len(doors) == 1
@@ -5745,7 +5746,7 @@ def test_door_from_disk_reselecting_a_registered_entry_offers_a_choice(db, lane,
     (directory / "mydoor.py").write_bytes(b"# a SysOp's own door script\n")
     create_door(db, "mydoor", "/usr/bin/python3", creator=sysop)
 
-    session = FakeSession(["c", "d", "f", "0", "1", "c", "b", "b", "b", "b"])
+    session = FakeSession(["c", "d", "f", "0", "1", "b", "b", "b", "b", "b"])  # [B]ack at the name collision
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "'mydoor' is already registered as a door." in text

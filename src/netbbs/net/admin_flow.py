@@ -22826,7 +22826,9 @@ async def _resolve_door_name_collision(
                 [
                     menu_key("N", "ew instance under a different name"),
                     menu_key("E", "dit the existing one"),
-                    menu_key("C", "ancel"),
+                    # `B` and Esc leave every screen (issue #1158); this was
+                    # `[C]ancel`, which they could not reach.
+                    menu_key("B", "ack"),
                 ],
                 width=session.terminal_width,
             )
@@ -22836,7 +22838,7 @@ async def _resolve_door_name_collision(
     await _ask()
     while True:
         choice = (await session.read_key()).lower()
-        if choice in ("n", "e", "c"):
+        if choice in ("n", "e", "b"):
             await session.write_line(choice.upper())
             break
         if choice == HELP_KEY:
@@ -22844,9 +22846,8 @@ async def _resolve_door_name_collision(
                 session, "Door name help",
                 [MenuEntry(label=menu_key("N", "ew instance under a different name"),
                            brief="Register it again, renamed"),
-                 MenuEntry(label=menu_key("E", "dit the existing one"), brief="Open the door already registered"),
-                 MenuEntry(label=menu_key("C", "ancel"), brief="Register nothing")],
-                about="Every door needs a name of its own, and this one is taken.",
+                 MenuEntry(label=menu_key("E", "dit the existing one"), brief="Open the door already registered")],
+                about="Every door needs a name of its own, and this one is taken. Back registers nothing.",
                 header_color=await lane.run(effective_header_color_256),
                 unicode_style=await lane.run(unicode_style_enabled, actor),
             )

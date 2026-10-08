@@ -285,7 +285,7 @@ def test_the_door_name_collision_choice_has_help(db, lane, sysop):
     from netbbs.doors import create_door
 
     create_door(db, "Retro Trivia", "/usr/bin/python3", creator=sysop)
-    text = _console(FakeSession(["c", "d", "g", "0", "1", H, " ", "c", "b", "b", "b", "b"]), lane, sysop)
+    text = _console(FakeSession(["c", "d", "g", "0", "1", H, " ", "b", "b", "b", "b", "b"]), lane, sysop)
     _assert_help_then_redraw(text, "Door name help", "this one is taken", "dit the existing one")
 
 
