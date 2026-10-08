@@ -69,7 +69,7 @@ def menu_key(key: str, rest: str = "", *, prefix: str = "", capitalize: bool = F
 
 # One key in brackets, not a word or a number: `[S]`, never `[10]` or `[ok]`.
 # `[Enter]` is the one named key (issue #1083): the pause prompt's.
-_BRACKETED_KEY = re.compile(r"\[([A-Za-z0-9]|Enter)\]")
+_BRACKETED_KEY = re.compile(r"\[([A-Za-z0-9<>/?]|Enter)\]")  # `<>/?`: the keys of issue #1158
 
 
 def highlight_hotkeys(text: str, *, color: Color | None = None) -> str:
