@@ -119,7 +119,7 @@ _EVERYWHERE = (
     ("B or Esc", "Back (Esc first clears a highlighted row)"),
     ("? F1 Ctrl-H", "This help"),
 )
-_PAGING = ("< > PgUp/PgDn", "Previous / next page")
+_PAGING = ("< > PgUp/PgDn", "Previous / next page (Left/Right too)")  # only show_detail pages here
 _MAX_KEY_COLUMN = 26
 
 
