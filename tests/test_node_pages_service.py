@@ -155,6 +155,8 @@ def test_hostile_text_is_escaped_and_unsafe_links_dropped():
         dial_in=(
             "javascript:alert(1)", "https://ok.example.org/\" onmouseover=\"x", "telnet://bbs.example.org:23",
             "ssh://bbs.example.org:22", "https://bbs.example.org/<b>", "http://plain.example.org/",
+            "https://www.netbbs.org@attacker.example/", "telnet://user:pw@bbs.example.org:23",
+            "telnet://bbs.example.org:99999",
         ),
     )
     text = render_node_page(_one([_reg("hostile")], [node]), NOW)
@@ -164,6 +166,9 @@ def test_hostile_text_is_escaped_and_unsafe_links_dropped():
     assert "onmouseover" not in text
     assert "<b>" not in text
     assert "http://plain" not in text
+    assert "attacker.example" not in text
+    assert "user:pw" not in text
+    assert "99999" not in text
     assert 'href="telnet://bbs.example.org:23"' in text
     assert 'href="ssh://bbs.example.org:22"' in text
 

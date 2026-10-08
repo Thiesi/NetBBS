@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 
 from services.node_pages.build import SourceError, build
+# The stdlib CLI-prose wrapper the other standalone service already has.
+from services.reliable_nodes.check_roster import print_wrapped
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,9 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         count = build(args.registrations, args.node_map, args.out)
     except SourceError as exc:
-        print(f"Not built: {exc}", file=sys.stderr)
+        print_wrapped(f"Not built: {exc}", file=sys.stderr)
         return 1
-    print(f"Wrote {count} node pages to {args.out}.")
+    print_wrapped(f"Wrote {count} node pages to {args.out}.")
     return 0
 
 
