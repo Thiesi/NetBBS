@@ -208,8 +208,8 @@ accounts, content, and many live settings are stored in the database. Command-li
 options override TOML settings.
 
 Link limits, the login throttle and the shutdown delays can be set either way.
-**Settings → Network & login limits** holds the carry caps, peering, Link limits,
-live relay bounds, login throttle and shutdown delays, grouped. A value there
+**Settings → Operating limits** holds the carry caps, peering, Link limits,
+real-time relay bounds, login throttle and shutdown delays, grouped. A value there
 applies the next time the node starts. A key your TOML file or a command-line
 option sets still wins: the screen shows it as *set in config* and does not let
 you change it there. Remove it from the TOML file to manage it from the console.
@@ -217,7 +217,7 @@ you change it there. Remove it from the TOML file to manage it from the console.
 The listeners, `public_url`, Link addresses, paths and managed-DNS service stay
 in TOML and on the command line only, because a wrong value set from inside
 NetBBS could lock you out of the session you would need to fix it. You can still
-see them: **Settings → Network & login limits → Node c[o]nfiguration** lists each
+see them: **Settings → Operating limits → Node configuration** lists each
 one as the node resolved it at its last start, with its TOML key and whether the
 value came from the config file, the command line or the default. It works in
 `python -m netbbs.admin` too, and never shows the managed-DNS admin token. Run `python -m netbbs --help` using the installed
@@ -506,7 +506,8 @@ The rules never touch the guest account, staff, SysOps, or pending and
 disabled accounts. They also leave alone any account whose level you set by
 hand, so a caller you demote stays demoted. The account screen shows
 **Auto promotion: on**, **off (level set by hand)**, or **on, but skipped**
-with the reason (a pending account, for example); `U` turns it on or off.
+with the reason (a pending account, for example); `U` (**Use promotion rules**)
+turns it on or off.
 Each automatic promotion appears in the moderation log as **(system)**,
 naming the rule.
 
@@ -528,7 +529,7 @@ board, file area, channel or door there opens its own screen, where you can
 change its levels. `G` on the level list shows any level, in use or not.
 
 You can name a level, for example "Member" for 10: in LAST,
-press `M` (Na[m]e) on its row and type the name, or a blank line to clear
+press `N` (**Name**) on its row and type the name, or a blank line to clear
 it. 255 is always "SysOp". From then on the console shows that level as
 `10 (Member)`, and the level prompt on a user's screen and `G` in LAST
 take `member` as well as `10`. A name is only a label: renaming or
@@ -619,7 +620,7 @@ written to the previous holder and inherit the authorship of their carried
 posts and whatever other nodes had recorded about them. Callers who try a
 retired name are told only that it is unavailable. If you deleted a test
 account, or a caller you removed has come back, release the name under
-**Users → Retired names**; the release is audit-logged. A node that has never
+**Users → Held names**; the release is audit-logged. A node that has never
 run Link keeps reusable names.
 
 A caller who forgot their password cannot recover it themselves: NetBBS has no
@@ -646,7 +647,7 @@ under **Users** and choose **Staff**:
 | --- | --- |
 | Approve accounts | Approve or decline signups waiting under approval-required registration |
 | Manage accounts | Disable and re-enable accounts, reset passwords, set levels from 0 to 254 |
-| Moderate everything | Act as moderator on every board, file area and chat channel, local and carried. It also lets them read and post on every board and file area whatever its level; age and verified-name gates still apply |
+| Moderate everything (**Global moderation** on the screen) | Act as moderator on every board, file area and chat channel, local and carried. It also lets them read and post on every board and file area whatever its level; age and verified-name gates still apply |
 
 **Co-SysOp** on the same screen sets all three in one step; **Verify identity**
 beside it gives or takes the right to verify identity. Every change asks
@@ -678,16 +679,16 @@ signups are waiting ("2 accounts awaiting approval"). A moderator who may
 approve posts or uploads anywhere sees **Moderation (n)** on the main menu,
 with how many wait, and it opens one queue across every board and file area
 their grants cover. To make someone a moderator of everything local in one
-step, grant a moderator with the scope **blanket across everything**: it
+step, grant a moderator with the scope **Everything**: it
 writes the board, file area and channel grants together.
 
 Members find everyone who runs the node under **Staff list** on their main
 menu: SysOps, staff members, and moderators with what they look after, each
 with the date of their last session. Being listed is the point, so a
-member's choice to stay off Previous callers does not hide them here. Guests
+member's choice to stay off Recent callers does not hide them here. Guests
 don't see the list.
 
-Going away for a while? Choose **Away** on your console's landing screen (it
+Going away for a while? Choose **Time away** on your console's landing screen (it
 is on the Staff console too) and leave one short line, such as "At a pen
 show", with the date you expect to be back, or none if you don't know. The
 Staff list shows it beside your name. When everyone who can approve accounts
@@ -814,7 +815,7 @@ list of one kind (board categories group boards) and shows up as a folder in
 that list. A Community is a topic that holds every kind at once. A resource
 can have both. Create categories under **Content → Categories** and pick one
 in a board's, area's or channel's **Category** field; Communities are under
-**Content → Communities**. Ctrl-H on the Categories screen says the same. A
+**Content → Topics**. Ctrl-H on the Categories screen says the same. A
 node with a handful of boards needs neither.
 
 Until the node has a board, chat channel or file area, your own main menu
@@ -946,7 +947,7 @@ lists the less common transport and quota settings.
 Create a local resource before promoting it to linked scope. Linked boards,
 channels and file areas from other nodes are carried automatically up to the
 `max_carried_boards` / `max_carried_channels` / `max_carried_file_areas` caps
-(500 each; **Settings → Network & login limits → Carry caps**). Past a cap, a new one is not lost: it waits under **Link status →
+(500 each; **Settings → Operating limits → Carry caps**). Past a cap, a new one is not lost: it waits under **Link status →
 Offered**, with its origin and why, until you **Accept** it (not limited by the
 cap) or **Exclude** it. Set a cap to 0 to carry only what you accept. Lowering a
 cap removes nothing already carried. Deleting a carried resource that another
@@ -1142,7 +1143,7 @@ use a second address, or a protocol demultiplexer in front of both.
 ### Trust and recovery
 
 Use **Link status** for peers and relay state, **Outbox** for pending or failed
-work, and **Diagnostics / Follow log** for explanations.
+work, and **Diagnostics / Watch log** for explanations.
 
 Some things Link cannot use or deliver are put off for an hour rather than
 retried every pass: content held back because its sender is on probation here
@@ -1192,11 +1193,11 @@ coming back; the time limit clears it without you doing anything.
 
 A node's screen also acts on its trust, when it is a trust subject here (every
 node that has exchanged a hello with yours, or been introduced to it; not a
-peer-list candidate): **Establish** and **Block** open the override editor with
+peer-list candidate): **Establish** and **Deny** (a block) open the override editor with
 all three dimensions and the state already chosen, so you only give a reason
 and save; **Clear override** removes one override, or all of them at once;
 **Trust details** opens the node's full trust screen from Policy trust. The same
-**Establish** and **Block** are on every subject's screen under **Settings →
+**Establish** and **Deny** are on every subject's screen under **Settings →
 Policy trust → Subjects**, and **Override**'s **Dimension** offers **All
 three**.
 
@@ -1267,7 +1268,7 @@ quarantines that node's identity integrity on yours, and logs it. Unless you
 turn it off, it also signs a short signal saying so, with both objects
 attached, for the nodes that name yours a trusted reporter. They check the
 proof themselves, and it counts there only together with a report from a
-second, independent trust domain. **Policy trust → Signals** lists what your
+second, independent trust domain. **Policy trust → Conflict signals** lists what your
 node published, turns automatic signals off (which also withdraws the
 published ones) or back on, and revokes one signal while keeping the evidence.
 At most five are signed a day, and never about your own node.
@@ -1322,7 +1323,7 @@ decides whether the published record follows your address. A node the service
 has not heard from for about a week has its record taken out of DNS and the
 name held for it; the node reclaims the name by itself once it is back, and
 the DNS screen shows the last attempt's outcome under the ABANDONED badge
-until it succeeds. **Release** is the one exit the node never undoes, and a
+until it succeeds. **Give up name** (a release) is the one exit the node never undoes, and a
 name the service operator has **revoked** on a complaint is the other: the
 screen says so, names the operator's contact channel, and a different name
 can be registered as usual.
@@ -1545,7 +1546,7 @@ its level.
 
 Under **Operations → Node and sessions**:
 
-- **Monitor** is a live table of everyone connected, refreshed every two
+- **Observe live** opens the Monitor, a live table of everyone connected, refreshed every two
   seconds:
   - It shows each caller's transport, address, time on, idle time, terminal
     size and where they are, for example "Boards › Retro" or
@@ -1579,7 +1580,7 @@ Under **Operations → Node and sessions**:
 
 These controls require a live node session. For a stopped node, use the host's
 service controls. Use **Audit log** to see administrative and moderation
-activity, and **Node log** to read the newest part of `netbbs.log`: warnings and
+activity, and **Error log** to read the newest part of `netbbs.log`: warnings and
 errors first, **Level** to show errors only or everything, **Follow** to watch
 new lines. Storage garbage collection and draft pruning show the proposed work
 before confirmation; review it instead of deleting files directly.
@@ -1593,7 +1594,7 @@ cannot lose any. It also works from `python -m netbbs.admin`, and
 ### Custom banners and mastheads
 
 **Settings → Mastheads & banners** holds eight optional pieces of caller-facing
-art. **Banners** are the welcome greeting, the log-off screen, and the screens
+art. **Session banners** are the welcome greeting, the log-off screen, and the screens
 shown before and after self-service signup. **Mastheads** sit above the main
 menu, the message-board list, the file-area list, and the chat channel picker.
 Each has a gallery of bundled samples, **From disk** loads a file you have
@@ -1646,7 +1647,7 @@ Empty rows at the bottom of a piece are not sent, so a banner drawn in the top
 seven rows of the 24-row editor takes seven rows on a caller's screen. Empty
 rows between parts of the art are kept.
 
-**Edit** opens the art editor on an 80x24 canvas. Typing (a space too) paints
+**Open editor** opens the art editor on an 80x24 canvas. Typing (a space too) paints
 over whatever is at the cursor. At the end of a row the cursor stays put, so
 press **Enter** for the next row; **End** goes to just after the row's last
 character. Retyping a shorter line leaves the end of the old one in place:
@@ -1723,25 +1724,33 @@ the menu as you see it, then as a level-0 caller sees it. The gallery's
 colours with characters classic terminals have; applying one switches the mode
 for you.
 
-You can also draw the menu's items into the art yourself, such as `[B]oards`
-or `Moder[a]tion`, instead of leaving all of them to `{menu}`:
+You can also draw the menu's items into the art yourself, such as
+`[M]essage boards` or `[A]pprovals`, instead of leaving all of them to
+`{menu}`:
 - **Any bracketed key is an item.** You don't need a token. The item is the
   text around the key, up to two spaces or a frame character on either side,
   which is also what a browser caller can click. Put at least two spaces or
-  a frame character such as `│` between items: `[B]oards [E]-mail` with one
-  space is one item, blanked only for a caller who can use neither key, and
-  a browser click on it always means `[B]`, while `[B]oards│ [E]-mail` is
-  two.
+  a frame character such as `│` between items: `[M]essage boards [E]-mail`
+  with one space is one item, blanked only for a caller who can use neither
+  key, and a browser click on it always means `[M]`, while
+  `[M]essage boards│ [E]-mail` is two.
 - **Items a caller can't use are blanked.** A level-20 caller doesn't see your
   drawn `[S]ysOp console` at all: its cells are painted over in the colour
   behind them, so your frame and fill stay whole. Putting staff-only items on
   their own row keeps the gap tidy. A staff member's `[S]` opens the Staff
   console, so they don't see a drawn `[S]ysOp` either: their `[S]taff` goes
   into `{menu}` instead.
-- **Items you didn't draw go into `{menu}`.** Games, Communities, Who's online,
-  Moderation and Invitations appear only for some callers. Leave a `{menu}`
+- **Items you didn't draw go into `{menu}`.** Games, Topics, Who's online,
+  Approvals and Invitations appear only for some callers. Leave a `{menu}`
   region for them: without one, a caller with an item you didn't draw gets the
   normal menu.
+- **Redraw items whose key moved.** Every main-menu key is now its label's
+  first letter, so Communities moved from `[O]` to `[T]opics` and the staff
+  list from `[T]` to `[O]perators`. Art that still draws `C[o]mmunities` or
+  `S[t]aff list` would send a caller to the wrong screen, so those drawn items
+  are blanked and the real ones go into `{menu}` until you redraw them.
+  `P[r]evious callers` and `Moder[a]tion` keep working (now `[R]ecent callers`
+  and `[A]pprovals`), but read better redrawn.
 - **Other bracketed text stays as drawn.** `[x] marks the spot` is decoration,
   since X is no menu key.
 
@@ -1830,7 +1839,7 @@ Every caller gets text in the character set their terminal reads:
   - A caller whose terminal wasn't recognised is asked once which of two sample
     lines looks right.
 
-**Settings → Previous callers** cycles through three states: the panel after
+**Settings → Recent callers** cycles through three states: the panel after
 login in its default neon style, the same panel plain (your header colour and
 a quiet heading), and hidden.
 
@@ -1863,11 +1872,11 @@ log can contain changes not yet written into that file.
 
 Stop active games before capture; halt companion services. The BBS itself may
 stay running for a supported database backup. From a live SysOp console,
-**Backup → Create backup now** writes a timestamped directory under
+**Full backups → Create backup now** writes a timestamped directory under
 `netbbs_backups/` beside the database, or under the destination you set. Check
 the reported path and game coverage.
 
-**Backup → Schedule & destination** sets both without a cron job:
+**Full backups → Schedule & destination** sets both without a cron job:
 
 - **Frequency** off, daily or weekly, at a **Time** (24-hour, in the node's
   display timezone) and, for weekly, a **Weekday**. A node that was not running
@@ -1921,7 +1930,7 @@ magically reappear during restore.
 
 War Dialer has separate world capture and restore rules; see the
 [door guide](NetBBS-door-guide.md). Third-party installation directories are
-excluded unless **Backup → Door installations** is enabled. The Backup screen
+excluded unless **Full backups → Door installations** is enabled. The Backup screen
 shows the door sections, and that option, only once a door is set up. That option copies
 them without stopping their writers and does not automatically restore them.
 Stop games/services first. A missing or unreadable requested installation fails
@@ -1996,7 +2005,7 @@ steps run in order, and a failure stops the rest and says why:
    digest the release publishes. A wheel without a published digest is not
    installed.
 2. Back up this node to `netbbs_backups/` beside the database, the same as
-   **Backup → Create backup now**.
+   **Full backups → Create backup now**.
 3. `pip install` the wheel into the environment NetBBS runs from, with the same
    extras. pip also fetches any newer dependency the release needs. The install
    is refused for a system Python (not a virtual environment), a development
@@ -2057,7 +2066,7 @@ DNS registration, or backups is a separate, deliberate operator action.
 | Caller cannot log in | Check maintenance mode, pending approval, disabled account, and login throttling before resetting credentials. |
 | Caller can read but cannot contribute | Check write/join gates, age/name attestations, moderator grants, and inherited Community settings. |
 | Browser terminal or upload fails | Check HTTPS proxy/WebSocket forwarding, upload limits, web listener, and `public_url`. |
-| Callers or peers cannot reach the address you expect | Compare **Settings → Network & login limits → Node configuration** (the configuration the node resolved at its last start, the addresses it advertises, and where each value came from; a listener whose optional extra is missing is listed but was not started, and the service output says so) with your TOML file and the service's command line. |
+| Callers or peers cannot reach the address you expect | Compare **Settings → Operating limits → Node configuration** (the configuration the node resolved at its last start, the addresses it advertises, and where each value came from; a listener whose optional extra is missing is listed but was not started, and the service output says so) with your TOML file and the service's command line. |
 | Terminal offers no file-transfer link | Enable/configure the web listener and its public URL, or use a Zmodem-capable client. |
 | Link will not start | Check the `web` extra, effective participation setting, and a non-placeholder node name. |
 | **Find** misses content callers can open, or lists removed content | **Operations → Search indexes**: check, then **Rebuild** if it reports drift. |
@@ -2082,7 +2091,7 @@ same way, and the log says once per peer when one does not take what yours
 sends yet. A relay candidate that cannot be reached is also mentioned once. A `WARNING` or `ERROR` line, and any traceback, is worth
 reading.
 
-**Operations → Node log** reads that file from inside NetBBS, including from
+**Operations → Error log** reads that file from inside NetBBS, including from
 `python -m netbbs.admin` while the node is stopped. That console runs outside
 the node, so its health panel has no live controls; it says whether the node
 is running. It shows the newest 512 KiB,

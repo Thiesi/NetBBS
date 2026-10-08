@@ -102,7 +102,7 @@ def test_choosing_just_this_time_returns_the_mode_without_persisting(db, alice):
 
 
 def test_choosing_global_persists_the_global_default(db, alice):
-    session = FakeSession(["l", "g"])
+    session = FakeSession(["n", "g"])
     mode = asyncio.run(prompt_sort_change(session, persist=_persist_for(db, alice, "channel")))
     assert mode == "alphabetical"
     assert get_effective_sort_mode(db, alice, "channel") == "alphabetical"

@@ -61,7 +61,7 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 MAP_HOTKEY = "m"
-MAP_MENU_TEXT = menu_key("M", "ap", prefix="Node ")
+MAP_MENU_TEXT = menu_key("M", "ap of nodes")
 
 NODE_MAP_COLUMNS = (
     ListColumn("known", 22, VALUE_COLOR),

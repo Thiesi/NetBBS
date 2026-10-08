@@ -173,8 +173,9 @@ def test_the_remove_action_uses_one_verb_throughout(db, alice):
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
     text = session.visible()
-    assert "Remove pos[t]" in text
-    assert 'Remove "Subject"?' in text
+    assert "[T]ake down" in text
+    assert 'Take down "Subject"?' in text
+    assert "Post taken down." in text
     assert "ombstone" not in text
 
 

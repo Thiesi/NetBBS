@@ -125,7 +125,7 @@ def test_a_broken_stored_value_is_ignored(db, sysop):
 def test_the_ladder_shows_names_and_names_a_level(db, lane, sysop):
     create_board(db, "lounge", min_read_level=10, creator=sysop)
 
-    text = _screen(lane, sysop, ["u", "l", "m", "02", "Member"])
+    text = _screen(lane, sysop, ["u", "l", "n", "02", "Member"])
 
     assert get_level_names(db)[10] == "Member"
     assert "02. 10 (Member)" in text
@@ -134,7 +134,7 @@ def test_the_ladder_shows_names_and_names_a_level(db, lane, sysop):
 
 
 def test_a_refused_name_says_why_on_the_ladder(db, lane, sysop):
-    text = _screen(lane, sysop, ["u", "l", "m", "01", "123"])
+    text = _screen(lane, sysop, ["u", "l", "n", "01", "123"])
 
     assert "A level name needs a letter" in text
     assert 0 not in get_level_names(db)

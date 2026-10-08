@@ -2,7 +2,7 @@
 Sent after Forward and Resend (issue #919): a Forward sent from a Sent letter
 returns to the list it was opened from, as Reply and Resend do; and a Link
 letter that bounced or expired and was sent again shows `resent` in Sent,
-a `Resent:` line on its view, and `Re[s]end again` as its key. For a letter
+a `Resent:` line on its view, and `[S]end another copy` as its key. For a letter
 to several people only the copies the resend actually reached are marked.
 """
 
@@ -184,7 +184,7 @@ def test_resend_marks_the_old_letter_resent_in_the_list_and_its_view(linked):
     # Its view: the Resent line under Delivery, and the key says "again".
     view = text.split("Message sent.")[-1]
     assert re.search(r"Delivery: Bounced: .*\n\s*Resent: .+ \(the new copy is in Sent\)", view)
-    assert "Re[s]end again" in view
+    assert "[S]end another copy" in view
 
 
 def test_resend_again_sends_another_copy_and_moves_the_time(linked):
@@ -196,7 +196,7 @@ def test_resend_again_sends_another_copy_and_moves_the_time(linked):
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
-    assert "Re[s]end again" in _visible_text(session)
+    assert "[S]end another copy" in _visible_text(session)
     assert len(_remote_rows(db)) == 2
     assert _old_row(db, address)["resent_at"] > "2020-01-01T00:00:00+00:00"
 
@@ -220,7 +220,7 @@ def test_a_cancelled_resend_marks_nothing(linked):
     _run(db_path, session, alice, link_context=link_context)
 
     assert _old_row(db, address)["resent_at"] is None
-    assert "Re[s]end again" not in _visible_text(session)
+    assert "[S]end another copy" not in _visible_text(session)
 
 
 def test_record_resend_marks_only_the_senders_failed_letters_to_those_addresses(linked):
@@ -288,13 +288,13 @@ def test_group_resend_marks_only_the_copies_it_reached(group):
 def test_group_resend_goes_to_the_copies_not_yet_resent_then_again_to_all(group):
     db_path, db, alice, link_context, carol_at, dave_at = group
     record_resend(db, alice, [_old_row(db, carol_at)["id"]], [carol_at])
-    # The key is plain Resend while dave's copy waits, and goes to dave only.
+    # The key is plain [S]end again while dave's copy waits, and goes to dave only.
     session = FakeSession(keys=["s", "1", "s", "s", "b", "b"], lines=["", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
     text = _visible_text(session)
-    assert "Re[s]end again" not in text
+    assert "[S]end another copy" not in text
     new = [row for row in _remote_rows(db) if row["subject"] == "Lunch" and row["link_delivery_status"] == "pending"]
     assert [row["recipient_remote_address"] for row in new] == [dave_at]
     assert _old_row(db, dave_at)["resent_at"] is not None
@@ -309,7 +309,7 @@ def test_group_resend_goes_to_the_copies_not_yet_resent_then_again_to_all(group)
     assert re.search(r"2  bob, carol@Farpoint[^\n]*dave@Farpoint[^\n]*Lunch +resent", text)
     assert re.search(r"Resent to carol@Farpoint[^:\n]*: .+ \(the new copy is in Sent\)", text)
     assert re.search(r"Resent to dave@Farpoint[^:\n]*: .+ \(the new copy is in Sent\)", text)
-    assert "Re[s]end again" in text
+    assert "[S]end another copy" in text
 
 
 def test_resent_ranks_below_an_unresent_failure_and_above_everything_else(group):
@@ -345,6 +345,6 @@ def test_resend_again_bar_and_resent_line_fit(linked, width, height):
     _run(db_path, session, alice, link_context=link_context)
 
     lines = _visible_text(session).replace("\r", "").split("\n")
-    assert any("Re[s]end again" in line for line in lines)
+    assert any("[S]end another copy" in line for line in lines)
     assert any(line.startswith("Resent: ") for line in lines)
-    assert all(len(line) <= width for line in lines if "Re[s]end" in line or "Resent" in line)
+    assert all(len(line) <= width for line in lines if "[S]end another copy" in line or "Resent" in line)

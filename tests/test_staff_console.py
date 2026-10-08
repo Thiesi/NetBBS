@@ -1,5 +1,5 @@
 """
-The Staff console, `Moderation (n)`, the pending-accounts notice and the
+The Staff console, `[A]pprovals (n)`, the pending-accounts notice and the
 grant-everywhere action (design doc §5.2, §5.6; issues #836, #835 F071).
 """
 
@@ -87,7 +87,7 @@ def test_a_plain_caller_gets_neither_console(db):
     carol = create_user(db, "carol", password="hunter2")
     text = _menu(db, carol)
     assert "[S]taff" not in text and "[S]ysOp" not in text
-    assert "Moder[a]tion" not in text
+    assert "[A]pprovals" not in text
 
 
 def test_a_moderator_is_told_what_waits_for_them(db, sysop):
@@ -101,7 +101,7 @@ def test_a_moderator_is_told_what_waits_for_them(db, sysop):
     create_post(db, board, author, "For sale", "a pen")
     create_post(db, other, author, "Not theirs", "text")
     assert count_moderation_items(db, mod) == 1
-    assert "Moder[a]tion (1)" in _menu(db, mod)
+    assert "[A]pprovals (1)" in _menu(db, mod)
 
 
 def test_an_edit_only_grant_does_not_make_a_moderation_queue(db, sysop):
@@ -111,7 +111,7 @@ def test_an_edit_only_grant_does_not_make_a_moderation_queue(db, sysop):
         db, mod, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=sysop
     )
     assert has_moderation_scope(db, mod) is False
-    assert "Moder[a]tion" not in _menu(db, mod)
+    assert "[A]pprovals" not in _menu(db, mod)
 
 
 def test_moderate_everything_counts_every_held_post(db, sysop):
@@ -120,7 +120,7 @@ def test_moderate_everything_counts_every_held_post(db, sysop):
     for name in ("One", "Two"):
         board = create_board(db, name, creator=sysop, moderated=True)
         create_post(db, board, author, f"Held in {name}", "text")
-    assert "Moder[a]tion (2)" in _menu(db, helper)
+    assert "[A]pprovals (2)" in _menu(db, helper)
     assert len(list_node_pending_posts(db, requesting_user=helper, limit=10)) == 2
 
 
@@ -244,7 +244,7 @@ def test_the_console_closes_once_the_permissions_are_gone(db, lane, sysop):
     assert "no longer has staff access" in _visible(_written_text(session))
 
 
-# -- Moderation (n) --------------------------------------------------------------
+# -- Approvals (n) ---------------------------------------------------------------
 
 
 def test_a_moderators_queue_holds_only_what_their_grants_cover(db, lane, sysop):

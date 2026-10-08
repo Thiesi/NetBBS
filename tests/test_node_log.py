@@ -331,14 +331,14 @@ def test_operations_offers_node_log_without_a_live_node(db, lane, sysop):
     _write_log(db, _line("INFO", "hello"))
     session = FakeSession(["o", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=None, link_context=None))
-    assert "Node lo[g]" in _visible(_written_text(session))
+    assert "[E]rror log" in _visible(_written_text(session))
 
 
 def test_node_log_shows_warnings_and_errors_by_default_and_level_widens(db, lane, sysop):
     _write_log(db, _line("INFO", "caller connected") + _line("WARNING", "banner file missing")
                + _line("ERROR", "listener failed"))
 
-    session = FakeSession(["o", "g", "l", "l", "b", "b", "b"])
+    session = FakeSession(["o", "e", "l", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     text = _visible(_written_text(session))
@@ -353,7 +353,7 @@ def test_node_log_shows_warnings_and_errors_by_default_and_level_widens(db, lane
 def test_node_log_entry_detail_shows_its_traceback(db, lane, sysop):
     _write_log(db, _line("ERROR", "upload failed") + "Traceback (most recent call last):\nOSError: disk full\n")
 
-    session = FakeSession(["o", "g", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["o", "e", "0", "1", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     visible = _visible(_written_text(session))
@@ -367,7 +367,7 @@ def test_node_log_screen_sanitizes_logged_text(db, lane, sysop):
     it must not reach the SysOp's terminal as control sequences."""
     _write_log(db, _line("ERROR", "bad name \x1b[2J\x1b]0;pwned\x07here"))
 
-    session = FakeSession(["o", "g", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["o", "e", "0", "1", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     raw = _written_text(session)
@@ -375,7 +375,7 @@ def test_node_log_screen_sanitizes_logged_text(db, lane, sysop):
 
 
 def test_missing_node_log_says_where_it_looked(db, lane, sysop):
-    session = FakeSession(["o", "g", "b", "b", "b"])
+    session = FakeSession(["o", "e", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     text = _normalized_visible(_written_text(session))
@@ -440,7 +440,7 @@ def test_a_failed_reload_keeps_the_last_read_and_says_why(db, lane, sysop, monke
 
     monkeypatch.setattr(admin_flow, "read_node_log", _flaky)
     # [F]ollow then any key returns through a reload.
-    session = FakeSession(["o", "g", "f", "x", "b", "b", "b"])
+    session = FakeSession(["o", "e", "f", "x", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     text = _normalized_visible(_written_text(session))
@@ -630,7 +630,7 @@ def test_the_empty_message_does_not_name_a_stale_level(db, lane, sysop):
     _write_log(db, _line("WARNING", "only a warning"))
 
     # Cycle to "errors only", which is empty.
-    session = FakeSession(["o", "g", "l", "b", "b", "b"])
+    session = FakeSession(["o", "e", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _normalized_visible(_written_text(session))
 

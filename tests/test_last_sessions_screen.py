@@ -5,7 +5,7 @@ tests/test_session_history.py), and for the profile toggle that governs
 what one of them shows.
 
 `[H]istory` (issue #100, narrowed to its own menu description by issue
-#592) is the viewer's own call record. `P[r]evious callers` (issue #592)
+#592) is the viewer's own call record. `[R]ecent callers` (issue #592)
 is the node-wide roll -- the same panel the post-login splash draws, on
 its own main-menu hotkey -- and is where every name-visibility rule now
 lives, since it is the only one of the two that other callers appear in.
@@ -196,7 +196,7 @@ def test_previous_callers_screen_is_truecolor_fancy_and_excludes_current_session
 
     output = _written_text(session)
     assert shown is True
-    assert "P R E V I O U S" in _visible(session)
+    assert "R E C E N T" in _visible(session)
     assert "bob" in _visible(session)
     assert "alice" not in _visible(session)
     truecolor_sequences = set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", output))
@@ -221,16 +221,16 @@ def test_previous_callers_screen_plain_style_drops_the_neon(tmp_path):
     asyncio.run(_show_previous_callers_screen(session, database, alice, current_history_id=None))
 
     text = _visible(session)
-    assert "Previous callers" in text
+    assert "Recent callers" in text
     assert "Who has called in lately" in text
     assert "SIGNALS" not in text
-    assert "P R E V I O U S" not in text
+    assert "R E C E N T" not in text
     assert "bob" in text
     # The frame and heading keep to one colour: no gradient, in truecolor
     # or in 256 colours (review on #889).
     output = _written_text(session)
     assert len(set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", output))) <= 3
-    heading_line = next(line for line in output.split("\r\n") if "Previous callers" in _ANSI_ESCAPE_RE.sub("", line))
+    heading_line = next(line for line in output.split("\r\n") if "Recent callers" in _ANSI_ESCAPE_RE.sub("", line))
     assert len(set(re.findall(r"\x1b\[38;5;\d+m", heading_line))) <= 2
     database.close()
 
@@ -336,19 +336,19 @@ def test_previous_callers_menu_screen_shows_another_caller(tmp_path):
     asyncio.run(_run_main_menu(session, database, alice))
 
     text = _visible(session)
-    assert "P R E V I O U S   C A L L E R S" in text
+    assert "R E C E N T   C A L L E R S" in text
     assert "bob" in text
     database.close()
 
 
-def test_previous_callers_menu_entry_is_offered(tmp_path):
+def test_recent_callers_menu_entry_is_offered(tmp_path):
     database = db_(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
     session = FakeSession(["l", "y"])
 
     asyncio.run(_run_main_menu(session, database, alice))
 
-    assert "P[r]evious callers" in _visible(session)
+    assert "[R]ecent callers" in _visible(session)
     database.close()
 
 

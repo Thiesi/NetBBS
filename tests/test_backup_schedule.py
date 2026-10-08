@@ -440,7 +440,7 @@ def _tall(inputs):
 def test_backup_screen_shows_the_schedule_and_default_destination(db, lane, sysop):
     identity = db.path.parent / "identity"
     identity.mkdir()
-    session = _tall(["k", "b", "b"])
+    session = _tall(["f", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
 
     text = _normalized_visible(_written_text(session))
@@ -458,7 +458,7 @@ def test_schedule_editor_saves_a_daily_schedule_and_audits_it(db, lane, sysop):
     identity = db.path.parent / "identity"
     identity.mkdir()
     # k: Backup; s: editor; f: off -> daily; s: save; b: Backup; b: landing.
-    session = _tall(["k", "s", "f", "s", "b", "b"])
+    session = _tall(["f", "s", "f", "s", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
 
     assert load_schedule(db) == BackupSchedule(frequency="daily", hour=3, minute=0)
@@ -471,7 +471,7 @@ def test_schedule_editor_saves_a_daily_schedule_and_audits_it(db, lane, sysop):
 def test_schedule_editor_refuses_a_bad_time_and_keeps_the_draft(db, lane, sysop):
     identity = db.path.parent / "identity"
     identity.mkdir()
-    session = _tall(["k", "s", "f", "t", "25:00", "s", "b", "y", "b", "b"])
+    session = _tall(["f", "s", "f", "t", "25:00", "s", "b", "y", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
 
     assert load_schedule(db) == BackupSchedule()
@@ -482,7 +482,7 @@ def test_schedule_editor_refuses_a_destination_that_does_not_exist(db, lane, sys
     identity = db.path.parent / "identity"
     identity.mkdir()
     missing = tmp_path / "no-such-disk"
-    session = _tall(["k", "s", "d", str(missing), "s", "b", "y", "b", "b"])
+    session = _tall(["f", "s", "d", str(missing), "s", "b", "y", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
 
     assert backup_root(db, db.path) == db.path.parent / "node_backups"
@@ -495,7 +495,7 @@ def test_create_backup_now_uses_the_configured_destination(db, lane, sysop, tmp_
     destination = tmp_path / "second-disk"
     destination.mkdir()
     set_destination_setting(db, destination, db_path=db.path)
-    session = _tall(["k", "c", "y", "b", "b"])
+    session = _tall(["f", "c", "y", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
 
     assert len(list(destination.iterdir())) == 1
@@ -504,7 +504,7 @@ def test_create_backup_now_uses_the_configured_destination(db, lane, sysop, tmp_
 
 
 def test_standalone_console_edits_the_schedule_and_says_who_runs_it(db, lane, sysop):
-    session = _tall(["o", "k", "s", "f", "s", "b", "b", "b"])
+    session = _tall(["o", "f", "s", "f", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=None))
 
     assert load_schedule(db).frequency == "daily"
@@ -605,7 +605,7 @@ def test_one_history_row_per_scheduled_run_even_when_retention_fails(db_path, id
 def test_a_lone_scheduled_failure_shows_on_the_backup_screen(db, lane, sysop, tmp_path):
     save_schedule(db, BackupSchedule(frequency="daily", hour=3), now=_at(2026, 9, 20, 10, 0))
     run_scheduled_backup_pass(db.path, tmp_path / "no-identity", now=_at(2026, 9, 27, 10, 0))
-    session = _tall(["o", "k", "b", "b", "b"])
+    session = _tall(["o", "f", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=None))
 
     text = _normalized_visible(_written_text(session))
@@ -680,7 +680,7 @@ def test_create_backup_now_rechecks_the_destination_after_confirmation(db, lane,
         return real_check(*args, **kwargs)
 
     monkeypatch.setattr(admin_flow, "check_backup_destination", check_then_unmount)
-    session = _tall(["k", "c", "y", "b", "b"])
+    session = _tall(["f", "c", "y", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(backup_identity_dir=identity)))
 
     assert len(calls) == 2
@@ -696,7 +696,7 @@ def test_standalone_console_refuses_a_destination_inside_the_nodes_identity_dir(
     identity = db.path.parent / "identity"
     (identity / "keys").mkdir(parents=True)
     record_node_identity_dir(db, identity)
-    session = _tall(["o", "k", "s", "d", str(identity / "keys"), "s", "b", "y", "b", "b", "b"])
+    session = _tall(["o", "f", "s", "d", str(identity / "keys"), "s", "b", "y", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=None))
 
     assert backup_root(db, db.path) == db.path.parent / "node_backups"
