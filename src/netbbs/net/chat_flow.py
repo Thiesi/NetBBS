@@ -165,7 +165,7 @@ from netbbs.link.node_profiles import (
 )
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX
 from netbbs.rendering.pipe_codes import cga_to_xterm
-from netbbs.mrc.protocol import MAX_ARGUMENT, display_roster_entry, mrc_sender
+from netbbs.mrc.protocol import MAX_ARGUMENT, display_roster_entry, handle_parts, mrc_sender
 from netbbs.mrc.bridge import MrcBridge, MrcNotice, MrcStatus
 from netbbs.mrc.settings import (
     MrcChannelMapping,
@@ -177,6 +177,7 @@ from netbbs.mrc.settings import (
     open_room_channel_ids,
 )
 from netbbs.net.mrc_color_preference import mrc_colors_enabled
+from netbbs.net.mrc_name_preference import mrc_name_style
 from netbbs.rendering.pipe_codes import render_pipe_codes, strip_pipe_codes
 from netbbs.timeutil import utc_now_iso
 from netbbs.messaging_preferences import invitation_refusal, live_message_refusal
@@ -1718,12 +1719,14 @@ def _render_channel_message(
         label = _speaker_label(db, channel, message, link_speaker, color=color, self_message=self_message)
         if from_mrc:
             nick_style = cga_to_xterm(mrc_nick_color) if mrc_nick_color is not None else color
+            author, tag, body = _mrc_name_for_viewer(db, viewer, author_label, message.mrc_handle, message.body)
             label = (
                 colored("<", fg_color=MUTED_COLOR)
-                + _mrc_styled_author(author_label, nick_style)
+                + _mrc_styled_author(author, nick_style)
+                + (colored(f" ({tag})", fg_color=MUTED_COLOR) if tag else "")
                 + colored(">", fg_color=MUTED_COLOR)
             )
-            line = f"{label} {_mrc_body(db, viewer, message.body)}"
+            line = f"{label} {_mrc_body(db, viewer, body)}"
         elif _is_door_line(db, message):
             # Issue #520: a door's line reads as the game talking, not as a
             # caller -- muted throughout, and marked, so nobody answers it
@@ -3421,6 +3424,30 @@ def _mrc_styled_author(author: str, foreground: int) -> str:
     )
 
 
+def _mrc_name_for_viewer(
+    db: Database, viewer: User, author: str, handle: str | None, body: str | None,
+) -> tuple[str, str, str | None]:
+    """`(nick@site, tag, body)` for an MRC line as `viewer` chose to see a
+    decorated sender handle (issue #1156). `combined` puts the handle's
+    styled name in place of the plain one, keeps the site from the packet
+    and returns the rest of the handle as a tag; `both` puts the handle
+    back in front of the text; `label`, a plain handle and a line stored
+    before handles were kept change nothing. The tag is sanitized here;
+    the name part holds only the sender's name and ASCII marks."""
+    if not handle:
+        return author, "", body
+    style = mrc_name_style(db, viewer)
+    if style == "both":
+        return author, "", f"{handle} {body or ''}"
+    if style == "combined":
+        nick, separator, site = author.rpartition("@")
+        parts = handle_parts(handle, nick) if separator else None
+        if parts is not None:
+            name, tag = parts
+            return f"{sanitize_text(name)}@{site}", sanitize_text(tag), body
+    return author, "", body
+
+
 #: In front of every chat line from MRC, as on the network's own notices
 #: (`_render_mrc_notice`), in place of the `(MRC)` after the name.
 _MRC_BADGE = "[MRC] "
@@ -3443,7 +3470,11 @@ def _render_mrc_notice(db: Database, viewer: User, notice: MrcNotice) -> str:
     hub's reply to something `viewer` asked) -- badge, then the text
     through `_mrc_body`, then the viewer's timestamp preference."""
     badge_text = {"broadcast": "[MRC broadcast]", "reply": "[MRC]", "private": "[MRC private]"}.get(notice.kind, "[MRC]")
-    line = colored(badge_text, fg_color=MUTED_COLOR) + " " + _mrc_body(db, viewer, notice.text)
+    text = notice.text
+    if notice.handle:
+        author, tag, message = _mrc_name_for_viewer(db, viewer, notice.sender, notice.handle, notice.message)
+        text = f"{author}{f' ({tag})' if tag else ''}: {message}"
+    line = colored(badge_text, fg_color=MUTED_COLOR) + " " + _mrc_body(db, viewer, text)
     return format_with_preference(db, viewer, line, notice.created_at)
 
 
