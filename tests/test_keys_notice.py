@@ -36,14 +36,18 @@ def test_an_account_made_after_the_upgrade_never_sees_it(tmp_path):
 
 
 def test_the_migration_marks_every_account_that_exists(tmp_path, monkeypatch):
-    """On a database one schema behind: the accounts it finds are pending,
+    """On a database from just before it: the accounts it finds are pending,
     and nothing else in the preferences table changes."""
     from netbbs.storage import database as database_module
     from tests.legacy_schema import insert_user_on_old_schema
 
     path = tmp_path / "upgrade.db"
+    # Found by description rather than MIGRATIONS[:-1]: a migration appended
+    # later would otherwise be the one left out, and this one would run on
+    # the empty table before the account below exists.
+    index = next(i for i, m in enumerate(MIGRATIONS) if "'keys that work everywhere'" in m.description)
     with monkeypatch.context() as old_schema:
-        old_schema.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+        old_schema.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
         with Database(path) as db:
             old = insert_user_on_old_schema(db, "old", user_level=10)
             set_user_preference(db, old, "unicode_style", "on")
