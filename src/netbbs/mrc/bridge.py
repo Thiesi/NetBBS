@@ -136,6 +136,22 @@ class MrcNotice:
     text: str
     created_at: str
     kind: str = "notice"
+    # Issue #1156: a broadcast or private line whose sender's client put a
+    # decorated handle in front of it. `text` is then `sender: message`
+    # (the plain label); the renderer rebuilds it per viewer from these.
+    sender: str = ""
+    from_user: str = ""
+    handle: str = ""
+    message: str = ""
+
+
+def _sender_fields(body: str, from_user: str, sender: str, message: str) -> dict[str, str]:
+    """`MrcNotice`'s per-viewer sender fields (issue #1156), or none when
+    the line carried no decorated handle."""
+    handle = protocol.sender_handle(body, from_user)
+    if not handle:
+        return {}
+    return {"sender": sender, "from_user": from_user, "handle": handle, "message": message}
 
 
 # How many reply lines the hub may push at one caller in a burst (a
@@ -1689,6 +1705,7 @@ class MrcBridge:
                 record_message, mapping.channel, kind=kind, author_label=author_label,
                 author_fingerprint=None, body=text, external_source="mrc", index_body=plain_text,
                 mrc_nick_color=protocol.sender_color(packet.body, packet.from_user),
+                mrc_handle=protocol.sender_handle(packet.body, packet.from_user),
             )
         except sqlite3.DatabaseError as exc:
             # The channel was deleted (or its row otherwise vanished)
@@ -1916,7 +1933,10 @@ class MrcBridge:
         if not strip_pipe_codes(text).strip():
             return
         sender = f"{protocol.display_handle(packet.from_user) or 'unknown'}@{packet.from_site or 'unknown'}"
-        notice = MrcNotice(f"{sender}: {text.strip()}", utc_now_iso(), kind="broadcast")
+        notice = MrcNotice(
+            f"{sender}: {text.strip()}", utc_now_iso(), kind="broadcast",
+            **_sender_fields(packet.body.strip(), packet.from_user, sender, text.strip()),
+        )
         for mapping in self._by_channel.values():
             if mapping.active:
                 await self._hub.broadcast(mapping.channel.name, notice)
@@ -1992,7 +2012,9 @@ class MrcBridge:
             for participant in self._hub.participants_for_username(mapping.channel.name, username):
                 await self._hub.send_to(mapping.channel.name, participant, notice, priority=priority)
 
-    async def _deliver_reply(self, username: str, text: str, *, kind: str = "reply") -> bool:
+    async def _deliver_reply(
+        self, username: str, text: str, *, kind: str = "reply", sender_fields: dict[str, str] | None = None,
+    ) -> bool:
         """One line of the hub's reply to `username` (or, `kind="private"`,
         a private line for them), under that caller's own reply
         allowance; the first line dropped in a burst is replaced by a
@@ -2020,7 +2042,7 @@ class MrcBridge:
         if bucket.has_tokens(self._reply_burst / 2):
             self._reply_truncated.discard((username, kind))
         bucket.consume()
-        await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind=kind))
+        await self._deliver_to_caller(username, MrcNotice(text, utc_now_iso(), kind=kind, **(sender_fields or {})))
         return True
 
     # --- open rooms (issue #300) ---------------------------------------------
@@ -2543,7 +2565,10 @@ class MrcBridge:
         if not strip_pipe_codes(text).strip():
             return
         sender = f"{protocol.display_handle(packet.from_user) or 'unknown'}@{packet.from_site or 'unknown'}"
-        if not await self._deliver_reply(username, f"{sender}: {text}", kind="private"):
+        if not await self._deliver_reply(
+            username, f"{sender}: {text}", kind="private",
+            sender_fields=_sender_fields(packet.body.strip(), packet.from_user, sender, text),
+        ):
             return  # `/mrc r` answers the last line they saw, never one they did not
         self._last_private_sender[username] = (packet.from_user, packet.from_site)
 

@@ -84,6 +84,9 @@ class ChannelMessage:
     external_source: str | None = None
     # Optional CGA foreground for MRC authors; never part of their identity.
     mrc_nick_color: int | None = None
+    # The decorated handle an MRC line arrived with (issue #1156), pipe
+    # codes and all; shown per viewer, never part of the sender's identity.
+    mrc_handle: str | None = None
 
 
 def get_scrollback_limit(db: Database) -> int:
@@ -130,6 +133,7 @@ def record_message(
     external_source: str | None = None,
     index_body: str | None = None,
     mrc_nick_color: int | None = None,
+    mrc_handle: str | None = None,
 ) -> ChannelMessage:
     """
     Append an event to `channel`'s scrollback and trim it back down to the
@@ -155,6 +159,8 @@ def record_message(
 
     if mrc_nick_color is not None and (external_source != "mrc" or not 0 <= mrc_nick_color <= 15):
         raise ValueError("MRC nickname color must be 0-15 on an MRC message")
+    if mrc_handle is not None and external_source != "mrc":
+        raise ValueError("an MRC handle belongs on an MRC message")
     created_at = utc_now_iso()
     if external_source is None:
         # Migration tests exercise historical schemas from before the
@@ -181,6 +187,10 @@ def record_message(
     if mrc_nick_color is not None:
         db.connection.execute(
             "UPDATE channel_messages SET mrc_nick_color = ? WHERE id = ?", (mrc_nick_color, message_id),
+        )
+    if mrc_handle:
+        db.connection.execute(
+            "UPDATE channel_messages SET mrc_handle = ? WHERE id = ?", (mrc_handle, message_id),
         )
     # Capture *this* row now, inside the transaction and before the trim:
     # never "the channel's newest row" (a background writer -- issue
@@ -267,4 +277,5 @@ def _row_to_message(row: sqlite3.Row) -> ChannelMessage:
         link_event_json=row["link_event_json"] if "link_event_json" in columns else None,
         external_source=row["external_source"] if "external_source" in columns else None,
         mrc_nick_color=row["mrc_nick_color"] if "mrc_nick_color" in columns else None,
+        mrc_handle=row["mrc_handle"] if "mrc_handle" in columns else None,
     )
