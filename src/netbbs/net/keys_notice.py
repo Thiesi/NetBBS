@@ -38,6 +38,12 @@ _LINES = [
     "board, [N]ext post and [P]revious post in the reader are unchanged.",
     "When you write a post or a letter, the review screen's Body is",
     "now [E]dit body, and [B]ack asks before it discards your draft.",
+    "",
+    "A menu key is now always the first letter of its item. On the",
+    "main menu, Communities is [T]opics and the staff list is",
+    "[O]perators. In mail, [E]rase deletes, [K]ept keeps a letter and",
+    "[V]iew Kept opens them. Switches such as [F]ollow show whether",
+    "they are on: [F]ollow: on.",
 ]
 
 

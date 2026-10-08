@@ -372,7 +372,7 @@ def test_live_sysop_overview_surfaces_node_and_link_health(db, lane, sysop):
     assert "Peers: 0" in text
     assert "Dead letters: 0" in text
     assert "ink status" in text
-    assert "Outbo[x]" in text
+    assert "[Q]ueue (outbox)" in text
 
 
 def test_operations_are_a_coherent_top_level_console_area(db, lane, sysop):
@@ -383,14 +383,10 @@ def test_operations_are_a_coherent_top_level_console_area(db, lane, sysop):
     text = _written_text(session)
     assert "NetBBS › SysOp › Operations" in _visible(text)
     assert "Observe the running node, investigate trouble, and recover work." in text
-    # "Bac[K]up", not "[K]backup" -- K isn't backup's first
-    # letter, so the hotkey is picked out from inside the word via
-    # menu_key's own prefix parameter (see admin_flow.py's own history:
-    # this was already fixed once and must not silently regress back to
-    # a stray bracketed letter sitting in front of the word).
-    assert "Bac" in text
-    assert "up" in text
-    assert "[K]backup" not in text
+    # Issue #1158: a key is its label's first letter, and `B` is Back, so
+    # backups are `[F]ull backups` -- never a letter bracketed mid-word.
+    assert "[F]ull backups" in _visible(text)
+    assert "Bac[K]up" not in _visible(text)
 
 
 def test_operations_console_wraps_actions_on_a_narrow_terminal(db, lane, sysop):
@@ -527,7 +523,7 @@ def test_sysop_can_apply_reasoned_override_through_real_menu_path(db, lane, syso
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",  # choose the only subject
-            "o", "d", "r", "t", "k", "r", "resource abuse reviewed", "s",
+            "o", "d", "r", "t", "d", "r", "resource abuse reviewed", "s",
             "b", "b", "b", "b",
         ]
     )
@@ -564,7 +560,7 @@ def test_warned_node_requires_technical_identity_confirmation_for_trust_override
     register_subject(db, subject, first_accepted_at="2026-09-04T09:01:00.000000Z")
     session = FakeSession([
         "s", "p", "s", "0", "1",
-        "o", "d", "r", "t", "k", "r", "reviewed but identity changed", "s", "n",
+        "o", "d", "r", "t", "d", "r", "reviewed but identity changed", "s", "n",
         "b", "y",  # leave the editor, confirming the discard of the unsaved draft
         "b", "b", "b", "b",
     ])
@@ -619,7 +615,7 @@ def test_trust_override_reconfirms_when_identity_warning_changes_during_prompt(
     monkeypatch.setattr(admin_flow, "prompt_yes_no", confirm)
     # [D]imension -> resource, S[t]ate -> blocked, [R]eason, [S]ave; the
     # declined re-confirmation leaves the draft, so [B]ack + "y" discards.
-    session = FakeSession(["d", "r", "t", "k", "r", "identity changed again", "s", "b", "y"])
+    session = FakeSession(["d", "r", "t", "d", "r", "identity changed again", "s", "b", "y"])
 
     asyncio.run(admin_flow._set_trust_override_screen(session, lane, sysop, subject))
 
@@ -893,12 +889,12 @@ def test_trust_override_rejected_save_keeps_the_draft(db, lane, sysop):
     session = FakeSession([
         "s", "p", "s", "0", "1",
         "o", "r", "resource abuse reviewed", "s",  # reason only -> rejected
-        "d", "r", "t", "k", "s",                    # add dimension + state, save
+        "d", "r", "t", "d", "s",                    # add dimension + state, save
         "b", "b", "b", "b",
     ])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "Could not save: choose a [D]imension and a S[t]ate first" in text
+    assert "Could not save: choose a dimension ([D]) and a state ([T]) first" in text
     assert "Trust override applied and audited." in text
     state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
     assert state.state == TrustState.BLOCKED
@@ -3117,7 +3113,7 @@ def test_link_this_channel_flow(db, lane, sysop):
     link_context = _link_context()
 
     inputs = [
-        "m", "n", "l", "0", "1",  # navigate to channel detail
+        "m", "l", "l", "0", "1",  # navigate to channel detail
         "l",  # [L]ink this channel -- opens the draft field-editor screen
         "s",  # save with every field left at its default recommendation
         "b", "b", "b", "b",
@@ -3149,7 +3145,7 @@ def test_channel_restrictions_screen_lists_and_lifts_an_active_ban(db, lane, sys
     assert is_banned(db, channel, alice) is not None
 
     inputs = [
-        "m", "n", "l", "0", "1",  # navigate to channel detail
+        "m", "l", "l", "0", "1",  # navigate to channel detail
         "r",  # [R]estrictions
         "0", "1",  # pick the one active restriction
         "y",  # confirm lifting it
@@ -3169,7 +3165,7 @@ def test_channel_restrictions_screen_empty_state_when_nothing_active(db, lane, s
 
     create_channel(db, "Lobby", creator=sysop)
 
-    inputs = ["m", "n", "l", "0", "1", "r", "b", "b", "b", "b", "b"]
+    inputs = ["m", "l", "l", "0", "1", "r", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -3185,7 +3181,7 @@ def test_link_this_channel_is_not_offered_once_already_linked(db, lane, sysop):
     channel = list_channels(db)[0]
     link_channel(db, channel, node_identity=link_context.node_identity)
 
-    inputs = ["m", "n", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b"]
+    inputs = ["m", "l", "l", "0", "1", "PAGE_UP", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -3800,7 +3796,7 @@ def test_a_moderator_can_download_a_pending_file_before_deciding(db, lane, sysop
 def test_a_sysop_can_recover_an_expired_file_before_it_is_purged(db, lane, sysop):
     """Issue #639: expiry ends a caller's reach, so the file area's own
     screens never show an expired file again -- and its bytes are
-    unrecoverable once the grace period ends. `E[x]pired files` is where
+    unrecoverable once the grace period ends. `[E]xpired files` is where
     the SysOp fetches one back in between, without shell access.
 
     Same fake-transport caveat as the pending download above: the send
@@ -3821,12 +3817,12 @@ def test_a_sysop_can_recover_an_expired_file_before_it_is_purged(db, lane, sysop
     db.connection.execute("UPDATE files SET created_at = ? WHERE id = ?", (backdated, entry.id))
     db.connection.commit()
 
-    inputs = ["m", "f", "l", "0", "1", "x", "0", "1", "d", "b", "b", "b", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "e", "0", "1", "d", "b", "b", "b", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
-    assert "E[x]pired files" in text
+    assert "[E]xpired files" in text
     assert "Expired files in 'Docs'" in text
     assert "fresh.txt" not in text  # approved files are not the recovery screen's business
     assert "Purge date" in text
@@ -3883,9 +3879,10 @@ def test_grant_blanket_across_all_boards(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "General", creator=sysop)
 
-    # scope 'x' = blanket across all boards, no board picker needed;
-    # the default preset is full, [C]ommunity left at "(whole node)".
-    inputs = ["m", "g", "u", "0", "1", "o", "x", "s", "b", "b"]
+    # scope [A]ll of one kind, [M]essage boards = blanket across all boards,
+    # no board picker needed; the default preset is full, [C]ommunity left
+    # at "(whole node)".
+    inputs = ["m", "g", "u", "0", "1", "o", "a", "m", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -3949,7 +3946,7 @@ def test_grant_moderator_save_without_a_scope_keeps_the_draft(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     # The rejected [S]ave keeps the editor open with the user still
     # chosen (Codex review on #289): adding the scope and saving works.
-    session = FakeSession(["m", "g", "u", "0", "1", "s", "o", "x", "s", "b", "b"])
+    session = FakeSession(["m", "g", "u", "0", "1", "s", "o", "a", "m", "s", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "Could not save: choose a [U]ser and a scope under [O]n first" in text
@@ -3964,7 +3961,7 @@ def test_grant_blanket_scoped_to_a_community_via_the_community_field(db, lane, s
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     retro = create_community(db, "Retro", creator=sysop)
     # [O]n -> blanket boards, [C]ommunity picker: "(whole node)" first, Retro second.
-    session = FakeSession(["m", "g", "u", "0", "1", "o", "x", "c", "0", "2", "s", "b", "b"])
+    session = FakeSession(["m", "g", "u", "0", "1", "o", "a", "m", "c", "0", "2", "s", "b", "b"])
     _run(session, lane, sysop)
     assert "scoped to Community 'Retro'" in _written_text(session)
     grants = list_grants_for_user(db, alice)
@@ -4121,7 +4118,7 @@ def test_door_requires_a_non_blank_executable_path(db, lane, sysop):
 
 
 def test_create_channel_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
-    inputs = ["m", "n", "c", "CTRL+H", " ", "b", "b", "b", "b"]
+    inputs = ["m", "l", "c", "CTRL+H", " ", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     text = _written_text(session)
@@ -4135,7 +4132,7 @@ def test_create_channel_flow(db, lane, sysop):
     # dogfood feature request) -- n(ame)/d(escription) select a field,
     # then [S]ave; every other field keeps its own default.
     inputs = [
-        "m", "n", "c",
+        "m", "l", "c",
         "ENTER", "Lobby",
         "DOWN", "ENTER", "A general channel",
         "s",
@@ -4155,7 +4152,7 @@ def test_create_channel_can_be_cancelled_without_creating_anything(db, lane, sys
     whole draft, even after fields were already filled in. Confirms the
     discard once asked (dogfood follow-up: a changed draft now asks
     first)."""
-    inputs = ["m", "n", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
+    inputs = ["m", "l", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.chat.channels import list_channels
@@ -4172,7 +4169,7 @@ def test_edit_and_delete_channel_flow(db, lane, sysop):
     # -> back to detail -> d(elete) -> retype new name -> back x3.
     # Every other field is left untouched.
     inputs = [
-        "m", "n", "l", "0", "1",
+        "m", "l", "l", "0", "1",
         "ENTER", "Lobby2", "s",
         "d", "Lobby2",
         "b", "b", "b",
@@ -4212,7 +4209,7 @@ def test_grant_and_revoke_moderator_flow_for_channel(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     channel = create_channel(db, "Lobby", creator=sysop)
 
-    grant_inputs = ["m", "g", "u", "0", "1", "o", "n", "0", "1", "s", "b", "b"]
+    grant_inputs = ["m", "g", "u", "0", "1", "o", "c", "0", "1", "s", "b", "b"]
     session = FakeSession(grant_inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -4236,9 +4233,10 @@ def test_grant_blanket_across_all_channels(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     channel = create_channel(db, "Lobby", creator=sysop)
 
-    # scope 'z' = blanket across all channels, no channel picker needed;
-    # the default preset is full, [C]ommunity left at "(whole node)".
-    inputs = ["m", "g", "u", "0", "1", "o", "z", "s", "b", "b"]
+    # scope [A]ll of one kind, [C]hat channels = blanket across all channels,
+    # no channel picker needed; the default preset is full, [C]ommunity left
+    # at "(whole node)".
+    inputs = ["m", "g", "u", "0", "1", "o", "a", "c", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -4251,7 +4249,7 @@ def test_grant_blanket_across_all_channels(db, lane, sysop):
 
 
 def test_create_community_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
-    inputs = ["m", "o", "c", "CTRL+H", " ", "b", "b", "b", "b"]
+    inputs = ["m", "t", "c", "CTRL+H", " ", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     text = _written_text(session)
@@ -4266,7 +4264,7 @@ def test_create_community_flow(db, lane, sysop):
     # with an empty draft (issue #1081): the cursor starts on Name, Enter
     # changes it, Down then Enter changes Description, then [S]ave --
     # returns to the community menu, as every create flow does. back x3.
-    inputs = ["m", "o", "c", "ENTER", "Vintage Computing", "DOWN", "ENTER", "Old iron", "s", "b", "b", "b"]
+    inputs = ["m", "t", "c", "ENTER", "Vintage Computing", "DOWN", "ENTER", "Old iron", "s", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -4280,7 +4278,7 @@ def test_create_community_can_be_cancelled_without_creating_anything(db, lane, s
     whole draft, even after fields were already filled in. Confirms the
     discard once asked (dogfood follow-up: a changed draft now asks
     first)."""
-    inputs = ["m", "o", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
+    inputs = ["m", "t", "c", "ENTER", "Abandoned", "b", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     from netbbs.communities import list_communities
@@ -4300,7 +4298,7 @@ def test_edit_and_delete_community_flow(db, lane, sysop):
     # menu -> back x3 (community menu, content menu, admin menu). Every
     # other field is left untouched.
     inputs = [
-        "m", "o", "l", "0", "1",
+        "m", "t", "l", "0", "1",
         "DOWN", "DOWN", "RIGHT", "s",
         "r", "Politics",
         "b", "b", "b",
@@ -4323,7 +4321,7 @@ def test_the_console_moves_a_community_up_the_callers_list(db, lane, sysop):
     create_community(db, "Pen Talk", creator=sysop)
     create_community(db, "The Clubhouse", creator=sysop)
 
-    session = FakeSession(["m", "o", "l", "0", "2", "u", "b", "b", "b", "b", "b"])
+    session = FakeSession(["m", "t", "l", "0", "2", "u", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert [c.name for c in list_communities(db)] == ["The Clubhouse", "Pen Talk"]
@@ -4439,9 +4437,10 @@ def test_grant_blanket_scoped_to_a_community(db, lane, sysop):
     board = create_board(db, "Elections", community_id=community.id, creator=sysop)
     other_board = create_board(db, "General", creator=sysop)  # not in the Community
 
-    # [O]n -> 'x' = blanket across all boards; [C]ommunity picker lists
-    # "(whole node)" first, Politics second; full preset is the default.
-    inputs = ["m", "g", "u", "0", "1", "o", "x", "c", "0", "2", "s", "b", "b"]
+    # [O]n -> [A]ll of one kind, [M]essage boards = blanket across all
+    # boards; [C]ommunity picker lists "(whole node)" first, Politics second;
+    # full preset is the default.
+    inputs = ["m", "g", "u", "0", "1", "o", "a", "m", "c", "0", "2", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -4471,7 +4470,7 @@ def test_banners_and_mastheads_option_appears_in_the_system_submenu(db, lane, sy
 def test_welcome_banner_option_appears_in_the_banners_menu(db, lane, sysop):
     # menu_key("W", "elcome banner") highlights the "W" separately, so
     # the contiguous literal text is "elcome banner", not "Welcome banner".
-    session = FakeSession(["s", "m", "n", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "elcome banner" in _written_text(session)
 
@@ -4479,7 +4478,7 @@ def test_welcome_banner_option_appears_in_the_banners_menu(db, lane, sysop):
 def test_enable_with_no_file_present_shows_friendly_error_and_leaves_flag_disabled(db, lane, sysop):
     from netbbs.net.welcome_banner import is_welcome_banner_enabled
 
-    session = FakeSession(["s", "m", "n", "w", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No banner file found" in _written_text(session)
     assert is_welcome_banner_enabled(db) is False
@@ -4489,7 +4488,7 @@ def test_enable_with_oversized_file_shows_friendly_error_and_leaves_flag_disable
     from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path, is_welcome_banner_enabled
 
     banner_path(db).write_bytes(b"x" * (MAX_BANNER_SIZE_BYTES + 1))
-    session = FakeSession(["s", "m", "n", "w", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _normalized_visible(_written_text(session))
     assert "over the" in text
@@ -4501,7 +4500,7 @@ def test_enable_with_valid_file_present_succeeds_and_sets_flag(db, lane, sysop):
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
     banner_path(db).write_bytes(b"MY CUSTOM BANNER")
-    session = FakeSession(["s", "m", "n", "w", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Welcome banner enabled" in _written_text(session)
     assert is_welcome_banner_enabled(db) is True
@@ -4513,7 +4512,7 @@ def test_disable_reverts_flag_without_deleting_file(db, lane, sysop):
     banner_path(db).write_bytes(b"MY CUSTOM BANNER")
     set_welcome_banner_enabled(db, True)
 
-    session = FakeSession(["s", "m", "n", "w", "d", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Reverted to the default banner" in _written_text(session)
     assert is_welcome_banner_enabled(db) is False
@@ -4529,7 +4528,7 @@ def test_preview_screen_renders_resolved_banner_content(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "MY DISTINCTIVE BANNER TEXT" in text
@@ -4542,7 +4541,7 @@ def test_preview_screen_with_nothing_saved_shows_the_default_and_says_so(db, lan
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _normalized_visible(_written_text(session))
     assert "N E T B B S" in text
@@ -4556,7 +4555,7 @@ def test_preview_of_a_saved_but_disabled_banner_shows_the_saved_art(db, lane, sy
     from netbbs.net.welcome_banner import banner_path
 
     banner_path(db).write_bytes(b"MY SAVED PEN ART")
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _normalized_visible(_written_text(session))
     assert "MY SAVED PEN ART" in text
@@ -4568,7 +4567,7 @@ def test_welcome_preview_in_ascii_shows_the_ascii_default_callers_get(db, lane, 
     # Review on #889: a caller whose terminal gets ASCII sees the default
     # banner in ASCII before sign-in, so such a SysOp's preview shows that
     # too (the character set replaced the Telnet rule in #929).
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     session.output_charset = "ascii"
     _run(session, lane, sysop)
     text = _written_text(session)
@@ -4585,7 +4584,7 @@ def test_welcome_preview_notes_a_menu_slot_callers_see_blank(db, lane, sysop):
 
     banner_path(db).write_bytes(b"Welcome to {node 12}\r\n{menu 20x2}")
     set_welcome_banner_enabled(db, True)
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _normalized_visible(_written_text(session))
     assert "Note: {menu 20x2} at row 2, column 1 is not used in a banner; callers see it blank." in text
@@ -4603,7 +4602,7 @@ def test_welcome_preview_uses_the_width_callers_get_on_a_terminal_that_wraps_at_
 
     banner_path(db).write_bytes(b"{node 80}")
     set_welcome_banner_enabled(db, True)
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     session.physical_width = 80
     session.terminal_wraps_immediately = True
     assert session.terminal_width == 79
@@ -4629,7 +4628,7 @@ def test_banner_previews_count_callers_online_as_callers_see_it(db, lane, sysop)
         SimpleNamespace(username="a"), SimpleNamespace(username=None), SimpleNamespace(username="b"),
     ]
     session = FakeSession([
-        "s", "m", "n", "w", "p", "x", "b", "l", "p", "x", "b", "b", "b", "b", "b",
+        "s", "m", "s", "w", "p", "x", "b", "l", "p", "x", "b", "b", "b", "b", "b",
     ])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     text = _normalized_visible(_written_text(session))
@@ -4643,7 +4642,7 @@ def test_logoff_preview_fills_field_slots_as_your_own_log_off_would(db, lane, sy
 
     logoff_banner_path(db).write_bytes(b"Bye, {user 8}!")
     set_logoff_banner_enabled(db, True)
-    session = FakeSession(["s", "m", "n", "l", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _normalized_visible(_written_text(session))
     preview = text[text.index("Previewing logoff banner"):]
@@ -4666,7 +4665,7 @@ def test_preview_of_an_oversized_saved_banner_says_why_it_is_not_shown(db, lane,
     from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path
 
     banner_path(db).write_bytes(b"x" * (MAX_BANNER_SIZE_BYTES + 1))
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _normalized_visible(_written_text(session))
     assert "(The saved file is over 256 KiB or can't be read: callers see the default NetBBS banner.)" in text
@@ -4686,7 +4685,7 @@ def test_preview_screen_color_depth_override_forces_truecolor(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "\x1b[38;2;" in text  # a real truecolor escape
@@ -4701,7 +4700,7 @@ def test_preview_screen_color_depth_override_forces_256_color(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
-    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "p", "x", "b", "b", "b", "b", "b"])
     session.supports_truecolor = True
     _run(session, lane, sysop)
     text = _written_text(session)
@@ -4715,7 +4714,7 @@ def test_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_banner_pa
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["s", "m", "n", "w", "i", "A", "CTRL+O", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "o", "A", "CTRL+O", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -4737,7 +4736,7 @@ def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, lane, sy
 
     banner_path(db).write_bytes(b"ORIGINAL")
 
-    session = FakeSession(["s", "m", "n", "w", "i", "A", "CTRL+X", "d", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "o", "A", "CTRL+X", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No changes saved" in _written_text(session)
     assert banner_path(db).read_bytes() == b"ORIGINAL"
@@ -4747,13 +4746,13 @@ def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, lane, sy
 
 
 def test_gallery_option_appears_in_the_welcome_banner_menu(db, lane, sysop):
-    session = FakeSession(["s", "m", "n", "w", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "allery" in _written_text(session)
 
 
 def test_gallery_lists_bundled_welcome_banner_presets_by_name(db, lane, sysop):
-    session = FakeSession(["s", "m", "n", "w", "g", "b", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "g", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Synthwave / Magenta-Cyan Neon Grid" in text
@@ -4766,7 +4765,7 @@ def test_gallery_selecting_a_preset_previews_its_decoded_content_before_applying
     # item 01 on the picker's first page -- Synthwave / Magenta-Cyan Neon Grid.
     # [B]ack from the preview returns to the gallery's own picker, so
     # exiting cleanly needs one extra "b" beyond the usual 3.
-    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "b", "b", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "g", "0", "1", "b", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'Synthwave / Magenta-Cyan Neon Grid':" in text
@@ -4778,7 +4777,7 @@ def test_gallery_applying_a_preset_writes_its_bytes_and_enables_the_banner(db, l
     from netbbs.net.banner_presets import WELCOME_BANNER_PRESETS, load_welcome_banner_preset
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
-    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -4796,7 +4795,7 @@ def test_gallery_applying_a_preset_writes_its_bytes_and_enables_the_banner(db, l
 def test_gallery_back_without_selecting_leaves_the_banner_untouched(db, lane, sysop):
     from netbbs.net.welcome_banner import is_welcome_banner_enabled
 
-    session = FakeSession(["s", "m", "n", "w", "g", "b", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "g", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_welcome_banner_enabled(db) is False
 
@@ -4810,7 +4809,7 @@ def test_gallery_declining_a_preset_returns_to_the_same_gallery_to_try_another(d
     from netbbs.net.banner_presets import WELCOME_BANNER_PRESETS, load_welcome_banner_preset
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
-    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "b", "0", "3", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "g", "0", "1", "b", "0", "3", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'Synthwave / Magenta-Cyan Neon Grid':" in text
@@ -4833,7 +4832,7 @@ def test_gallery_apply_choice_drains_a_trailing_enter(db, lane, sysop):
         async def discard_buffered_enter(self) -> None:
             self.drains += 1
 
-    session = DrainingSession(["s", "m", "n", "w", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = DrainingSession(["s", "m", "s", "w", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert session.drains >= 1
     assert is_welcome_banner_enabled(db) is True
@@ -4843,7 +4842,7 @@ def test_gallery_apply_choice_drains_a_trailing_enter(db, lane, sysop):
 
 
 def test_from_disk_option_appears_in_the_welcome_banner_menu(db, lane, sysop):
-    session = FakeSession(["s", "m", "n", "w", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "rom disk" in _written_text(session)
 
@@ -4852,7 +4851,7 @@ def test_from_disk_with_no_other_files_shows_an_empty_state_message(db, lane, sy
     # Trailing "x" dismisses this screen's own "Press any key to
     # continue..." pause (dogfood fix: without it, redraw_in_place wiped
     # this message before it could be read).
-    session = FakeSession(["s", "m", "n", "w", "f", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "f", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No other .ans files found in" in text
@@ -4865,7 +4864,7 @@ def test_from_disk_excludes_the_current_target_file_and_lists_only_others(db, la
     banner_path(db).write_bytes(b"ALREADY THE CURRENT BANNER")
     (tmp_path / "custom.ans").write_bytes(b"MY OWN ART")
 
-    session = FakeSession(["s", "m", "n", "w", "f", "b", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "f", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     # Scoped to the picker screen itself, not the whole session's output --
@@ -4883,7 +4882,7 @@ def test_from_disk_selecting_and_declining_previews_but_does_not_load(db, lane, 
 
     # [B]ack from the preview returns to this same picker, so exiting
     # cleanly needs one extra "b".
-    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "b", "b", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "f", "0", "1", "b", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'custom.ans':" in text
@@ -4897,7 +4896,7 @@ def test_from_disk_selecting_and_confirming_loads_and_enables_it(db, lane, sysop
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN ART")
 
-    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -4918,7 +4917,7 @@ def test_from_disk_rejects_an_oversized_file_without_loading_it(db, lane, sysop,
 
     (tmp_path / "toobig.ans").write_bytes(b"A" * (MAX_BANNER_SIZE_BYTES + 1))
 
-    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "x", "b", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "f", "0", "1", "x", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "over the" in text
@@ -4934,7 +4933,7 @@ def test_welcome_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     it with nothing there yet looked like the feature was broken."""
     from netbbs.net.welcome_banner import banner_path
 
-    session = FakeSession(["s", "m", "n", "w", "\x08", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(banner_path(db)), session.terminal_width - 4)
@@ -4954,7 +4953,7 @@ def test_welcome_banner_ctrl_h_keeps_every_piece_of_a_long_path_visible(tmp_path
     lane = DatabaseLane(db.path)
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
 
-    session = FakeSession(["s", "m", "n", "w", "\x08", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     lane.close()
@@ -4979,7 +4978,7 @@ def test_banners_and_mastheads_hub_ctrl_h_shows_generic_help(db, lane, sysop):
 def test_banners_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
     """Same gap, one level down: the "Banners" submenu (Welcome/Logoff/
     before/after signup) also owns no single file."""
-    session = FakeSession(["s", "m", "n", "\x08", "x", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "\x08", "x", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "press Ctrl-H on that screen" in text
@@ -5019,7 +5018,7 @@ def test_main_menu_masthead_subtitle_wraps_on_a_narrow_terminal(db, lane, sysop)
 def test_board_list_masthead_subtitle_wraps_on_a_narrow_terminal(db, lane, sysop):
     """Same gap, same fix, different screen (dogfood report named this
     one specifically)."""
-    session = FakeSession(["s", "m", "m", "o", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "b", "b", "b", "b", "b"])
     session.terminal_width = 60
 
     _run(session, lane, sysop)
@@ -5118,7 +5117,7 @@ def test_masthead_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["s", "m", "m", "m", "i", "A", "CTRL+O", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "o", "A", "CTRL+O", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -5140,7 +5139,7 @@ def test_masthead_edit_then_quit_without_saving_leaves_banner_file_untouched(db,
 
     main_menu_banner_path(db).write_bytes(b"ORIGINAL")
 
-    session = FakeSession(["s", "m", "m", "m", "i", "A", "CTRL+X", "d", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "o", "A", "CTRL+X", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No changes saved" in _written_text(session)
     assert main_menu_banner_path(db).read_bytes() == b"ORIGINAL"
@@ -5956,12 +5955,12 @@ def test_banners_option_appears_in_the_banners_and_mastheads_menu(db, lane, syso
 
 
 def test_banners_menu_lists_all_four(db, lane, sysop):
-    session = FakeSession(["s", "m", "n", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "elcome banner" in text
     assert "ogoff banner" in text
-    assert "fore signup" in text
+    assert "re-signup" in text
     assert "ter signup" in text
 
 
@@ -5971,7 +5970,7 @@ def test_banners_menu_lists_all_four(db, lane, sysop):
 def test_logoff_banner_enable_with_no_file_present_shows_friendly_error(db, lane, sysop):
     from netbbs.net.logoff_banner import is_logoff_banner_enabled
 
-    session = FakeSession(["s", "m", "n", "l", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No banner file found" in _written_text(session)
     assert is_logoff_banner_enabled(db) is False
@@ -5981,7 +5980,7 @@ def test_logoff_banner_enable_with_oversized_file_shows_friendly_error(db, lane,
     from netbbs.net.logoff_banner import MAX_LOGOFF_BANNER_SIZE_BYTES, logoff_banner_path
 
     logoff_banner_path(db).write_bytes(b"x" * (MAX_LOGOFF_BANNER_SIZE_BYTES + 1))
-    session = FakeSession(["s", "m", "n", "l", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _normalized_visible(_written_text(session))
     assert "over the" in text and "byte limit" in text
@@ -5991,7 +5990,7 @@ def test_logoff_banner_enable_with_valid_file_succeeds_and_is_audit_logged(db, l
     from netbbs.net.logoff_banner import is_logoff_banner_enabled, logoff_banner_path
 
     logoff_banner_path(db).write_bytes(b"MY CUSTOM LOGOFF BANNER")
-    session = FakeSession(["s", "m", "n", "l", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Logoff banner enabled" in _written_text(session)
     assert is_logoff_banner_enabled(db) is True
@@ -6009,7 +6008,7 @@ def test_logoff_banner_disable_reverts_flag_without_deleting_file(db, lane, syso
     logoff_banner_path(db).write_bytes(b"MY CUSTOM LOGOFF BANNER")
     set_logoff_banner_enabled(db, True)
 
-    session = FakeSession(["s", "m", "n", "l", "d", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "disabled" in _written_text(session).lower()
     assert is_logoff_banner_enabled(db) is False
@@ -6022,13 +6021,13 @@ def test_logoff_banner_preview_shows_resolved_content(db, lane, sysop):
     logoff_banner_path(db).write_bytes(b"MY DISTINCTIVE LOGOFF TEXT")
     set_logoff_banner_enabled(db, True)
 
-    session = FakeSession(["s", "m", "n", "l", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "MY DISTINCTIVE LOGOFF TEXT" in _written_text(session)
 
 
 def test_logoff_banner_preview_when_disabled_says_no_banner(db, lane, sysop):
-    session = FakeSession(["s", "m", "n", "l", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "(Nothing saved yet: callers see no banner.)" in text
@@ -6041,7 +6040,7 @@ def test_logoff_banner_edit_round_trips_into_logoff_banner_path(db, lane, sysop)
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["s", "m", "n", "l", "i", "A", "CTRL+O", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "o", "A", "CTRL+O", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -6061,7 +6060,7 @@ def test_logoff_banner_gallery_applies_a_bundled_preset(db, lane, sysop):
     from netbbs.net.banner_presets import LOGOFF_BANNER_PRESETS, load_logoff_banner_preset
     from netbbs.net.logoff_banner import is_logoff_banner_enabled, logoff_banner_path
 
-    session = FakeSession(["s", "m", "n", "l", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -6075,7 +6074,7 @@ def test_logoff_banner_from_disk_loads_and_enables_a_local_file(db, lane, sysop,
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN LOGOFF ART")
 
-    session = FakeSession(["s", "m", "n", "l", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -6089,7 +6088,7 @@ def test_logoff_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     # This screen dispatches on a plain read_key() (not the structured
     # read_editor_key() path), so Ctrl-H arrives as the literal HELP_KEY
     # control character, not the "CTRL+H" sentinel string.
-    session = FakeSession(["s", "m", "n", "l", "\x08", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "l", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(logoff_banner_path(db)), session.terminal_width - 4)
@@ -6106,7 +6105,7 @@ def test_new_account_banner_before_enable_with_valid_file_succeeds(db, lane, sys
     )
 
     new_account_banner_before_path(db).write_bytes(b"MY CUSTOM SIGNUP BANNER")
-    session = FakeSession(["s", "m", "n", "e", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "p", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "New-account (before) banner enabled" in _written_text(session)
     assert is_new_account_banner_before_enabled(db) is True
@@ -6127,7 +6126,7 @@ def test_new_account_banner_before_disable_reverts_flag_without_deleting_file(db
     new_account_banner_before_path(db).write_bytes(b"MY CUSTOM SIGNUP BANNER")
     set_new_account_banner_before_enabled(db, True)
 
-    session = FakeSession(["s", "m", "n", "e", "d", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "p", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_new_account_banner_before_enabled(db) is False
     assert new_account_banner_before_path(db).read_bytes() == b"MY CUSTOM SIGNUP BANNER"
@@ -6142,7 +6141,7 @@ def test_new_account_banner_before_preview_shows_resolved_content(db, lane, syso
     new_account_banner_before_path(db).write_bytes(b"DISTINCTIVE SIGNUP TEXT")
     set_new_account_banner_before_enabled(db, True)
 
-    session = FakeSession(["s", "m", "n", "e", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "p", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "DISTINCTIVE SIGNUP TEXT" in _written_text(session)
 
@@ -6157,7 +6156,7 @@ def test_new_account_banner_before_gallery_applies_a_bundled_preset(db, lane, sy
         new_account_banner_before_path,
     )
 
-    session = FakeSession(["s", "m", "n", "e", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "p", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -6176,7 +6175,7 @@ def test_new_account_banner_before_from_disk_loads_and_enables_a_local_file(db, 
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN SIGNUP ART")
 
-    session = FakeSession(["s", "m", "n", "e", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "p", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -6194,7 +6193,7 @@ def test_new_account_banner_after_enable_with_valid_file_succeeds(db, lane, syso
     )
 
     new_account_banner_after_path(db).write_bytes(b"MY CUSTOM WELCOME BANNER")
-    session = FakeSession(["s", "m", "n", "f", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "a", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "New-account (after) banner enabled" in _written_text(session)
     assert is_new_account_banner_after_enabled(db) is True
@@ -6215,7 +6214,7 @@ def test_new_account_banner_after_disable_reverts_flag_without_deleting_file(db,
     new_account_banner_after_path(db).write_bytes(b"MY CUSTOM WELCOME BANNER")
     set_new_account_banner_after_enabled(db, True)
 
-    session = FakeSession(["s", "m", "n", "f", "d", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "a", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_new_account_banner_after_enabled(db) is False
     assert new_account_banner_after_path(db).read_bytes() == b"MY CUSTOM WELCOME BANNER"
@@ -6230,7 +6229,7 @@ def test_new_account_banner_after_preview_shows_resolved_content(db, lane, sysop
     new_account_banner_after_path(db).write_bytes(b"DISTINCTIVE WELCOME TEXT")
     set_new_account_banner_after_enabled(db, True)
 
-    session = FakeSession(["s", "m", "n", "f", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "a", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "DISTINCTIVE WELCOME TEXT" in _written_text(session)
 
@@ -6245,7 +6244,7 @@ def test_new_account_banner_after_gallery_applies_a_bundled_preset(db, lane, sys
         new_account_banner_after_path,
     )
 
-    session = FakeSession(["s", "m", "n", "f", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "a", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -6264,7 +6263,7 @@ def test_new_account_banner_after_from_disk_loads_and_enables_a_local_file(db, l
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN WELCOME ART")
 
-    session = FakeSession(["s", "m", "n", "f", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "a", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -6297,7 +6296,7 @@ def test_mastheads_menu_lists_all_four(db, lane, sysop):
 def test_board_list_masthead_enable_with_no_file_present_shows_friendly_error(db, lane, sysop):
     from netbbs.net.board_list_banner import is_board_list_banner_enabled
 
-    session = FakeSession(["s", "m", "m", "o", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No masthead file found" in _written_text(session)
     assert is_board_list_banner_enabled(db) is False
@@ -6307,7 +6306,7 @@ def test_board_list_masthead_enable_with_oversized_file_shows_friendly_error(db,
     from netbbs.net.board_list_banner import MAX_BOARD_LIST_BANNER_SIZE_BYTES, board_list_banner_path
 
     board_list_banner_path(db).write_bytes(b"x" * (MAX_BOARD_LIST_BANNER_SIZE_BYTES + 1))
-    session = FakeSession(["s", "m", "m", "o", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     normalized = _normalized_visible(text)
@@ -6318,7 +6317,7 @@ def test_board_list_masthead_enable_with_valid_file_succeeds_and_is_audit_logged
     from netbbs.net.board_list_banner import board_list_banner_path, is_board_list_banner_enabled
 
     board_list_banner_path(db).write_bytes(b"MY CUSTOM BOARD MASTHEAD")
-    session = FakeSession(["s", "m", "m", "o", "e", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Board list masthead enabled" in _written_text(session)
     assert is_board_list_banner_enabled(db) is True
@@ -6340,7 +6339,7 @@ def test_board_list_masthead_disable_reverts_flag_without_deleting_file(db, lane
     board_list_banner_path(db).write_bytes(b"MY CUSTOM BOARD MASTHEAD")
     set_board_list_banner_enabled(db, True)
 
-    session = FakeSession(["s", "m", "m", "o", "d", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_board_list_banner_enabled(db) is False
     assert board_list_banner_path(db).read_bytes() == b"MY CUSTOM BOARD MASTHEAD"
@@ -6352,7 +6351,7 @@ def test_board_list_masthead_preview_shows_resolved_content(db, lane, sysop):
     board_list_banner_path(db).write_bytes(b"DISTINCTIVE BOARD TEXT")
     set_board_list_banner_enabled(db, True)
 
-    session = FakeSession(["s", "m", "m", "o", "p", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "DISTINCTIVE BOARD TEXT" in _written_text(session)
 
@@ -6363,7 +6362,7 @@ def test_board_list_masthead_edit_round_trips_into_board_list_banner_path(db, la
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["s", "m", "m", "o", "i", "A", "CTRL+O", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "o", "A", "CTRL+O", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -6383,7 +6382,7 @@ def test_board_list_masthead_gallery_applies_a_bundled_preset(db, lane, sysop):
     from netbbs.net.banner_presets import BOARD_LIST_MASTHEAD_PRESETS, load_board_list_masthead_preset
     from netbbs.net.board_list_banner import board_list_banner_path, is_board_list_banner_enabled
 
-    session = FakeSession(["s", "m", "m", "o", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "g", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -6399,7 +6398,7 @@ def test_board_list_masthead_from_disk_loads_and_enables_a_local_file(db, lane, 
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN BOARD ART")
 
-    session = FakeSession(["s", "m", "m", "o", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "f", "0", "1", "a", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -6410,7 +6409,7 @@ def test_board_list_masthead_from_disk_loads_and_enables_a_local_file(db, lane, 
 def test_board_list_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     from netbbs.net.board_list_banner import board_list_banner_path
 
-    session = FakeSession(["s", "m", "m", "o", "\x08", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "d", "\x08", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(board_list_banner_path(db)), session.terminal_width - 4)
@@ -6857,7 +6856,7 @@ def test_registration_settings_screen_shows_pending_count(db, lane, sysop):
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
     session = FakeSession(["u", "r", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "Awaiting approval: 1 account(s) -- see List [u]sers" in _normalized_visible(_written_text(session))
+    assert "Awaiting approval: 1 account(s) -- see [U]ser list" in _normalized_visible(_written_text(session))
 
 
 # -- self-update (design doc §17) --------------------------------------------
@@ -7171,14 +7170,14 @@ def test_settings_previous_callers_toggle_is_node_wide_and_audited(db, lane, sys
 
     assert previous_callers_enabled(db) is True
     # Issue #841: neon, then plain, then hidden.
-    session = FakeSession(["s", "v", "v", "b", "b"])
+    session = FakeSession(["s", "r", "r", "b", "b"])
     _run(session, lane, sysop)
 
     assert previous_callers_enabled(db) is False
     text = _visible(_written_text(session))
-    assert "Previous callers: shown after login, plain" in _normalized_visible(text)
-    assert "Previous callers: hidden" in _normalized_visible(text)
-    assert "vious callers" in text
+    assert "Recent callers: shown after login, plain" in _normalized_visible(text)
+    assert "Recent callers: hidden" in _normalized_visible(text)
+    assert "ecent callers: hidden" in text
     row = db.connection.execute(
         "SELECT actor_user_id, detail FROM moderation_log "
         "WHERE action = 'set_previous_callers_enabled'"
@@ -7187,7 +7186,7 @@ def test_settings_previous_callers_toggle_is_node_wide_and_audited(db, lane, sys
     assert row["detail"] == "enabled=false"
 
     # A third press shows it again, in the default neon style.
-    session = FakeSession(["s", "v", "b", "b"])
+    session = FakeSession(["s", "r", "b", "b"])
     _run(session, lane, sysop)
     assert previous_callers_enabled(db) is True
     assert previous_callers_plain(db) is False
@@ -7273,7 +7272,7 @@ def test_dashboard_shows_the_backup_state(db, lane, sysop):
 @pytest.mark.parametrize("keys", [
     ["c", "d", "b", "b", "b"],       # Content > Doors
     ["c", "m", "b", "b", "b"],       # Content > Message boards
-    ["c", "o", "b", "b", "b"],       # Content > Communities
+    ["c", "t", "b", "b", "b"],       # Content > Topics (Communities)
 ])
 def test_nested_screens_do_not_repeat_the_backup_line(db, lane, sysop, keys):
     # F034: "Backup: never" followed a first-day SysOp onto every submenu,
@@ -7287,10 +7286,11 @@ def test_nested_screens_do_not_repeat_the_backup_line(db, lane, sysop, keys):
 
 def test_link_status_screen_does_not_repeat_the_backup_line(db, lane, sysop):
     link_context = _link_context()
-    session = FakeSession(["s", "l", "b", "b", "b"])
+    session = FakeSession(["o", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     text = _visible(_written_text(session))
-    link_screen = text[text.index("Link status") :]
+    start = text.index("Identity, capacity, relay activity")  # the Link status screen itself
+    link_screen = text[start:text.index("Choice:", start)]
     assert "Backup:" not in link_screen
 
 
@@ -7430,7 +7430,7 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
 
 
 def test_backup_status_shows_no_backup_yet_message(db, lane, sysop):
-    session = FakeSession(["s", "k", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "f", "PAGE_DOWN", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "NO BACKUP RECORDED" in text
@@ -7441,7 +7441,7 @@ def test_backup_page_on_a_node_without_doors_says_so_in_one_line(db, lane, sysop
     monkeypatch.delenv("WAR_DIALER_DB_PATH", raising=False)
     # F066: page 1 was mostly Voidrunner, War Dialer and door-installation
     # text on a node with no doors.
-    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "f", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "No doors are set up, so backups hold no door data." in text
@@ -7456,7 +7456,7 @@ def test_backup_page_shows_door_data_a_removed_door_left_behind(db, lane, sysop)
     doors_dir = db.path.parent / (db.path.name + ".doors")
     doors_dir.mkdir()
     (doors_dir / "war-dialer.db").write_bytes(b"")
-    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "f", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "No doors are set up" not in text
@@ -7465,7 +7465,7 @@ def test_backup_page_shows_door_data_a_removed_door_left_behind(db, lane, sysop)
 
 def test_backup_page_puts_the_schedule_before_door_data(db, lane, sysop, isolated_door_career_directory):
     isolated_door_career_directory.mkdir()
-    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "f", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "Voidrunner source:" in text
@@ -7488,11 +7488,11 @@ def test_backup_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
     # key": anything else (the space here) is refused with a bell and the
     # screen stays up. Had it returned by itself, the last "b" would be
     # left unread.
-    session = FakeSession(["s", "k", " ", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "f", " ", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     backup = text[text.index("Operations › Backup"):]
-    assert backup.index("\a") < backup.index("NetBBS › Settings")
+    assert backup.index("\a") < backup.index("SysOp › Operations")
     assert "Press any key to continue..." not in backup
     # Standalone admin: status only, and the last page says why.
     assert "CREATING A BACKUP" in backup
@@ -7509,7 +7509,7 @@ def test_backup_status_shows_last_backup_summary(db, lane, sysop):
     destination = db.path.parent / "backup1"
     create_backup(db_path=db.path, identity_dir=identity_dir, destination=destination)
 
-    session = FakeSession(["s", "k", "b", "b", "b"])
+    session = FakeSession(["o", "f", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "BACKED UP" in _visible(text)
@@ -7527,7 +7527,7 @@ def test_backup_status_shows_recent_backup_history(db, lane, sysop):
     create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
     create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup2")
 
-    session = FakeSession(["s", "k", "b", "b", "b"])
+    session = FakeSession(["o", "f", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -7543,7 +7543,7 @@ def test_backup_status_hides_history_section_with_only_one_backup(db, lane, syso
 
     # Every page of the panel is turned, so the section is absent from
     # all of it rather than just from the first page.
-    session = FakeSession(["s", "k", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "f", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -7560,7 +7560,7 @@ def test_live_backup_screen_creates_a_complete_backup_with_configured_identity(
     identity_dir.mkdir()
     (identity_dir / "identity-marker").write_text("configured identity")
     controls = _node_controls(backup_identity_dir=identity_dir)
-    session = FakeSession(["s", "k", "c", "y", "b", "b", "b"])
+    session = FakeSession(["o", "f", "c", "y", "b", "b", "b"])
 
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
 
@@ -7581,7 +7581,7 @@ def test_dashboard_refreshes_its_backup_summary_after_quick_action(
     identity_dir = db.path.parent / "identity"
     identity_dir.mkdir()
     controls = _node_controls(backup_identity_dir=identity_dir)
-    session = FakeSession(["k", "c", "y", "b", "b"])
+    session = FakeSession(["f", "c", "y", "b", "b"])
 
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
 
@@ -7607,7 +7607,7 @@ def test_live_backup_screen_surfaces_a_backup_failure(db, lane, sysop, monkeypat
     identity_dir = db.path.parent / "identity"
     identity_dir.mkdir()
     controls = _node_controls(backup_identity_dir=identity_dir)
-    session = FakeSession(["k", "c", "y", "b", "b"])
+    session = FakeSession(["f", "c", "y", "b", "b"])
 
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
 
@@ -7632,7 +7632,7 @@ def test_live_backup_screen_uses_the_width_aware_choice_prompt(
 
     monkeypatch.setattr(detail_view, "write_prompt", recording_write_prompt)
     controls = _node_controls(backup_identity_dir=db.path.parent / "identity")
-    session = FakeSession(["k", "b", "b"])
+    session = FakeSession(["f", "b", "b"])
 
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
 
@@ -7644,7 +7644,7 @@ def test_live_backup_screen_refuses_a_missing_configured_identity(
 ):
     identity_dir = db.path.parent / "missing-identity"
     controls = _node_controls(backup_identity_dir=identity_dir)
-    session = FakeSession(["k", "c", "y", "b", "b"])
+    session = FakeSession(["f", "c", "y", "b", "b"])
 
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
 
@@ -7671,7 +7671,7 @@ def test_live_backup_remains_owned_until_its_worker_finishes_after_cancellation(
     identity_dir = db.path.parent / "identity"
     identity_dir.mkdir()
     controls = _node_controls(backup_identity_dir=identity_dir)
-    session = FakeSession(["k", "c", "y"])
+    session = FakeSession(["f", "c", "y"])
 
     async def scenario():
         task = asyncio.create_task(
@@ -7706,7 +7706,7 @@ def test_live_backup_reports_success_when_audit_logging_fails(
     identity_dir = db.path.parent / "identity"
     identity_dir.mkdir()
     controls = _node_controls(backup_identity_dir=identity_dir)
-    session = FakeSession(["k", "c", "y", "b", "b"])
+    session = FakeSession(["f", "c", "y", "b", "b"])
 
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
 
@@ -7928,7 +7928,7 @@ def test_managed_dns_status_explains_a_revocation_and_names_the_contact(db, lane
     assert "The service operator revoked this name" in text
     assert "To dispute it, contact abuse@example.org" in text
     assert "[R]egister" in text
-    assert "Re[l]ease" not in text and "Change [n]ame" not in text
+    assert "[G]ive up name" not in text and "[N]ew name" not in text
 
 
 def test_managed_dns_status_offers_service_administration_only_with_a_token(db, lane, sysop, monkeypatch):
@@ -7986,8 +7986,8 @@ def test_managed_dns_status_offers_release_when_active(db, lane, sysop):
     session = FakeSession(["d", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "Re[l]ease" in text
-    assert "Change [n]ame" in text
+    assert "[G]ive up name" in text
+    assert "[N]ew name" in text
     assert "[R]egister" in text
 
 
@@ -8010,8 +8010,8 @@ def test_managed_dns_pending_rename_offers_cancel_change_without_hotkey_collisio
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "[C]ancel change" in text
-    assert "Change [n]ame" not in text
-    assert "Re[l]ease" not in text
+    assert "[N]ew name" not in text
+    assert "[G]ive up name" not in text
 
 
 def test_managed_dns_abandoned_replacement_still_offers_cancel_change(
@@ -8042,8 +8042,8 @@ def test_managed_dns_abandoned_replacement_still_offers_cancel_change(
     text = _visible(_written_text(session))
     assert "The new name is inactive" in text
     assert "[C]ancel change" in text
-    assert "Change [n]ame" not in text
-    assert "Re[l]ease" not in text
+    assert "[N]ew name" not in text
+    assert "[G]ive up name" not in text
     assert cancelled == [True]
 
 
@@ -8088,7 +8088,7 @@ def test_managed_dns_status_pauses_after_register_message_before_redraw(db, lane
 
 
 def test_managed_dns_status_rejects_the_release_hotkey_when_not_active(db, lane, sysop):
-    session = FakeSession(["d", "l", "b", "b"])  # "l" is rejected -- no confirmation prompt follows
+    session = FakeSession(["d", "g", "b", "b"])  # "g" is rejected -- no confirmation prompt follows
     _run(session, lane, sysop)
 
 
@@ -8131,9 +8131,9 @@ def test_managed_dns_status_release_hotkey_releases_end_to_end(db, lane, sysop):
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             # Register first (outside the admin screen, to set up state),
-            # then exercise the screen's own [L] Release hotkey.
+            # then exercise the screen's own [G]ive up name hotkey.
             await admin_menu(FakeSession(["d", "r", "n", "myboard", "d", "r", "b", "b"]), lane, sysop)
-            await admin_menu(FakeSession(["d", "l", "y", "b", "b"]), lane, sysop)
+            await admin_menu(FakeSession(["d", "g", "y", "b", "b"]), lane, sysop)
         finally:
             await server.stop()
             backend_db.close()
@@ -8162,7 +8162,7 @@ def test_managed_dns_status_register_back_returns_straight_to_the_status(db, lan
 
 
 def test_outbox_option_hidden_without_link_context(db, lane, sysop):
-    session = FakeSession(["s", "o", "b", "b"])
+    session = FakeSession(["o", "o", "b", "b"])
     _run(session, lane, sysop)  # _run's admin_menu call passes no link_context
     bell_index = session.written.index("\b \b\a")
     assert session.written[bell_index] == "\b \b\a"
@@ -8171,7 +8171,7 @@ def test_outbox_option_hidden_without_link_context(db, lane, sysop):
 def test_outbox_shows_no_items_yet_message(db, lane, sysop):
     link_context = _link_context()
     # A held status screen; with nothing recorded it offers only [B]ack.
-    session = FakeSession(["s", "o", "b", "b", "b"])
+    session = FakeSession(["o", "o", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     text = _visible(_written_text(session))
     assert "WORK ITEMS BY STATUS" in text
@@ -8193,7 +8193,7 @@ def test_outbox_replays_a_dead_lettered_item(db, lane, sysop):
     # Status screen -> [I]tems -> the item -> its own detail screen, where
     # [R]eplay now is an offered action rather than a yes/no -> back on
     # the status screen, which shows the result.
-    session = FakeSession(["s", "o", "i", "0", "1", "r", "b", "b", "b"])
+    session = FakeSession(["o", "o", "i", "0", "1", "r", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _normalized_visible(_written_text(session))
@@ -8214,7 +8214,7 @@ def test_outbox_cancels_a_retrying_item(db, lane, sysop):
     from netbbs.link.work_items import list_work_items
 
     link_context = _link_context()
-    session = FakeSession(["s", "o", "i", "0", "1", "c", "b", "b", "b"])
+    session = FakeSession(["o", "o", "i", "0", "1", "c", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _normalized_visible(_written_text(session))
@@ -8228,7 +8228,7 @@ def test_outbox_cancels_a_retrying_item(db, lane, sysop):
 
 
 def test_link_status_option_hidden_without_link_context(db, lane, sysop):
-    session = FakeSession(["s", "l", "b", "b"])
+    session = FakeSession(["o", "l", "b", "b"])
     _run(session, lane, sysop)  # _run's admin_menu call passes no link_context
     bell_index = session.written.index("\b \b\a")
     assert session.written[bell_index] == "\b \b\a"
@@ -8259,7 +8259,7 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     link_context.link_node.known_event_ids.add("event-1")
 
     # Two pages on an 80x24 terminal: relays and content are a page on.
-    session = FakeSession(["s", "l", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "l", "PAGE_DOWN", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _normalized_visible(_written_text(session))
@@ -8307,7 +8307,7 @@ def test_link_status_screen_lists_relay_mail_per_recipient_with_its_oldest_depos
     )
     db.connection.commit()
 
-    session = FakeSession(["s", "l", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "l", "PAGE_DOWN", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
 
     text = _normalized_visible(_written_text(session))
@@ -8319,7 +8319,7 @@ def test_link_status_screen_lists_relay_mail_per_recipient_with_its_oldest_depos
 def test_link_status_screen_reads_the_current_node_name(db, lane, sysop):
     from netbbs.config import set_node_display_name
 
-    session = FakeSession(["s", "l", "b", "b", "b"])
+    session = FakeSession(["o", "l", "b", "b", "b"])
     assert session.node_display_name == "NetBBS"
     set_node_display_name(db, "Renamed While Connected")
 
@@ -8351,7 +8351,7 @@ def test_link_status_screen_can_acknowledge_identity_change_notices(db, lane, sy
         save_peer(db, changed)
     link_context.link_node.peers[changed.fingerprint] = changed
 
-    session = FakeSession(["s", "l", "a", "b", "b", "b"])
+    session = FakeSession(["o", "l", "a", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     assert "Identity changes acknowledged." in _written_text(session)
@@ -8389,7 +8389,7 @@ def test_link_status_screen_prioritizes_a_cryptographic_identity_warning(
 
     # The notices are their own section of the paged panel, a page on
     # from the node's identity.
-    session = FakeSession(["s", "l", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "l", "PAGE_DOWN", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _normalized_visible(_written_text(session))
@@ -8432,7 +8432,7 @@ def test_link_status_identity_changes_say_when_each_was_seen(db, lane, sysop):
         for stamp in stamps
     )
 
-    session = FakeSession(["s", "l", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "l", "PAGE_DOWN", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _normalized_visible(_written_text(session))
@@ -8446,7 +8446,7 @@ def test_repair_carried_posts_screen_reports_nothing_to_do_when_caught_up(db, la
     link_context = _link_context()
 
     # The outcome is a held screen of its own, left with [B]ack.
-    session = FakeSession(["s", "r", "b", "b", "b"])
+    session = FakeSession(["o", "r", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _normalized_visible(_written_text(session))
@@ -8486,7 +8486,7 @@ def test_repair_carried_posts_screen_materializes_a_missing_gap(db, lane, sysop)
     )
     db.connection.commit()
 
-    session = FakeSession(["s", "r", "b", "b", "b"])
+    session = FakeSession(["o", "r", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _normalized_visible(_written_text(session))
@@ -8499,7 +8499,7 @@ def test_diagnostic_log_screen_reports_nothing_logged_yet(db, lane, sysop):
     link_context = _link_context()
 
     # A held, titled screen (no "Diagnostic log:" heading line), left with [B]ack.
-    session = FakeSession(["s", "d", "b", "b", "b"])
+    session = FakeSession(["o", "d", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _visible(_written_text(session))
@@ -8518,7 +8518,7 @@ def test_diagnostic_log_screen_lists_and_shows_entry_detail(db, lane, sysop):
 
     # Entry detail is a screen of its own; [B]ack returns to the picker,
     # so one more "b" leaves that.
-    session = FakeSession(["s", "d", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["o", "d", "0", "1", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     visible = _visible(_written_text(session))
@@ -8541,7 +8541,7 @@ def test_diagnostic_log_screen_order_toggle_reverses_display_order(db, lane, sys
         )
     db.connection.commit()
 
-    session = FakeSession(["s", "d", "o", "b", "b", "b"])  # "o" -> oldest first
+    session = FakeSession(["o", "d", "o", "b", "b", "b"])  # "o" -> oldest first
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _visible(_written_text(session))
@@ -8573,7 +8573,7 @@ def test_diagnostic_log_screen_colors_level_by_severity(db, lane, sysop):
     )
     db.connection.commit()
 
-    session = FakeSession(["s", "d", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["o", "d", "0", "1", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _written_text(session)
@@ -8593,13 +8593,13 @@ def test_diagnostic_log_tail_screen_shows_seeded_entries_and_stops_on_any_key(db
     )
     db.connection.commit()
 
-    session = FakeSession(["s", "f", "x", "b", "b"])
+    session = FakeSession(["o", "w", "x", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _visible(_written_text(session))
     assert "Diagnostic log (live)" in text
     assert "seeded entry" in text
-    assert "NetBBS › Settings" in text  # back at Settings -- tail actually ended
+    assert "Observe the running node" in text.split("Diagnostic log (live)")[-1]  # back at Operations -- tail actually ended
 
 
 def test_diagnostic_log_tail_screen_appends_entries_written_while_watching(db, lane, monkeypatch):
@@ -8676,7 +8676,7 @@ def test_link_status_screen_lists_and_shows_peer_detail(db, lane, sysop):
     # [P]eers -> the node map -> the peer's own detail screen, left with
     # [B]ack (the stray "x" is refused, not taken as "any key") -> the map
     # -> Link status.
-    session = FakeSession(["s", "l", "p", "0", "1", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["o", "l", "p", "0", "1", "x", "b", "b", "b", "b", "b"])
     session.terminal_height = 60  # the whole detail on one page
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
@@ -8727,7 +8727,7 @@ def test_link_status_screen_draws_the_whole_panel_before_offering_to_acknowledge
     # the script turns the page ([>] rather than [N], since [P]eers owns
     # "p" here) through all three and then leaves, and never answers
     # anything. (Issue #777's dial-in row made it three pages.)
-    session = FakeSession(["s", "l", ">", ">", "b", "b", "b"])
+    session = FakeSession(["o", "l", ">", ">", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _visible(_written_text(session))
@@ -9311,8 +9311,8 @@ def test_operations_menu_reloads_after_diagnostic_and_follow_log_screens(db, lan
     identity = bootstrap_node_identity("testnode")
     link_context = LinkContext(link_node=LinkNode(identity=identity))
 
-    # landing (1) -> operations initial (2) -> [d] reload (3) -> [f] reload (4)
-    session = FakeSession(["o", "d", "f", "b", "b"])
+    # landing (1) -> operations initial (2) -> [d] reload (3) -> [w] reload (4)
+    session = FakeSession(["o", "d", "w", "b", "b"])
     asyncio.run(
         admin_menu(session, lane, sysop, node_controls=None, link_context=link_context)
     )
@@ -9320,12 +9320,11 @@ def test_operations_menu_reloads_after_diagnostic_and_follow_log_screens(db, lan
     assert len(calls) == 4
 
 
-@pytest.mark.parametrize("menu_key_", ["o", "s"])
-def test_diagnostics_open_without_link_from_operations_and_settings(db, lane, sysop, monkeypatch, menu_key_):
+def test_diagnostics_open_without_link_from_operations(db, lane, sysop, monkeypatch):
     """Issue #732: a live node running MRC without Link writes the
-    diagnostic log too. Operations offered [D]iagnostics/[F]ollow log
-    there, but Settings' hidden d/f aliases still required Link and
-    silently rejected the key."""
+    diagnostic log too, and Operations offers [D]iagnostics/[W]atch log
+    without Link. (Settings' hidden d/f aliases, which once required Link,
+    are gone since issue #1158: a renamed key is a clean switch.)"""
     import netbbs.net.admin_flow as admin_flow_module
 
     opened = []
@@ -9339,7 +9338,7 @@ def test_diagnostics_open_without_link_from_operations_and_settings(db, lane, sy
     monkeypatch.setattr(admin_flow_module, "_diagnostic_log_screen", _fake_diagnostic_log_screen)
     monkeypatch.setattr(admin_flow_module, "_diagnostic_log_tail_screen", _fake_diagnostic_log_tail_screen)
 
-    session = FakeSession([menu_key_, "d", "f", "b", "b"])
+    session = FakeSession(["o", "d", "w", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls(), link_context=None))
 
     assert opened == ["diagnostics", "follow"]
@@ -9565,7 +9564,7 @@ def test_renaming_an_occupied_channel_is_refused_until_it_empties(db, lane, syso
 
     # list -> pick(01): its own screen, the cursor on Name -> rename -> [S]ave
     # is refused -> put the name back (nothing left to save) -> back out.
-    inputs = ["m", "n", "l", "0", "1", "ENTER", "Lobby2", "s", "ENTER", "Lobby", "s", "b", "b", "b", "b"]
+    inputs = ["m", "l", "l", "0", "1", "ENTER", "Lobby2", "s", "ENTER", "Lobby", "s", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
     text = _written_text(session)
@@ -9574,7 +9573,7 @@ def test_renaming_an_occupied_channel_is_refused_until_it_empties(db, lane, syso
     assert [c.name for c in list_channels(db)] == ["Lobby"]
 
     hub.leave("Lobby", ParticipantId("alice", 1))
-    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lobby2", "s", "b", "b", "b", "b"])
+    session = FakeSession(["m", "l", "l", "0", "1", "ENTER", "Lobby2", "s", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
     assert "Updated 'Lobby2'" in _written_text(session)
     assert [c.name for c in list_channels(db)] == ["Lobby2"]
@@ -9586,7 +9585,7 @@ def test_standalone_rename_says_what_happens_to_callers_inside(db, lane, sysop):
     from netbbs.chat.channels import create_channel
 
     create_channel(db, "Lobby", creator=sysop)
-    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lobby2", "s", "b", "b", "b", "b"])
+    session = FakeSession(["m", "l", "l", "0", "1", "ENTER", "Lobby2", "s", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Updated 'Lobby2'" in text
@@ -9610,7 +9609,7 @@ def test_rename_refusal_sanitizes_a_hostile_channel_name(db, lane, sysop):
         session_registry=ActiveSessionRegistry(), maintenance=MaintenanceMode(),
         shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0, chat_hub=hub,
     )
-    session = FakeSession(["m", "n", "l", "0", "1", "ENTER", "Lobby2", "s", "ENTER", hostile, "s", "b", "b", "b", "b"])
+    session = FakeSession(["m", "l", "l", "0", "1", "ENTER", "Lobby2", "s", "ENTER", hostile, "s", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
     refusal = next(line for line in session.written if "cannot be renamed" in line)
     # The escape byte is gone (the styling wrapper adds its own, well-formed
@@ -10301,7 +10300,7 @@ def test_delete_warning_says_the_name_stays_retired_on_a_link_node(db, lane, sys
 
     text = " ".join(_visible(_written_text(session)).split())
     assert "the username 'alice' stays retired afterwards" in text
-    assert "Retired names releases it" in text
+    assert "Held names releases it" in text
 
 
 def test_declining_a_registration_holds_no_name_and_skips_the_delete_ritual(db, lane, sysop):
@@ -10358,12 +10357,12 @@ def test_retired_names_screen_lists_and_can_be_left_without_writing(db, lane, sy
     from netbbs.auth.users import list_retired_usernames
 
     _retire(db, sysop)
-    session = FakeSession(["u", "t", "b", "b", "b"])
+    session = FakeSession(["u", "h", "b", "b", "b"])
 
     _run(session, lane, sysop)
 
     text = " ".join(_visible(_written_text(session)).split())
-    assert "Users › Retired usernames" in text
+    assert "Users › Held names" in text
     assert re.search(r"HELD USERNAMES Username Retired ─+ alice \d{4}-\d{2}-\d{2} ", text), text
     assert "a username is the account's identity" in text
     assert "[R]elease [B]ack" in text
@@ -10371,7 +10370,7 @@ def test_retired_names_screen_lists_and_can_be_left_without_writing(db, lane, sy
 
 
 def test_retired_names_screen_says_so_on_a_node_that_never_ran_link(db, lane, sysop):
-    session = FakeSession(["u", "t", "b", "b", "b"])
+    session = FakeSession(["u", "h", "b", "b", "b"])
 
     _run(session, lane, sysop)
 
@@ -10383,7 +10382,7 @@ def test_sysop_can_release_a_retired_name_behind_one_confirm(db, lane, sysop):
     from netbbs.auth.users import list_retired_usernames
 
     _retire(db, sysop)
-    session = FakeSession(["u", "t", "r", "0", "1", "y", "b", "b", "b"])
+    session = FakeSession(["u", "h", "r", "0", "1", "y", "b", "b", "b"])
 
     _run(session, lane, sysop)
 
@@ -10398,7 +10397,7 @@ def test_declining_the_release_confirm_keeps_the_name_held(db, lane, sysop):
     from netbbs.auth.users import is_username_retired
 
     _retire(db, sysop)
-    session = FakeSession(["u", "t", "r", "0", "1", "n", "b", "b", "b"])
+    session = FakeSession(["u", "h", "r", "0", "1", "n", "b", "b", "b"])
 
     _run(session, lane, sysop)
 
@@ -10862,7 +10861,7 @@ def test_link_status_offers_an_uncarried_board_and_accepting_it_carries_it(db, l
     )
 
     # The Content section is on the status screen's second page.
-    session = FakeSession(["s", "l", "PAGE_DOWN", "o", "0", "1", "a", "b", "b", "b"])
+    session = FakeSession(["o", "l", "PAGE_DOWN", "o", "0", "1", "a", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
 
     text = _normalized_visible(_written_text(session))
@@ -10892,7 +10891,7 @@ def test_an_offered_resource_name_from_a_peer_is_sanitized_before_it_is_styled(d
         content_id=genesis.content_id, own_fingerprint="own", cap=0,
     )
 
-    session = FakeSession(["s", "l", "o", "0", "1", "b", "b", "b", "b", "b"])
+    session = FakeSession(["o", "l", "o", "0", "1", "b", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
 
     assert "\x1b[2J" not in _written_text(session)
@@ -10909,7 +10908,7 @@ def test_link_status_screen_shows_the_live_proxy_outcome(db, lane, sysop, monkey
             ProxyEndpoint("squid.example", 3128, "Basic c2VjcmV0"),
             "tunnel refused: 407 Proxy Authentication Required", ok=False,
         )
-        session = FakeSession(["s", "l", "b", "b", "b"])
+        session = FakeSession(["o", "l", "b", "b", "b"])
         asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
     finally:
         REALTIME_PROXY_STATUS.reset()
@@ -10925,7 +10924,7 @@ def test_link_status_screen_names_a_configured_proxy_without_its_credentials(db,
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HTTP_PROXY", "http://carrier:hunter2@squid.example:3128")
     REALTIME_PROXY_STATUS.reset()
-    session = FakeSession(["s", "l", "b", "b", "b"])
+    session = FakeSession(["o", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
 
     text = _normalized_visible(_written_text(session))
@@ -10938,7 +10937,7 @@ def test_link_status_screen_has_no_proxy_line_without_a_proxy(db, lane, sysop, m
 
     monkeypatch.setattr(realtime_proxy.urllib.request, "getproxies", lambda: {})
     realtime_proxy.REALTIME_PROXY_STATUS.reset()
-    session = FakeSession(["s", "l", "b", "b", "b"])
+    session = FakeSession(["o", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
 
     assert "Live proxy" not in _normalized_visible(_written_text(session))
@@ -11034,7 +11033,7 @@ def test_deleting_a_carried_board_from_elsewhere_hides_it_and_excluded_restores_
         get_board_by_name(db, "Retro Hardware")
     assert db.connection.execute("SELECT COUNT(*) FROM boards").fetchone()[0] == 1
 
-    session = FakeSession(["s", "l", "PAGE_DOWN", "x", "0", "1", "r", "b", "b", "b"])
+    session = FakeSession(["o", "l", "PAGE_DOWN", "e", "0", "1", "r", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
     text = _normalized_visible(_written_text(session))
     assert "'Retro Hardware' restored" in text
@@ -11114,7 +11113,7 @@ def test_a_pending_post_keeps_the_readers_layout_with_colors_off(db, lane, sysop
 def test_welcome_banner_speed_cycles_through_the_offered_speeds(db, lane, sysop):
     from netbbs.net.art_pacing import WELCOME_ART, art_speed
 
-    session = FakeSession(["s", "m", "n", "w", "s", "s", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "s", "w", "s", "s", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert art_speed(db, WELCOME_ART) == 9600
     assert "Plays at 9600 bps" in _written_text(session)
@@ -11134,7 +11133,7 @@ def test_main_menu_masthead_speed_wraps_back_to_off(db, lane, sysop):
 
 
 @pytest.mark.parametrize(("screen_key", "kind"), [
-    ("o", "board_list"),
+    ("d", "board_list"),
     ("f", "file_area"),
     ("c", "chat_channel_picker"),
 ])
@@ -11204,7 +11203,7 @@ def test_link_status_lists_every_hour_long_wait_with_its_next_try(db, lane, syso
     """Issue #700: an operator who fixed the cause could not tell whether they
     had, or when the node would next try, and waited the full hour to be safe."""
     link_context = _waiting_link_context(db)
-    session = FakeSession(["s", "l", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "l", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     text = _link_status_pages(session)
 
@@ -11225,7 +11224,7 @@ def test_link_status_lists_every_hour_long_wait_with_its_next_try(db, lane, syso
 
 
 def test_link_status_leaves_the_waiting_section_out_when_nothing_waits(db, lane, sysop):
-    session = FakeSession(["s", "l", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
+    session = FakeSession(["o", "l", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
     assert "WAITING" not in _link_status_pages(session)
 
@@ -11235,7 +11234,7 @@ def test_retry_now_ends_every_wait_and_starts_a_pass(db, lane, sysop):
 
     link_context = _waiting_link_context(db)
     node = link_context.link_node
-    session = FakeSession(["s", "l", "r", "b", "b", "b"])
+    session = FakeSession(["o", "l", "r", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     text = _link_status_pages(session)
 
@@ -11253,7 +11252,7 @@ def test_retry_now_ends_every_wait_and_starts_a_pass(db, lane, sysop):
 
 def test_retry_now_with_nothing_waiting_still_starts_a_pass(db, lane, sysop):
     link_context = _link_context()
-    session = FakeSession(["s", "l", "r", "b", "b", "b"])
+    session = FakeSession(["o", "l", "r", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     assert "Nothing was waiting. A sync pass is starting now." in _link_status_pages(session)
     assert link_context.link_node.sync_wake.is_set()
@@ -11309,7 +11308,7 @@ def test_the_signals_screen_turns_automatic_signals_off(db, lane, sysop):
     from netbbs.link.trust_issuance import automatic_signals_enabled
 
     assert automatic_signals_enabled(db)
-    session = FakeSession(["s", "p", "g", "t", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "p", "c", "t", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert not automatic_signals_enabled(db)
@@ -11336,7 +11335,7 @@ def test_a_sysop_clears_observed_equivocation_from_the_subject_screen(db, lane, 
     assert len(list_local_observations(db, subject)) == 1
 
     # [>] Next: the subject screen pages, and what was observed is on page 2.
-    session = FakeSession(["s", "p", "s", "0", "1", ">", "l", "y", "b", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "p", "s", "0", "1", ">", "r", "y", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert list_local_observations(db, subject) == []

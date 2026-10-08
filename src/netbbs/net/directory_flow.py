@@ -400,9 +400,9 @@ async def _caller_who_screen(
     with a plain explanation rather than a silently swallowed attempt.
     Choosing not to receive unsolicited direct messages reasonably also
     means not receiving direct-chat invites -- one check gates both, not
-    two independent ones. `Bloc[k]` (issue #925) blocks or unblocks the
+    two independent ones. `[S]ender blocked` (issue #925) blocks or unblocks the
     selected caller -- the same list, and the same toggle, as a received
-    letter's `Bloc[k] sender` -- and is not offered for this BBS's SysOp
+    letter's `[S]ender blocked` -- and is not offered for this BBS's SysOp
     or the caller's own account.
     It does not close mail (issue #821): `[E]-mail` is offered to anyone
     listed, local or on a linked node, while mail is open to the caller,
@@ -460,11 +460,11 @@ async def _caller_who_screen(
     _E_MAIL = ("e", MenuEntry(label=menu_key("E", "-mail"), brief="Write them a letter"))
 
     async def _block_option(target: BlockTarget) -> tuple[str, MenuEntry]:
-        """`Bloc[k]`/`Unbloc[k]`, labelled by what it will do (issue #925)."""
+        """`[S]ender blocked: no`/`yes`, a toggle showing its state (issues #925, #1158)."""
         assert lane is not None
         blocked = await lane.run(is_blocked, user, target)
-        return ("k", MenuEntry(
-            label=menu_key("k", "", prefix="Unbloc" if blocked else "Bloc"),
+        return ("s", MenuEntry(
+            label=menu_key("S", "ender blocked: yes" if blocked else "ender blocked: no"),
             brief="Accept their mail and messages again" if blocked else "Refuse their mail and messages",
         ))
 
@@ -547,7 +547,7 @@ async def _caller_who_screen(
             action = await _choose(options, _remote_header)
             if action == "b":
                 return
-            if action == "k":
+            if action == "s":
                 await _toggle(remote_block)
                 return
             if action == "e":
@@ -639,7 +639,7 @@ async def _caller_who_screen(
 
         if action == "b":
             return
-        if action == "k":
+        if action == "s":
             await _toggle(local_block)
             return
         if action == "e":

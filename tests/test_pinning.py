@@ -353,10 +353,10 @@ def test_a_moderator_pins_from_the_reader_and_the_list_says_so(db, mod, monkeypa
     board = _board(db, mod)
     _posts(db, board, mod, 3, monkeypatch)
     # Open post 1, pin it, back to the list, leave.
-    session = BoardSession(["1", "i", "b", "b"])
+    session = BoardSession(["1", "o", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, mod))
     text = session.visible()
-    assert "P[i]n" in text
+    assert "[O]n top: no" in text
     assert "Post pinned: it is listed at the top of this board." in text
     assert list_pinned_posts(db, board, requesting_user=mod)[0].subject == "Subject 0"
     assert "pin" in text.rsplit("Choice:", 2)[-2]  # the list drawn after the pin marks it
@@ -367,7 +367,7 @@ def test_keep_is_offered_only_where_posts_expire(db, mod, monkeypatch):
     _posts(db, board, mod, 1, monkeypatch)
     session = BoardSession(["1", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, mod))
-    assert "[K]eep" not in session.visible()
+    assert "[K]ept" not in session.visible()
 
     expiring = create_board(db, "news", creator=mod, max_post_age_days=30)
     grant_permissions(
@@ -376,16 +376,16 @@ def test_keep_is_offered_only_where_posts_expire(db, mod, monkeypatch):
     create_post(db, expiring, mod, "Headline", "Body")
     session = BoardSession(["1", "k", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, expiring, mod))
-    assert "[K]eep" in session.visible()
+    assert "[K]ept: no" in session.visible()
     assert "Post kept: it will not expire." in session.visible()
 
 
 def test_a_caller_without_edit_permission_cannot_pin(db, mod, alice, monkeypatch):
     board = _board(db, mod)
     _posts(db, board, mod, 1, monkeypatch)
-    session = BoardSession(["1", "i", "b", "b"])
+    session = BoardSession(["1", "o", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
-    assert "P[i]n" not in session.visible()
+    assert "[O]n top" not in session.visible()
     assert list_pinned_posts(db, board, requesting_user=alice) == []
 
 
@@ -477,12 +477,12 @@ def test_a_moderator_pins_the_highlighted_file(tmp_path, monkeypatch):
     monkeypatch.undo()
     lane = DatabaseLane(path)
     try:
-        session = FileSession(["DOWN", "i", "b"])
+        session = FileSession(["DOWN", "o", "b"])
         asyncio.run(_show_area(session, lane, area, mod))
     finally:
         lane.close()
     text = session.visible()
-    assert "P[i]n" in text
+    assert "[O]n top" in text
     assert "f0.txt pinned: it is listed first in this area." in text
     assert "pin f0.txt" in text
     assert list_files_page(db, area, mod, with_pinned=True).entries[0].filename == "f0.txt"
@@ -516,7 +516,7 @@ def test_unpinning_an_old_post_returns_to_the_list(db, mod, monkeypatch):
     set_post_pinned(db, made[0], True, changed_by=mod)
     # Open the pinned row, unpin it, and one [B]ack leaves the board: the
     # unpin already went back to the list.
-    session = BoardSession(["1", "i", "b"])
+    session = BoardSession(["1", "o", "b"])
     asyncio.run(board_flow._show_board(session, db, board, mod))
     assert "Post unpinned" in session.visible()
     assert list_pinned_posts(db, board, requesting_user=mod) == []

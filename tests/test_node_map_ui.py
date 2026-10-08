@@ -1,6 +1,6 @@
 """
 The caller's node map screen (design doc §8.12, issue #777), reached from
-the Directory: `Node [m]ap`, "Nodes known to <board>", its detail view, the
+the Directory: `[M]ap of nodes`, "Nodes known to <board>", its detail view, the
 node-wide level gate, and the entry's absence when Link is disabled.
 """
 
@@ -108,7 +108,7 @@ def test_the_directory_offers_the_node_map_and_it_lists_known_nodes(rig):
     _browse(session, db, lane, viewer, link_context)
 
     text = session.visible_output
-    assert "Node [m]ap" in text
+    assert "[M]ap of nodes" in text
     assert "Nodes known to Roanoke" in text
     listing = text[text.index("Nodes known to Roanoke"):]
     listing = listing[: listing.index("Choice:")]
@@ -132,7 +132,7 @@ def test_the_node_map_is_not_offered_when_link_is_disabled(rig):
     _browse(session, db, lane, viewer, None)
 
     text = session.visible_output
-    assert "Node [m]ap" not in text
+    assert "[M]ap of nodes" not in text
     assert "Nodes known to" not in text
 
 
@@ -145,12 +145,12 @@ def test_the_node_map_level_gate(rig):
 
     refused = FakeSession(["m", "b"])
     _browse(refused, db, lane, below, link_context)
-    assert "Node [m]ap" not in refused.visible_output
+    assert "[M]ap of nodes" not in refused.visible_output
     assert "Nodes known to" not in refused.visible_output
 
     allowed = FakeSession(["m", "b"])
     _browse(allowed, db, lane, at, link_context)
-    assert "Node [m]ap" in allowed.visible_output
+    assert "[M]ap of nodes" in allowed.visible_output
     # An empty map says so and returns to the directory.
     assert "No other nodes are known here yet." in allowed.visible_output
 

@@ -410,7 +410,7 @@ def test_the_console_rotates_a_key_from_link_status_and_says_so(db, tmp_path):
     base, link_node, run = _console(db, tmp_path, with_rotator=True)
 
     # Settings -> Link status -> [K]eys -> [S]igning key -> [C]ompromised, confirmed.
-    text = run(["s", "l", "k", "s", "c", "y", "b", "b", "b", "b"])
+    text = run(["o", "l", "k", "s", "c", "y", "b", "b", "b", "b"])
 
     assert "Node keys" in text and base.fingerprint in text
     assert link_node.identity.signing_key.fingerprint != base.signing_key.fingerprint
@@ -421,13 +421,13 @@ def test_the_console_rotates_a_key_from_link_status_and_says_so(db, tmp_path):
 
 def test_declining_the_confirmation_rotates_nothing(db, tmp_path):
     base, link_node, run = _console(db, tmp_path, with_rotator=True)
-    run(["s", "l", "k", "t", "r", "n", "b", "b", "b", "b", "b"])
+    run(["o", "l", "k", "t", "r", "n", "b", "b", "b", "b", "b"])
     assert link_node.identity is base
 
 
 def test_without_a_running_node_the_keys_screen_says_where_rotation_is_done(db, tmp_path):
     _base, _link_node, run = _console(db, tmp_path, with_rotator=False)
-    text = run(["s", "l", "k", "b", "b", "b", "b"])
+    text = run(["o", "l", "k", "b", "b", "b", "b"])
     assert "Rotation needs the running node" in text and "rotate-key" in text
     assert "[S]igning key" not in text
 

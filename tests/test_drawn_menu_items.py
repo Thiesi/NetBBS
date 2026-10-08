@@ -131,8 +131,8 @@ def test_hidden_items_are_painted_over_and_the_frame_stays():
 # Every item an ordinary caller has, drawn, plus the SysOp's console.
 ALL_DRAWN = "\r\n".join([
     "  [M]essage boards  [C]hat  [F]iles  [N]ew scan  [/] Find  [?] Help",
-    "  [D]irectory  [P]rofile  [E]-mail  [H]istory  P[r]evious callers",
-    "  [S]ysOp console  [V]erify  S[t]aff list  [L]ogoff",
+    "  [D]irectory  [P]rofile  [E]-mail  [H]istory  [R]ecent callers",
+    "  [S]ysOp console  [V]erify  [O]perators  [L]ogoff",
     "Choice here: {prompt}",
 ]).encode("utf-8")
 
@@ -178,7 +178,7 @@ def test_a_caller_does_not_see_a_drawn_item_they_cannot_use(tmp_path):
     screen = _screen(text)
     shown = "\n".join(screen)
     assert "[S]ysOp" not in shown and "[V]erify" not in shown
-    assert screen[2].strip() == "S[t]aff list  [L]ogoff"
+    assert screen[2].strip() == "[O]perators  [L]ogoff"
     assert "[M]essage boards" in screen[0]
     db.close()
 
@@ -260,6 +260,16 @@ def test_a_drawn_key_that_is_no_menu_key_stays_as_drawn(tmp_path):
     db, user = _setup(tmp_path, art)
     screen = _screen(_draw(db, user))
     assert "[x] marks the spot" in screen[2]
+    db.close()
+
+
+def test_art_drawn_with_the_old_staff_list_key_is_blanked_and_listed_anew(tmp_path):
+    # Issue #1158: `[T]` was the Staff list and is Topics now; art drawn
+    # before still says `S[t]aff list`, which is no longer the caller's item.
+    db, user = _setup(tmp_path, b"  S[t]aff list  [L]ogoff\r\n{menu 74x6}\r\n\r\n\r\n\r\n\r\n\r\n{prompt}")
+    screen = _screen(_draw(db, user))
+    assert "S[t]aff" not in screen[0] and "[L]ogoff" in screen[0]
+    assert "[O]perators" in "\n".join(screen[1:7])
     db.close()
 
 

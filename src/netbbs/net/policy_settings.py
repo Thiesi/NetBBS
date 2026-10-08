@@ -90,8 +90,8 @@ class PolicySetting:
 GROUP_CARRY = "Carry caps"
 GROUP_PEERING = "Peering"
 GROUP_LINK_LIMITS = "Link limits"
-GROUP_RELAY = "Live relay"
-GROUP_THROTTLE = "Login throttle"
+GROUP_RELAY = "Real-time relay"
+GROUP_THROTTLE = "Throttle for logins"
 GROUP_SHUTDOWN = "Shutdown"
 GROUPS = (GROUP_CARRY, GROUP_PEERING, GROUP_LINK_LIMITS, GROUP_RELAY, GROUP_THROTTLE, GROUP_SHUTDOWN)
 

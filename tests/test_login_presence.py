@@ -156,7 +156,7 @@ def test_previous_callers_screen_appears_after_login_and_before_main_menu(db, mo
             MaintenanceMode(),
         )
         output = re.sub(r"\x1b\[[0-9;]*m", "", session.output)
-        assert output.index("P R E V I O U S") < output.index("Main menu")
+        assert output.index("R E C E N T") < output.index("Main menu")
         assert "bob" in output
 
     asyncio.run(scenario())

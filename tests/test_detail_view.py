@@ -253,7 +253,7 @@ def test_repair_carried_posts_holds_its_result(lane):
 
 
 def test_an_empty_outbox_and_an_empty_diagnostic_log_are_screens_not_flashes(lane):
-    for keys, expected in ((["x"], "No outbound work items recorded yet."), (["o", "d"], "Nothing logged yet.")):
+    for keys, expected in ((["q"], "No outbound work items recorded yet."), (["o", "d"], "Nothing logged yet.")):
         session = _walk(lane, keys, link_context=_link_context())
         screen = "\n".join(session.on_terminal())
         assert expected in screen and "[B]ack" in screen

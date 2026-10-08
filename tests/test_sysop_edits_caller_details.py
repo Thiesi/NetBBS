@@ -198,13 +198,13 @@ def _detail(session, lane, actor, target):
 def test_the_account_screen_shows_and_edits_the_display_name(db, lane, sysop, carol):
     session = FakeSession(["n", "Carol R.", "b"])
     text = _detail(session, lane, sysop, carol)
-    assert "Display name:" in text and "Display [n]ame" in text
+    assert "Display name:" in text and "[N]ame" in text
     assert get_display_name(db, carol) == "Carol R."
     assert "Display name for 'carol' is now 'Carol R.'." in text
 
 
 def test_the_account_screen_edits_the_birthdate_and_refuses_a_bad_one(db, lane, sysop, carol):
-    session = FakeSession(["e", "1990-05-01", "e", "not a date", "b"])
+    session = FakeSession(["w", "1990-05-01", "w", "not a date", "b"])
     text = _detail(session, lane, sysop, carol)
     assert get_birthdate(db, carol) == date(1990, 5, 1)
     assert "Not a valid date" in text
@@ -219,7 +219,7 @@ def test_the_account_screen_says_when_an_age_is_verified(db, lane, sysop, carol)
 def test_a_staff_member_without_manage_accounts_is_not_offered_the_edits(db, lane, sysop, carol):
     helper = _staff(db, sysop, "helper", APPROVE)
     text = _detail(FakeSession(["n", "b"]), lane, helper, carol)
-    assert "Display [n]ame" not in text
+    assert "[N]ame" not in text
     assert get_display_name(db, carol) is None
 
 

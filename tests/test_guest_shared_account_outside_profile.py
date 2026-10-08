@@ -112,7 +112,7 @@ def bob(db):
 
 
 def test_a_guest_session_cannot_block_from_whos_online(db, lane, alice, bob):
-    session = WhoSession(keys=["0", "1", "k", "b"])
+    session = WhoSession(keys=["0", "1", "s", "b"])
     session.authenticated_without_credential = True
 
     _run_who(db, lane, alice, session)

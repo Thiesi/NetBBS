@@ -1765,7 +1765,7 @@ async def admin_menu(
 
     `node_controls` (design doc), if given, unlocks the `[N]ode` quick
     action and its entry in `[O]perations` (list/disconnect sessions,
-    trigger shutdown), and lets `[K] Backup` use the running node's
+    trigger shutdown), and lets `[F]ull backups` use the running node's
     configured identity path -- present when called
     from within a live session (`netbbs.net.login_flow`), absent
     (`None`) when called from the standalone `python -m netbbs.admin`
@@ -1858,13 +1858,13 @@ async def admin_menu(
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
             )
-        elif choice == "x" and link_context is not None:
+        elif choice == "q" and link_context is not None:
             await session.write_line("")
             await _outbox_screen(session, lane, user)
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
             )
-        elif choice == "k":
+        elif choice == "f":
             await session.write_line("")
             await _backup_status_screen(session, lane, user, node_controls=node_controls)
             dashboard_state = await _draw_admin_menu(
@@ -1875,7 +1875,7 @@ async def admin_menu(
             await _managed_dns_status_screen(session, lane, user)
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
                                    link_context=link_context, state=dashboard_state)
-        elif choice == "w":
+        elif choice == "t":
             await session.write_line("")
             await _away_screen(session, lane, user)
             dashboard_state = await _draw_admin_menu(
@@ -1939,7 +1939,7 @@ async def staff_menu(
         elif choice == "u" and user.has_staff(StaffPermission.MANAGE_ACCOUNTS):
             await session.write_line("")
             await _pick_and_edit_user(session, lane, user, node_controls, title="Accounts")
-        elif choice == "w":
+        elif choice == "t":
             await session.write_line("")
             await _away_screen(session, lane, user)
         elif choice == "m" and await lane.run(has_moderation_scope, user):
@@ -2020,7 +2020,7 @@ def _staff_menu_entries(user: User, *, moderates: bool) -> list[MenuEntry]:
         options.append(MenuEntry(label=menu_key("U", "sers"), brief="Levels, disabling, passwords"))
     if moderates:
         options.append(MenuEntry(label=menu_key("M", "oderation"), brief="Held posts and uploads"))
-    options.append(MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"))
+    options.append(MenuEntry(label=menu_key("T", "ime away"), brief="Tell members you're away"))
     options.append(MenuEntry(label=menu_key("R", "efresh"), brief="Redraw with current numbers"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"))
     return options
@@ -2047,7 +2047,7 @@ def _away_panel_lines(state: dict[str, object], *, width: int, unicode_style: bo
     notice = state.get("away")
     if notice is None:
         return []
-    text = f"You are marked {describe_away(notice, state['away_since'])}. A[w]ay ends it."
+    text = f"You are marked {describe_away(notice, state['away_since'])}. [T]ime away ends it."
     return [
         colored(f"  {line}", fg_color=WARNING_COLOR)
         for line in _wrap_panel_sentence(sanitize_text(text), prefix="  ", width=width, unicode_style=unicode_style)
@@ -2500,9 +2500,9 @@ def _admin_menu_entries(
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"),
     ]
     quick = [
-        MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
+        MenuEntry(label=menu_key("F", "ull backups"), brief="Create and review complete backups"),
         MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org name status"),
-        MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"),
+        MenuEntry(label=menu_key("T", "ime away"), brief="Tell members you're away"),
     ]
     if node_controls is not None:
         quick.insert(
@@ -2512,7 +2512,7 @@ def _admin_menu_entries(
     if link_context is not None:
         quick.extend([
             MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
-            MenuEntry(label=menu_key("X", "", prefix="Outbo"), brief="Pending outgoing Link work items"),
+            MenuEntry(label=menu_key("Q", "ueue (outbox)"), brief="Pending outgoing Link work items"),
         ])
     return console, quick
 
@@ -2618,7 +2618,7 @@ async def _users_menu(
 ) -> None:
     """Every user-account action, grouped together (design doc): create,
     list/detail, registration policy, promote/demote, enable/disable,
-    delete. `List [u]sers`/`[P]romote/demote`/`[E]nable/disable`/
+    delete. `[U]ser list`/`[P]romote/demote`/`[E]nable/disable`/
     `[D]elete user` all route through the same `_pick_and_edit_user` ->
     `_user_detail_screen` central editor now (design doc -- node
     management, Thiesi's own dogfood-testing report), differing only in
@@ -2684,7 +2684,7 @@ async def _users_menu(
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Delete which user?")
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
-        elif choice == "o":
+        elif choice == "a":
             await session.write_line("")
             await _promotion_rules_screen(session, lane, actor)
             stats = await lane.run(_load_stats)
@@ -2694,7 +2694,7 @@ async def _users_menu(
             await _levels_screen(session, lane, actor, node_controls=node_controls, link_context=link_context)
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
-        elif choice == "t":
+        elif choice == "h":
             await session.write_line("")
             await _retired_usernames_screen(session, lane, actor)
             stats = await lane.run(_load_stats)
@@ -2715,14 +2715,14 @@ def _users_menu_entries() -> list[MenuEntry]:
     """The Users screen's menu, shared by its draw and its help."""
     return [
         MenuEntry(label=menu_key("C", "reate user"), brief="Add a new user account"),
-        MenuEntry(label=menu_key("u", "sers", prefix="List "), brief="Browse and edit accounts"),
+        MenuEntry(label=menu_key("U", "ser list"), brief="Browse and edit accounts"),
         MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
         MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
         MenuEntry(label=menu_key("L", "evels (LAST)"), brief="What each level opens"),
-        MenuEntry(label=menu_key("o", "motion rules", prefix="Pr"), brief="Raise new accounts automatically"),
+        MenuEntry(label=menu_key("A", "uto-promotion rules"), brief="Raise new accounts automatically"),
         MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
         MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
-        MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Names held for deleted accounts"),
+        MenuEntry(label=menu_key("H", "eld names"), brief="Names held for deleted accounts"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
     ]
 
@@ -2963,10 +2963,10 @@ async def _levels_screen(
             empty_message="No levels in use.",
             refresh=_load,
             live_keys={"g": _other_level},
-            item_keys={"m": _name_level},
+            item_keys={"n": _name_level},
             live_nav=[
                 MenuEntry(label=menu_key("G", "o to level"), brief="What any level opens"),
-                MenuEntry(label=menu_key("m", "e", prefix="Na"), brief="Name or rename a level"),
+                MenuEntry(label=menu_key("N", "ame"), brief="Name or rename a level"),
             ],
             live_label=_status_line,
             start_stable_id=start,
@@ -3509,13 +3509,13 @@ async def _operations_menu(
         elif choice == "d" and diagnostics_available:
             await _diagnostic_log_screen(session, lane, actor)
             state = await lane.run(_load_ops)
-        elif choice == "f" and diagnostics_available:
+        elif choice == "w" and diagnostics_available:
             await _diagnostic_log_tail_screen(session, lane)
             state = await lane.run(_load_ops)
         elif choice == "r" and link_context is not None:
             await _repair_carried_posts_screen(session, lane, actor)
             state = await lane.run(_load_ops)
-        elif choice == "k":
+        elif choice == "f":
             await _backup_status_screen(session, lane, actor, node_controls=node_controls)
             state = await lane.run(_load_ops)
         elif choice == "p":
@@ -3527,7 +3527,7 @@ async def _operations_menu(
         elif choice == "a":
             await _audit_log_screen(session, lane, actor)
             state = await lane.run(_load_ops)
-        elif choice == "g":
+        elif choice == "e":
             await _node_log_screen(session, lane, actor)
             state = await lane.run(_load_ops)
         elif choice == "m":
@@ -3550,11 +3550,11 @@ def _operations_menu_entries(
 ) -> list[MenuEntry]:
     """The Operations screen's menu, shared by its draw and its help."""
     options = [
-        MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
+        MenuEntry(label=menu_key("F", "ull backups"), brief="Create and review complete backups"),
         MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
         MenuEntry(label=menu_key("S", "earch indexes"), brief="Check and rebuild Find's indexes"),
         MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
-        MenuEntry(label=menu_key("g", prefix="Node lo"), brief="Warnings and errors in netbbs.log"),
+        MenuEntry(label=menu_key("E", "rror log"), brief="Warnings and errors in netbbs.log"),
         MenuEntry(label=menu_key("M", "ail"), brief="Mailbox sizes, refused Link mail"),
     ]
     if node_controls is not None:
@@ -3567,7 +3567,7 @@ def _operations_menu_entries(
     if diagnostics_available:
         options.extend([
             MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostics"),
-            MenuEntry(label=menu_key("F", "ollow log"), brief="Live-tail the diagnostic log"),
+            MenuEntry(label=menu_key("W", "atch log"), brief="Live-tail the diagnostic log"),
         ])
     if link_context is not None:
         options.append(
@@ -3585,11 +3585,13 @@ async def _system_menu(
     node_controls: NodeControls | None,
     link_context: LinkContext | None = None,
 ) -> None:
-    """Durable node settings: manners & bastheads, updates, timestamps, and trust.
+    """Durable node settings: mastheads & banners, updates, timestamps, and trust.
 
-    The old operational keys remain accepted here as non-advertised
-    compatibility aliases; the visible home for those actions is now the
-    operations console."""
+    The operational screens (Link status, Outbox, Repair carried posts,
+    Diagnostics, Watch log, Full backups) live under Operations. Their old
+    keys were accepted here too as unlisted aliases until issue #1158 step 2:
+    a hidden key blocks a label's first letter, and a renamed key is a clean
+    switch."""
 
     def _load_settings_stats(db: Database) -> dict[str, Any]:
         # GitHub issue #206: unlike its Users/Content/Operations/Node
@@ -3660,17 +3662,17 @@ async def _system_menu(
             await _timestamp_settings_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "s":
+        elif choice == "l":
             await session.write_line("")
             await _limits_settings_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "w":
+        elif choice == "o":
             await session.write_line("")
             await _policy_settings_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "v":
+        elif choice == "r":
             def _toggle_previous_callers(db: Database) -> None:
                 # Three steps (issue #841): shown in the default neon style,
                 # shown plain, hidden, and round again.
@@ -3708,41 +3710,11 @@ async def _system_menu(
             await _trust_menu(session, lane, actor, link_context=link_context)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "l" and link_context is not None:
-            await session.write_line("")
-            await _link_status_screen(session, lane, actor, link_context=link_context, node_controls=node_controls)
-            stats = await lane.run(_load_settings_stats)
-            await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "o" and link_context is not None:
-            await session.write_line("")
-            await _outbox_screen(session, lane, actor)
-            stats = await lane.run(_load_settings_stats)
-            await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "r" and link_context is not None:
-            await session.write_line("")
-            await _repair_carried_posts_screen(session, lane, actor)
-            stats = await lane.run(_load_settings_stats)
-            await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "d" and _diagnostics_available(node_controls, link_context):
-            await session.write_line("")
-            await _diagnostic_log_screen(session, lane, actor)
-            stats = await lane.run(_load_settings_stats)
-            await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "f" and _diagnostics_available(node_controls, link_context):
-            await session.write_line("")
-            await _diagnostic_log_tail_screen(session, lane)
-            stats = await lane.run(_load_settings_stats)
-            await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "k":
-            await session.write_line("")
-            await _backup_status_screen(session, lane, actor, node_controls=node_controls)
-            stats = await lane.run(_load_settings_stats)
-            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Settings help", _system_menu_entries(stats),
                 about="The node's lasting configuration: how it looks, what callers may do, and how it "
-                      "joins other networks. Previous callers changes at once, without a screen of its own.",
+                      "joins other networks. Recent callers changes at once, without a screen of its own.",
                 header_color=stats["header_color"], unicode_style=stats["unicode_style"],
             )
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
@@ -3815,7 +3787,7 @@ async def _draw_system_menu(
         # sentences rather than five settings.
         node_name_label, update_label, timestamp_label, callers_label, trust_label = (
             f"{label + ':':<22}" for label in (
-                "Node name", "Update checks", "Timestamps shown as", "Previous callers", "Trust policy",
+                "Node name", "Update checks", "Timestamps shown as", "Recent callers", "Trust policy",
             )
         )
         update_value = f"{update_state} -- {update_summary}"
@@ -3879,11 +3851,11 @@ def _system_menu_entries(stats: dict[str, Any]) -> list[MenuEntry]:
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
         MenuEntry(
-            label=menu_key("S", " & retention", prefix="Limit"),
+            label=menu_key("L", "imits & retention"),
             brief="Uploads, expiry, chat, mail level",
         ),
         MenuEntry(
-            label=menu_key("w", "ork & login limits", prefix="Net"),
+            label=menu_key("O", "perating limits"),
             brief="Link, login throttle, shutdown",
         ),
         MenuEntry(
@@ -3900,8 +3872,13 @@ def _system_menu_entries(stats: dict[str, Any]) -> list[MenuEntry]:
                 else "Guest login off; pre-login notice"
             ),
         ),
+        # A three-way toggle (issue #841) shows its state after a colon
+        # (issue #1158): the key and the label's start never change.
         MenuEntry(
-            label=menu_key("V", "ious callers", prefix="Pre"),
+            label=menu_key("R", "ecent callers: " + (
+                "hidden" if not stats["previous_callers_enabled"]
+                else "plain" if stats["previous_callers_plain"] else "neon"
+            )),
             brief=(
                 "Hidden after login; press to show (neon)"
                 if not stats["previous_callers_enabled"]
@@ -4398,7 +4375,7 @@ _TRUST_MENU = (
     MenuEntry(label=menu_key("I", "dentity authorities"), brief="Attestation authority list"),
     MenuEntry(label=menu_key("P", "ublished identity"), brief="What it asserts about its users"),
     MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for"),
-    MenuEntry(label=menu_key("g", "nals", prefix="Si"), brief="Equivocation it reported"),
+    MenuEntry(label=menu_key("C", "onflict signals"), brief="Equivocation it reported"),
     MenuEntry(label=menu_key("E", "xceptions"), brief="Sole-authority deviations"),
     MenuEntry(label=menu_key("H", "istory"), brief="Trust config change log"),
     MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
@@ -4469,7 +4446,7 @@ async def _trust_menu(
             await _trust_subjects_screen(session, lane, actor, link_context=link_context)
         elif choice == "v":
             await _published_vouches_screen(session, lane, actor, link_context=link_context)
-        elif choice == "g":
+        elif choice == "c":
             await _issued_signals_screen(session, lane, actor, link_context=link_context)
         elif choice == "i":
             await _attestation_authorities_screen(session, lane, actor)
@@ -4966,7 +4943,7 @@ async def _trust_subject_screen(
         if selected.kind == "user":
             actions.append(("i", menu_key("I", "dentity attestation override")))
         if observations:
-            actions.append(("l", menu_key("l", "ear evidence", prefix="C")))
+            actions.append(("r", menu_key("R", "emove evidence")))
         actions.extend([("v", menu_key("V", "ouch")), ("h", menu_key("H", "istory")), _BACK_ACTION])
         choice, listing.page = await show_detail(
             session,
@@ -4977,7 +4954,7 @@ async def _trust_subject_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Trust subject help",
             help_about=(
-                "One node or remote user, and how far this node trusts it in each area. Establish and Block "
+                "One node or remote user, and how far this node trusts it in each area. Establish and Deny "
                 "open the override editor already filled in; nothing changes before you save."
             ),
         )
@@ -4999,7 +4976,7 @@ async def _trust_subject_screen(
             await _vouch_screen(session, lane, actor, selected, subject_name, link_context=link_context)
         elif choice == "i":
             await _remote_attestation_override_screen(session, lane, actor, selected, listing)
-        elif choice == "l" and observations:
+        elif choice == "r" and observations:
             await _clear_observation(session, lane, actor, selected, observations, listing, link_context)
 
 
@@ -5439,7 +5416,7 @@ _TRUST_STATE_HELP = (
     MenuEntry(label=menu_key("P", "robationary"), brief="Unproven, as every subject starts"),
     MenuEntry(label=menu_key("E", "stablished"), brief="Trusted without waiting"),
     MenuEntry(label=menu_key("Q", "uarantined"), brief="Held back, as a trigger would"),
-    MenuEntry(label=menu_key("k", "ed", prefix="Bloc"), brief="Refused; wins over everything"),
+    MenuEntry(label=menu_key("D", "enied"), brief="Blocked; wins over everything"),
 )
 
 
@@ -5450,7 +5427,7 @@ async def _set_trust_override_screen(
 ) -> None:
     """
     Issue #820: `state` and `all_dimensions` open the editor already filled
-    in, which is all `[E]stablish` and `Bloc[k]` are -- the same editor, the
+    in, which is all `[E]stablish` and `[D]eny` are -- the same editor, the
     same reason, the same confirmations, the same audit. `S[t]ate` and
     `[D]imension` stay editable, so a preset is a starting point, not a
     different path.
@@ -5481,8 +5458,9 @@ async def _set_trust_override_screen(
                         menu_key("P", "robationary"),
                         menu_key("E", "stablished"),
                         menu_key("Q", "uarantined"),
-                        # `B` is Back on every screen (issue #1158).
-                        menu_key("k", "ed", prefix="Bloc"),
+                        # `B` is Back on every screen (issue #1158), so
+                        # the blocked state is offered as Denied.
+                        menu_key("D", "enied"),
                         menu_key("B", "ack"),
                     ],
                     width=session.terminal_width,
@@ -5498,7 +5476,7 @@ async def _set_trust_override_screen(
             )
         state = {
             "p": TrustState.PROBATIONARY, "e": TrustState.ESTABLISHED,
-            "q": TrustState.QUARANTINED, "k": TrustState.BLOCKED,
+            "q": TrustState.QUARANTINED, "d": TrustState.BLOCKED,
         }.get(key)
         await session.write_line("")
         if state is not None:
@@ -5537,7 +5515,7 @@ async def _set_trust_override_screen(
     async def save(draft: dict) -> bool | None:
         dimension, state, reason = draft["dimension"], draft["state"], draft["reason"]
         if dimension is None or state is None:
-            raise ValueError("choose a [D]imension and a S[t]ate first")
+            raise ValueError("choose a dimension ([D]) and a state ([T]) first")
         if not reason:
             raise ValueError("a reason is required")
         if state == TrustState.ESTABLISHED:
@@ -5601,7 +5579,7 @@ async def _set_trust_override_screen(
 # state already chosen; nothing is applied before its `[S]ave`.
 _TRUST_QUICK_ACTIONS = (
     ("e", menu_key("E", "stablish")),
-    ("k", menu_key("k", prefix="Bloc")),
+    ("d", menu_key("D", "eny")),
 )
 
 
@@ -5609,9 +5587,9 @@ async def _trust_quick_action(
     session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject, choice: str, *,
     name: str, listing: "_Listing | None", link_context: LinkContext | None,
 ) -> bool:
-    """Run `[E]stablish` or `Bloc[k]` if that is what `choice` is; `False`
-    for any other key, which the calling screen handles itself."""
-    presets = {"e": (TrustState.ESTABLISHED, "Establish"), "k": (TrustState.BLOCKED, "Block")}
+    """Run `[E]stablish` or `[D]eny` (a block) if that is what `choice` is;
+    `False` for any other key, which the calling screen handles itself."""
+    presets = {"e": (TrustState.ESTABLISHED, "Establish"), "d": (TrustState.BLOCKED, "Deny")}
     if choice not in presets:
         return False
     state, verb = presets[choice]
@@ -5633,7 +5611,7 @@ async def _clear_trust_override_screen(
 ) -> None:
     overrides: list = list(await lane.run(list_trust_overrides, subject))
     if len(overrides) > 1:
-        # Issue #820: what `[E]stablish` or `Bloc[k]` set is one override per
+        # Issue #820: what `[E]stablish` or `[D]eny` set is one override per
         # dimension, and undoing it should not take three trips.
         overrides.insert(0, _ALL_OVERRIDES)
     selected = await pick_item(
@@ -6131,7 +6109,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["domain_id"] or not draft["scopes"]:
-                raise ValueError("choose a [N]ode and fill in [D]omain ID and S[c]opes first")
+                raise ValueError("choose a [N]ode and fill in the domain ID ([D]) and scopes ([C]) first")
             scopes = _parse_reporter_scopes(draft["scopes"])
             await lane.run(
                 configure_trusted_reporter, draft["node"], domain_id=draft["domain_id"], scopes=scopes,
@@ -7050,13 +7028,13 @@ async def _retired_usernames_screen(session: Session, lane: DatabaseLane, actor:
         choice, page = await show_detail(
             session,
             title=_detail_title(
-                session, chrome, "Retired usernames", breadcrumb=("SysOp", "Users"),
+                session, chrome, "Held names", breadcrumb=("SysOp", "Users"),
                 subtitle="Names held for deleted accounts so nobody inherits their Link identity.",
             ),
             sections=[Section("Why names are held", [why]), Section("Held usernames", held)],
             actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
-            help_title="Retired usernames help",
+            help_title="Held names help",
             help_about=(
                 "Names of deleted accounts that nobody may register again, so no one inherits their Link "
                 "mail address or reputation. Releasing a name frees it for anyone."
@@ -7508,7 +7486,7 @@ async def _pick_and_edit_user(
     central editor rather than picking the same user again through
     three separate single-purpose screens to promote them, then disable
     them, then...). `title` is the only thing that still varies by
-    which top-level `[U]sers` menu entry got here -- `List [u]sers`/
+    which top-level `[U]sers` menu entry got here -- `[U]ser list`/
     `[P]romote/demote`/`[E]nable/disable`/`[D]elete user` all land on
     the exact same full editor once a user is actually selected, so a
     SysOp who only meant to promote someone can still also disable them
@@ -7645,7 +7623,7 @@ async def _draw_user_detail(
                 age_verified=age_verified,
                 name_verified=name_verified,
                 field=_editable,
-            ) if allowed is None or "e" in allowed else ()),
+            ) if allowed is None or "w" in allowed else ()),
             # Issue #611: whether a password exists, never the password. Beside
             # the key line because the two together are "how this account gets
             # in", and a SysOp resetting one wants to see the other.
@@ -7697,13 +7675,13 @@ async def _draw_user_detail(
     if "l" in offered:
         options.append(MenuEntry(label=menu_key("L", "evel"), brief="Change this user's access level"))
     if "u" in offered:
-        options.append(MenuEntry(label=menu_key("u", "to promotion", prefix="A"), brief="Promotion rules on or off"))
+        options.append(MenuEntry(label=menu_key("U", "se promotion rules"), brief="Promotion rules on or off"))
     if "t" in offered:
         options.append(MenuEntry(label=menu_key("T", "oggle enable/disabled"), brief="Enable or disable this account"))
     if "n" in offered:
-        options.append(MenuEntry(label=menu_key("n", "ame", prefix="Display "), brief="Correct or clear the display name"))
-    if "e" in offered:
-        options.append(MenuEntry(label=menu_key("e", "", prefix="Birthdat"), brief="Correct or clear the birthdate"))
+        options.append(MenuEntry(label=menu_key("N", "ame"), brief="Correct or clear the display name"))
+    if "w" in offered:
+        options.append(MenuEntry(label=menu_key("W", "hen born"), brief="Correct or clear the birthdate"))
     if "s" in offered:
         options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
     if "i" in offered:
@@ -7733,15 +7711,15 @@ async def _draw_user_detail(
     return blocked
 
 
-_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "n", "e", "k", "p", "s", "i", "u")
+_USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "n", "w", "k", "p", "s", "i", "u")
 
 #: Every action key on the account detail -- what a SysOp gets.
-_ALL_USER_DETAIL_KEYS = frozenset("alutrnekpsihdv")
+_ALL_USER_DETAIL_KEYS = frozenset("alutrnwkpsihdv")
 
 
 def _auto_promotion_label(target: User, kept: str | None) -> str:
     """Whether the promotion rules (issue #992) may raise this account. The
-    on/off is the switch `A[u]to promotion` flips (a level set by hand turns
+    on/off is the switch `[U]se promotion rules` flips (a level set by hand turns
     it off); anything else keeping the rules away is said beside it, since
     the switch does not change it."""
     if target.level_set_by_hand:
@@ -7767,7 +7745,7 @@ def _user_detail_keys(actor: User, target: User) -> frozenset[str]:
     keys = {"h"}
     within_reach = target.user_level < SYSOP_LEVEL and not target.staff_permissions
     if within_reach and actor.has_staff(StaffPermission.MANAGE_ACCOUNTS):
-        keys |= {"l", "u", "t", "p", "n", "e"}
+        keys |= {"l", "u", "t", "p", "n", "w"}
     if within_reach and target.pending_approval and actor.has_staff(StaffPermission.APPROVE_ACCOUNTS):
         keys |= {"a", "d"}
     return frozenset(keys)
@@ -7794,7 +7772,7 @@ def _detail_fields(
             color=VALUE_COLOR if display_name else MUTED_COLOR,
         ),
         field(
-            "e", "Birthdate", born + ("; age verified" if age_verified else ""),
+            "w", "Birthdate", born + ("; age verified" if age_verified else ""),
             color=VALUE_COLOR if birthdate else MUTED_COLOR,
         ),
     ]
@@ -7899,7 +7877,7 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
         "The same rules as the caller's own apply, and the change is recorded in the "
         "account's history. A verified real name is a separate record and is not changed.",
     ),
-    "e": (
+    "w": (
         "Birthdate",
         "The birthdate this caller entered themselves, which age gates use when there is "
         "no verified age. Correct or clear it here; blank clears it. The history records "
@@ -7908,7 +7886,7 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
     ),
     "u": (
         "Auto promotion",
-        "Whether the node's promotion rules (Users > Promotion rules) may raise this "
+        "Whether the node's promotion rules (Users > Auto-promotion rules) may raise this "
         "account at its next login. Setting its level by hand turns them off, so a "
         "demotion is not undone; this turns them back on, or off. They never apply to "
         "the guest account, staff, SysOps, or pending and disabled accounts.",
@@ -7961,7 +7939,7 @@ async def _edit_account_detail(
     session: Session, lane: DatabaseLane, actor: User, target: User, choice: str
 ) -> None:
     """Issue #1110: correct or clear `target`'s display name (`n`) or
-    birthdate (`e`). The value opens in the line, as the level does; blank
+    birthdate (`w`). The value opens in the line, as the level does; blank
     clears it, Esc keeps it."""
     if choice == "n":
         current = await lane.run(get_display_name, target) or ""
@@ -7998,7 +7976,7 @@ async def _edit_account_detail(
 
 async def _revoke_verification(session: Session, lane: DatabaseLane, actor: User, target: User) -> None:
     """Issue #1115: withdraw `target`'s verified age or real name. Clearing
-    the self-entered birthdate or display name (`n`, `e`) never does this,
+    the self-entered birthdate or display name (`n`, `w`) never does this,
     so it is an action of its own, confirmed and recorded. With both on
     record, the SysOp picks one first."""
     age = await lane.run(get_attestation, target, "age")
@@ -8316,7 +8294,7 @@ async def _user_detail_screen(
                     if target.disabled_at is not None:
                         await _revoke_live_sessions(session, node_controls, target, actor)
             blocked = await _redraw()
-        elif choice in ("n", "e"):
+        elif choice in ("n", "w"):
             await session.write_line("")
             await _edit_account_detail(session, lane, actor, target, choice)
             blocked = await _redraw()
@@ -8414,7 +8392,7 @@ async def _user_detail_screen(
 _STAFF_TOGGLE_KEYS: dict[str, StaffPermission] = {
     "a": StaffPermission.APPROVE_ACCOUNTS,
     "m": StaffPermission.MANAGE_ACCOUNTS,
-    "e": StaffPermission.MODERATE_ALL,
+    "g": StaffPermission.MODERATE_ALL,
 }
 
 
@@ -8450,7 +8428,7 @@ async def _staff_permissions_screen(
                       brief=_yes_no(target.has_staff(StaffPermission.APPROVE_ACCOUNTS))),
             MenuEntry(label=menu_key("M", "anage accounts"),
                       brief=_yes_no(target.has_staff(StaffPermission.MANAGE_ACCOUNTS))),
-            MenuEntry(label=menu_key("E", "verything", prefix="Moderate "),
+            MenuEntry(label=menu_key("G", "lobal moderation"),
                       brief=_yes_no(target.has_staff(StaffPermission.MODERATE_ALL))),
         ]
         # Verifying identity is not a staff permission (§5.5) but a SysOp
@@ -8522,7 +8500,7 @@ async def _staff_permissions_screen(
 _STAFF_PERMISSIONS_HELP = (
     MenuEntry(label=menu_key("A", "pprove accounts"), brief="Approve or decline new accounts"),
     MenuEntry(label=menu_key("M", "anage accounts"), brief="Levels, disabling, passwords"),
-    MenuEntry(label=menu_key("E", "verything", prefix="Moderate "), brief="Every board, area and channel"),
+    MenuEntry(label=menu_key("G", "lobal moderation"), brief="Every board, area and channel"),
     MenuEntry(label=menu_key("V", "erify identity"), brief="Verify callers' age or real name"),
     MenuEntry(label=menu_key("C", "o-SysOp preset"), brief="All three permissions at once"),
     MenuEntry(label=menu_key("N", "one"), brief="Remove every staff permission"),
@@ -8575,7 +8553,7 @@ async def _delete_user_confirm(
             colored(
                 f"This node has run NetBBS Link, so the username {target.username!r} stays "
                 "retired afterwards: nobody can register it and inherit this account's Link "
-                "mail address, authorship and reputation. Users -> Retired names releases it.",
+                "mail address, authorship and reputation. Users -> Held names releases it.",
                 fg_color=MUTED_COLOR,
             )
         )
@@ -8612,7 +8590,7 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
     open/approval_required/closed, replacing the earlier plain
     require-approval toggle -- and surfaces how many self-registered
     accounts are currently waiting on approval. Approving/rejecting any
-    of them individually still happens via `List [u]sers` -> a pending
+    of them individually still happens via `[U]ser list` -> a pending
     account's own detail screen (`_user_detail_screen`'s `[A]pprove` action),
     reusing the existing user-management flow rather than building a
     second, parallel pending-accounts queue UI.
@@ -8645,7 +8623,7 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
         ))
         if pending_count:
             rows.append(Field(
-                "Awaiting approval", f"{pending_count} account(s) -- see List [u]sers", color=WARNING_COLOR
+                "Awaiting approval", f"{pending_count} account(s) -- see [U]ser list", color=WARNING_COLOR
             ))
         if current == RegistrationMode.APPROVAL_REQUIRED:
             # Issue #835: a SysOp's banner promised newcomers they could
@@ -9798,7 +9776,7 @@ async def _draw_managed_dns_status(
     status (design doc §16, issue #201) -- shows whatever `netbbs.net.
     managed_dns_flow`'s register/release flows already set. Returns the
     current status so `_managed_dns_status_screen` knows whether to
-    offer `[R]egister` or `Re[l]ease` without re-reading it a second
+    offer `[R]egister` or `[G]ive up name` without re-reading it a second
     time."""
     opt_in = await lane.run(get_managed_dns_opt_in)
     name = await lane.run(get_managed_dns_registered_name)
@@ -9955,8 +9933,8 @@ async def _draw_managed_dns_status(
         actions.append(menu_key("C", "ancel change"))
     elif status in _MANAGED_DNS_ACTIVE_STATUSES:
         if previous_name is None:
-            actions.append(menu_key("l", "ease", prefix="Re"))
-            actions.append(menu_key("N", "ame", prefix="Change "))
+            actions.append(menu_key("G", "ive up name"))
+            actions.append(menu_key("N", "ew name"))
     if status in _MANAGED_DNS_ACTIVE_STATUSES:
         actions.append(menu_key("W", "eb page"))
     if await lane.run(get_managed_dns_admin_token) is not None:
@@ -10088,7 +10066,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
     Design doc §16, issue #201: status plus, once release/reclaim exist
     to make them meaningful, the actions themselves -- `[R]egister`
     (also how a SysOp who initially declined the opt-in prompt, or wants
-    to reclaim a previously-released name, gets in) and `[L] Release`,
+    to reclaim a previously-released name, gets in) and `[G]ive up name`,
     mutually exclusive on whether this node currently has an active
     (`pending`/`matured`) registration. Same single-item hotkey-menu-loop
     shape as `_post_action_screen`.
@@ -10110,7 +10088,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
-            choice == "l" and status in _MANAGED_DNS_ACTIVE_STATUSES
+            choice == "g" and status in _MANAGED_DNS_ACTIVE_STATUSES
             and await lane.run(get_managed_dns_previous_name) is None
         ):
             await session.write_line("")
@@ -10169,9 +10147,9 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
                 help_entries.append(MenuEntry(label=menu_key("C", "ancel change"),
                                               brief="Keep the old name after all"))
             elif status in _MANAGED_DNS_ACTIVE_STATUSES and previous_name is None:
-                help_entries.append(MenuEntry(label=menu_key("l", "ease", prefix="Re"),
-                                              brief="Give the name up"))
-                help_entries.append(MenuEntry(label=menu_key("N", "ame", prefix="Change "),
+                help_entries.append(MenuEntry(label=menu_key("G", "ive up name"),
+                                              brief="Release the name"))
+                help_entries.append(MenuEntry(label=menu_key("N", "ew name"),
                                               brief="Move to a different name"))
             if status in _MANAGED_DNS_ACTIVE_STATUSES:
                 help_entries.append(MenuEntry(label=menu_key("W", "eb page"),
@@ -10408,7 +10386,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             help=(
                 "When a post or file passes its board's or area's maximum age it expires, and is deleted "
                 f"this many days later (0-{MAX_SETTING_DAYS}). Until then a SysOp can still recover an "
-                "expired file from its area's E[x]pired files screen."
+                "expired file from its area's [E]xpired files screen."
             ),
         ),
         FieldSpec(
@@ -10538,13 +10516,16 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
     _announce_line(session, "Saved. Applies from now on." if changed else "Nothing changed.")
 
 
-# -- Network & login limits (issue #730) -------------------------------------
+# -- Operating limits (issue #730) -------------------------------------
 
-# One hotkey per group on the overview; letters chosen to read as the group.
-_POLICY_GROUP_KEYS = {
-    "Carry caps": "c", "Peering": "p", "Link limits": "l",
-    "Live relay": "r", "Login throttle": "t", "Shutdown": "d",
-}
+# One hotkey per group on the overview: its first letter (issue #1158), so
+# the group names (`netbbs.net.policy_settings.GROUPS`) start with different
+# letters, none of them `n` (Node configuration) or `b` (Back). Checked here,
+# once, so a group added later cannot quietly take another's key.
+_POLICY_GROUP_KEYS = {group: group[0].lower() for group in POLICY_GROUPS}
+_NODE_CONFIGURATION_KEY = "n"
+if len({*_POLICY_GROUP_KEYS.values(), _NODE_CONFIGURATION_KEY, "b"}) != len(_POLICY_GROUP_KEYS) + 2:
+    raise RuntimeError(f"policy groups need different first letters: {sorted(_POLICY_GROUP_KEYS)}")
 _POLICY_CONFIG_NOTE = (
     "Set in the config file or on the command line, which wins over this screen. Change it there, "
     "or remove it there to manage it here."
@@ -10636,17 +10617,15 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
             ))
         choice, page = await show_detail(
             session,
-            title=_detail_title(session, chrome, "Network & login limits", breadcrumb=("SysOp", "Settings")),
+            title=_detail_title(session, chrome, "Operating limits", breadcrumb=("SysOp", "Settings")),
             sections=[Section(None, rows), Section(None, notes)],
             actions=[
-                *((key, menu_key(key.upper(), group[1:]) if group[0].lower() == key
-                   else menu_key(key, group[group.lower().index(key) + 1:], prefix=group[:group.lower().index(key)]))
-                  for group, key in _POLICY_GROUP_KEYS.items()),
-                ("o", menu_key("o", "nfiguration", prefix="Node c")),
+                *((key, menu_key(group[0], group[1:])) for group, key in _POLICY_GROUP_KEYS.items()),
+                (_NODE_CONFIGURATION_KEY, menu_key("N", "ode configuration")),
                 _BACK_ACTION,
             ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, page=page,
-            help_title="Network & login limits help",
+            help_title="Operating limits help",
             help_about=(
                 "Link limits, the login throttle and shutdown delays. Changes apply at the next start; a "
                 "value set in the config file or on the command line wins and is shown as such."
@@ -10654,7 +10633,7 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
         )
         if choice == "b":
             return
-        if choice == "o":
+        if choice == _NODE_CONFIGURATION_KEY:
             await _node_configuration_screen(session, lane, actor)
             continue
         group = next(group for group, key in _POLICY_GROUP_KEYS.items() if key == choice)
@@ -10703,7 +10682,7 @@ async def _node_configuration_screen(session: Session, lane: DatabaseLane, actor
         choice, page = await show_detail(
             session,
             title=_detail_title(session, chrome, "Node configuration",
-                                breadcrumb=("SysOp", "Settings", "Network & login limits"),
+                                breadcrumb=("SysOp", "Settings", "Operating limits"),
                                 subtitle="As the node resolved it at its last start"),
             sections=sections, actions=[_BACK_ACTION], page=page,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -12065,7 +12044,7 @@ async def _carry_decisions_screen(
     mrc_bridge=None,
 ) -> None:
     """Picker over the offered (or excluded) resources, then one resource's
-    screen, with `[A]ccept` and `E[x]clude` for an offer (issue #683)."""
+    screen, with `[A]ccept` and `[E]xclude` for an offer (issue #683)."""
     node = link_context.link_node
     title = "Offered to this node" if state == OFFERED else "Excluded from this node"
     message = None
@@ -12108,7 +12087,7 @@ async def _carry_decisions_screen(
         )
         actions = []
         if state == OFFERED:
-            actions += [("a", menu_key("A", "ccept")), ("x", menu_key("x", "clude", prefix="E"))]
+            actions += [("a", menu_key("A", "ccept")), ("e", menu_key("E", "xclude"))]
         else:
             actions.append(("r", menu_key("R", "estore")))
             if selected.hidden:
@@ -12195,7 +12174,7 @@ async def _carry_decisions_screen(
                     # A channel coming back (or gone for good) changes which
                     # MRC rooms the running bridge maps, as hiding it did.
                     await mrc_bridge.refresh_channel_mappings()
-        elif choice == "x":
+        elif choice == "e":
             try:
                 await lane.run(exclude_offer, selected.kind, selected.resource_id, actor=actor)
             except CarryDecisionError as exc:
@@ -12395,7 +12374,7 @@ async def _link_status_screen(
         if offered:
             actions.append(("o", menu_key("O", "ffered")))
         if excluded:
-            actions.append(("x", menu_key("x", "cluded", prefix="E")))
+            actions.append(("e", menu_key("E", "xcluded")))
         actions.append(_BACK_ACTION)
         choice, page = await show_detail(
             session,
@@ -12434,7 +12413,7 @@ async def _link_status_screen(
                 session, lane, actor, link_context=link_context, state=OFFERED,
                 mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
             )
-        elif choice == "x":
+        elif choice == "e":
             await _carry_decisions_screen(
                 session, lane, actor, link_context=link_context, state=EXCLUDED,
                 mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
@@ -14043,7 +14022,7 @@ async def _draw_node_menu(
 
 _NODE_MENU = (
     MenuEntry(label=menu_key("W", "ho"), brief="See who's currently connected"),
-    MenuEntry(label=menu_key("O", "nitor", prefix="M"), brief="Watch callers live, act on one"),
+    MenuEntry(label=menu_key("O", "bserve live"), brief="Watch callers live, act on one"),
     MenuEntry(label=menu_key("M", "aintenance mode"), brief="Toggle: block non-SysOp logins"),
     MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
     MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
@@ -14802,7 +14781,7 @@ async def _banners_and_mastheads_menu(
         if choice == "b":
             await session.write_line("")
             return
-        elif choice == "n":
+        elif choice == "s":
             await session.write_line("")
             await _banners_menu(session, lane, actor, node_controls=node_controls)
             await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -14854,7 +14833,7 @@ async def _draw_banners_and_mastheads_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("M", "astheads"), brief="Art above the menu and pickers"),
-                MenuEntry(label=menu_key("n", "nners", prefix="Ba"), brief="Welcome, logoff, new-account text"),
+                MenuEntry(label=menu_key("S", "ession banners"), brief="Welcome, logoff, new-account text"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
             ],
             description_level,
@@ -14900,7 +14879,7 @@ async def _welcome_banner_menu(
             await session.write_line("")
             await _disable_welcome_banner_screen(session, lane, actor)
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
-        elif choice == "i":
+        elif choice == "o":
             await session.write_line("")
             await _edit_welcome_banner_screen(session, lane, actor)
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
@@ -14966,7 +14945,7 @@ async def _draw_welcome_banner_menu(
 ) -> None:
     status = await lane.run(welcome_banner_status)
     rows = await _write_counted(session, "\r\n" + screen_title("Welcome banner",
-            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Session banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     credit_line = await lane.run(is_welcome_banner_credit_enabled)
     speed = await lane.run(art_speed, WELCOME_ART)
@@ -14985,13 +14964,13 @@ async def _draw_welcome_banner_menu(
             MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
-            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+            MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the banner text"),
             MenuEntry(label=menu_key("C", "redit line"), brief="Credit the art under the banner"),
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
             *_remove_file_entry(status),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Session banners"),
         ],
         description_level,
         used_rows=rows,
@@ -15685,7 +15664,7 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
             await session.write_line("")
             await _disable_main_menu_banner_screen(session, lane, actor)
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
-        elif choice == "i":
+        elif choice == "o":
             await session.write_line("")
             await _edit_main_menu_banner_screen(session, lane, actor)
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
@@ -15762,7 +15741,7 @@ async def _draw_main_menu_banner_menu(
             MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and menu fit"),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
-            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+            MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the masthead art"),
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
@@ -16180,11 +16159,11 @@ async def _banners_menu(
             await session.write_line("")
             await _logoff_banner_menu(session, lane, actor, node_controls=node_controls)
             await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "e":
+        elif choice == "p":
             await session.write_line("")
             await _new_account_banner_before_menu(session, lane, actor)
             await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "f":
+        elif choice == "a":
             await session.write_line("")
             await _new_account_banner_after_menu(session, lane, actor)
             await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -16200,7 +16179,7 @@ async def _draw_banners_menu(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
-    await session.write_line("\r\n" + screen_title("Banners",
+    await session.write_line("\r\n" + screen_title("Session banners",
             breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
@@ -16214,8 +16193,8 @@ async def _draw_banners_menu(
             [
                 MenuEntry(label=menu_key("W", "elcome banner"), brief="Art shown when a caller connects"),
                 MenuEntry(label=menu_key("L", "ogoff banner"), brief="Shown on an intentional Log off"),
-                MenuEntry(label=menu_key("e", "fore signup", prefix="B"), brief="Shown once, before Create account"),
-                MenuEntry(label=menu_key("f", "ter signup", prefix="A"), brief="Shown once signup succeeds"),
+                MenuEntry(label=menu_key("P", "re-signup"), brief="Shown once, before Create account"),
+                MenuEntry(label=menu_key("A", "fter signup"), brief="Shown once signup succeeds"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
             ],
             description_level,
@@ -16257,7 +16236,7 @@ async def _logoff_banner_menu(
             await session.write_line("")
             await _disable_logoff_banner_screen(session, lane, actor)
             await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "i":
+        elif choice == "o":
             await session.write_line("")
             await _edit_logoff_banner_screen(session, lane, actor)
             await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -16297,7 +16276,7 @@ async def _draw_logoff_banner_menu(
 ) -> None:
     status = await lane.run(logoff_banner_status)
     rows = await _write_counted(session, "\r\n" + screen_title("Logoff banner",
-            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Session banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     rows += await _write_wrapped_subtitle(
@@ -16313,12 +16292,12 @@ async def _draw_logoff_banner_menu(
             MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
-            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+            MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the banner text"),
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
             *_remove_file_entry(status),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Session banners"),
         ],
         description_level,
         used_rows=rows,
@@ -16546,7 +16525,7 @@ async def _new_account_banner_before_menu(session: Session, lane: DatabaseLane, 
             await session.write_line("")
             await _disable_new_account_banner_before_screen(session, lane, actor)
             await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "i":
+        elif choice == "o":
             await session.write_line("")
             await _edit_new_account_banner_before_screen(session, lane, actor)
             await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -16586,7 +16565,7 @@ async def _draw_new_account_banner_before_menu(
 ) -> None:
     status = await lane.run(new_account_banner_before_status)
     rows = await _write_counted(session, "\r\n" + screen_title("New account banner (before)",
-            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Session banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     rows += await _write_wrapped_subtitle(
@@ -16602,12 +16581,12 @@ async def _draw_new_account_banner_before_menu(
             MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
-            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+            MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the banner text"),
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
             *_remove_file_entry(status),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Session banners"),
         ],
         description_level,
         used_rows=rows,
@@ -16832,7 +16811,7 @@ async def _new_account_banner_after_menu(session: Session, lane: DatabaseLane, a
             await session.write_line("")
             await _disable_new_account_banner_after_screen(session, lane, actor)
             await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "i":
+        elif choice == "o":
             await session.write_line("")
             await _edit_new_account_banner_after_screen(session, lane, actor)
             await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -16872,7 +16851,7 @@ async def _draw_new_account_banner_after_menu(
 ) -> None:
     status = await lane.run(new_account_banner_after_status)
     rows = await _write_counted(session, "\r\n" + screen_title("New account banner (after)",
-            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "Settings", "Mastheads & banners", "Session banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     rows += await _write_wrapped_subtitle(
@@ -16888,12 +16867,12 @@ async def _draw_new_account_banner_after_menu(
             MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
-            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+            MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the banner text"),
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
             *_remove_file_entry(status),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
+            MenuEntry(label=menu_key("B", "ack"), brief="Return to Session banners"),
         ],
         description_level,
         used_rows=rows,
@@ -17115,7 +17094,7 @@ async def _mastheads_menu(session: Session, lane: DatabaseLane, actor: User) -> 
             await session.write_line("")
             await _main_menu_banner_menu(session, lane, actor)
             await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "o":
+        elif choice == "d":
             await session.write_line("")
             await _board_list_masthead_menu(session, lane, actor)
             await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -17154,7 +17133,7 @@ async def _draw_mastheads_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("M", "ain menu"), brief="Above the menu, or as the menu"),
-                MenuEntry(label=menu_key("o", "ards", prefix="Message b"), brief="Above the list, or as the list"),
+                MenuEntry(label=menu_key("D", "iscussion boards"), brief="Above the list, or as the list"),
                 MenuEntry(label=menu_key("F", "ile areas"), brief="Above the list, or as the list"),
                 MenuEntry(label=menu_key("C", "hat channels"), brief="Above the picker, or as the list"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
@@ -17376,7 +17355,7 @@ async def _board_list_masthead_menu(session: Session, lane: DatabaseLane, actor:
             await session.write_line("")
             await _disable_board_list_masthead_screen(session, lane, actor)
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "i":
+        elif choice == "o":
             await session.write_line("")
             await _edit_board_list_masthead_screen(session, lane, actor)
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -17455,7 +17434,7 @@ async def _draw_board_list_masthead_menu(
             MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
-            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+            MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the masthead art"),
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
@@ -17684,7 +17663,7 @@ async def _file_area_masthead_menu(session: Session, lane: DatabaseLane, actor: 
             await session.write_line("")
             await _disable_file_area_masthead_screen(session, lane, actor)
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "i":
+        elif choice == "o":
             await session.write_line("")
             await _edit_file_area_masthead_screen(session, lane, actor)
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -17763,7 +17742,7 @@ async def _draw_file_area_masthead_menu(
             MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
-            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+            MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the masthead art"),
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
@@ -17990,7 +17969,7 @@ async def _chat_channel_picker_masthead_menu(session: Session, lane: DatabaseLan
             await session.write_line("")
             await _disable_chat_channel_picker_masthead_screen(session, lane, actor)
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "i":
+        elif choice == "o":
             await session.write_line("")
             await _edit_chat_channel_picker_masthead_screen(session, lane, actor)
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -18069,7 +18048,7 @@ async def _draw_chat_channel_picker_masthead_menu(
             MenuEntry(label=menu_key("C", "heck"), brief="Slots, problems and list fit"),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
-            MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+            MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the masthead art"),
             MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
             MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans from this node"),
             MenuEntry(label=menu_key("U", "pload"), brief="Send an .ans from your computer"),
@@ -18542,7 +18521,7 @@ async def _content_menu(
                              backup_identity_dir=backup_identity_dir)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
-        elif choice == "n":
+        elif choice == "l":
             await session.write_line("")
             await _channel_menu(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
             stats = await lane.run(_load_stats)
@@ -18552,7 +18531,7 @@ async def _content_menu(
             await _category_menu(session, lane, actor)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
-        elif choice == "o":
+        elif choice == "t":
             await session.write_line("")
             await _community_menu(session, lane, actor)
             stats = await lane.run(_load_stats)
@@ -18588,9 +18567,9 @@ _CONTENT_MENU = (
     MenuEntry(label=menu_key("M", "essage boards"), brief="Create/edit message boards"),
     MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
     MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
-    MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
+    MenuEntry(label=menu_key("L", "ive chat"), brief="Create/edit chat channels"),
     MenuEntry(label=menu_key("C", "ategories"), brief="Group lists of one kind"),
-    MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Topics holding every kind"),
+    MenuEntry(label=menu_key("T", "opics"), brief="Communities holding every kind"),
     MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
     MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
     MenuEntry(label=menu_key("P", "ending review"), brief="Posts and files awaiting approval"),
@@ -21828,7 +21807,7 @@ async def _area_screen(
     screen that creates one -- the same shape as `_board_screen`: its
     files and latest upload, its place and whether it is Linked above the
     fields; the NetBBS Link section after them; [U]p, [D]own, [R]emove,
-    [P]ending files, E[x]pired files, [H]istory and [L]ink while nothing
+    [P]ending files, [E]xpired files, [H]istory and [L]ink while nothing
     waits to be saved."""
     current: dict[str, FileArea | None] = {"area": existing}
     own_fingerprint = link_context.node_identity.fingerprint if link_context is not None else None
@@ -21944,7 +21923,7 @@ async def _area_screen(
         actions += [
             DetailAction("r", menu_key("R", "emove"), _act(_remove), brief="Permanently remove this area"),
             DetailAction("p", menu_key("P", "ending files"), _act(_pending), brief="Review uploads awaiting approval"),
-            DetailAction("x", menu_key("x", "pired files", prefix="E"), _act(_expired), brief="Recover before they are purged"),
+            DetailAction("e", menu_key("E", "xpired files"), _act(_expired), brief="Recover before they are purged"),
             DetailAction("h", menu_key("H", "istory"), _act(_history), brief="Its moderators and what they did"),
         ]
         if link_context is not None and not linked:
@@ -22410,7 +22389,7 @@ async def _file_action_screen(
 async def _expired_files_screen(
     session: Session, lane: DatabaseLane, actor: User, area: FileArea, *, transfers: Any = None,
 ) -> None:
-    """`E[x]pired files` (design doc §5.3, issue #639): SysOp recovery.
+    """`[E]xpired files` (design doc §5.3, issue #639): SysOp recovery.
     Expiry ends a caller's reach, but an expired file's bytes stay in
     storage until the grace period ends, and this is where they are
     fetched back without shell access. Listed oldest first, which is
@@ -23691,10 +23670,10 @@ async def _war_dialer_competition_flow(
     session: Session, lane: DatabaseLane, actor: User, door: Door, world: Path, status: dict, *,
     reset: bool, identity_dir: Path, db_path: Path,
 ) -> None:
-    """Next season or Reset competition, behind a reason and the world's typed
+    """Next season or Competition reset, behind a reason and the world's typed
     filename. Two values, so prompts rather than a draft (design doc §3.5);
     the filename is the type-the-name confirmation before a destructive act."""
-    what = "Reset competition" if reset else "Next season"
+    what = "Competition reset" if reset else "Next season"
     if status["maintenance"] != "on":
         _announce(session, f"{what} needs maintenance on first, so nobody can enter the world "
                   "while it changes. Nothing was changed.", error=True)
@@ -23806,7 +23785,7 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
     because ten retained operations do not fit a 24-row terminal. Maintenance
     is a toggle and needs no confirmation: it only closes the world to new
     callers, and it refuses while anyone is inside, the same guard the CLI
-    meets. Next season and Reset competition need a live node (for the
+    meets. Next season and Competition reset need a live node (for the
     identity directory the backup takes), maintenance on, a reason and the
     typed world filename; unlike the CLI they do not need the node stopped.
     """
@@ -23850,10 +23829,10 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
                 rows.append(Note("Closed to new callers until you switch maintenance off."))
             if backup_identity_dir is None:
                 rows.append(Note(
-                    "Next season and Reset competition run from a live node's console, or with "
+                    "Next season and Competition reset run from a live node's console, or with "
                     "python -m netbbs.doors.war_dialer_admin while the node is stopped."))
             elif not maintenance:
-                rows.append(Note("Next season and Reset competition need maintenance on first."))
+                rows.append(Note("Next season and Competition reset need maintenance on first."))
         sections = [Section("World", rows)]
         if status is not None:
             operations = await lane.run(_war_dialer_operation_rows, status["recent_operations"])
@@ -23865,7 +23844,7 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
         if status is not None:
             actions.append(("m", menu_key("M", "aintenance " + ("off" if status["maintenance"] == "on" else "on"))))
             if backup_identity_dir is not None:
-                actions += [("n", menu_key("N", "ext season")), ("c", menu_key("c", "ompetition", prefix="Reset "))]
+                actions += [("n", menu_key("N", "ext season")), ("c", menu_key("C", "ompetition reset"))]
         actions += [("r", menu_key("R", "efresh")), _BACK_ACTION]
         choice, page = await show_detail(
             session,
@@ -24355,15 +24334,15 @@ async def _channel_screen(
             actions.append(DetailAction("l", menu_key("L", "ink this chat channel"), _act(_link), brief="Share it via NetBBS Link"))
         if open_room:
             actions.append(DetailAction("a", menu_key("A", "dopt"), _act(_adopt), brief="Keep it as a bridged channel"))
-            actions.append(DetailAction("t", menu_key("t", "ire", prefix="Re"), _act(_retire), brief="Remove it and its scrollback now"))
+            actions.append(DetailAction("c", menu_key("C", "lose room"), _act(_retire), brief="Remove it and its scrollback now"))
         else:
             actions.append(DetailAction("m", menu_key("M", "RC room"), _act(_mrc_room), brief="Bridge to a Multi Relay Chat room"))
         if mrc_mapping is not None and not open_room:
             actions.append(DetailAction("u", menu_key("U", "nbridge"), _act(_unbridge), brief="Stop relaying and forget the room"))
             if mrc_mapping.paused:
-                actions.append(DetailAction("p", menu_key("P", "ause MRC bridge", prefix="Un"), _act(_pause), brief="Resume relaying to MRC"))
+                actions.append(DetailAction("p", menu_key("P", "ause MRC bridge: on"), _act(_pause), brief="Resume relaying to MRC"))
             else:
-                actions.append(DetailAction("p", menu_key("P", "ause MRC bridge"), _act(_pause), brief="Keep the mapping, relay nothing"))
+                actions.append(DetailAction("p", menu_key("P", "ause MRC bridge: off"), _act(_pause), brief="Keep the mapping, relay nothing"))
         return DetailState(
             draft={**_channel_draft(channel), **labels},
             title=sanitize_text(channel.name),
@@ -24484,12 +24463,12 @@ async def _retire_open_room_screen(
     session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, mrc_bridge: MrcBridge | None,
     chat_hub: ChatHub | None = None,
 ) -> bool:
-    """`Re[t]ire` (issue #300): remove a room a caller opened, with its
+    """`[C]lose room` (issue #300, once `Retire`): remove a room a caller opened, with its
     scrollback, now. Destructive, so the yes/no is the last keystroke
     behind the hotkey. Callers inside are told and returned to the
     picker, as for a deleted channel (issue #716)."""
     if not await prompt_yes_no(
-        session, f"Retire {sanitize_text(channel.name)} and delete its scrollback now?", default=False,
+        session, f"Close {sanitize_text(channel.name)} and delete its scrollback now?", default=False,
     ):
         return False
 
@@ -24505,7 +24484,7 @@ async def _retire_open_room_screen(
     except MrcSettingsError as exc:
         _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
         return False
-    _announce_line(session, f"Retired {channel.name!r}.")
+    _announce_line(session, f"Closed {channel.name!r}.")
     # Callers first: the retirement has committed, and a bridge refresh that
     # fails must not leave anyone inside a room that is gone.
     _move_callers_out(session, chat_hub, channel)
@@ -24918,7 +24897,7 @@ async def _categories_help_screen(
         "",
         colored("Communities", fg_color=header_color, bold=True),
         "  A topic that holds every kind at once: its own boards, chat channels,",
-        "  file areas and games. Callers reach them under C[o]mmunities on the main",
+        "  file areas and games. Callers reach them under [T]opics on the main",
         "  menu. They are managed under Content, not here.",
         "",
         colored("Using both", fg_color=header_color, bold=True),
@@ -25300,30 +25279,30 @@ async def _pick_moderator_scope(
     # at the terminal edge (the same primitive every other hotkey menu
     # in this codebase uses); routing through it here instead of a raw
     # write() fixes this the same way, not a one-off patch.
-    scope_options = [
-        menu_key("m", "essage board"),  # `b` is Back (issue #1158)
-        menu_key("a", "rea", prefix="file "),
-        menu_key("n", "nel", prefix="chat cha"),
-        menu_key("x", "", prefix="blanket across all boards "),
-        menu_key("y", "", prefix="blanket across all areas "),
-        menu_key("z", "", prefix="blanket across all channels "),
-        menu_key("e", "verything", prefix="blanket across "),
-        menu_key("B", "ack"),
-    ]
+    #
+    # Issue #1158: every key is its label's first letter, so a blanket grant
+    # over one kind is `[A]ll of one kind` and then the kind, rather than
+    # three more keys that could not start their own labels.
+    scope_options = [label for label, _brief in _MODERATOR_SCOPE_CHOICES] + [menu_key("B", "ack")]
     header_color = await lane.run(effective_header_color_256)
-    while True:
-        await session.write_line("Scope:")
-        await write_prompt(session, f"{action_bar(scope_options, width=session.terminal_width)}: ")
-        scope_key = (await session.read_key()).lower()
-        await session.write_line("")
-        if scope_key != HELP_KEY:
-            break
-        await show_menu_help(
-            session, "Moderator scope help", _MODERATOR_SCOPE_HELP,
-            about="What the new grant covers: one board, file area or chat channel, or all of "
-                  "one kind at once. Any other key cancels.",
+    scope_key = await _ask_moderator_scope_key(
+        session, "Scope:", scope_options, _MODERATOR_SCOPE_HELP,
+        about="What the new grant covers: one board, file area or chat channel, all of one kind, "
+              "or everything at once. Any other key cancels.",
+        header_color=header_color, unicode_style=unicode_style,
+    )
+    if scope_key == "a":
+        kind_key = await _ask_moderator_scope_key(
+            session, "All of which kind:",
+            [label for label, _brief in _MODERATOR_BLANKET_CHOICES] + [menu_key("B", "ack")],
+            _MODERATOR_BLANKET_HELP,
+            about="A blanket grant: every one of this kind, including those created later. "
+                  "Any other key cancels.",
             header_color=header_color, unicode_style=unicode_style,
         )
+        if kind_key == "b":
+            return None
+        scope_key = {"m": "all_boards", "f": "all_areas", "c": "all_channels"}.get(kind_key, "")
     accent_color = await lane.run(effective_accent_color_256)
     if scope_key == "b":
         return None  # Back: nothing chosen, nothing said
@@ -25338,7 +25317,7 @@ async def _pick_moderator_scope(
         if board is None:
             return None
         return "board", board.id, f"message board {board.name!r}"
-    elif scope_key == "a":
+    elif scope_key == "f":
         area = await pick_item(
             session, await lane.run(list_file_areas, order_by="alphabetical"),
             name_of=lambda a: a.name, stable_id_of=lambda a: a.id,
@@ -25349,7 +25328,7 @@ async def _pick_moderator_scope(
         if area is None:
             return None
         return "file_area", area.id, f"file area {area.name!r}"
-    elif scope_key == "n":
+    elif scope_key == "c":
         channel = await pick_item(
             session, await lane.run(list_channels),
             name_of=lambda c: c.name, stable_id_of=lambda c: c.id,
@@ -25360,11 +25339,11 @@ async def _pick_moderator_scope(
         if channel is None:
             return None
         return "channel", channel.id, f"chat channel {channel.name!r}"
-    elif scope_key == "x":
+    elif scope_key == "all_boards":
         object_type, label = "board", "all message boards (blanket)"
-    elif scope_key == "y":
+    elif scope_key == "all_areas":
         object_type, label = "file_area", "all file areas (blanket)"
-    elif scope_key == "z":
+    elif scope_key == "all_channels":
         object_type, label = "channel", "all chat channels (blanket)"
     elif scope_key == "e":
         # Issue #836 (F131): boards, areas and channels in one grant.
@@ -25377,15 +25356,41 @@ async def _pick_moderator_scope(
 
 
 
-_MODERATOR_SCOPE_HELP = (
-    MenuEntry(label=menu_key("m", "essage board"), brief="One board you pick next"),
-    MenuEntry(label=menu_key("a", "rea", prefix="file "), brief="One file area you pick next"),
-    MenuEntry(label=menu_key("n", "nel", prefix="chat cha"), brief="One chat channel you pick next"),
-    MenuEntry(label=menu_key("x"), brief="Every message board"),
-    MenuEntry(label=menu_key("y"), brief="Every file area"),
-    MenuEntry(label=menu_key("z"), brief="Every chat channel"),
-    MenuEntry(label=menu_key("e", "verything"), brief="Every board, area and channel"),
+async def _ask_moderator_scope_key(
+    session: Session, question: str, options: list[str], help_entries: Sequence[MenuEntry], *,
+    about: str, header_color: int | tuple[int, int, int], unicode_style: bool,
+) -> str:
+    """One key for `_pick_moderator_scope`'s one-key questions, with their
+    help on `?`."""
+    while True:
+        await session.write_line(question)
+        await write_prompt(session, f"{action_bar(options, width=session.terminal_width)}: ")
+        key = (await session.read_key()).lower()
+        await session.write_line("")
+        if key != HELP_KEY:
+            return key
+        await show_menu_help(
+            session, "Moderator scope help", help_entries, about=about,
+            header_color=header_color, unicode_style=unicode_style,
+        )
+
+
+# `(label, brief)` for each scope; `b` is Back (issue #1158).
+_MODERATOR_SCOPE_CHOICES = (
+    (menu_key("M", "essage board"), "One board you pick next"),
+    (menu_key("F", "ile area"), "One file area you pick next"),
+    (menu_key("C", "hat channel"), "One chat channel you pick next"),
+    (menu_key("A", "ll of one kind"), "Every board, every area or every channel"),
+    (menu_key("E", "verything"), "Every board, area and channel"),
 )
+_MODERATOR_SCOPE_HELP = tuple(MenuEntry(label=label, brief=brief) for label, brief in _MODERATOR_SCOPE_CHOICES)
+
+_MODERATOR_BLANKET_CHOICES = (
+    (menu_key("M", "essage boards"), "Every message board"),
+    (menu_key("F", "ile areas"), "Every file area"),
+    (menu_key("C", "hat channels"), "Every chat channel"),
+)
+_MODERATOR_BLANKET_HELP = tuple(MenuEntry(label=label, brief=brief) for label, brief in _MODERATOR_BLANKET_CHOICES)
 
 _MODERATOR_PRESETS = ["full", "limited", "post", "read"]
 

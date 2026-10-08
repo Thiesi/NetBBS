@@ -83,10 +83,10 @@ def test_the_staff_console_has_help(db, lane, sysop):
         (["s", "n"], "Node name help", "corner of every screen", "Recolor the node name"),
         (["s", "p"], "Policy trust help", "safety deviation", "dentity authorities"),
         (["c"], "Content help", "approval", "rant moderator"),
-        (["c", "o"], "Communities help", "Community is a topic", "Browse and edit Communities"),
+        (["c", "t"], "Communities help", "Community is a topic", "Browse and edit Communities"),
         (["c", "m"], "Message boards help", "message boards", "Browse and edit boards"),
         (["c", "f"], "File areas help", "GC storage", "Reclaim space from orphaned files"),
-        (["c", "n"], "Chat channels help", "chat channels", "Browse and edit channels"),
+        (["c", "l"], "Chat channels help", "chat channels", "Browse and edit channels"),
         (["c", "d"], "Doors help", "gallery", "Register a script from this node"),
         (["c", "c", "m"], "Message board categories help", "two levels deep", "Edit, order and remove"),
     ],
@@ -170,7 +170,7 @@ def test_the_door_outbound_screen_has_help(db, lane, sysop):
 
 
 def test_the_away_screen_has_help(db, lane, sysop):
-    text = _console(FakeSession(["w", H, " ", "s", "At a pen show", "", "b"]), lane, sysop)
+    text = _console(FakeSession(["t", H, " ", "s", "At a pen show", "", "b"]), lane, sysop)
     _assert_help_then_redraw(text, "Away notice help", "Staff list", "Away notice")
     assert "You are marked away." in text
 
@@ -223,7 +223,7 @@ def _override_session(*keys_after_subject: str) -> FakeSession:
 def test_the_trust_override_dimension_and_state_choices_have_help(db, lane, sysop):
     subject = TrustSubject.node("remote-node")
     register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
-    session = _override_session("o", "d", H, " ", "r", "t", H, " ", "k", "r", "resource abuse reviewed", "s")
+    session = _override_session("o", "d", H, " ", "r", "t", H, " ", "d", "r", "resource abuse reviewed", "s")
     text = _console(session, lane, sysop)
     _assert_help_then_redraw(text, "Trust dimension help", "three areas", "Dimension:")
     _assert_help_then_redraw(text, "Trust state help", "override forces", "State:")
@@ -274,7 +274,7 @@ def test_the_preview_apply_choice_has_help(db, lane, sysop):
     from netbbs.net.welcome_banner import is_welcome_banner_enabled
 
     text = _console(
-        FakeSession(["s", "m", "n", "w", "g", "0", "1", H, " ", "a", "b", "b", "b", "b", "b"]), lane, sysop,
+        FakeSession(["s", "m", "s", "w", "g", "0", "1", H, " ", "a", "b", "b", "b", "b", "b"]), lane, sysop,
     )
     _assert_help_then_redraw(text, "Preview help", "what callers would see", "ack to the list")
     assert "Applied and enabled." in text
@@ -317,7 +317,7 @@ def test_a_trust_list_screen_has_its_own_help(db, lane, sysop):
 
 
 def test_a_detail_screen_has_its_own_help(db, lane, sysop):
-    text = _console(FakeSession(["k", H, " ", "b", "b"]), lane, sysop)
+    text = _console(FakeSession(["f", H, " ", "b", "b"]), lane, sysop)
     _assert_help_then_redraw(text, "Backup help", "Complete local backups", "Backup")
 
 

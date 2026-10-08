@@ -237,26 +237,26 @@ def test_send_refuses_a_recipient_who_blocked_you_while_you_wrote(node, monkeypa
 # -- blocking from a letter ----------------------------------------------------------------
 
 
-def test_k_on_a_letter_blocks_its_sender_and_again_unblocks(node):
+def test_s_on_a_letter_blocks_its_sender_and_again_unblocks(node):
     db, lane, bob, alice = node
     send_mail(db, alice, bob, "Hello", "body")
-    session = FakeSession(["1", "k", "k", "b", "b"])
+    session = FakeSession(["1", "s", "s", "b", "b"])
 
     asyncio.run(browse_mail(session, lane, bob))
 
     screens = session.screens()
-    assert "Bloc[k] sender" in screens[1]
+    assert "[S]ender blocked: no" in screens[1]
     assert "Blocked alice: their mail and live messages are refused from now on" in " ".join(screens[2].split())
-    assert "Unbloc[k] sender" in screens[2]
+    assert "[S]ender blocked: yes" in screens[2]
     assert "Unblocked alice: their mail and live messages are accepted again." in " ".join(screens[3].split())
     assert not blocks_local_sender(db, bob, alice)
 
 
-def test_k_on_link_mail_blocks_the_senders_address(node, identities):
+def test_s_on_link_mail_blocks_the_senders_address(node, identities):
     db, lane, bob, _ = node
     home, remote = identities
     deliver_link_message(db, _incoming_message(home, remote, recipient="bob", sender="dave").to_dict(), node_identity=home)
-    session = FakeSession(["1", "k", "b", "b"])
+    session = FakeSession(["1", "s", "b", "b"])
 
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -274,7 +274,7 @@ def test_system_mail_and_sysop_mail_offer_no_block(node):
 
     views = [screen for screen in session.screens() if "Date:" in screen]
     assert len(views) == 2
-    assert all("sender" not in view.split("Date:")[1] for view in views)
+    assert all("[S]ender blocked" not in view.split("Date:")[1] for view in views)
     assert list_mail_blocks(db, bob) == []
 
 

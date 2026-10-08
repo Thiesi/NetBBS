@@ -216,4 +216,4 @@ def test_the_content_screen_says_what_categories_and_communities_are(db, lane, s
     text = _visible(_written_text(session))
 
     assert "Group lists of one kind" in text
-    assert "Topics holding every kind" in text
+    assert "Communities holding every kind" in text
