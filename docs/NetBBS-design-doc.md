@@ -1071,6 +1071,18 @@ one is offered, and Esc keeps the value (above). Doors draw their own screens
 under their own contracts and are outside this rule. A test keeps it: no
 screen's hotkeys bind a reserved key to anything but its meaning here.
 
+**A menu key is its label's first letter** (issue #1158, step 2). On a menu,
+an action bar or a one-key question, every letter key starts the label it
+belongs to: `[R]ecent callers`, never `P[r]evious callers`, and never a later
+word's first letter (`Reply [a]ll`) or a key set apart from its label
+(`[U] Read`). Where two labels on one screen start with the same letter, one
+of them is reworded with a synonym; a key is never bracketed further in. A
+toggle names its setting and shows the current state after a colon,
+`[F]ollow: off` / `[F]ollow: on`, so the key and the label stay the same
+whichever way it is set. A label that is an explicit action (`[T]urn off`)
+is not a toggle label and may stay. Settings and field screens are outside
+this rule; they move to two-digit numbers (step 3). A test keeps it.
+
 A key a caller can press is highlighted wherever it is offered, not only on
 menus (issue #974): a prompt that lists its choices in running text
 ("Unsaved changes. [S]ave, [D]iscard, or [C]ancel?") and a detail-panel label
@@ -15637,6 +15649,27 @@ previous-callers screen, then marked seen. An account made later has no mark,
 and a guest, signed in to a shared account, is never shown it. Rejected:
 counting logins, which would also show it to an account made after the
 upgrade on its second login.
+
+**Decision 7 — a menu key is its label's very first letter.** Step 2 of the
+tracker. Every letter key on a menu, an action bar or a one-key question
+starts its label. A collision is resolved by rewording one label with a
+synonym, and a renamed key is a clean switch with no hidden alias for the
+old one. Rejected: allowing the first letter of a later word (`Reply [a]ll`,
+`Change [N]ame`), which reads naturally but leaves the eye hunting for the
+key inside the label.
+
+- **Toggles show their state.** `[F]ollow: off` / `[F]ollow: on`,
+  `[M]arked: no` / `[M]arked: yes`. The key and the label's start never
+  change with the state. Rejected: the key followed by the action
+  (`[F] Unfollow`), which sets the key apart from its label, and separate
+  verbs (`[F]ollow` / `[U]nfollow`), which move the key with the state and
+  collide with other `U` keys.
+- **The main menu.** `C[o]mmunities` becomes `[T]opics` (its own description
+  already called them topic spaces; the screens keep the word Communities),
+  `S[t]aff list` becomes `[O]perators`, `P[r]evious callers` becomes
+  `[R]ecent callers` and `Moder[a]tion` becomes `[A]pprovals`.
+- **Settings and field screens are left to step 3**, which numbers them, so
+  their fields are not reworded twice.
 
 ### Issue #1156 — how an MRC sender's styled name is shown — decided
 
