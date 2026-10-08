@@ -678,8 +678,8 @@ text's, never the status line's, and it gives them up before the text drops
 below four rows: the rule first, then the title, then fields from the last.
 Review keeps its title, To and Subject on every page and pages the body with
 the detail-panel machinery `show_detail` uses (`render_sections`/`paginate`),
-turned with `PgUp`/`PgDn` and `[N]ext`/`[P]rev page` (`[>]`/`[<]` where the
-commit key is already `P`). It stays its own loop rather than becoming a
+turned with `<` `>`, PgUp/PgDn or ←→ (the keys that work everywhere, §3.5).
+It stays its own loop rather than becoming a
 `show_detail` caller, because it keeps its `>` cursor over To/Subject/Body and
 its Ctrl-H field help. Once the body is paged, the menu is the packed action
 bar, the rule §3.5 sets for a detail screen with a described menu. An outcome
@@ -967,9 +967,9 @@ screen and flags any that is too tall, and `tests/
 test_sysop_console_presentation.py` holds the same list of screens to the
 terminal's size. A panel that does not fit is
 paged (`netbbs.net.detail_view.show_detail`): whole groups are kept together, a
-group taller than a page repeats its heading where it continues, `PgUp`/`PgDn`
-always turn the page, and `[N]ext`/`[P]rev` join the action bar — `[>]`/`[<]`
-on a screen that already uses those letters. A list that grows without bound
+group taller than a page repeats its heading where it continues, and `<` `>`,
+PgUp/PgDn and ←→ turn the page (§3.5), so the panel's own actions keep every
+letter. A list that grows without bound
 (an account's admin actions, trust configuration history) is a screen of its
 own rather than the tail of another. A detail screen that keeps its own
 described menu gives the menu only the rows the panel leaves, and falls back to
@@ -1049,6 +1049,7 @@ the session's screen copy. While the answer fits it echoes character by
 character as before; the keystroke that would reach the edge hands over to the
 window. A masked answer stops showing `*` at the edge instead, so it never
 wraps either.
+
 **Keys that work everywhere** (issue #1158). A small set of keys means the
 same thing on every screen that takes hotkeys, and no screen binds one of them
 to anything else:
@@ -2590,8 +2591,8 @@ be settled in Phase 3; only presentation refinements may wait until Phase 7.
 
 The list:
 - Shows one row per post: number, subject, a `new` marker, author and date.
-- Fits as many rows as the terminal holds and pages with
-  `[O]lder`/`[N]ewer`/`[R]ecent`.
+- Fits as many rows as the terminal holds and pages with `<` (older) and `>`
+  (newer), PgUp/PgDn or ←→ (§3.5); `[R]ecent` jumps to the newest page.
 - Has a cursor: Up/Down, and Enter or a digit to open a post.
 - Follows §3.6: display-width columns. Below readable width, a row becomes
   "subject -- author". Author gives way to subject first, because the reader
@@ -2615,7 +2616,8 @@ A post opens on `show_detail`:
 - The post's own actions live there, offered only when they would succeed:
   `[R]eply`, `[H]istory`, `[E]dit`, `[W]ithdraw`, `Remove pos[t]`,
   `P[i]n`/`[K]eep` (§5.3), and `[N]ext post`/`[P]revious post`, which cross
-  page boundaries.
+  page boundaries. These move to another post, not another page of this one,
+  so they are the screen's own actions rather than the paging keys of §3.5.
 - `[B]ack` returns to the list with the cursor on the post last read.
 
 **Revision history** (issue #675). `[H]istory` lists a post's versions,
@@ -3392,8 +3394,8 @@ The list:
   leave. It has no fixed cap, because a Link address carries its node's
   name, and the message view shows it in full. Below 60 columns a row
   becomes prose: "N new name: subject".
-- Fits as many rows as the terminal holds and pages with `[N]ext page` and
-  `[P]rev page` (PgDn/PgUp). A mailbox is bounded (§14), so the whole folder
+- Fits as many rows as the terminal holds and pages with `<` `>`, PgUp/PgDn
+  or ←→ (§3.5). A mailbox is bounded (§14), so the whole folder
   is loaded and paged in memory. Below 16 rows the blank rows and rules go,
   and each note above the list is cut to one row, so the 40x12 floor keeps
   three rows of mail.
