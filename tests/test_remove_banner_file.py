@@ -12,7 +12,7 @@ from netbbs.moderation.log import list_recent_actions
 from tests.test_admin_flow import FakeSession, _run, _visible, _written_text, db, lane, sysop  # noqa: F401 -- fixtures
 
 # Settings > Mastheads & banners > Banners > Welcome banner.
-_WELCOME = ["s", "m", "n", "w"]
+_WELCOME = ["s", "m", "s", "w"]
 _BACK_OUT = ["b"] * 6
 
 
@@ -57,14 +57,14 @@ def test_remove_file_is_offered_only_while_a_file_is_saved(db, lane, sysop):
     ("keys", "module", "path_fn", "audit"),
     [
         (["s", "m", "m", "m"], "netbbs.net.main_menu_banner", "main_menu_banner_path", "remove_main_menu_banner"),
-        (["s", "m", "m", "o"], "netbbs.net.board_list_banner", "board_list_banner_path", "remove_board_list_banner"),
+        (["s", "m", "m", "d"], "netbbs.net.board_list_banner", "board_list_banner_path", "remove_board_list_banner"),
         (["s", "m", "m", "f"], "netbbs.net.file_area_banner", "file_area_banner_path", "remove_file_area_banner"),
         (["s", "m", "m", "c"], "netbbs.net.chat_channel_picker_banner", "chat_channel_picker_banner_path",
          "remove_chat_channel_picker_banner"),
-        (["s", "m", "n", "l"], "netbbs.net.logoff_banner", "logoff_banner_path", "remove_logoff_banner"),
-        (["s", "m", "n", "e"], "netbbs.net.new_account_banner_before", "new_account_banner_before_path",
+        (["s", "m", "s", "l"], "netbbs.net.logoff_banner", "logoff_banner_path", "remove_logoff_banner"),
+        (["s", "m", "s", "p"], "netbbs.net.new_account_banner_before", "new_account_banner_before_path",
          "remove_new_account_banner_before"),
-        (["s", "m", "n", "f"], "netbbs.net.new_account_banner_after", "new_account_banner_after_path",
+        (["s", "m", "s", "a"], "netbbs.net.new_account_banner_after", "new_account_banner_after_path",
          "remove_new_account_banner_after"),
     ],
 )

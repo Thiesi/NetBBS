@@ -271,7 +271,7 @@ def test_a_refusal_for_another_reason_is_not_read_as_acceptance(db, lane):
     link_context.link_node.peer_exchange[peer.fingerprint] = PeerExchange(
         at=datetime.now(timezone.utc).timestamp(), refused_reason="link_policy_node_quarantined" + "x" * 500,
     )
-    text = _run(FakeSession(["s", "l", "b", "b", "b", "b"]), lane, sysop, link_context)
+    text = _run(FakeSession(["o", "l", "b", "b", "b", "b"]), lane, sysop, link_context)
     assert "Your node at peers: refused by 1 of 1 peer(s) this node dials" in text
     assert "accepted by" not in text
 
@@ -341,7 +341,7 @@ def _run(session, lane, sysop, link_context):
 def test_link_status_explains_probation_both_ways(db, lane):
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     link_context, _peer = _link_context_with_peer(db)
-    text = _run(FakeSession(["s", "l", "b", "b", "b", "b"]), lane, sysop, link_context)
+    text = _run(FakeSession(["o", "l", "b", "b", "b", "b"]), lane, sysop, link_context)
 
     assert "On probation here: 1 of 1 -- nothing is exchanged with them until you establish them" in text
     assert "Your node at peers: not known yet" in text
@@ -363,7 +363,7 @@ def test_a_peer_screen_shows_probation_what_it_offers_and_what_yours_sends(db, l
         _genesis(peer, "Pen Talk").to_dict(), waiting_for=None, now=10**12, held_from=peer.fingerprint,
     )
     text = _run(
-        FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"]), lane, sysop, link_context,
+        FakeSession(["o", "l", "p", "0", "1", "b", "b", "b", "b", "b"]), lane, sysop, link_context,
     )
     detail = text[text.index("Name: ReLink"):]
     detail = detail[: detail.index("Choice: ")]
@@ -383,7 +383,7 @@ def test_an_established_peer_still_shows_what_its_probationary_callers_had_held_
     link_context.link_node.deferred_events.defer(
         _genesis(peer, "Pen Talk").to_dict(), waiting_for=None, now=10**12, held_from=peer.fingerprint,
     )
-    text = _run(FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"]), lane, sysop, link_context)
+    text = _run(FakeSession(["o", "l", "p", "0", "1", "b", "b", "b", "b", "b"]), lane, sysop, link_context)
     assert "What it sends: accepted, except 1 item(s) held back from its callers still on probation" in text
 
 

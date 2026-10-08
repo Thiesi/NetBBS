@@ -250,27 +250,27 @@ def _screen(lane, sysop, keys, **size) -> str:
 def test_the_rules_screen_lists_rules_with_needs_and_what_they_open(db, lane, sysop, rules):
     create_board(db, "lounge", min_read_level=10, creator=sysop)
 
-    text = _screen(lane, sysop, ["u", "o"])
+    text = _screen(lane, sysop, ["u", "a"])
 
     assert "Promotion rules" in text
     assert "0 → 10" in text and "24h, 2 logins" in text and "1 read" in text
 
 
 def test_creating_a_rule_from_the_console(db, lane, sysop):
-    _screen(lane, sysop, ["u", "o", "c", "f", "20", "t", "30", "s"])
+    _screen(lane, sysop, ["u", "a", "c", "f", "20", "t", "30", "s"])
 
     assert get_promotion_rules(db) == [PromotionRule(20, 30, min_age_hours=24, min_logins=2)]
 
 
 def test_a_refused_rule_keeps_the_draft_open(db, lane, sysop, rules):
-    text = _screen(lane, sysop, ["u", "o", "c", "s"])  # the default draft starts from 0, which has a rule
+    text = _screen(lane, sysop, ["u", "a", "c", "s"])  # the default draft starts from 0, which has a rule
 
     assert "Two rules start from level 0" in text
     assert len(get_promotion_rules(db)) == 2
 
 
 def test_deleting_a_rule_from_the_console(db, lane, sysop, rules):
-    text = _screen(lane, sysop, ["u", "o", "d", "01", "y"])
+    text = _screen(lane, sysop, ["u", "a", "d", "01", "y"])
 
     assert get_promotion_rules(db) == [rules[1]]
     assert "Deleted the rule 0 -> 10." in text

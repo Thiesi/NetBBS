@@ -209,14 +209,14 @@ def test_a_captured_flow_still_writes_what_it_said_before_asking_something():
 
 
 def test_enabling_a_banner_with_no_file_says_why_on_the_menu(db, lane, sysop):
-    rows = _screen(lane, sysop, ["s", "m", "n", "w", "e"])
+    rows = _screen(lane, sysop, ["s", "m", "s", "w", "e"])
     assert rows[0].endswith("Welcome banner")
     assert any("No banner file found at" in row for row in rows)
     assert any("[E]nable" in row for row in rows)  # the menu is still there under it
 
 
 def test_browsing_an_empty_banner_directory_explains_itself_without_a_keypress(db, lane, sysop):
-    rows = _screen(lane, sysop, ["s", "m", "n", "w", "f"])
+    rows = _screen(lane, sysop, ["s", "m", "s", "w", "f"])
     assert rows[0].endswith("Welcome banner")  # back on the menu, not held on a pause
     assert any("No other .ans files found in" in row for row in rows)
     assert not any("Press any key" in row for row in rows)

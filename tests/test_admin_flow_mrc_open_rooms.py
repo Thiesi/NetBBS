@@ -83,7 +83,7 @@ def test_open_room_detail_offers_adopt_and_retire_but_never_link_or_unbridge(db,
     asyncio.run(admin_flow._channel_detail_screen(session, lane, sysop, channel, link_context=_Link(), mrc_bridge=None))
     text = _visible(_written_text(session))
     assert "open room -- opened by a caller" in text
-    assert "[A]dopt" in text and "Re[t]ire" in text
+    assert "[A]dopt" in text and "[C]lose room" in text
     assert "[L]ink this chat channel" not in text and "[U]nbridge" not in text and "[M]RC room" not in text
     assert not is_channel_linked(db, channel)
 
@@ -112,14 +112,14 @@ def test_the_unlisted_pause_key_is_rejected_for_an_open_room(db, lane, sysop):
 def test_retire_asks_first_and_then_removes_the_room(db, lane, sysop):
     settings = save_open_room_settings(db, OpenRoomSettings(enabled=True))
     channel = materialize_open_room(db, "lobby", open_settings=settings).channel
-    # t/n: retire, declined -> still there; t/y: retire, confirmed -> gone.
-    session = FakeSession(["t", "n", "t", "y"])
+    # c/n: close, declined -> still there; c/y: close, confirmed -> gone.
+    session = FakeSession(["c", "n", "c", "y"])
     asyncio.run(admin_flow._channel_detail_screen(session, lane, sysop, channel, mrc_bridge=None))
     text = _visible(_written_text(session))
-    assert "Retire mrc:lobby and delete its scrollback now?" in text
+    assert "Close mrc:lobby and delete its scrollback now?" in text
     # Entered directly, so the outcome is still queued for the menu that would
     # be drawn next rather than written under this screen.
-    assert "Retired 'mrc:lobby'." in _visible("".join(admin_flow._take_notices(session)))
+    assert "Closed 'mrc:lobby'." in _visible("".join(admin_flow._take_notices(session)))
     assert get_mrc_mapping(db, channel) is None
     try:
         get_channel_by_name(db, "mrc:lobby")

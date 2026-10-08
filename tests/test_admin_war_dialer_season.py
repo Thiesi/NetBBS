@@ -67,7 +67,7 @@ def test_the_standalone_console_points_at_the_cli_instead(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop))
     text = _normalized_visible(_written_text(session))
 
-    assert "Next season and Reset competition run from a live node's console" in text
+    assert "Next season and Competition reset run from a live node's console" in text
     assert "[N]ext season" not in text
 
 
