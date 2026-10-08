@@ -394,7 +394,7 @@ def _dial_in_link_context():
 
 def test_link_status_shows_the_fallback_labelled_as_such(db, lane, sysop):
     _listeners(db, public_url="https://bbs.example.org/")
-    session = FakeSession(["s", "l", "b", "b", "b"])
+    session = FakeSession(["o", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_dial_in_link_context()))
 
     text = _normalized_visible(_written_text(session))
@@ -406,7 +406,7 @@ def test_suggestions_are_shown_but_not_published_until_saved(db, lane, sysop):
     _listeners(db)
     # Link status -> [D]ial-in -> [U]se suggestions -> [B]ack, confirming the
     # discard -> back out of Link status and the console.
-    session = FakeSession(["s", "l", "d", "u", "b", "y", "b", "b", "b"])
+    session = FakeSession(["o", "l", "d", "u", "b", "y", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_dial_in_link_context()))
 
     text = _normalized_visible(_written_text(session))
@@ -418,7 +418,7 @@ def test_suggestions_are_shown_but_not_published_until_saved(db, lane, sysop):
 
 def test_saving_suggestions_publishes_them(db, lane, sysop):
     _listeners(db, public_url="https://bbs.example.org/")
-    session = FakeSession(["s", "l", "d", "u", "s", "b", "b", "b"])
+    session = FakeSession(["o", "l", "d", "u", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_dial_in_link_context()))
 
     assert get_stated_dial_in(db) == [
@@ -432,7 +432,7 @@ def test_saving_suggestions_publishes_them(db, lane, sysop):
 def test_a_rejected_save_keeps_the_draft_and_writes_nothing(db, lane, sysop):
     _listeners(db)
     session = FakeSession([
-        "s", "l", "d",
+        "o", "l", "d",
         "1", "http://bbs.example.org/", "s",      # refused: the editor stays open
         "2", "telnet://bbs.example.org:23", "s",  # still refused: slot 1 kept its value
         "1", "", "s",                             # slot 1 emptied: saved
@@ -449,7 +449,7 @@ def test_saving_every_slot_empty_is_a_statement(db, lane, sysop):
     _listeners(db, public_url="https://bbs.example.org/")
     # The draft opens on the fallback in slot 1; emptying it and saving
     # states that the node publishes nothing.
-    session = FakeSession(["s", "l", "d", "1", "", "s", "b", "b", "b"])
+    session = FakeSession(["o", "l", "d", "1", "", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=_dial_in_link_context()))
 
     assert get_stated_dial_in(db) == []

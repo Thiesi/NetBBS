@@ -73,12 +73,12 @@ def test_the_dashboard_quick_column_lines_up() -> None:
         MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org name status"),
         MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"),
         MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
-        MenuEntry(label=menu_key("X", "", prefix="Outbo"), brief="Pending outgoing Link work items"),
+        MenuEntry(label=menu_key("Q", "ueue (outbox)"), brief="Pending outgoing Link work items"),
     ]
     rows = _plain_rows(
         menu_grid([("Console", console), ("Quick", quick)], width=80, height=24, description_level="inline")
     )
-    quick_labels = ("[N]ode", "Bac[k]up", "[D]NS", "A[w]ay", "[L]ink status", "Outbo[x]")
+    quick_labels = ("[N]ode", "[F]ull backups", "[D]NS", "[T]ime away", "[L]ink status", "[Q]ueue (outbox)")
     assert len(_starts(rows, quick_labels)) == 1, "\n".join(rows)
     # The heading sits two columns left of its entries, as in every section.
     heading = next(row.index("QUICK") for row in rows if "QUICK" in row)

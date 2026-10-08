@@ -436,8 +436,8 @@ def test_a_peer_screen_establishes_blocks_and_clears(db, lane, sysop):
     subject = TrustSubject.node(peer.fingerprint)
 
     session = FakeSession([
-        "s", "l", "p", "0", "1",  # Settings, Link status, Peers, the only node
-        "k", "r", "spam", "s",  # Block: reason, save
+        "o", "l", "p", "0", "1",  # Operations, Link status, Peers, the only node
+        "d", "r", "spam", "s",  # Deny (a block): reason, save
         "c", "0", "1",  # Clear override: all three at once
         "e", "r", "reviewed", "s", "y",  # Establish
         "b", "b", "b", "b", "b", "b",
@@ -460,7 +460,7 @@ def test_a_peer_list_candidate_offers_no_trust_action(db, lane, sysop):
     link_context = _link_context()
     candidate = bootstrap_node_identity("candidate")
     save_candidate_descriptor(db, candidate.fingerprint, _record(candidate, name="Beta Candidate").descriptor)
-    session = FakeSession(["s", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
+    session = FakeSession(["o", "l", "p", "0", "1", "b", "b", "b", "b", "b"])
     session.terminal_height = 60
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
