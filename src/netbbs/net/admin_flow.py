@@ -372,6 +372,10 @@ from netbbs.link.dial_in import (
     set_stated_dial_in_without_commit, suggested_dial_in,
 )
 from netbbs.link.key_rotation import KeyRotationError
+from netbbs.link.node_page import (
+    NODE_PAGE_INDEXED, NODE_PAGE_OFF, NODE_PAGE_SHOWN, NODE_PAGE_STATES, NODE_PAGE_URL_PREFIX, get_node_page,
+    set_node_page_without_commit,
+)
 from netbbs.link.node_identity import operational_key_history
 from netbbs.link.enforcement import (
     REASON_NODE_PROBATIONARY, REASON_USER_PROBATIONARY, REASON_USER_QUARANTINED, decide_user_authorship,
@@ -9920,6 +9924,9 @@ async def _draw_managed_dns_status(
                 "Reaching this board by name",
                 [Note(line) for line in managed_dns_standard_ports_lines(listeners)],
             ))
+            sections.append(Section(
+                "Web page", _node_page_lines(previous_name or name, await lane.run(get_node_page)),
+            ))
     await _write_sections(session, sections, unicode_style=unicode_style)
     actions = [menu_key("R", "egister")]
     if previous_name is not None and status is not ManagedDnsRegistrationStatus.REVOKED:
@@ -9928,6 +9935,8 @@ async def _draw_managed_dns_status(
         if previous_name is None:
             actions.append(menu_key("G", "ive up name"))
             actions.append(menu_key("N", "ew name"))
+    if status in _MANAGED_DNS_ACTIVE_STATUSES:
+        actions.append(menu_key("W", "eb page"))
     if await lane.run(get_managed_dns_admin_token) is not None:
         # Design doc §16 Decision 4: the one node whose operator also
         # runs the service gets the service's own table here.
@@ -9936,6 +9945,34 @@ async def _draw_managed_dns_status(
     await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
     await _choice_prompt(session)
     return status
+
+
+_NODE_PAGE_DESCRIPTIONS = {
+    NODE_PAGE_SHOWN: "Shown, not indexed by search engines",
+    NODE_PAGE_INDEXED: "Shown and indexed by search engines",
+    NODE_PAGE_OFF: "Off",
+}
+
+
+def _node_page_lines(name: str, setting: str) -> list[Field | Note]:
+    """The "Web page" section of the DNS screen (design doc §8.13, issue
+    #1165): where this node's page lives and the SysOp's choice about it.
+    The page is built from what Reliable Link knows, so it appears only
+    once Reliable Link has met this node, and a change reaches it with
+    the next contact."""
+    rows: list[Field | Note] = [
+        Field("Address", f"{NODE_PAGE_URL_PREFIX}{name}"),
+        Field(
+            "Setting", _NODE_PAGE_DESCRIPTIONS[setting],
+            color=MUTED_COLOR if setting == NODE_PAGE_OFF else VALUE_COLOR,
+        ),
+        Note(
+            "A public page about this node: its name, how callers dial in, and when it joined and was "
+            "last heard on NetBBS Link. It appears once Reliable Link has met this node, and a change "
+            "here reaches it with the next contact. [W]eb page steps through the settings."
+        ),
+    ]
+    return rows
 
 
 def _managed_dns_state_guidance(
@@ -10077,6 +10114,24 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             await cancel_registration_rename(flow, lane)
             flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
+        elif choice == "w" and status in _MANAGED_DNS_ACTIVE_STATUSES:
+            # Issue #1165: a toggle that steps through the three settings.
+            # The setting and its audit entry commit together.
+            def _step(db: Database) -> None:
+                db.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    current = get_node_page(db)
+                    following = NODE_PAGE_STATES[(NODE_PAGE_STATES.index(current) + 1) % len(NODE_PAGE_STATES)]
+                    set_node_page_without_commit(db, following)
+                    record_action_without_commit(db, actor=actor, action="set_node_page", detail=following)
+                except BaseException:
+                    db.connection.rollback()
+                    raise
+                else:
+                    db.connection.commit()
+
+            await lane.run(_step)
+            status = await _draw_managed_dns_status(session, lane, actor)
         elif choice == "a" and await lane.run(get_managed_dns_admin_token) is not None:
             await session.write_line("")
             await administer_managed_dns_service(session, lane, actor)
@@ -10096,6 +10151,9 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
                                               brief="Release the name"))
                 help_entries.append(MenuEntry(label=menu_key("N", "ew name"),
                                               brief="Move to a different name"))
+            if status in _MANAGED_DNS_ACTIVE_STATUSES:
+                help_entries.append(MenuEntry(label=menu_key("W", "eb page"),
+                                              brief="Show, index or hide the web page"))
             if admin_token is not None:
                 help_entries.append(MenuEntry(label=menu_key("A", "dminister service"),
                                               brief="Every name the service holds"))

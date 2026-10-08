@@ -492,6 +492,7 @@ def build_endpoint_descriptor(
     canonical_dns_name: str | None = None,
     capabilities: tuple[str, ...] = LINK_CAPABILITIES,
     dial_in: list[str] | tuple[str, ...] | None = None,
+    node_page: str | None = None,
 ) -> EndpointDescriptor:
     """
     Build and sign one `endpoint_descriptor` event, per design doc §12
@@ -556,6 +557,12 @@ def build_endpoint_descriptor(
         # validated by the reader rather than here, so a bad entry costs
         # only itself. Same "omitted when empty" convention.
         payload["dial_in"] = list(dial_in)
+    if node_page:
+        # Issue #1165 (design doc §8.13): the SysOp's choice about this
+        # node's page on www.netbbs.org, read by `netbbs.link.node_page`.
+        # Omitted for the default, so it is present only as "indexed" or
+        # "off".
+        payload["node_page"] = node_page
 
     envelope = build_envelope(ENDPOINT_DESCRIPTOR_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))

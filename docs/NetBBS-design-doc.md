@@ -4792,6 +4792,14 @@ drops a malformed entry and a malformed list reads as empty, as for
 `live_relays`, and never refuses the hello over it. An older node keeps and
 forwards the field inside the signed envelope without reading it.
 
+A descriptor may also carry `node_page`: the SysOp's choice about the node's
+public page on www.netbbs.org (issue #1165, §8.13). It is `"indexed"` (shown,
+and search engines may index it) or `"off"` (no page); a descriptor without it
+asks for the default, a page shown but marked `noindex`. The field is omitted
+for the default, so every older descriptor reads as the default. A reader takes
+any other value as `"off"`, since a claim it does not understand is not consent
+to publish, and never refuses the hello over it.
+
 The protocol logic remains transport-independent. The `aiohttp` adapter is the
 boundary translating protocol messages to real HTTP requests and responses.
 
@@ -5925,6 +5933,53 @@ trust screen. A peer-list candidate has none: nothing about it is verified.
 defaulting to 0. A guest is an account (§4.6), so a SysOp who wants the map
 kept from guests sets the level above the guest account's. On a node with Link
 disabled the entry is not shown.
+
+### 8.13 Public node pages (issue #1165)
+
+A node that holds a managed netbbs.org name (the §16 issue #201 entry) and has
+met Reliable Link gets a page at `https://www.netbbs.org/~<name>`. The page
+says what the project knows about the node: its friendly name, its DNS name,
+how callers dial in, when its name was registered, how long Reliable Link has
+known it, when it was last heard, and its technical identity. A `/nodes/`
+index lists every page. The pages are the project's publication, not a
+node's: they are built by the project, from two sources the project runs.
+
+**Who gets a page.** A node whose managed-DNS registration is matured and whose
+fingerprint Reliable Link has met directly (§8.12: a completed hello or
+events exchange). Introduced nodes and peer-list candidates do not: Reliable
+Link has not verified them itself. The DNS name is the address, because the
+service already keeps it unique and screened.
+
+**What it shows, and from where.** The registration date comes from the
+managed-DNS service's registration. Everything else comes from Reliable Link's
+node map *as a caller sees it* (§8.12), so a fact a caller there could not see
+is never on the page either: Link addresses, relay roles, reliability, trust
+states, and every node quarantined or blocked there. The friendly name and
+`dial_in` addresses are read from the node's signed descriptor by the same
+validating readers the node map uses, and are remote text, escaped where they
+are written. "Known to Reliable Link since" is the first direct contact
+Reliable Link has on record; "last heard" is the node map's (§8.12).
+
+**What it never shows.** The address the managed-DNS service last saw, which
+is where the node's operator lives as often as where the board does; the
+service's contact times; and any free text beyond the friendly name.
+
+**Still on NetBBS Link.** A state with its date, not a yes or no: *active* when
+last heard within 7 days, *quiet* within 30 days (the node map's stale point),
+and *left* after that, or once the name is released or revoked. A page that
+has left keeps its history and says so; it goes when another node holds the
+name.
+
+**Pages belong to fingerprints.** A page's history is keyed by the node's
+fingerprint, which key rotation never changes (the §16 issue #624 entry). A
+name released and registered again by another node starts a fresh page; the
+new holder never inherits the old one's dates. A rename moves the page to the new name once it has matured.
+
+**The SysOp's choice.** Shown but `noindex` by default; the SysOp can let search
+engines index it, or turn it off, on the DNS screen's `[W]eb page`. The choice
+travels as the descriptor's `node_page` field (§8.2), so the node states it
+itself and nobody needs a login on the website; it takes effect at Reliable
+Link's next contact with the node.
 
 ## 9. Linked boards and resource lifecycle
 
@@ -15724,6 +15779,45 @@ everywhere.
 and a row inside list art get ` ~` after the name. Rejected: a legend row
 above the list, which would cost a list row on every page of a full list;
 Ctrl-H carries the explanation instead.
+
+### Issue #1165 — public node pages on www.netbbs.org — decided
+
+A node that registers a netbbs.org name and joins NetBBS Link got nothing it
+could point people at. Normative description: §8.13, and §8.2 for
+`node_page`.
+
+**Decision 1 — managed-DNS names, met by Reliable Link.** The name is already
+unique and screened, so it is the page's address without another namespace.
+Rejected: a page for every node any part of the network knows, which would
+publish unverified claims under the project's domain.
+
+**Decision 2 — built ahead of time, not served live.** A periodic job writes
+static pages next to the rest of www.netbbs.org. Rejected: a route in the
+managed-DNS service, which would put a public page renderer in front of the
+credential store.
+
+**Decision 3 — Reliable Link's caller view, not its tables.** The page shows no
+more than a caller on Reliable Link may see, which keeps out every SysOp-only
+fact by construction. Rejected: reading the tables directly, where one
+forgotten column would publish addresses or trust states. The address the
+managed-DNS service last saw is never published.
+
+**Decision 4 — an opt-out here, unlike the node map.** The node map has none
+(issue #767 Decision 4), because a board missing from it must mean callers
+cannot reach it through that board. A web page carries no such meaning: it is
+the project describing a node to the whole internet, and a SysOp may not want
+that. Published by default with `noindex`, so a new node shows up without
+being found by every search engine; indexing is the SysOp's choice too. The
+choice is a signed descriptor field, so no website account exists to lose or
+to phish.
+
+**Decision 5 — history follows the fingerprint.** A released name can pass to
+another node, and the dates are about the node, not the name.
+
+**Not done, deliberately.** Free text such as a tagline, which would put remote
+prose under the project's domain; a reliability or uptime history, which reads
+as shaming for a hobbyist board that sleeps at night; software version and
+carried boards, until the descriptor publishes them.
 
 ### SFTP over the SSH transport — declined
 
