@@ -289,9 +289,9 @@ PgUp and PgDn) turn the page. The other keys:
   and you are told how many more Kept has room for. The Inbox header says how
   many are in Kept.
 - **[C]ompose** writes a new message.
-- **[M]arked: no** (or Space) marks the highlighted message with `*` and
-  moves to the next, so you can mark a run of them; on a marked one it reads
-  **[M]arked: yes** and unmarks it. **[E]rase** then deletes the marked
+- **[M]ark** (or Space) marks the highlighted message with `*` and moves to
+  the next, so you can mark a run of them; press it again on a marked one to
+  unmark it. **[E]rase** then deletes the marked
   messages, after one question that says how many; with nothing marked it
   deletes the highlighted one. In the Inbox, **[K]ept** moves the marked
   messages to Kept the same way.
@@ -304,9 +304,9 @@ PgUp and PgDn) turn the page. The other keys:
   first and by conversation. Your choice is remembered.
 - **[/] Find** shows only mail with a word in the name or the subject. An empty
   line shows everything again.
-- **[U]nread: no** marks the highlighted message unread; on an unread one it
-  reads **[U]nread: yes** and marks it read without opening it. While you
-  read a message, its own **[U]nread: no** marks it unread again.
+- **[U]nread** marks the highlighted message unread, or read without opening
+  it. While you read a message, its own **[U]nread: no** marks it unread
+  again.
 
 You can also write to someone from where you found them, without typing
 their address. The compose screen opens with **To** filled in:
@@ -315,7 +315,7 @@ their address. The compose screen opens with **To** filled in:
 - On **Who's online**, pick a caller and press **[E]-mail** (**[M]** there is
   a live message). It works for a caller on a linked node, and for a caller
   who has turned off live messages.
-- On **Previous callers**, press **[M]ail a caller** and type the caller's
+- On **Recent callers**, press **[M]ail a caller** and type the caller's
   number. A caller whose name is hidden there can't be written to from the
   list.
 - While reading a post, **[M]ail author** answers its author privately, with
@@ -325,7 +325,7 @@ their address. The compose screen opens with **To** filled in:
 
 None of these offers mail to someone on this board who has blocked you. The
 member card and Who's online say that they do not accept messages or mail
-from you, Previous callers says so when you type their number, and a post of
+from you, Recent callers says so when you type their number, and a post of
 theirs has no **[M]ail author**. For someone on a linked node you are still
 offered mail, since this board can't see who they block; their board answers.
 
@@ -468,7 +468,7 @@ A blocked person is told. On this board the To prompt and Send say that
 you do not accept mail from them, and `/msg`, `/private`, `/dm` and
 `/invite` say you do not accept messages from them. Who's online and your
 Directory card say you do not accept messages or mail from them, and offer
-neither; Previous callers says it when they type your number, and your posts
+neither; Recent callers says it when they type your number, and your posts
 offer them no **[M]ail author**. Mail from another node bounces with that reason. It is never taken and quietly thrown away. The
 one exception is a live message from someone on another node: it is
 dropped without an answer, because live messages between nodes have no way

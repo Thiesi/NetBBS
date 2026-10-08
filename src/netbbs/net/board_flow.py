@@ -2412,9 +2412,9 @@ async def _tombstone_existing_post(
     stays_local = _moderation_stays_local(db, board, link_context)
     subject = sanitize_text(post.subject)
     question = (
-        f"Remove \"{subject}\" on this node only?"
+        f"Take down \"{subject}\" on this node only?"
         if stays_local
-        else f"Remove \"{subject}\"? This cannot be undone."
+        else f"Take down \"{subject}\"? This cannot be undone."
     )
     if not await prompt_yes_no(session, question, default=False):
         announce(session, "Cancelled.", tone="muted")
@@ -2428,10 +2428,10 @@ async def _tombstone_existing_post(
     if link_context is not None:
         queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=link_context.node_identity)
     if stays_local:
-        announce(session, "Post removed on this node.")
+        announce(session, "Post taken down on this node.")
         announce(session, _STAYS_LOCAL_NOTICE, tone="muted")
     else:
-        announce(session, "Post removed.")
+        announce(session, "Post taken down.")
 
 
 def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_post_id: str = "") -> Path:

@@ -382,7 +382,7 @@ def test_every_folder_fits_with_marks(node, width, height, folder_keys):
     set_kept(db, bob, [m.id for m in list_inbox(db, bob)[:20]], kept=True)
     path = mail_flow._letter_draft_path(lane, bob)
     path.write_text("A letter", encoding="utf-8")
-    # The cursor ends on a marked row, where the bar reads [M]arked: yes (review on #908).
+    # The cursor ends on a marked row, the busiest bar (review on #908).
     session = FakeSession([*folder_keys, "m", "m", "UP", "b", "b"], width=width, height=height)
 
     _run(session, lane, bob)

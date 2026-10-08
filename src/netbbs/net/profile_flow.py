@@ -330,10 +330,10 @@ def _render_previous_callers_panel(
         )
 
     if plain:
-        title = "Previous callers"
+        title = "Recent callers"
         subtitle = "Who has called in lately"
     else:
-        title = f"{marker}  P R E V I O U S   C A L L E R S  {marker}"
+        title = f"{marker}  R E C E N T   C A L L E R S  {marker}"
         subtitle = "SIGNALS RECENTLY RECEIVED BY THIS NODE"
     rendered: list[str] = [
         _rule(top_left, top_right),
@@ -595,7 +595,7 @@ async def _previous_callers_screen(
 
         await session.write_line(
             "\r\n" + screen_title(
-                "Previous callers",
+                "Recent callers",
                 breadcrumb=(session.node_display_name,),
                 width=session.terminal_width,
                 clear=redraw_in_place_enabled(db, user),
@@ -662,7 +662,7 @@ async def _previous_callers_screen(
             action = (await session.read_key()).lower()
             if action == HELP_KEY:
                 await show_menu_help(
-                    session, "Previous callers help",
+                    session, "Recent callers help",
                     [MenuEntry(
                         label=menu_key("M", "ail a caller"),
                         brief="Write to someone on the list; asks for their number",

@@ -685,7 +685,7 @@ writes the board, file area and channel grants together.
 Members find everyone who runs the node under **Staff list** on their main
 menu: SysOps, staff members, and moderators with what they look after, each
 with the date of their last session. Being listed is the point, so a
-member's choice to stay off Previous callers does not hide them here. Guests
+member's choice to stay off Recent callers does not hide them here. Guests
 don't see the list.
 
 Going away for a while? Choose **Time away** on your console's landing screen (it

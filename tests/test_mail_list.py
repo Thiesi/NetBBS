@@ -378,8 +378,9 @@ def test_u_on_the_list_toggles_the_highlighted_message(node):
     _run(session, lane, bob)
 
     screens = session.screens()
-    assert "[U]nread: yes" in screens[0]
-    assert "Marked read." in screens[1] and "[U]nread: no" in screens[1]
+    # One label either way (design doc §16 Decision 7): the row shows `new`.
+    assert "[U]nread" in screens[0] and "new" in screens[0]
+    assert "Marked read." in screens[1]
     assert "Marked unread." in screens[2]
     assert get_mail(db, bob, message.id).is_read is False
 

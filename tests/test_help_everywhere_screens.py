@@ -566,8 +566,8 @@ def test_previous_callers_has_help(db, lane, alice, bob):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_previous_callers_screen(session, db, alice, lane=lane))
     text = session.squeezed()
-    assert "Previous callers help" in text and "[M]ail a caller Write to someone on the list" in text
-    assert "bob" in text.split("Previous callers help")[1]
+    assert "Recent callers help" in text and "[M]ail a caller Write to someone on the list" in text
+    assert "bob" in text.split("Recent callers help")[1]
     assert session.leftover == []
 
 

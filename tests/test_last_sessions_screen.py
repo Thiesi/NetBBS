@@ -196,7 +196,7 @@ def test_previous_callers_screen_is_truecolor_fancy_and_excludes_current_session
 
     output = _written_text(session)
     assert shown is True
-    assert "P R E V I O U S" in _visible(session)
+    assert "R E C E N T" in _visible(session)
     assert "bob" in _visible(session)
     assert "alice" not in _visible(session)
     truecolor_sequences = set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", output))
@@ -221,16 +221,16 @@ def test_previous_callers_screen_plain_style_drops_the_neon(tmp_path):
     asyncio.run(_show_previous_callers_screen(session, database, alice, current_history_id=None))
 
     text = _visible(session)
-    assert "Previous callers" in text
+    assert "Recent callers" in text
     assert "Who has called in lately" in text
     assert "SIGNALS" not in text
-    assert "P R E V I O U S" not in text
+    assert "R E C E N T" not in text
     assert "bob" in text
     # The frame and heading keep to one colour: no gradient, in truecolor
     # or in 256 colours (review on #889).
     output = _written_text(session)
     assert len(set(re.findall(r"\x1b\[38;2;\d+;\d+;\d+m", output))) <= 3
-    heading_line = next(line for line in output.split("\r\n") if "Previous callers" in _ANSI_ESCAPE_RE.sub("", line))
+    heading_line = next(line for line in output.split("\r\n") if "Recent callers" in _ANSI_ESCAPE_RE.sub("", line))
     assert len(set(re.findall(r"\x1b\[38;5;\d+m", heading_line))) <= 2
     database.close()
 
@@ -336,7 +336,7 @@ def test_previous_callers_menu_screen_shows_another_caller(tmp_path):
     asyncio.run(_run_main_menu(session, database, alice))
 
     text = _visible(session)
-    assert "P R E V I O U S   C A L L E R S" in text
+    assert "R E C E N T   C A L L E R S" in text
     assert "bob" in text
     database.close()
 

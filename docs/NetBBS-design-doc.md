@@ -893,7 +893,7 @@ truecolor is a progressive visual enhancement with a deliberately polished
 256-color fallback. The SysOp can toggle the splash node-wide from Settings;
 new and upgraded nodes default to showing it. The same setting also offers a
 plain style (issue #841): the node's header colour, no gradient, and the
-heading "Previous callers" / "Who has called in lately" instead of the neon
+heading "Recent callers" / "Who has called in lately" instead of the neon
 "signals received" wording, for a node whose tone the neon clashes with. It
 applies to the splash and the menu screen alike.
 
@@ -15660,8 +15660,10 @@ old one. Rejected: allowing the first letter of a later word (`Reply [a]ll`,
 key inside the label.
 
 - **Toggles show their state.** `[F]ollow: off` / `[F]ollow: on`,
-  `[M]arked: no` / `[M]arked: yes`. The key and the label's start never
-  change with the state. Rejected: the key followed by the action
+  `[K]ept: no` / `[K]ept: yes`. The key and the label's start never
+  change with the state. Where the highlighted row already shows the state
+  (the mail list's `*` mark and `new`), the toggle keeps one label,
+  `[M]ark` and `[U]nread`, so the bar still fits 40x12. Rejected: the key followed by the action
   (`[F] Unfollow`), which sets the key apart from its label, and separate
   verbs (`[F]ollow` / `[U]nfollow`), which move the key with the state and
   collide with other `U` keys.

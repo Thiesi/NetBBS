@@ -1339,12 +1339,10 @@ class _MailboxScreen:
             options.append(MenuEntry(label=menu_key("S", "ent"), brief="Review mail you've sent"))
             options.append(MenuEntry(label=menu_key("V", "iew Kept"), brief="Mail you keep from the mailbox cap"))
         if row_count:
-            # A toggle shows its state (issue #1158); "yes" is the longer
-            # label, which the page budget measures.
-            if not measuring and (highlighted is None or highlighted.message.id not in self.marked):
-                options.append(MenuEntry(label=menu_key("M", "arked: no"), brief="Mark the highlighted message"))
-            else:
-                options.append(MenuEntry(label=menu_key("M", "arked: yes"), brief="Unmark it"))
+            # The row shows its own `*` and `new`, so these two toggles keep
+            # one label (design doc §16 Decision 7); with their states the
+            # bar took a fifth row at 40x12.
+            options.append(MenuEntry(label=menu_key("M", "ark"), brief="Mark or unmark the highlighted message"))
             options.append(MenuEntry(
                 label=menu_key("E", "rase"),
                 brief="Delete the marked messages" if self.marked else "Delete the highlighted message",
@@ -1356,10 +1354,7 @@ class _MailboxScreen:
             elif self.kept:
                 options.append(MenuEntry(label=menu_key("K", "ept: yes"), brief="Move back to the Inbox"))
             if not self.sent:
-                if measuring or (highlighted is not None and not highlighted.message.is_read):
-                    options.append(MenuEntry(label=menu_key("U", "nread: yes"), brief="Mark the highlighted message read"))
-                else:
-                    options.append(MenuEntry(label=menu_key("U", "nread: no"), brief="Mark the highlighted message unread"))
+                options.append(MenuEntry(label=menu_key("U", "nread"), brief="Mark it unread, or read"))
         if self.folder == _INBOX and (measuring or self._read_count()):
             options.append(MenuEntry(
                 label=menu_key("P", "urge read"), brief="Delete every read message in the Inbox",
