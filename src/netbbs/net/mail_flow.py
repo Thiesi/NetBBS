@@ -2024,7 +2024,7 @@ def _decode_files(text: str | None) -> list[FileRef]:
 # -- blocked people (issues #817, #925) ----------------------------------------
 #
 # A caller blocks someone from a letter they received (`[S]ender blocked` on
-# its view, a toggle), from Who's online (`Bloc[k]`, the same toggle), or by
+# its view, a toggle), from Who's online (the same toggle), or by
 # name from Profile > Blocked people, which lists them and unblocks. Local
 # accounts are blocked by account id, Link users by their `user@<fingerprint>`
 # address. One list stops both mail and live messages (issue #925). The rules
@@ -2038,7 +2038,7 @@ _UNBLOCKED_NOTICE = "Unblocked {name}: their mail and live messages are accepted
 
 @dataclass(frozen=True)
 class BlockTarget:
-    """Who a `Bloc[k]` toggle acts on -- on a received letter or on Who's
+    """Who a `[S]ender blocked` toggle acts on -- on a received letter or on Who's
     online: a local account by id, or a Link user by address."""
     user_id: int | None
     address: str | None
@@ -2278,7 +2278,7 @@ async def _show_sent_group(
     for all its copies: To names everyone, and each Link copy's delivery is
     on a line of its own. `[R]eply` writes to them all again; `[S]end again`
     sends the letter again to those whose copy bounced or expired, and to
-    no one else; `[D]elete` removes every copy from Sent. Mail to all
+    no one else; `[E]rase` removes every copy from Sent. Mail to all
     callers has no Reply or Resend: it is sent from the SysOp console."""
     copies = await lane.run(sent_group_copies, user, message)
     to_all = is_to_all_callers(message)
