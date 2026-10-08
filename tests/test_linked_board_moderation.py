@@ -496,9 +496,9 @@ def test_removing_a_carried_post_on_a_non_origin_node_says_it_stays_local(db, re
     asyncio.run(board_flow._show_board(session, db, board, sysop))
 
     text = session.visible()
-    assert 'Remove "Carried subject" on this node only?' in text
+    assert 'Take down "Carried subject" on this node only?' in text
     assert "cannot be undone" not in text
-    assert "Post removed on this node." in text
+    assert "Post taken down on this node." in text
     assert "Other nodes carrying this board keep the original" in text
 
 
@@ -512,8 +512,8 @@ def test_removing_a_post_on_the_origin_node_is_not_called_local(db, sysop, alice
     asyncio.run(board_flow._show_board(session, db, board, sysop, link_context=link_context))
 
     text = session.visible()
-    assert 'Remove "Local subject"? This cannot be undone.' in text
-    assert "Post removed." in text
+    assert 'Take down "Local subject"? This cannot be undone.' in text
+    assert "Post taken down." in text
     assert "keep the original" not in text
 
 

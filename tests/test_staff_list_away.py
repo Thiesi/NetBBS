@@ -200,8 +200,8 @@ def test_every_member_but_the_guest_is_offered_the_staff_list(db, sysop):
         asyncio.run(_draw_main_menu(session, db, MessageMailbox(), user))
         return _visible(_written_text(session))
 
-    assert "S[t]aff list" in menu(carol)
-    assert "S[t]aff list" not in menu(guest)
+    assert "[O]perators" in menu(carol)
+    assert "[O]perators" not in menu(guest)
 
 
 # -- pending callers --------------------------------------------------------------
@@ -245,8 +245,8 @@ def test_the_sysops_own_words_are_sanitized_for_callers():
 
 def test_the_sysop_sets_an_away_notice_from_the_console_and_is_reminded(db, lane, sysop):
     until = (node_today(db) + datetime.timedelta(days=5)).isoformat()
-    # w: Away; s: set; message; date; (back on the landing) b: leave.
-    session = FakeSession(["w", "s", "At a pen show", until, "b"])
+    # t: Time away; s: set; message; date; (back on the landing) b: leave.
+    session = FakeSession(["t", "s", "At a pen show", until, "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert away_notice(db, sysop).message == "At a pen show"
     landing = _visible(_written_text(session)).rsplit("SysOp operations console", 1)[-1]
@@ -256,13 +256,13 @@ def test_the_sysop_sets_an_away_notice_from_the_console_and_is_reminded(db, lane
 def test_a_staff_member_ends_their_notice_from_the_staff_console(db, lane, sysop):
     helper = _staff(db, sysop, "helper", CO_SYSOP_PRESET)
     set_away(db, helper, "Exams", None)
-    session = FakeSession(["w", "e", "b"])
+    session = FakeSession(["t", "e", "b"])
     asyncio.run(staff_menu(session, lane, helper))
     assert away_notice(db, helper) is None
 
 
 def test_a_bad_date_is_refused_without_setting_anything(db, lane, sysop):
-    session = FakeSession(["w", "s", "Away", "12.10.2026", "b", "b"])
+    session = FakeSession(["t", "s", "Away", "12.10.2026", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert away_notice(db, sysop) is None
     assert "not a date like" in _visible(_written_text(session))

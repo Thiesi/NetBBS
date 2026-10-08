@@ -365,7 +365,7 @@ def test_a_received_copy_shows_everyone_and_reply_all_writes_to_them(db, lane):
 
     text = _visible_text(session)
     assert "To: bob, carol" in text
-    assert "Reply [a]ll" in text
+    assert "[A]nswer all" in text
     assert "Message sent to 2 people." in text
     replies = [m for m in list_inbox(db, alice) + list_inbox(db, carol) if m.subject == "Re: Lunch"]
     assert len(replies) == 2
@@ -379,13 +379,13 @@ def test_a_letter_to_one_person_offers_no_reply_all(db, lane):
 
     asyncio.run(browse_mail(session, lane, bob))
 
-    assert "Reply [a]ll" not in _visible_text(session)
+    assert "[A]nswer all" not in _visible_text(session)
 
 
 def test_sent_lists_a_letter_to_several_people_once_and_delete_removes_every_copy(db, lane):
     alice, bob, carol = _user(db, "alice"), _user(db, "bob"), _user(db, "carol")
     _group_letter(db, alice, [bob, carol])
-    session = FakeSession(keys=["s", "1", "d", "b", "b"], lines=["y"])
+    session = FakeSession(keys=["s", "1", "e", "b", "b"], lines=["y"])
 
     asyncio.run(browse_mail(session, lane, alice))
 
@@ -528,4 +528,4 @@ def test_sent_shows_each_link_copys_delivery_and_offers_resend_for_a_bounce(db, 
     # One row for the letter, showing the copy that needs the caller most.
     assert re.search(r"1  bob, carol@Farpoint .*Lunch +bounced", text)
     assert "Delivery to carol@Farpoint" in text
-    assert "Re[s]end" in text
+    assert "[S]end again" in text

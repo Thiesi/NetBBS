@@ -704,11 +704,12 @@ def _area_page_menus(
     if following is not None:
         # Issue #675: a followed area is listed first in [N]ew scan.
         hints.append(
-            MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this file area") if following
-            else MenuEntry(label=menu_key("F", "ollow"), brief="List this area first in New scan")
+            MenuEntry(label=menu_key("F", "ollow: on"), brief="Stop following this file area") if following
+            else MenuEntry(label=menu_key("F", "ollow: off"), brief="List this area first in New scan")
         )
     if can_pin and n_files > 0:
-        hints.append(MenuEntry(label=menu_key("i", "n", prefix="P"), brief="Pin or unpin a file at the top"))
+        # `[O]n top`, as a post's is on a board (issue #1158).
+        hints.append(MenuEntry(label=menu_key("O", "n top"), brief="Pin or unpin a file at the top"))
         if can_keep:
             hints.append(MenuEntry(label=menu_key("K", "eep"), brief="Keep a file from expiring, or stop"))
     return options, hints
@@ -805,7 +806,7 @@ def _key_action(
         return ("weblink", None, highlighted)
     if lowered == "l":
         return ("remote", None, highlighted)
-    if lowered == "i":
+    if lowered == "o":
         return ("pin", None, highlighted)
     if lowered == "k":
         return ("keep", None, highlighted)
@@ -1493,9 +1494,9 @@ async def _show_area(
         # An empty area can be followed too, to be told of its first file
         # (Codex review on #788).
         follow_entry = (
-            MenuEntry(label=menu_key("f", "ollow", prefix="Un"), brief="Stop following this file area")
+            MenuEntry(label=menu_key("F", "ollow: on"), brief="Stop following this file area")
             if follows["on"]
-            else MenuEntry(label=menu_key("F", "ollow"), brief="List this area first in New scan")
+            else MenuEntry(label=menu_key("F", "ollow: off"), brief="List this area first in New scan")
         )
         # [E] is decided at each draw: an upload arriving while this
         # screen is up can be the caller's own, waiting (issue #842).

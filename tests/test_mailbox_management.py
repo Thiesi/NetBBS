@@ -218,7 +218,7 @@ def test_the_capacity_notes_speak_of_unread_mail_and_of_kept():
     assert "Unread mail is never removed." in mailbox_capacity_note(mail_module.MAILBOX_NEARLY_FULL, 0)[0]
     assert kept_capacity_note(mail_module.MAX_KEPT_PER_RECIPIENT - 1) is None
     assert kept_capacity_note(mail_module.MAX_KEPT_PER_RECIPIENT) == (
-        "Kept is full (100 letters): K[e]ep in the Inbox is refused until you move some back to the "
+        "Kept is full (100 letters): [K]ept in the Inbox is refused until you move some back to the "
         "Inbox or delete them."
     )
 
@@ -231,7 +231,7 @@ def test_marked_letters_are_deleted_with_one_confirmation(node):
     for subject in ("One", "Two", "Three"):
         send_mail(db, alice, bob, subject, "body")
     # Newest first: Three, Two, One. Mark the first two.
-    session = FakeSession(["m", "m", "l", "y", "b"])
+    session = FakeSession(["m", "m", "e", "y", "b"])
 
     _run(session, lane, bob)
 
@@ -251,7 +251,7 @@ def test_delete_with_nothing_marked_takes_the_highlighted_letter(node):
     db, lane, bob, alice, _carol = node
     send_mail(db, alice, bob, "Stays", "body")
     send_mail(db, alice, bob, "Goes", "body")
-    session = FakeSession(["l", "n", "l", "y", "b"])
+    session = FakeSession(["e", "n", "e", "y", "b"])
 
     _run(session, lane, bob)
 
@@ -259,31 +259,31 @@ def test_delete_with_nothing_marked_takes_the_highlighted_letter(node):
     assert [m.subject for m in list_inbox(db, bob)] == ["Stays"]
 
 
-def test_delete_read_says_how_many_and_spares_unread_and_kept_mail(node):
+def test_purge_read_says_how_many_and_spares_unread_and_kept_mail(node):
     db, lane, bob, alice, _carol = node
     mark_read(db, bob, send_mail(db, alice, bob, "Read one", "body"))
     mark_read(db, bob, send_mail(db, alice, bob, "Read two", "body"))
     kept = mark_read(db, bob, send_mail(db, alice, bob, "Read and kept", "body"))
     set_kept(db, bob, [kept.id], kept=True)
     send_mail(db, alice, bob, "Unread", "body")
-    session = FakeSession(["r", "y", "b"])
+    session = FakeSession(["p", "y", "b"])
 
     _run(session, lane, bob)
 
-    assert "Delete [r]ead" in session.screens()[0]
+    assert "[P]urge read" in session.screens()[0]
     assert "Delete all 2 read messages in your Inbox?" in session.visible()
     assert {m.subject for m in list_inbox(db, bob)} == {"Unread", "Read and kept"}
     last = session.screens()[-1]
     assert "Deleted 2 read messages." in last
     # Nothing read is left, so nothing is offered.
-    assert "Delete [r]ead" not in last
+    assert "[P]urge read" not in last
 
 
 def test_keep_moves_letters_to_kept_and_back(node):
     db, lane, bob, alice, _carol = node
     send_mail(db, alice, bob, "Older", "body")
     send_mail(db, alice, bob, "Precious", "body")
-    session = FakeSession(["e", "k", "e", "b", "b"])
+    session = FakeSession(["k", "v", "k", "b", "b"])
 
     _run(session, lane, bob)
 
@@ -294,7 +294,7 @@ def test_keep_moves_letters_to_kept_and_back(node):
     kept_screen = screens[2]
     assert "NetBBS › Mail › Kept" in kept_screen
     assert re.search(r"> 1 +new +alice +Precious", kept_screen)
-    assert "Mov[e] to Inbox" in kept_screen
+    assert "[K]ept: yes" in kept_screen
     # Each folder counts against its own limit (issue #921).
     assert "1 of 100" in kept_screen and "of 500" not in kept_screen
     assert "1 of 500" in screens[1]
@@ -302,27 +302,27 @@ def test_keep_moves_letters_to_kept_and_back(node):
     assert all(m.kept_at is None for m in list_inbox(db, bob))
 
 
-def test_a_kept_letter_opens_with_move_to_inbox(node):
+def test_a_kept_letter_opens_with_kept_yes(node):
     db, lane, bob, alice, _carol = node
     letter = send_mail(db, alice, bob, "Precious", "body")
     set_kept(db, bob, [letter.id], kept=True)
-    session = FakeSession(["k", "1", "e", "b", "b"])
+    session = FakeSession(["v", "1", "k", "b", "b"])
 
     _run(session, lane, bob)
 
     assert "Mail › Kept" in session.visible()
-    assert "Mov[e] to Inbox" in session.visible()
+    assert "[K]ept: yes" in session.visible()
     assert get_mail(db, bob, letter.id).kept_at is None
 
 
 def test_the_inbox_view_keeps_a_letter(node):
     db, lane, bob, alice, _carol = node
     letter = send_mail(db, alice, bob, "Precious", "body")
-    session = FakeSession(["1", "e", "b"])
+    session = FakeSession(["1", "k", "b"])
 
     _run(session, lane, bob)
 
-    assert "K[e]ep" in session.visible()
+    assert "[K]ept: no" in session.visible()
     assert get_mail(db, bob, letter.id).kept_at is not None
     assert "Moved to Kept." in session.screens()[-1]
 
@@ -364,7 +364,7 @@ def test_marks_and_delete_work_in_sent(node):
     db, lane, bob, alice, _carol = node
     send_mail(db, bob, alice, "One", "body")
     send_mail(db, bob, alice, "Two", "body")
-    session = FakeSession(["s", " ", " ", "l", "y", "b", "b"])
+    session = FakeSession(["s", " ", " ", "e", "y", "b", "b"])
 
     _run(session, lane, bob)
 
@@ -372,7 +372,7 @@ def test_marks_and_delete_work_in_sent(node):
     assert len(list_inbox(db, alice)) == 2
 
 
-@pytest.mark.parametrize("folder_keys", [[], ["k"], ["s"]])
+@pytest.mark.parametrize("folder_keys", [[], ["v"], ["s"]])
 @pytest.mark.parametrize(("width", "height"), [(80, 24), (40, 12)])
 def test_every_folder_fits_with_marks(node, width, height, folder_keys):
     db, lane, bob, alice, _carol = node
@@ -382,7 +382,7 @@ def test_every_folder_fits_with_marks(node, width, height, folder_keys):
     set_kept(db, bob, [m.id for m in list_inbox(db, bob)[:20]], kept=True)
     path = mail_flow._letter_draft_path(lane, bob)
     path.write_text("A letter", encoding="utf-8")
-    # The cursor ends on a marked row, where the bar reads Un[m]ark (review on #908).
+    # The cursor ends on a marked row, the busiest bar (review on #908).
     session = FakeSession([*folder_keys, "m", "m", "UP", "b", "b"], width=width, height=height)
 
     _run(session, lane, bob)
@@ -454,8 +454,8 @@ def test_keeping_from_the_list_is_refused_in_place_with_the_marks_kept(node, mon
     _full_kept(db, bob, alice, monkeypatch)
     send_mail(db, alice, bob, "One", "body")
     send_mail(db, alice, bob, "Two", "body")
-    # m, m: mark both; e: keep -> refused; b: out.
-    session = FakeSession(["m", "m", "e", "b"])
+    # m, m: mark both; k: keep -> refused; b: out.
+    session = FakeSession(["m", "m", "k", "b"])
 
     _run(session, lane, bob)
 
@@ -469,26 +469,26 @@ def test_keeping_from_a_letter_is_refused_and_the_letter_stays_open(node, monkey
     db, lane, bob, alice, _carol = node
     _full_kept(db, bob, alice, monkeypatch)
     letter = send_mail(db, alice, bob, "Precious", "body")
-    session = FakeSession(["1", "e", "b", "b"])
+    session = FakeSession(["1", "k", "b", "b"])
 
     _run(session, lane, bob)
 
     refused = " ".join(session.screens()[2].split())
     assert "Kept is full (2 letters)" in refused
     assert "Mail › Inbox › Precious" in refused
-    assert "K[e]ep" in refused
+    assert "[K]ept: no" in refused
     assert get_mail(db, bob, letter.id).kept_at is None
 
 
 def test_a_full_kept_folder_says_so(node, monkeypatch):
     db, lane, bob, alice, _carol = node
     _full_kept(db, bob, alice, monkeypatch)
-    session = FakeSession(["k", "b", "b"])
+    session = FakeSession(["v", "b", "b"])
 
     _run(session, lane, bob)
 
     kept_screen = " ".join(session.screens()[1].split())
     assert "2 of 2" in kept_screen
-    assert "Kept is full (2 letters): K[e]ep in the Inbox is refused" in kept_screen
+    assert "Kept is full (2 letters): [K]ept in the Inbox is refused" in kept_screen
     # The Inbox counts only its own letters against the cap.
     assert "0 of 500" in " ".join(session.screens()[0].split())

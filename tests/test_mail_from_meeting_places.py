@@ -339,7 +339,7 @@ def test_previous_callers_mails_a_caller_by_number(db, lane, alice, bob):
     assert letter.subject == "Welcome"
     screens = _screens(session)
     assert "[M]ail a caller" in screens[0]
-    assert "Previous callers" in screens[-1] and "Message sent." in screens[-1]
+    assert "Recent callers" in screens[-1] and "Message sent." in screens[-1]
 
 
 def test_previous_callers_refuses_a_hidden_name_and_your_own_call(db, lane, alice, bob):

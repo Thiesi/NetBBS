@@ -231,7 +231,7 @@ def test_the_callers_list_follows_the_sysops_order_and_offers_it_under_order(db,
     create_board(db, "Zebra", creator=sysop)
     create_board(db, "Apple", creator=sysop)
 
-    session = FakeSession(["o", "l", "j", "o", "s", "j", "b"])
+    session = FakeSession(["o", "n", "j", "o", "s", "j", "b"])
     asyncio.run(board_flow._browse_boards(session, db, sysop))
     text = _visible_text(session)
 
