@@ -137,7 +137,8 @@ def load_node_map(path: Path) -> list[dict]:
 
 def _dial_in(values: object) -> tuple[str, ...]:
     """The dial-in URLs that are safe to link: one of the three schemes, a
-    host, at most 300 bytes, printable ASCII without spaces or quotes. The
+    host with no user name or password and a valid port, at most 300 bytes,
+    printable ASCII without spaces or quotes. The
     export already validated them; this is the page's own guard."""
     if not isinstance(values, list):
         return ()
@@ -151,9 +152,12 @@ def _dial_in(values: object) -> tuple[str, ...]:
             continue
         try:
             parts = urlsplit(value)
+            parts.port
         except ValueError:
             continue
-        if parts.scheme not in _DIAL_IN_SCHEMES or not parts.hostname:
+        # No user name or password: `https://www.netbbs.org@elsewhere/` reads
+        # as one host and goes to another, as `netbbs.link.dial_in` refuses.
+        if parts.scheme not in _DIAL_IN_SCHEMES or not parts.hostname or "@" in parts.netloc:
             continue
         accepted.append(value)
         if len(accepted) == MAX_DIAL_IN:
