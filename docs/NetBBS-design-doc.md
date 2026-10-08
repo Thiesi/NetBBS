@@ -5972,9 +5972,17 @@ service's contact times; and any free text beyond the friendly name.
 
 **Still on NetBBS Link.** A state with its date, not a yes or no: *active* when
 last heard within 7 days, *quiet* within 30 days (the node map's stale point),
-and *left* after that, or once the name is released or revoked. A page that
-has left keeps its history and says so; it goes when another node holds the
-name.
+and *left* after that, or once the name is released. A page that has left
+keeps its history and says so; it goes when the service forgets the released
+name or another node takes it. A name the service operator revoked on a
+complaint loses its page at once: the page would otherwise keep showing what
+the complaint was about.
+
+**Built without state of its own.** Every run of the generator
+(`services/node_pages`) derives every page from the two sources, read-only,
+and replaces the whole site. A name that passes to another node therefore
+gives it a fresh page without anything to forget, and a page that is turned
+off is gone at the next run. A run that cannot read a source writes nothing.
 
 **Pages belong to fingerprints.** A page's history is keyed by the node's
 fingerprint, which key rotation never changes (the §16 issue #624 entry). A
