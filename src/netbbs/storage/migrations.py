@@ -4219,4 +4219,15 @@ MIGRATIONS = [
         ALTER TABLE ftn_networks ADD COLUMN nodelist_entries INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1156: the decorated handle an MRC sender's client put in front of the "
+            "line (`+Nick+[TAG]`), kept as sent so each viewer chooses how it is shown. "
+            "NULL for every older line and for a plain handle."
+        ),
+        sql="""
+        ALTER TABLE channel_messages ADD COLUMN mrc_handle TEXT
+            CHECK (mrc_handle IS NULL OR external_source IS 'mrc');
+        """,
+    ),
 ]

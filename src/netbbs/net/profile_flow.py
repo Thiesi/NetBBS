@@ -103,6 +103,7 @@ from netbbs.net.password_screen import manage_password_screen
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.mrc_color_preference import mrc_colors_enabled, set_mrc_colors_enabled
 from netbbs.net.post_color_preference import post_colors_enabled, set_post_colors_enabled
+from netbbs.net.mrc_name_preference import MRC_NAME_STYLES, mrc_name_style, set_mrc_name_style
 from netbbs.net.mrc_nick_color_preference import mrc_nick_color, set_mrc_nick_color
 from netbbs.net.mrc_lastseen_preference import mrc_lastseen_recorded, set_mrc_lastseen_recorded
 from netbbs.net.mrc_private_preference import mrc_private_messages_enabled, set_mrc_private_messages_enabled
@@ -184,6 +185,13 @@ _LOGOFF_SUMMARY_GRADIENT = [
 # compared against, what keeps that row from being mailed (issue #821).
 _NAME_HIDDEN = "(name hidden)"
 
+
+#: Issue #1156: what the Profile shows for each MRC name style.
+_MRC_NAME_STYLE_LABELS = {
+    "combined": "combined: <+Nick+@BBS (TAG)>",
+    "both": "both: <Nick@BBS> +Nick+[TAG]",
+    "label": "label only: <Nick@BBS>",
+}
 
 #: How a self-reported field on Name & details is edited. The same words
 #: as `admin_flow._CLEAR_HINT` (issue #557) for a value that can be
@@ -1138,6 +1146,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "mrc_colors": await lane.run(mrc_colors_enabled, user),
         "post_colors": await lane.run(post_colors_enabled, user),
         "mrc_nick_color": await lane.run(mrc_nick_color, user),
+        "mrc_names": await lane.run(mrc_name_style, user),
         "breadcrumb_collapsed": collapsed,
         "sort_preference_count": len(await lane.run(list_sort_preferences, user)),
         "ssh_key_count": len(await lane.run(list_ssh_keys, user)),
@@ -1588,6 +1597,25 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Every line you send to the Multi Relay Chat network carries your handle in front "
                 "of it, in this color -- one of the sixteen CGA colors MRC clients understand. "
                 "Each press moves to the next color. Applies the next time you enter an MRC room."
+            ),
+            section="Display",
+        ),
+        FieldSpec(
+            key="mrc_names", hotkey="z", menu_text=menu_key("z", "ed MRC names", prefix="Styli"),
+            label="Stylized MRC names",
+            render=lambda d: _MRC_NAME_STYLE_LABELS[d["mrc_names"]],
+            prompt=live_choice_field(
+                "mrc_names", list(MRC_NAME_STYLES),
+                persist=lambda lane, v: lane.run(set_mrc_name_style, user, v),
+            ),
+            brief="How a styled MRC name such as +Nick+[TAG] is shown",
+            help=(
+                "Some MRC users' software puts a styled name in front of their lines, such as "
+                "+Nick+[CASTLE BBS]. Combined: the styled name replaces the plain one in "
+                "<name@BBS>, and the rest follows in brackets: <+Nick+@Castle_BBS (CASTLE BBS)>. "
+                "Both: the plain <Nick@Castle_BBS>, then the styled name as sent. Label only: "
+                "just <Nick@Castle_BBS>. The BBS name always comes from the network, never from "
+                "the styled name. Lines from before this setting existed look the same in all three."
             ),
             section="Display",
         ),
