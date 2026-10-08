@@ -310,3 +310,38 @@ def test_the_command_reports_and_exits(tmp_path, registrations_db, capsys):
     assert main(["--registrations", str(tmp_path / "none.db"), "--node-map", str(map_path), "--out", str(out)]) == 1
     assert "Not built" in capsys.readouterr().err
     assert (out / "nibandquill").is_dir()
+
+
+# -- the member badge (step 5) -----------------------------------------------------
+
+
+def test_the_badge_says_since_when_and_holds_no_node_text():
+    from xml.etree import ElementTree
+
+    from services.node_pages.build import render_badge
+
+    page = _one([_reg("badged", created="2026-09-01T00:00:00+00:00")],
+                [_node(name="<b>Evil</b> & Co", first="2026-09-28T10:00:00+00:00")])
+    svg = render_badge(page)
+    ElementTree.fromstring(svg)  # well-formed
+    assert "member since Sep 2026 · active" in svg
+    assert "Evil" not in svg
+    assert "badged" not in svg
+
+
+def test_the_badge_color_follows_the_state():
+    from services.node_pages.build import render_badge
+
+    left = _one([_reg("gone", status="released")], [_node()])
+    assert "#6b7286" in render_badge(left)
+    assert "· left" in render_badge(left)
+
+
+def test_the_page_offers_the_badge_snippet_escaped(tmp_path, registrations_db):
+    out = tmp_path / "nodes"
+    build(registrations_db, _map_file(tmp_path, [_node(FP_A)]), out, now=NOW)
+    page = (out / "nibandquill" / "index.html").read_text(encoding="utf-8")
+    assert (out / "nibandquill" / "badge.svg").is_file()
+    assert '<img src="/~nibandquill/badge.svg"' in page
+    assert ("&lt;a href=&quot;https://www.netbbs.org/~nibandquill&quot;&gt;&lt;img "
+            "src=&quot;https://www.netbbs.org/~nibandquill/badge.svg&quot;") in page
