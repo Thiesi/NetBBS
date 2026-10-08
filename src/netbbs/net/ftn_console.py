@@ -344,6 +344,11 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
             actions=[("p", menu_key("P", "oll now")), ("a", menu_key("A", "reaFix")),
                      ("n", menu_key("N", "odelist import")), ("h", menu_key("H", "eld packets")), af._BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="FTN mail help",
+            help_about=(
+                "What the echomail and netmail gateway last did, network by network. "
+                "Each action asks which network it is for."
+            ),
         )
         message = None
         if choice == "b":

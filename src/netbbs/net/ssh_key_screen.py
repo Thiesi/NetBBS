@@ -26,13 +26,16 @@ import nacl.signing
 
 from netbbs.auth.users import AuthError, User, add_ssh_key, list_ssh_keys, remove_ssh_key
 from netbbs.identity.keys import IdentityError, parse_verify_key
-from netbbs.net.char_input import InputCancelled
+from netbbs.net.char_input import HELP_KEY, InputCancelled
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.notices import announce, write_notices
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
+from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering.ansi import clear_screen
 from netbbs.rendering.charset import ellipsis_for
+from netbbs.rendering.layout import MenuEntry
 from netbbs.rendering import LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -144,6 +147,22 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
             target = await _add_key(session, lane, target, changed_by=changed_by)
         elif choice == "r" and keys:
             target = await _remove_key(session, lane, target, keys, changed_by=changed_by)
+        elif choice == HELP_KEY:
+            help_entries = [MenuEntry(
+                label=options[0], brief="Paste an ed25519 public key; it signs in alongside any keys already here",
+            )]
+            if keys:
+                help_entries.append(MenuEntry(
+                    label=options[1], brief="Stop one key from signing in; the others keep working",
+                ))
+            await show_menu_help(
+                session, "SSH keys help", help_entries,
+                about=(
+                    f"The keys that can sign in to {possessive} account over SSH. "
+                    "Every key listed works; the primary one also names the account on the Link network."
+                ),
+                unicode_style=await lane.run(unicode_style_enabled, changed_by),
+            )
         else:
             await session.write_line("")
 

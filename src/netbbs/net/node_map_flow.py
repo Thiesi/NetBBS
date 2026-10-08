@@ -483,4 +483,9 @@ async def node_map_screen(
             redraw_in_place=state["redraw"],
             unicode_style=state["unicode"],
             message="\r\n".join(take_notices(session)) or None,
+            help_title="Linked BBS help",
+            help_about=(
+                "One BBS on the Link network: how this board knows it, when it was last heard "
+                "from, and what of it you can open here."
+            ),
         )

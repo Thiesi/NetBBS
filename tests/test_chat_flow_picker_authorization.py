@@ -72,7 +72,7 @@ class FakeSession(Session):
             raise AssertionError("unreachable")
         return self._inputs.pop(0)
 
-    async def read_editor_key(self):
+    async def read_editor_key(self, **kwargs):
         raise NotImplementedError
 
     async def close(self) -> None:

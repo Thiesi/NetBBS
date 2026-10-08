@@ -16,6 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from netbbs.rendering.layout import MenuEntry
 from netbbs.rendering.menu import continue_prompt, highlight_hotkeys
 from netbbs.attestation import (
     AttestationError,
@@ -61,7 +62,8 @@ from netbbs.link.attestation_delivery import attestation_delivery_counts
 from netbbs.link.remote_attestation import count_attestation_recipients
 from netbbs.mail import list_mail_blocks, set_shares_read_receipts, shares_read_receipts
 from netbbs.messaging_preferences import accepts_direct_messages, set_accepts_direct_messages
-from netbbs.net.char_input import InputCancelled, reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, InputCancelled, reject_unhandled_key
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled, set_breadcrumb_collapsed_enabled
 from netbbs.net.color_depth_preference import (
     color_depth_override,
@@ -658,10 +660,24 @@ async def _previous_callers_screen(
         await write_prompt(session, "Choice: ")
         while True:
             action = (await session.read_key()).lower()
+            if action == HELP_KEY:
+                await show_menu_help(
+                    session, "Previous callers help",
+                    [MenuEntry(
+                        label=menu_key("M", "ail a caller"),
+                        brief="Write to someone on the list; asks for their number",
+                    )],
+                    about="The most recent calls to this BBS, newest first.",
+                    header_color=effective_header_color(session, db),
+                    unicode_style=unicode_style_enabled(db, user),
+                )
+                break  # drawn again
             if action in ("m", "b"):
                 await session.write_line("")
                 break
             await session.write(reject_unhandled_key(action))
+        if action == HELP_KEY:
+            continue
         if action == "b":
             return
 
@@ -2238,8 +2254,26 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
     age = get_attestation(db, subject, "age")
     name = get_attestation(db, subject, "name")
     if age is not None and name is not None:
-        await write_prompt(session, highlight_hotkeys("Revoke which: [A]ge, real [N]ame, or [B]ack? "))
-        which = (await session.read_key()).lower()
+        while True:
+            await write_prompt(session, highlight_hotkeys("Revoke which: [A]ge, real [N]ame, or [B]ack? "))
+            which = (await session.read_key()).lower()
+            if which != HELP_KEY:
+                break
+            await show_menu_help(
+                session, "Revoke help",
+                [
+                    MenuEntry(label=menu_key("A", "ge"), brief="Withdraw the verified age"),
+                    MenuEntry(label=menu_key("N", "ame", prefix="real ", capitalize=True),
+                              brief="Withdraw the verified real name"),
+                ],
+                about=(
+                    f"{sanitize_text(subject.username)} has both a verified age and a verified real name. "
+                    "Revoking one leaves the other; you are asked to confirm."
+                ),
+                header_color=effective_header_color(session, db),
+                unicode_style=unicode_style_enabled(db, verifier),
+            )
+            await session.write_line("")
         await session.write_line("")
         if which not in ("a", "n"):
             announce_line(session, "Cancelled.")
@@ -2380,6 +2414,23 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
                     announce_line(session, f"Could not attest name: {exc}")
                 else:
                     announce_line(session, "Real name attested.")
+            await _draw()
+        elif choice == HELP_KEY:
+            entries = [
+                MenuEntry(label=menu_key("A", "ttest age"), brief="Record the birthdate you checked"),
+                MenuEntry(label=menu_key("N", "ame", prefix="Attest ", capitalize=True),
+                          brief="Record the real name you checked"),
+            ]
+            if get_attestation(db, subject, "age") is not None or get_attestation(db, subject, "name") is not None:
+                entries.append(MenuEntry(label=menu_key("R", "evoke"), brief="Withdraw a verification"))
+            await show_menu_help(
+                session, "Verify identity help", entries,
+                about=(
+                    "What this caller says about themselves, and what has been verified. "
+                    "Record only what you have checked: a verified age or name opens what asks for one."
+                ),
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw()
         else:
             await session.write(reject_unhandled_key(choice))

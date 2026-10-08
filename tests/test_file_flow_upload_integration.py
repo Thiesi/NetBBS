@@ -95,7 +95,7 @@ class _ServerSession(Session):
             raise AssertionError("_ServerSession.read_key() called with no more scripted keys")
         return key
 
-    async def read_editor_key(self):
+    async def read_editor_key(self, **kwargs):
         raise NotImplementedError
 
     async def close(self) -> None:
@@ -128,7 +128,7 @@ class _ClientSession(Session):
     async def read_key(self, echo: bool = True) -> str:
         raise NotImplementedError
 
-    async def read_editor_key(self):
+    async def read_editor_key(self, **kwargs):
         raise NotImplementedError
 
     async def close(self) -> None:

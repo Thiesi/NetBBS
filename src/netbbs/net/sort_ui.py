@@ -25,9 +25,11 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable
 
-from netbbs.net.char_input import reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, reject_unhandled_key
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.session import Session
 from netbbs.rendering import menu_key
+from netbbs.rendering.layout import MenuEntry
 
 # (sort_mode, scope_kwargs) -> None -- scope_kwargs is one of {},
 # {"community_id": int}, {"category_id": int}, matching
@@ -101,11 +103,32 @@ async def prompt_sort_change(
             menu_key("B", "ack"),
         ]
     )
+    mode_help = [
+        *([MenuEntry(label=menu_key("S", "ysOp's order"), brief="The order the SysOp arranged")] if sysop_order else []),
+        MenuEntry(label=menu_key("A", "ctivity"), brief="Most recent activity first"),
+        MenuEntry(label=menu_key("L", "phabetical", prefix="A"), brief="By name, A to Z"),
+        MenuEntry(label=menu_key("R", "ecent"), brief="Newest first, by when each was added"),
+        MenuEntry(
+            label=menu_key(volume_label[0].upper(), volume_label[1:]),
+            brief="Most people in it first" if volume_label == "Participants" else "Most content first",
+        ),
+    ]
     await session.write_line("")
     await session.write_line(f"Sort by: {mode_nav}")
+    # Written once: a refused key erases only itself, so writing the prompt
+    # on every pass left "Choice: Choice: " on the line.
+    await session.write("Choice: ")
     while True:
-        await session.write("Choice: ")
         choice = (await session.read_key()).lower()
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Sort order help", mode_help,
+                about="How this list is ordered. Next you choose whether to remember it, and where.",
+            )
+            await session.write_line("")
+            await session.write_line(f"Sort by: {mode_nav}")
+            await session.write("Choice: ")
+            continue
         if choice == "b":
             await session.write_line("")
             return None
@@ -132,11 +155,26 @@ async def prompt_sort_change(
     scope_nav.append(menu_key("G", "lobal default"))
     scope_actions["g"] = {}
     scope_nav.append(menu_key("B", "ack"))
+    scope_help = [MenuEntry(label=scope_nav[0], brief="Use it now; the list goes back to its usual order next time")]
+    if category_id is not None:
+        scope_help.append(MenuEntry(label=scope_nav[len(scope_help)], brief="Remember it for this category"))
+    if community_id is not None:
+        scope_help.append(MenuEntry(label=scope_nav[len(scope_help)], brief="Remember it for this Community"))
+    scope_help.append(MenuEntry(label=scope_nav[len(scope_help)], brief="Remember it everywhere this kind of list appears"))
 
     await session.write_line(f"Remember this as: {'  '.join(scope_nav)}")
+    await session.write("Choice: ")
     while True:
-        await session.write("Choice: ")
         choice = (await session.read_key()).lower()
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Remember sort help", scope_help,
+                about="Where to keep the order you just picked. A narrower choice wins over a wider one.",
+            )
+            await session.write_line("")
+            await session.write_line(f"Remember this as: {'  '.join(scope_nav)}")
+            await session.write("Choice: ")
+            continue
         if choice == "b":
             await session.write_line("")
             return None

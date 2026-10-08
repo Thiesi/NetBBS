@@ -619,7 +619,7 @@ from netbbs.sysop_uploads import (
     door_filename_error,
 )
 from netbbs.net.draft_storage import DraftPruneReport, prune_stale_drafts
-from netbbs.net.help_overlay import show_help
+from netbbs.net.help_overlay import show_help, show_menu_help
 from netbbs.net.picker import ListColumn, pick_item as _pick_item
 from netbbs.net.resource_editor import (
     inline_field,
@@ -1472,7 +1472,7 @@ _BACK_ACTION = ("b", menu_key("B", "ack"))
 async def _show_report(
     session: Session, lane: DatabaseLane, actor: User, title: str, *,
     breadcrumb: Sequence[str], sections: Sequence[Section], subtitle: str | None = None,
-    message: str | None = None,
+    message: str | None = None, help_title: str, help_about: str,
 ) -> None:
     """Hold a finished action's result on screen until the SysOp leaves it.
 
@@ -1485,6 +1485,7 @@ async def _show_report(
         title=_detail_title(session, chrome, title, breadcrumb=breadcrumb, subtitle=subtitle),
         sections=sections, actions=[_BACK_ACTION], message=message,
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        help_title=help_title, help_about=help_about,
     )
 
 
@@ -1876,6 +1877,17 @@ async def admin_menu(
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
             )
+        elif choice == HELP_KEY:
+            console, quick = _admin_menu_entries(node_controls, link_context)
+            await show_menu_help(
+                session, "SysOp console help", [*console, *quick],
+                about="The landing page of the SysOp console: the node's health and what waits for "
+                      "you above, every area of the console below. Quick keys jump straight to a "
+                      "screen that also sits deeper in the menus.",
+                header_color=dashboard_state["header_color"], unicode_style=dashboard_state["unicode_style"],
+            )
+            await _draw_admin_menu(session, lane, user, node_controls=node_controls,
+                                   link_context=link_context, state=dashboard_state)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -1932,6 +1944,16 @@ async def staff_menu(
                 session, lane, user, link_context=link_context,
                 transfers=node_controls.transfers if node_controls is not None else None,
             )
+        elif choice == HELP_KEY:
+            moderates, header_color, unicode_style = await lane.run(lambda db: (
+                has_moderation_scope(db, user), effective_header_color_256(db), unicode_style_enabled(db, user),
+            ))
+            await show_menu_help(
+                session, "Staff console help", _staff_menu_entries(user, moderates=moderates),
+                about="Your staff work on this node: only the screens your staff permissions reach "
+                      "are listed. The counts above show what is waiting for you.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
         else:
             await session.write(reject_unhandled_key(choice))
             continue
@@ -1978,20 +2000,26 @@ async def _draw_staff_menu(session: Session, lane: DatabaseLane, user: User) -> 
     for line in _away_panel_lines(state, width=min(session.terminal_width, 78) - 4, unicode_style=unicode_style):
         await session.write_line(line)
         panel_rows += 1
+    options = _staff_menu_entries(user, moderates=bool(state["moderates"]))
+    await session.write_line(
+        "\r\n" + _fitted_menu(options, state["description_level"], session=session, used_rows=panel_rows + 5)
+    )
+    await _choice_prompt(session)
+
+
+def _staff_menu_entries(user: User, *, moderates: bool) -> list[MenuEntry]:
+    """The Staff console's menu, shared by its draw and its help."""
     options: list[MenuEntry] = []
     if user.has_staff(StaffPermission.APPROVE_ACCOUNTS):
         options.append(MenuEntry(label=menu_key("A", "ccounts waiting"), brief="Approve or decline signups"))
     if user.has_staff(StaffPermission.MANAGE_ACCOUNTS):
         options.append(MenuEntry(label=menu_key("U", "sers"), brief="Levels, disabling, passwords"))
-    if state["moderates"]:
+    if moderates:
         options.append(MenuEntry(label=menu_key("M", "oderation"), brief="Held posts and uploads"))
     options.append(MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"))
     options.append(MenuEntry(label=menu_key("R", "efresh"), brief="Redraw with current numbers"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"))
-    await session.write_line(
-        "\r\n" + _fitted_menu(options, state["description_level"], session=session, used_rows=panel_rows + 5)
-    )
-    await _choice_prompt(session)
+    return options
 
 
 def _date_of(db: Database, stamp: str | None) -> str | None:
@@ -2056,6 +2084,20 @@ async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None
             await lane.run(end_away, user)
             _announce_line(session, "You are no longer marked away.")
             return
+        if choice == HELP_KEY:
+            help_entries = [MenuEntry(label=menu_key("S", "et"), brief="A one-line notice, optional date")]
+            if notice is not None:
+                help_entries.append(MenuEntry(label=menu_key("E", "nd it"), brief="Stop being marked away"))
+            header_color, unicode_style = await lane.run(
+                lambda db: (effective_header_color_256(db), unicode_style_enabled(db, user))
+            )
+            await show_menu_help(
+                session, "Away notice help", help_entries,
+                about="Tell members you are away. The notice shows beside your name on the Staff list; "
+                      "it changes none of your permissions.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            continue
         if choice != "s":
             await session.write(reject_unhandled_key(choice))
             continue
@@ -2156,6 +2198,11 @@ async def staff_list_screen(session: Session, lane: DatabaseLane, user: User) ->
     await _show_report(
         session, lane, user, "Staff", breadcrumb=(),
         subtitle="Who runs this node, and when they were last on.", sections=[Section(None, body)],
+        help_title="Staff help",
+        help_about=(
+            "Everyone who runs this node: SysOps, staff and moderators, what each looks after, and any away "
+            "notice."
+        ),
     )
 
 
@@ -2369,49 +2416,7 @@ async def _draw_admin_menu(
             )
         )
 
-    # Brief descriptions are kept to roughly 34 characters or less --
-    # the actual available width once this renders in two columns at
-    # the classic 80-column terminal (menu_grid's own column_width
-    # minus its description indent). Longer, fuller text belongs in
-    # `detailed`, shown only when a caller opts into that verbosity.
-    console = [
-        MenuEntry(label=menu_key("U", "sers"), brief="Manage user accounts"),
-        MenuEntry(
-            label=menu_key("C", "ontent"),
-            brief="Boards, areas, channels & more",
-            detailed="Manage message boards, file areas, chat channels, and Communities -- including GC (storage garbage collection) under file areas.",
-        ),
-        MenuEntry(
-            label=menu_key("O", "perations"),
-            brief="Observe the node, fix trouble",
-            detailed="Live node observation: sessions, Link status, the audit log, backup status, and draft cleanup.",
-        ),
-        MenuEntry(label=menu_key("S", "ettings"), brief="Durable node configuration"),
-        # Dogfood follow-up: this used to say "Dashboard" (hotkey "d"),
-        # which reads as a promise of some separate, deeper stats view
-        # -- it's actually a manual redraw of the exact screen already
-        # on display (see the "r" dispatch case in `admin_menu`).
-        # "Refresh" says what it actually does; "d" wasn't a natural
-        # fit for that word, so the hotkey moves to "r" (unused at
-        # this menu) rather than forcing a mismatched letter.
-        MenuEntry(label=menu_key("R", "efresh"), brief="Redraw with current numbers"),
-        MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"),
-    ]
-    quick = [
-        MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
-        MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org name status"),
-        MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"),
-    ]
-    if node_controls is not None:
-        quick.insert(
-            0,
-            MenuEntry(label=menu_key("N", "ode"), brief="Sessions, shutdown, and drain"),
-        )
-    if link_context is not None:
-        quick.extend([
-            MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
-            MenuEntry(label=menu_key("X", "", prefix="Outbo"), brief="Pending outgoing Link work items"),
-        ])
+    console, quick = _admin_menu_entries(node_controls, link_context)
     # The landing page is the one console screen that had no answer to a short
     # terminal: a twelve-row health panel over a described two-section menu is
     # 32 rows, so on the classic 24 its own title and the top of the panel had
@@ -2456,6 +2461,56 @@ async def _draw_admin_menu(
         )
     await _choice_prompt(session)
     return state
+
+
+def _admin_menu_entries(
+    node_controls: NodeControls | None, link_context: LinkContext | None
+) -> tuple[list[MenuEntry], list[MenuEntry]]:
+    """The landing page's two menu sections, shared by its draw and its help."""
+    # Brief descriptions are kept to roughly 34 characters or less --
+    # the actual available width once this renders in two columns at
+    # the classic 80-column terminal (menu_grid's own column_width
+    # minus its description indent). Longer, fuller text belongs in
+    # `detailed`, shown only when a caller opts into that verbosity.
+    console = [
+        MenuEntry(label=menu_key("U", "sers"), brief="Manage user accounts"),
+        MenuEntry(
+            label=menu_key("C", "ontent"),
+            brief="Boards, areas, channels & more",
+            detailed="Manage message boards, file areas, chat channels, and Communities -- including GC (storage garbage collection) under file areas.",
+        ),
+        MenuEntry(
+            label=menu_key("O", "perations"),
+            brief="Observe the node, fix trouble",
+            detailed="Live node observation: sessions, Link status, the audit log, backup status, and draft cleanup.",
+        ),
+        MenuEntry(label=menu_key("S", "ettings"), brief="Durable node configuration"),
+        # Dogfood follow-up: this used to say "Dashboard" (hotkey "d"),
+        # which reads as a promise of some separate, deeper stats view
+        # -- it's actually a manual redraw of the exact screen already
+        # on display (see the "r" dispatch case in `admin_menu`).
+        # "Refresh" says what it actually does; "d" wasn't a natural
+        # fit for that word, so the hotkey moves to "r" (unused at
+        # this menu) rather than forcing a mismatched letter.
+        MenuEntry(label=menu_key("R", "efresh"), brief="Redraw with current numbers"),
+        MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"),
+    ]
+    quick = [
+        MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
+        MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org name status"),
+        MenuEntry(label=menu_key("w", "ay", prefix="A"), brief="Tell members you're away"),
+    ]
+    if node_controls is not None:
+        quick.insert(
+            0,
+            MenuEntry(label=menu_key("N", "ode"), brief="Sessions, shutdown, and drain"),
+        )
+    if link_context is not None:
+        quick.extend([
+            MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
+            MenuEntry(label=menu_key("X", "", prefix="Outbo"), brief="Pending outgoing Link work items"),
+        ])
+    return console, quick
 
 
 def _compact_dashboard_panel(
@@ -2640,8 +2695,32 @@ async def _users_menu(
             await _retired_usernames_screen(session, lane, actor)
             stats = await lane.run(_load_stats)
             await _draw_users_menu(session, stats=stats)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Users help", _users_menu_entries(),
+                about="Every action on user accounts: creating and finding them, their levels, "
+                      "who may sign up, and the names deleted accounts still hold.",
+                header_color=stats["header_color"], unicode_style=stats["unicode_style"],
+            )
+            await _draw_users_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+def _users_menu_entries() -> list[MenuEntry]:
+    """The Users screen's menu, shared by its draw and its help."""
+    return [
+        MenuEntry(label=menu_key("C", "reate user"), brief="Add a new user account"),
+        MenuEntry(label=menu_key("u", "sers", prefix="List "), brief="Browse and edit accounts"),
+        MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
+        MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
+        MenuEntry(label=menu_key("L", "evels (LAST)"), brief="What each level opens"),
+        MenuEntry(label=menu_key("o", "motion rules", prefix="Pr"), brief="Raise new accounts automatically"),
+        MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
+        MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
+        MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Names held for deleted accounts"),
+        MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
+    ]
 
 
 _LADDER_COLUMNS = [
@@ -3183,18 +3262,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
 
         await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
 
-    entries = [
-        MenuEntry(label=menu_key("C", "reate user"), brief="Add a new user account"),
-        MenuEntry(label=menu_key("u", "sers", prefix="List "), brief="Browse and edit accounts"),
-        MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
-        MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
-        MenuEntry(label=menu_key("L", "evels (LAST)"), brief="What each level opens"),
-        MenuEntry(label=menu_key("o", "motion rules", prefix="Pr"), brief="Raise new accounts automatically"),
-        MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
-        MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
-        MenuEntry(label=menu_key("t", "ired names", prefix="Re"), brief="Names held for deleted accounts"),
-        MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
-    ]
+    entries = _users_menu_entries()
     effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
         panel=panel, unicode_style=unicode_style, description_level=description_level,
         entry_count=len(entries), terminal_width=session.terminal_width, terminal_height=session.terminal_height,
@@ -3396,31 +3464,7 @@ async def _operations_menu(
 
             await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
 
-        options = [
-            MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
-            MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
-            MenuEntry(label=menu_key("S", "earch indexes"), brief="Check and rebuild Find's indexes"),
-            MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
-            MenuEntry(label=menu_key("g", prefix="Node lo"), brief="Warnings and errors in netbbs.log"),
-            MenuEntry(label=menu_key("M", "ail"), brief="Mailbox sizes, refused Link mail"),
-        ]
-        if node_controls is not None:
-            options.insert(0, MenuEntry(label=menu_key("N", "ode and sessions"), brief="Sessions, shutdown, and drain"))
-        if link_context is not None:
-            options.extend([
-                MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
-                MenuEntry(label=menu_key("O", "utbox"), brief="Pending outgoing Link work items"),
-            ])
-        if diagnostics_available:
-            options.extend([
-                MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostics"),
-                MenuEntry(label=menu_key("F", "ollow log"), brief="Live-tail the diagnostic log"),
-            ])
-        if link_context is not None:
-            options.append(
-                MenuEntry(label=menu_key("R", "epair carried posts"), brief="Fix inconsistent carried posts")
-            )
-        options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
+        options = _operations_menu_entries(node_controls, link_context, diagnostics_available)
 
         effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
             panel=panel, unicode_style=unicode_style, description_level=description_level,
@@ -3485,8 +3529,48 @@ async def _operations_menu(
         elif choice == "m":
             await _mail_tools_screen(session, lane, actor, link_context=link_context)
             state = await lane.run(_load_ops)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Operations help",
+                _operations_menu_entries(node_controls, link_context, diagnostics_available),
+                about="Watch the running node and fix trouble: sessions, backups, logs, mail and Link. "
+                      "Durable settings live under Settings instead.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+def _operations_menu_entries(
+    node_controls: NodeControls | None, link_context: LinkContext | None, diagnostics_available: bool
+) -> list[MenuEntry]:
+    """The Operations screen's menu, shared by its draw and its help."""
+    options = [
+        MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Create and review complete backups"),
+        MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
+        MenuEntry(label=menu_key("S", "earch indexes"), brief="Check and rebuild Find's indexes"),
+        MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
+        MenuEntry(label=menu_key("g", prefix="Node lo"), brief="Warnings and errors in netbbs.log"),
+        MenuEntry(label=menu_key("M", "ail"), brief="Mailbox sizes, refused Link mail"),
+    ]
+    if node_controls is not None:
+        options.insert(0, MenuEntry(label=menu_key("N", "ode and sessions"), brief="Sessions, shutdown, and drain"))
+    if link_context is not None:
+        options.extend([
+            MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
+            MenuEntry(label=menu_key("O", "utbox"), brief="Pending outgoing Link work items"),
+        ])
+    if diagnostics_available:
+        options.extend([
+            MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostics"),
+            MenuEntry(label=menu_key("F", "ollow log"), brief="Live-tail the diagnostic log"),
+        ])
+    if link_context is not None:
+        options.append(
+            MenuEntry(label=menu_key("R", "epair carried posts"), brief="Fix inconsistent carried posts")
+        )
+    options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
+    return options
 
 
 async def _system_menu(
@@ -3650,6 +3734,14 @@ async def _system_menu(
             await _backup_status_screen(session, lane, actor, node_controls=node_controls)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Settings help", _system_menu_entries(stats),
+                about="The node's lasting configuration: how it looks, what callers may do, and how it "
+                      "joins other networks. Previous callers changes at once, without a screen of its own.",
+                header_color=stats["header_color"], unicode_style=stats["unicode_style"],
+            )
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -3756,6 +3848,25 @@ async def _draw_system_menu(
         ]
         await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
 
+    option_list = _system_menu_entries(stats)
+    # The panel above takes rows from the menu, as on Users, Content and
+    # Operations: descriptions give way before anything overflows.
+    effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
+        panel=panel, unicode_style=unicode_style, description_level=description_level,
+        entry_count=len(option_list), terminal_width=session.terminal_width,
+        terminal_height=session.terminal_height,
+    )
+    await session.write_line(
+        _menu_row(
+            option_list, effective_desc_level, width=session.terminal_width,
+            height=available_menu_height, degraded=desc_degraded,
+        )
+    )
+    await _choice_prompt(session)
+
+
+def _system_menu_entries(stats: dict[str, Any]) -> list[MenuEntry]:
+    """The Settings screen's menu, shared by its draw and its help."""
     option_list = [
         MenuEntry(label=menu_key("M", "astheads & banners"), brief="Banners and mastheads callers see"),
         MenuEntry(label=menu_key("C", "olors"), brief="Accent, header and clock colors"),
@@ -3800,20 +3911,7 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
     ]
     option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
-    # The panel above takes rows from the menu, as on Users, Content and
-    # Operations: descriptions give way before anything overflows.
-    effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
-        panel=panel, unicode_style=unicode_style, description_level=description_level,
-        entry_count=len(option_list), terminal_width=session.terminal_width,
-        terminal_height=session.terminal_height,
-    )
-    await session.write_line(
-        _menu_row(
-            option_list, effective_desc_level, width=session.terminal_width,
-            height=available_menu_height, degraded=desc_degraded,
-        )
-    )
-    await _choice_prompt(session)
+    return option_list
 
 
 async def _draw_node_name_screen(
@@ -3849,16 +3947,16 @@ async def _draw_node_name_screen(
         )]),
     ], unicode_style=unicode_style)
     await session.write_line(
-        "\r\n" + _fitted_menu(
-            [
-                MenuEntry(label=menu_key("N", "ame"), brief="Rename the node"),
-                MenuEntry(label=menu_key("G", "radient"), brief="Recolor the node name"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
-            ],
-            description_level, session=session, used_rows=panel_rows + 4,
-        )
+        "\r\n" + _fitted_menu(list(_NODE_NAME_MENU), description_level, session=session, used_rows=panel_rows + 4)
     )
     await _choice_prompt(session)
+
+
+_NODE_NAME_MENU = (
+    MenuEntry(label=menu_key("N", "ame"), brief="Rename the node"),
+    MenuEntry(label=menu_key("G", "radient"), brief="Recolor the node name"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
+)
 
 
 async def _link_participation_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -3894,6 +3992,11 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
             ),
             sections=sections, actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Join NetBBS Link help",
+            help_about=(
+                "Whether this node uses the project's reliable nodes as seeds and relays. The node's own "
+                "configuration file can override the answer."
+            ),
         )
         message = None
         if choice == "b":
@@ -3998,6 +4101,14 @@ async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -
         elif choice == "g":
             await session.write_line("")
             await _set_node_name_gradient_screen(session, lane, actor, header_color)
+            await _draw_node_name_screen(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Node name help", _NODE_NAME_MENU,
+                about="The name shown in the corner of every screen and handed to doors, and the "
+                      "colors it is drawn in.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_node_name_screen(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -4220,16 +4331,19 @@ async def _set_node_name_gradient_screen(
     name, current = await lane.run(_load)
     choices: list[str | None] = [None, *sorted(GRADIENTS)]
 
-    await session.write_line(colored(f"\r\nGradient for {name!r}:", fg_color=header_color, bold=True))
-    for i, choice in enumerate(choices):
-        label = "solid" if choice is None else choice
-        preview = gradient_text(name, choice, truecolor=False) if choice is not None else colored(name, fg_color=header_color, bold=True)
-        marker = colored(" (current)", fg_color=MUTED_COLOR) if choice == current else ""
-        await session.write_line(colored(f"  {i}. {label:<8}", fg_color=LABEL_COLOR) + preview + marker)
-    await session.write_line(
-        action_bar([menu_key(f"0-{len(choices) - 1}", ""), menu_key("B", "ack")], width=session.terminal_width)
-    )
-    await _choice_prompt(session)
+    async def _draw() -> None:
+        await session.write_line(colored(f"\r\nGradient for {name!r}:", fg_color=header_color, bold=True))
+        for i, choice in enumerate(choices):
+            label = "solid" if choice is None else choice
+            preview = gradient_text(name, choice, truecolor=False) if choice is not None else colored(name, fg_color=header_color, bold=True)
+            marker = colored(" (current)", fg_color=MUTED_COLOR) if choice == current else ""
+            await session.write_line(colored(f"  {i}. {label:<8}", fg_color=LABEL_COLOR) + preview + marker)
+        await session.write_line(
+            action_bar([menu_key(f"0-{len(choices) - 1}", ""), menu_key("B", "ack")], width=session.terminal_width)
+        )
+        await _choice_prompt(session)
+
+    await _draw()
     while True:
         raw = (await session.read_key()).lower()
         if raw == "b":
@@ -4241,6 +4355,17 @@ async def _set_node_name_gradient_screen(
             await session.write_line("")
             chosen = choices[int(raw)]
             break
+        if raw == HELP_KEY:
+            await show_menu_help(
+                session, "Gradient help",
+                [MenuEntry(label=menu_key(f"0-{len(choices) - 1}", ""),
+                           brief="Apply that gradient (0 is solid)")],
+                about="Each row shows the node name in one gradient. Pressing its number applies it "
+                      "straight away.",
+                header_color=header_color, unicode_style=await lane.run(unicode_style_enabled, actor),
+            )
+            await _draw()
+            continue
         await session.write(reject_unhandled_key(raw))
 
     if chosen == current:
@@ -4259,6 +4384,21 @@ async def _set_node_name_gradient_screen(
 
 
 # -- trust policy (Phase 4, issue #129) -------------------------------------
+
+
+_TRUST_MENU = (
+    MenuEntry(label=menu_key("S", "ubjects"), brief="Trusted node/user subjects"),
+    MenuEntry(label=menu_key("D", "omains"), brief="Trusted federation domains"),
+    MenuEntry(label=menu_key("A", "nchors"), brief="Root trust anchor keys"),
+    MenuEntry(label=menu_key("R", "eporters"), brief="Who can report abuse remotely"),
+    MenuEntry(label=menu_key("I", "dentity authorities"), brief="Attestation authority list"),
+    MenuEntry(label=menu_key("P", "ublished identity"), brief="What it asserts about its users"),
+    MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for"),
+    MenuEntry(label=menu_key("g", "nals", prefix="Si"), brief="Equivocation it reported"),
+    MenuEntry(label=menu_key("E", "xceptions"), brief="Sole-authority deviations"),
+    MenuEntry(label=menu_key("H", "istory"), brief="Trust config change log"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
+)
 
 
 async def _trust_menu(
@@ -4285,19 +4425,7 @@ async def _trust_menu(
                 header_color=header_color,
             node_name_gradient=session.node_name_gradient)
         )
-        options = [
-            MenuEntry(label=menu_key("S", "ubjects"), brief="Trusted node/user subjects"),
-            MenuEntry(label=menu_key("D", "omains"), brief="Trusted federation domains"),
-            MenuEntry(label=menu_key("A", "nchors"), brief="Root trust anchor keys"),
-            MenuEntry(label=menu_key("R", "eporters"), brief="Who can report abuse remotely"),
-            MenuEntry(label=menu_key("I", "dentity authorities"), brief="Attestation authority list"),
-            MenuEntry(label=menu_key("P", "ublished identity"), brief="What it asserts about its users"),
-            MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for"),
-            MenuEntry(label=menu_key("g", "nals", prefix="Si"), brief="Equivocation it reported"),
-            MenuEntry(label=menu_key("E", "xceptions"), brief="Sole-authority deviations"),
-            MenuEntry(label=menu_key("H", "istory"), brief="Trust config change log"),
-            MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
-        ]
+        options = list(_TRUST_MENU)
         await session.write_line(
             _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
         )
@@ -4345,6 +4473,13 @@ async def _trust_menu(
             await _published_identity_screen(session, lane, actor, link_context=link_context)
         elif choice == "h":
             await _trust_config_history_screen(session, lane, actor)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Policy trust help", _TRUST_MENU,
+                about="Whom this node trusts on NetBBS Link, and what it vouches for and reports about "
+                      "others. A safety deviation means an exception lets one authority decide alone.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -4555,6 +4690,11 @@ async def _vouch_screen(
             ],
             actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Vouch help",
+            help_about=(
+                "A vouch tells other nodes on the Link that you stand behind this identity. Issuing one asks "
+                "for a reason and one confirmation before it is published."
+            ),
         )
         if choice == "b":
             return
@@ -4643,6 +4783,8 @@ async def _published_vouches_screen(
             session, lane, actor, listing, title="Vouches",
             subtitle="Identities this node vouches for to the nodes that subscribe to it.",
             rows=rows, options=["w"] if intents else [],
+            help_title="Vouches help",
+            help_about="The identities this node vouches for, as the nodes that subscribe to it see them.",
         )
         if choice == "b":
             return
@@ -4829,6 +4971,11 @@ async def _trust_subject_screen(
             ),
             sections=sections, actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Trust subject help",
+            help_about=(
+                "One node or remote user, and how far this node trusts it in each area. Establish and Block "
+                "open the override editor already filled in; nothing changes before you save."
+            ),
         )
         if choice == "b":
             return
@@ -4966,6 +5113,11 @@ async def _issued_signals_screen(
             session, lane, actor, listing, title="Signals",
             subtitle="Equivocation this node reported to the nodes that subscribe to it.",
             rows=rows, options=[], extra_actions=extra,
+            help_title="Signals help",
+            help_about=(
+                "Equivocation this node caught and reported: a node that signed two different versions of "
+                "the same thing."
+            ),
         )
         if choice == "b":
             return
@@ -5028,7 +5180,6 @@ _ALL_DIMENSIONS = "all"
 
 
 async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) -> TrustDimension | str | None:
-    await session.write_line("Dimension:")
     entries = [
         menu_key("I", "dentity integrity"),
         menu_key("R", "esource behavior"),
@@ -5037,9 +5188,19 @@ async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) ->
     if allow_all:
         entries.append(menu_key("A", "ll three"))
     entries.append(menu_key("B", "ack"))
-    await session.write_line(action_bar(entries, width=session.terminal_width))
-    await _choice_prompt(session)
-    choice = (await session.read_key()).lower()
+    while True:
+        await session.write_line("Dimension:")
+        await session.write_line(action_bar(entries, width=session.terminal_width))
+        await _choice_prompt(session)
+        choice = (await session.read_key()).lower()
+        if choice != HELP_KEY:
+            break
+        await show_menu_help(
+            session, "Trust dimension help",
+            _TRUST_DIMENSION_HELP if allow_all else _TRUST_DIMENSION_HELP[:-1],
+            about="Trust is kept separately in three areas, so a node can be trusted in one and "
+                  "blocked in another. Any other key leaves the choice as it was.",
+        )
     if allow_all and choice == "a":
         return _ALL_DIMENSIONS
     return {
@@ -5047,6 +5208,14 @@ async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) ->
         "r": TrustDimension.RESOURCE_BEHAVIOR,
         "c": TrustDimension.CONTENT_CONDUCT,
     }.get(choice)
+
+
+_TRUST_DIMENSION_HELP = (
+    MenuEntry(label=menu_key("I", "dentity integrity"), brief="Its keys and signatures"),
+    MenuEntry(label=menu_key("R", "esource behavior"), brief="Load, floods and abuse"),
+    MenuEntry(label=menu_key("C", "ontent conduct"), brief="What it posts and says"),
+    MenuEntry(label=menu_key("A", "ll three"), brief="The same state in all three"),
+)
 
 
 def _dimension_text(dimension: TrustDimension | str | None) -> str:
@@ -5239,7 +5408,7 @@ _TRUST_LIST_ACTIONS = {
 async def _trust_list_choice(
     session: Session, lane: DatabaseLane, actor: User, listing: _Listing, *,
     title: str, subtitle: str, rows: Sequence[Field | Note | Table], options: list[str],
-    extra_actions: Sequence[tuple[str, str]] = (),
+    extra_actions: Sequence[tuple[str, str]] = (), help_title: str, help_about: str,
 ) -> str:
     """One trust-policy listing, drawn in full -- title, the entries as a
     table, the action bar -- and the lowercase key the SysOp chose from it.
@@ -5257,8 +5426,17 @@ async def _trust_list_choice(
         title=_detail_title(session, chrome, title, breadcrumb=("Settings", "Policy trust"), subtitle=subtitle),
         sections=[Section(None, rows)], actions=actions, page=listing.page, message=listing.take_message(),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        help_title=help_title, help_about=help_about,
     )
     return choice
+
+
+_TRUST_STATE_HELP = (
+    MenuEntry(label=menu_key("P", "robationary"), brief="Unproven, as every subject starts"),
+    MenuEntry(label=menu_key("E", "stablished"), brief="Trusted without waiting"),
+    MenuEntry(label=menu_key("Q", "uarantined"), brief="Held back, as a trigger would"),
+    MenuEntry(label=menu_key("k", "ed", prefix="Bloc"), brief="Refused; wins over everything"),
+)
 
 
 async def _set_trust_override_screen(
@@ -5291,25 +5469,33 @@ async def _set_trust_override_screen(
             draft["dimension"] = dimension
 
     async def _state_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await session.write_line("State:")
-        await session.write_line(
-            action_bar(
-                [
-                    menu_key("P", "robationary"),
-                    menu_key("E", "stablished"),
-                    menu_key("Q", "uarantined"),
-                    # `B` is Back on every screen (issue #1158).
-                    menu_key("k", "ed", prefix="Bloc"),
-                    menu_key("B", "ack"),
-                ],
-                width=session.terminal_width,
+        while True:
+            await session.write_line("State:")
+            await session.write_line(
+                action_bar(
+                    [
+                        menu_key("P", "robationary"),
+                        menu_key("E", "stablished"),
+                        menu_key("Q", "uarantined"),
+                        # `B` is Back on every screen (issue #1158).
+                        menu_key("k", "ed", prefix="Bloc"),
+                        menu_key("B", "ack"),
+                    ],
+                    width=session.terminal_width,
+                )
             )
-        )
-        await _choice_prompt(session)
+            await _choice_prompt(session)
+            key = (await session.read_key()).lower()
+            if key != HELP_KEY:
+                break
+            await show_menu_help(
+                session, "Trust state help", _TRUST_STATE_HELP,
+                about="The state this override forces. Any other key leaves the state as it was.",
+            )
         state = {
             "p": TrustState.PROBATIONARY, "e": TrustState.ESTABLISHED,
             "q": TrustState.QUARANTINED, "k": TrustState.BLOCKED,
-        }.get((await session.read_key()).lower())
+        }.get(key)
         await session.write_line("")
         if state is not None:
             draft["state"] = state
@@ -5527,6 +5713,8 @@ async def _trust_decision_history_screen(
     await _show_report(
         session, lane, actor, "Trust decision history", breadcrumb=("Settings", "Policy trust", "Subjects"),
         sections=[Section(None, body)],
+        help_title="Trust history help",
+        help_about="Every trust decision this node made about this subject, newest first.",
     )
 
 
@@ -5547,6 +5735,11 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
             session, lane, actor, listing, title="Trust domains",
             subtitle="Groups of reporters whose signals count together, and how much.",
             rows=rows, options=["a"],
+            help_title="Trust domains help",
+            help_about=(
+                "Groups of reporters whose signals count together. A signal needs agreement from two "
+                "independent domains unless an exception says otherwise."
+            ),
         )
         if choice == "b":
             return
@@ -5696,6 +5889,11 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             session, lane, actor, listing, title="Trust anchors",
             subtitle="Nodes whose trust signals this node accepts as a root.",
             rows=rows, options=["a", "r"] if anchors else ["a"],
+            help_title="Trust anchors help",
+            help_about=(
+                "The nodes whose trust signals this node accepts as a starting point for everything else it "
+                "trusts."
+            ),
         )
         if choice == "b":
             return
@@ -5819,6 +6017,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             session, lane, actor, listing, title="Trusted reporters",
             subtitle="Who may report abuse to this node, in which domain and for what.",
             rows=rows, options=["a", "r"] if reporters else ["a"],
+            help_title="Trusted reporters help",
+            help_about="Who may report abuse to this node, in which trust domain, and about what.",
         )
         if choice == "b":
             return
@@ -5977,6 +6177,8 @@ async def _attestation_authorities_screen(
             session, lane, actor, listing, title="Identity authorities",
             subtitle="Nodes whose signed age/name attestations this node believes.",
             rows=rows, options=["a", "r"] if authorities else ["a"],
+            help_title="Identity authorities help",
+            help_about="Nodes whose signed statements about a caller's age or name this node believes.",
         )
         if choice == "b":
             return
@@ -6106,6 +6308,8 @@ async def _attestation_recipients_screen(
             session, lane, actor, listing, title="Attestation recipients",
             subtitle="Nodes that receive this node's identity attestations.",
             rows=rows, options=["a", "r"] if recipients else ["a"],
+            help_title="Attestation recipients help",
+            help_about="The nodes this node sends its own identity attestations to.",
         )
         if choice == "b":
             return
@@ -6374,6 +6578,8 @@ async def _published_identity_screen(
             ],
             actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Published identity help",
+            help_about="What this node tells other Link nodes about its own users, such as verified age or name.",
         )
         if choice == "b":
             return
@@ -6482,19 +6688,34 @@ async def _remote_attestation_override_screen(
     """`[O]verride` (issue #282: a draft editor -- attribute, decision,
     reason, with the accept-side confirmation kept inside Save) or
     `[C]lear override` (the existing picker), or `[B]ack`."""
-    await session.write_line("Remote attestation:")
-    await session.write_line(
-        action_bar(
-            [menu_key("O", "verride"), menu_key("C", "lear override"), menu_key("B", "ack")],
-            width=session.terminal_width,
+    async def _ask() -> None:
+        await session.write_line("Remote attestation:")
+        await session.write_line(
+            action_bar(
+                [menu_key("O", "verride"), menu_key("C", "lear override"), menu_key("B", "ack")],
+                width=session.terminal_width,
+            )
         )
-    )
-    await _choice_prompt(session)
+        await _choice_prompt(session)
+
+    await _ask()
     while True:
         choice = (await session.read_key()).lower()
         if choice in ("o", "c", "b"):
             await session.write_line("")
             break
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Remote attestation help",
+                [MenuEntry(label=menu_key("O", "verride"),
+                           brief="Accept or reject it yourself"),
+                 MenuEntry(label=menu_key("C", "lear override"),
+                           brief="Judge it by its signature again")],
+                about="Another node's signed statement about this user's age or name. An override "
+                      "decides it here, whatever the signature says, and is audited.",
+            )
+            await _ask()
+            continue
         await session.write(reject_unhandled_key(choice))
     if choice == "b":
         return
@@ -6627,6 +6848,11 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             session, lane, actor, listing, title="Sole-authority exceptions",
             subtitle="Safety deviations from the two-independent-domains rule.",
             rows=rows, options=["a", "r"] if exceptions else ["a"],
+            help_title="Exceptions help",
+            help_about=(
+                "Places where one trust authority may decide alone, instead of two independent domains "
+                "agreeing. Each one is a deliberate safety deviation."
+            ),
         )
         if choice == "b":
             return
@@ -6773,6 +6999,8 @@ async def _trust_config_history_screen(session: Session, lane: DatabaseLane, act
         session, lane, actor, "Trust configuration history", breadcrumb=("Settings", "Policy trust"),
         subtitle="Every change to this node's trust policy, newest first.",
         sections=[Section(None, body)],
+        help_title="Trust configuration history help",
+        help_about="Every change to this node's trust policy, newest first, and who made it.",
     )
 
 
@@ -6824,6 +7052,11 @@ async def _retired_usernames_screen(session: Session, lane: DatabaseLane, actor:
             sections=[Section("Why names are held", [why]), Section("Held usernames", held)],
             actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Retired usernames help",
+            help_about=(
+                "Names of deleted accounts that nobody may register again, so no one inherits their Link "
+                "mail address or reputation. Releasing a name frees it for anyone."
+            ),
         )
         message = None
         if choice == "b":
@@ -7613,6 +7846,8 @@ async def _user_history_screen(session: Session, lane: DatabaseLane, actor: User
     await _show_report(
         session, lane, actor, "Admin actions", breadcrumb=(sanitize_text(target.username),),
         sections=[Section(None, body)],
+        help_title="Admin actions help",
+        help_about="Every administrative action taken on this account, newest first.",
     )
 
 
@@ -7768,11 +8003,23 @@ async def _revoke_verification(session: Session, lane: DatabaseLane, actor: User
         _announce_line(session, f"No verification on record for {target.username!r}.")
         return
     if age is not None and name is not None:
-        await write_prompt(
-            session, highlight_hotkeys("Revoke which: verified [A]ge, verified real [N]ame, or [B]ack? ")
-        )
-        which = (await session.read_key()).lower()
-        await session.write_line("")
+        while True:
+            await write_prompt(
+                session, highlight_hotkeys("Revoke which: verified [A]ge, verified real [N]ame, or [B]ack? ")
+            )
+            which = (await session.read_key()).lower()
+            await session.write_line("")
+            if which != HELP_KEY:
+                break
+            await show_menu_help(
+                session, "Revoke verification help",
+                [MenuEntry(label=menu_key("A", "ge"), brief="Withdraw the verified age"),
+                 MenuEntry(label=menu_key("N", "ame"), brief="Withdraw the verified real name")],
+                about="Both an age and a real name are verified for this account; choose which to "
+                      "withdraw. You are asked to confirm before anything changes.",
+                header_color=await lane.run(effective_header_color_256),
+                unicode_style=await lane.run(unicode_style_enabled, actor),
+            )
         if which not in ("a", "n"):
             return
         attribute = "age" if which == "a" else "name"
@@ -7863,6 +8110,8 @@ async def _preview_level_change(
         sections=_level_change_sections(change),
         actions=[("a", menu_key("A", "pply")), _BACK_ACTION],
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        help_title="Level change help",
+        help_about="What this account gains and loses by moving to the new level. Nothing changes until you confirm.",
     )
     return choice == "a"
 
@@ -8216,6 +8465,14 @@ async def _staff_permissions_screen(
         if choice == "v":
             target = await _toggle_verify_identity(session, lane, actor, target, node_controls)
             continue
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Staff permissions help", _STAFF_PERMISSIONS_HELP,
+                about="What this account may do as staff. Each key turns one permission on or off, "
+                      "and asks first; the account's live sessions pick up the change.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            continue
         if choice in _STAFF_TOGGLE_KEYS:
             flag = _STAFF_TOGGLE_KEYS[choice]
             giving = not target.has_staff(flag)
@@ -8254,6 +8511,18 @@ async def _staff_permissions_screen(
             # (issue #1115).
             _announce_line(session, "To let them verify identity too, use [V]erify identity.")
         _request_live_access_recheck(node_controls, target)
+
+
+# The staff screen's own briefs are each permission's on/off state; its help
+# says what each one lets the account do instead.
+_STAFF_PERMISSIONS_HELP = (
+    MenuEntry(label=menu_key("A", "pprove accounts"), brief="Approve or decline new accounts"),
+    MenuEntry(label=menu_key("M", "anage accounts"), brief="Levels, disabling, passwords"),
+    MenuEntry(label=menu_key("E", "verything", prefix="Moderate "), brief="Every board, area and channel"),
+    MenuEntry(label=menu_key("V", "erify identity"), brief="Verify callers' age or real name"),
+    MenuEntry(label=menu_key("C", "o-SysOp preset"), brief="All three permissions at once"),
+    MenuEntry(label=menu_key("N", "one"), brief="Remove every staff permission"),
+)
 
 
 async def _toggle_verify_identity(
@@ -8397,6 +8666,11 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
             ],
             message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Registration help",
+            help_about=(
+                "Who may create an account on this node by themselves, and the question new callers answer "
+                "while approval is required."
+            ),
         )
         if choice == "b":
             return
@@ -8761,6 +9035,27 @@ async def _update_settings_screen(
             await lane.run(_apply)
             _announce_line(session, f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
             status = await _redraw()
+        elif choice == HELP_KEY:
+            help_entries = [MenuEntry(label=menu_key("C", "heck now"), brief="Look for a newer release now")]
+            if status.installable is not None:
+                help_entries.append(MenuEntry(
+                    label=menu_key("I", f"nstall {status.installable.tag_name}"),
+                    brief="Download and install it",
+                ))
+            help_entries.extend([
+                MenuEntry(label=menu_key("R", "estart after install"),
+                          brief="Restart after installing or not"),
+                MenuEntry(label=menu_key("T", "oken"), brief="GitHub token for release checks"),
+                MenuEntry(label=menu_key("A", "uto-check off" if status.auto_enabled else "uto-check on"),
+                          brief="Daily automatic check on or off"),
+            ])
+            await show_menu_help(
+                session, "Self-update help", help_entries,
+                about="Check for a newer NetBBS release and install it. A check never installs "
+                      "anything by itself; a token only lifts GitHub's rate limit.",
+                header_color=await lane.run(effective_header_color_256), unicode_style=status.unicode_style,
+            )
+            status = await _redraw()
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -8819,6 +9114,8 @@ async def _install_release_screen(
                 Note(refusal),
             ])],
             actions=[_BACK_ACTION], redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Install help",
+            help_about="Why this release can't be installed from here, and what to do instead.",
         )
         return
 
@@ -8842,6 +9139,11 @@ async def _install_release_screen(
         sections=[Section(f"{current_version} -> {release.tag_name}", plan)],
         actions=[("i", menu_key("I", "nstall now")), _BACK_ACTION],
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        help_title="Install help",
+        help_about=(
+            "What installing this release will do, including the backup taken first and whether the node "
+            "restarts afterwards. Nothing happens until you choose to install."
+        ),
     )
     if choice != "i":
         return
@@ -8895,6 +9197,8 @@ async def _run_install(
             sections.append(Section("pip output (last lines)", [Note(line, color=VALUE_COLOR) for line in log.splitlines()[-40:]]))
         await _show_report(
             session, lane, actor, f"Install {release.tag_name}", breadcrumb=breadcrumb, sections=sections,
+            help_title="Install help",
+            help_about="Why the install stopped, and at which step. The running version is unchanged.",
         )
 
     token = await lane.run(get_github_pat)
@@ -9239,6 +9543,11 @@ async def _backup_status_screen(
             ),
             sections=sections, actions=actions, page=page,
             redraw_in_place=chrome.redraw_in_place, unicode_style=unicode_style,
+            help_title="Backup help",
+            help_about=(
+                "Complete local backups of this node: when the last one ran, the schedule, and where they "
+                "go. A backup can be made while the node runs."
+            ),
         )
         if choice == "b":
             return
@@ -9794,6 +10103,31 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             await session.write_line("")
             await administer_managed_dns_service(session, lane, actor)
             status = await _draw_managed_dns_status(session, lane, actor)
+        elif choice == HELP_KEY:
+            previous_name, admin_token, header_color, unicode_style = await lane.run(lambda db: (
+                get_managed_dns_previous_name(db), get_managed_dns_admin_token(db),
+                effective_header_color_256(db), unicode_style_enabled(db, actor),
+            ))
+            help_entries = [MenuEntry(label=menu_key("R", "egister"),
+                                      brief="Ask for a netbbs.org name")]
+            if previous_name is not None and status is not ManagedDnsRegistrationStatus.REVOKED:
+                help_entries.append(MenuEntry(label=menu_key("C", "ancel change"),
+                                              brief="Keep the old name after all"))
+            elif status in _MANAGED_DNS_ACTIVE_STATUSES and previous_name is None:
+                help_entries.append(MenuEntry(label=menu_key("l", "ease", prefix="Re"),
+                                              brief="Give the name up"))
+                help_entries.append(MenuEntry(label=menu_key("N", "ame", prefix="Change "),
+                                              brief="Move to a different name"))
+            if admin_token is not None:
+                help_entries.append(MenuEntry(label=menu_key("A", "dminister service"),
+                                              brief="Every name the service holds"))
+            await show_menu_help(
+                session, "Managed DNS help", help_entries,
+                about="A free name under netbbs.org that callers can use to reach this node, "
+                      "kept pointing at its current address.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            status = await _draw_managed_dns_status(session, lane, actor)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -10254,6 +10588,11 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 _BACK_ACTION,
             ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, page=page,
+            help_title="Network & login limits help",
+            help_about=(
+                "Link limits, the login throttle and shutdown delays. Changes apply at the next start; a "
+                "value set in the config file or on the command line wins and is shown as such."
+            ),
         )
         if choice == "b":
             return
@@ -10310,6 +10649,11 @@ async def _node_configuration_screen(session: Session, lane: DatabaseLane, actor
                                 subtitle="As the node resolved it at its last start"),
             sections=sections, actions=[_BACK_ACTION], page=page,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Node configuration help",
+            help_about=(
+                "The listeners, Link addresses and paths the node read from its config file and command line "
+                "when it last started. Read-only: change them there and restart."
+            ),
         )
         if choice == "b":
             return
@@ -10835,6 +11179,16 @@ async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) ->
                 entries.remove(picked[1])
                 draft["open_blocklist"] = entries
             continue
+        if choice == HELP_KEY:
+            help_entries = [MenuEntry(label=menu_key("A", "dd"), brief="Block one more room by name")]
+            if entries:
+                help_entries.append(MenuEntry(label=menu_key("R", "emove"), brief="Pick a room to unblock"))
+            await show_menu_help(
+                session, "Blocked rooms help", help_entries,
+                about="MRC rooms callers may not open from this node. Changes are kept only when you "
+                      "save the MRC settings.",
+            )
+            continue
         await session.write(reject_unhandled_key(choice))
 
 
@@ -10975,6 +11329,11 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
                     Note("The MRC bridge lives inside the running node; this console runs outside the node and can't see it."),
                 ])],
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+                help_title="MRC status help",
+                help_about=(
+                    "The MRC bridge runs inside the live node, so this console cannot show it. Log in as a "
+                    "SysOp on the node to see it."
+                ),
             )
             return
         status = mrc_bridge.status()
@@ -10985,6 +11344,11 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
             session, title=title, actions=actions, page=page, message=message,
             sections=await _mrc_status_sections(lane, mrc_bridge, status, unicode_style=chrome.unicode_style),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="MRC status help",
+            help_about=(
+                "What the inter-BBS chat bridge is doing right now: its connection to the hub and the "
+                "channels it carries."
+            ),
         )
         message = None
         if choice == "b":
@@ -11536,6 +11900,11 @@ async def _node_map_sysop_screen(
                 ),
                 actions=actions, page=listing.page, message=listing.take_message(),
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+                help_title="Node map help",
+                help_about=(
+                    "Every node this one knows on the Link, including those callers don't see because you "
+                    "quarantined or blocked them, with trust, addresses and reliability."
+                ),
             )
             if choice == "b":
                 break
@@ -11697,6 +12066,11 @@ async def _carry_decisions_screen(
             ),
             actions=actions, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Carry help",
+            help_about=(
+                "A board, file area or channel another node offers to share with this one. Accepting starts "
+                "carrying it here; excluding turns the offer away."
+            ),
         )
         message = None
         if choice == "a":
@@ -11973,6 +12347,11 @@ async def _link_status_screen(
             ),
             sections=sections, actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Link status help",
+            help_about=(
+                "This node's place on NetBBS Link: its identity, capacity, relays and verified peers, and "
+                "the offers waiting for a decision."
+            ),
         )
         message = None
         if choice == "b":
@@ -12088,6 +12467,11 @@ async def _node_keys_screen(
             ),
             sections=sections, actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Node keys help",
+            help_about=(
+                "This node's Link keys. The root key is the node's address and never changes; the signing "
+                "and transport keys can be replaced from their own screens."
+            ),
         )
         if choice == "b":
             return
@@ -12139,6 +12523,11 @@ async def _node_key_detail(
             ],
             actions=[("r", menu_key("R", "otate")), ("c", menu_key("C", "ompromised")), _BACK_ACTION],
             page=page, redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Node key help",
+            help_about=(
+                "One key and its history. Rotate replaces it routinely; Compromised also tells peers to stop "
+                "believing what the old key signed. Both are final."
+            ),
         )
         if choice == "b":
             return
@@ -12234,6 +12623,8 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
             ),
             sections=[Section("Work items by status", rows)], actions=actions, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Outbox help",
+            help_about="Link mail and acknowledgements waiting to go out, and those that keep failing.",
         )
         message = None
         if choice == "b":
@@ -12285,6 +12676,11 @@ async def _outbox_item_screen(
         title=_detail_title(session, chrome, "Work item", breadcrumb=("SysOp", "Operations", "Outbox")),
         sections=[Section(None, rows)], actions=[action, _BACK_ACTION],
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+        help_title="Work item help",
+        help_about=(
+            "One outgoing delivery that is retrying or gave up. Replay sends it again now; cancel stops "
+            "retrying it."
+        ),
     )
     if choice == "r":
         def _replay(db: Database) -> WorkItem:
@@ -12439,6 +12835,8 @@ async def _mail_tools_screen(
             ],
             actions=actions,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Mail help",
+            help_about="How much mail each mailbox holds, and the Link mail this node refused to deliver.",
         )
         if choice == "b":
             return
@@ -12505,6 +12903,8 @@ async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -
             ],
             page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Mailboxes help",
+            help_about="Each member's mailbox and how much it holds.",
         )
         if choice == "b":
             return
@@ -12557,6 +12957,8 @@ async def _refused_link_mail_screen(
             actions=[("o", menu_key("O", "pen"))] + [_BACK_ACTION] if refusals else [_BACK_ACTION],
             page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Refused Link mail help",
+            help_about="Letters from other nodes that this node would not deliver, and why.",
         )
         if choice == "b":
             return
@@ -12665,6 +13067,8 @@ async def _refused_letter_screen(
             ],
             actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Refused letter help",
+            help_about="One refused letter: who sent it, to whom, and why it was refused.",
         )
         if choice == "b":
             return
@@ -12713,6 +13117,8 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
         await _show_report(
             session, lane, actor, "Diagnostic log", breadcrumb=("SysOp", "Operations"),
             sections=[Section(None, [Note("Nothing logged yet.")])],
+            help_title="Diagnostic log help",
+            help_about="Warnings and errors from Link and MRC. Nothing has been logged yet.",
         )
         return
 
@@ -12763,6 +13169,8 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
             ])],
             actions=[_BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Diagnostic entry help",
+            help_about="One warning or error from Link or MRC, in full.",
         )
 
 
@@ -12796,6 +13204,8 @@ async def _audit_log_screen(
         await _show_report(
             session, lane, actor, title, breadcrumb=breadcrumb,
             sections=[*moderator_section, Section(None, [Note("Nothing logged yet.")])],
+            help_title="Audit log help",
+            help_about="The moderation and administrative actions logged here. Nothing has been logged yet.",
         )
         return
     # One row each, whatever the terminal (Codex review on #797): the
@@ -12926,6 +13336,8 @@ async def _audit_log_screen(
             title=_detail_title(session, chrome, "Audit entry", breadcrumb=(*breadcrumb, title)),
             sections=[Section(None, rows)], actions=[_BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Audit entry help",
+            help_about="One logged action in full: who did it, when, and to what.",
         )
 
 
@@ -13057,6 +13469,8 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
         await _show_report(
             session, lane, actor, "Node log", breadcrumb=("SysOp", "Operations"),
             sections=[Section(None, [Field("File", str(path)), Note(note)])],
+            help_title="Node log help",
+            help_about="The node's log file, which could not be read or does not exist yet.",
         )
         return
 
@@ -13161,6 +13575,8 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
             sections=sections,
             actions=[_BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Log entry help",
+            help_about="One warning or error from the node's log file, in full.",
         )
 
 
@@ -13235,6 +13651,11 @@ async def _repair_carried_posts_screen(session: Session, lane: DatabaseLane, act
         session, lane, actor, "Repair carried posts", breadcrumb=("SysOp", "Operations"),
         subtitle="Rebuilds local posts rows from already-accepted Link events.",
         sections=[Section(None, rows)],
+        help_title="Repair help",
+        help_about=(
+            "What the repair rebuilt: local copies of carried posts, made again from Link events this node "
+            "had already accepted."
+        ),
     )
 
 
@@ -13286,6 +13707,11 @@ async def _prune_drafts_screen(session: Session, lane: DatabaseLane, actor: User
             ),
             sections=[_prune_report_section(report)], actions=actions,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Prune drafts help",
+            help_about=(
+                "Unsaved post edits and bio drafts nobody has touched for longer than the retention window. "
+                "Deleting them cannot be undone."
+            ),
         )
         if choice == "b":
             return
@@ -13363,6 +13789,11 @@ async def _search_indexes_screen(session: Session, lane: DatabaseLane, actor: Us
             ),
             sections=[_search_index_section(report)], actions=actions,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="Search indexes help",
+            help_about=(
+                "What Find searches, compared with the content it should cover. Rebuild an index that has "
+                "fallen behind."
+            ),
         )
         if choice == "b":
             return
@@ -13483,6 +13914,14 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await session.write_line("")
             await _mrc_status_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Node management help", _NODE_MENU,
+                about="The running node: who is connected, and taking it down for maintenance or a "
+                      "shutdown. Maintenance mode stays on until you turn it off.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -13539,22 +13978,22 @@ async def _draw_node_menu(
         state.append(Field("Shutdown scheduled", line, color=ALERT_COLOR, bold=True))
     panel_rows = await _write_sections(session, [Section("Right now", state)], unicode_style=unicode_style)
     await session.write_line(
-        "\r\n" + _fitted_menu(
-            [
-                MenuEntry(label=menu_key("W", "ho"), brief="See who's currently connected"),
-                MenuEntry(label=menu_key("O", "nitor", prefix="M"), brief="Watch callers live, act on one"),
-                MenuEntry(label=menu_key("M", "aintenance mode"), brief="Toggle: block non-SysOp logins"),
-                MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
-                MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
-                MenuEntry(label=menu_key("S", "hutdown"), brief="Schedule a node shutdown"),
-                MenuEntry(label=menu_key("C", "hat bridge (MRC)"), brief="Inter-BBS chat link status"),
-                MenuEntry(label=menu_key("F", "TN mail"), brief="Calls, AreaFix, held packets"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Operations"),
-            ],
-            description_level, session=session, used_rows=panel_rows + 3,
-        )
+        "\r\n" + _fitted_menu(list(_NODE_MENU), description_level, session=session, used_rows=panel_rows + 3)
     )
     await _choice_prompt(session)
+
+
+_NODE_MENU = (
+    MenuEntry(label=menu_key("W", "ho"), brief="See who's currently connected"),
+    MenuEntry(label=menu_key("O", "nitor", prefix="M"), brief="Watch callers live, act on one"),
+    MenuEntry(label=menu_key("M", "aintenance mode"), brief="Toggle: block non-SysOp logins"),
+    MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
+    MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
+    MenuEntry(label=menu_key("S", "hutdown"), brief="Schedule a node shutdown"),
+    MenuEntry(label=menu_key("C", "hat bridge (MRC)"), brief="Inter-BBS chat link status"),
+    MenuEntry(label=menu_key("F", "TN mail"), brief="Calls, AreaFix, held packets"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to Operations"),
+)
 
 
 def _session_name(entry: SessionSummary) -> str:
@@ -13794,6 +14233,20 @@ async def _scheduled_action_prelude(
         if choice == "c" or (choice == "r" and replace_label is not None):
             await session.write_line("")
             return choice
+        if choice == HELP_KEY:
+            help_entries = [MenuEntry(label=menu_key("C", cancel_label), brief="Call off what is already scheduled")]
+            if replace_label is not None:
+                help_entries.append(MenuEntry(
+                    label=menu_key("R", replace_label), brief="Schedule a new one in its place",
+                ))
+            await show_menu_help(
+                session, "Scheduled action help", help_entries,
+                about="Something is already scheduled. Back leaves it exactly as it is.",
+            )
+            await _write_wrapped_subtitle(session, status_text, color=ALERT_COLOR, bold=True)
+            await session.write_line(action_bar(options, width=session.terminal_width))
+            await _choice_prompt(session)
+            continue
         await session.write(reject_unhandled_key(choice))
 
 
@@ -14667,12 +15120,24 @@ async def _preview_apply_choice(session: Session, label: str) -> bool:
     `[B]ack` to the list, instead of a yes/no whose "no" then also needed
     a "Press any key" to get back -- two keystrokes per declined preset
     while shopping through a gallery. Returns whether to apply."""
-    await session.write_line(
-        "\r\n" + action_bar([menu_key("A", "pply"), menu_key("B", "ack to the list")], width=session.terminal_width)
-    )
-    await write_prompt(session, f"{label}? ")
+    async def _ask() -> None:
+        await session.write_line(
+            "\r\n" + action_bar([menu_key("A", "pply"), menu_key("B", "ack to the list")], width=session.terminal_width)
+        )
+        await write_prompt(session, f"{label}? ")
+
+    await _ask()
     while True:
         choice = (await session.read_key()).lower()
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Preview help",
+                [MenuEntry(label=menu_key("A", "pply"), brief="Use what the preview showed"),
+                 MenuEntry(label=menu_key("B", "ack to the list"), brief="Leave it unchanged and pick again")],
+                about="The preview above is what callers would see. Nothing changes unless you apply it.",
+            )
+            await _ask()
+            continue
         if choice in ("a", "b"):
             # A caller who habitually types "A<Enter>" must not carry that
             # Enter into the success pause or back into the picker (where
@@ -18049,8 +18514,30 @@ async def _content_menu(
             await _pending_review_screen(session, lane, actor, link_context=link_context, transfers=transfers)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Content help", _CONTENT_MENU,
+                about="Everything callers read, download, play and chat in, who moderates it, and "
+                      "what waits for approval.",
+                header_color=stats["header_color"], unicode_style=stats["unicode_style"],
+            )
+            await _draw_content_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_CONTENT_MENU = (
+    MenuEntry(label=menu_key("M", "essage boards"), brief="Create/edit message boards"),
+    MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
+    MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
+    MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
+    MenuEntry(label=menu_key("C", "ategories"), brief="Group lists of one kind"),
+    MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Topics holding every kind"),
+    MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
+    MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
+    MenuEntry(label=menu_key("P", "ending review"), brief="Posts and files awaiting approval"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
+)
 
 
 async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None:
@@ -18143,18 +18630,7 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
 
         await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
 
-    entries = [
-        MenuEntry(label=menu_key("M", "essage boards"), brief="Create/edit message boards"),
-        MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
-        MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
-        MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
-        MenuEntry(label=menu_key("C", "ategories"), brief="Group lists of one kind"),
-        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Topics holding every kind"),
-        MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
-        MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
-        MenuEntry(label=menu_key("P", "ending review"), brief="Posts and files awaiting approval"),
-        MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
-    ]
+    entries = list(_CONTENT_MENU)
     effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
         panel=panel, unicode_style=unicode_style, description_level=description_level,
         entry_count=len(entries), terminal_width=session.terminal_width, terminal_height=session.terminal_height,
@@ -18899,8 +19375,23 @@ async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> 
             await session.write_line("")
             await _list_communities_screen(session, lane, actor)
             await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Communities help", _COMMUNITY_MENU,
+                about="A Community is a topic with its own boards, chat channels, file areas and games. "
+                      "Callers reach them under Communities on the main menu.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_COMMUNITY_MENU = (
+    MenuEntry(label=menu_key("C", "reate"), brief="Add a new Community"),
+    MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit Communities"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
+)
 
 
 async def _draw_community_menu(
@@ -18911,11 +19402,7 @@ async def _draw_community_menu(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
     await session.write_line(
         _menu_row(
-            [
-                MenuEntry(label=menu_key("C", "reate"), brief="Add a new Community"),
-                MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit Communities"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
-            ],
+            list(_COMMUNITY_MENU),
             description_level,
             width=session.terminal_width,
             height=session.terminal_height,
@@ -19232,8 +19719,23 @@ async def _board_menu(
             await session.write_line("")
             await _list_boards_screen(session, lane, actor, link_context=link_context)
             await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Message boards help", _BOARD_MENU,
+                about="Add message boards and change or remove existing ones. Pick a board from the "
+                      "list to edit it.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_BOARD_MENU = (
+    MenuEntry(label=menu_key("C", "reate"), brief="Add a new message board"),
+    MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit boards"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
+)
 
 
 async def _draw_board_menu(
@@ -19244,11 +19746,7 @@ async def _draw_board_menu(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
     await session.write_line(
         _menu_row(
-            [
-                MenuEntry(label=menu_key("C", "reate"), brief="Add a new message board"),
-                MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit boards"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
-            ],
+            list(_BOARD_MENU),
             description_level,
             width=session.terminal_width,
             height=session.terminal_height,
@@ -20918,6 +21416,11 @@ async def _post_action_screen(
         choice, page = await show_detail(
             session, title=title, sections=sections, actions=actions,
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
+            help_title="Held post help",
+            help_about=(
+                "A post waiting for moderation. Read it in full, then approve it so readers see it, or "
+                "reject it."
+            ),
         )
         if choice == "b":
             return
@@ -20989,8 +21492,31 @@ async def _area_menu(
             await session.write_line("")
             await _gc_screen(session, lane, actor)
             await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "File areas help", _AREA_MENU,
+                about="Add file areas and change or remove existing ones. GC storage frees disk space "
+                      "that deleted files still hold.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_AREA_MENU = (
+    MenuEntry(label=menu_key("C", "reate"), brief="Add a new file area"),
+    MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit file areas"),
+    MenuEntry(
+        label=menu_key("G", "C storage"),
+        brief="Reclaim space from orphaned files",
+        detailed=(
+            "Garbage-collect (GC) uploaded file storage: reclaim disk space still "
+            "held by blobs no file entry references anymore, e.g. after a delete."
+        ),
+    ),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
+)
 
 
 async def _draw_area_menu(
@@ -21003,19 +21529,7 @@ async def _draw_area_menu(
         menu_grid(
             [(
                 "",
-                [
-                    MenuEntry(label=menu_key("C", "reate"), brief="Add a new file area"),
-                    MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit file areas"),
-                    MenuEntry(
-                        label=menu_key("G", "C storage"),
-                        brief="Reclaim space from orphaned files",
-                        detailed=(
-                            "Garbage-collect (GC) uploaded file storage: reclaim disk space still "
-                            "held by blobs no file entry references anymore, e.g. after a delete."
-                        ),
-                    ),
-                    MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
-                ],
+                list(_AREA_MENU),
             )],
             width=session.terminal_width,
             height=session.terminal_height,
@@ -21053,6 +21567,11 @@ async def _gc_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
             ),
             sections=[_gc_report_section(report)], actions=actions,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="GC storage help",
+            help_about=(
+                "Files on disk that no file entry refers to any more. Reclaiming deletes them to free the "
+                "space."
+            ),
         )
         if choice == "b":
             return
@@ -21692,6 +22211,14 @@ async def _draw_file_action(
         redraw_in_place=redraw_in_place, unicode_style=unicode_style,
         collapsed=collapsed, header_color=header_color,
     )
+    entries = _file_action_entries(can_download=can_download, can_flag=can_flag)
+    options = _fitted_menu(entries, description_level, session=session, used_rows=used_rows)
+    await session.write_line(f"\r\n{options}")
+    await _choice_prompt(session)
+
+
+def _file_action_entries(*, can_download: bool, can_flag: bool) -> list[MenuEntry]:
+    """The pending-file screen's menu, shared by its draw and its help."""
     entries = [
         MenuEntry(label=menu_key("A", "pprove"), brief="Publish this pending file"),
         MenuEntry(label=menu_key("R", "eject"), brief="Delete this pending file"),
@@ -21712,9 +22239,7 @@ async def _draw_file_action(
             MenuEntry(label=menu_key("X", "empt toggle"), brief="Toggle exempt from expiry"),
         ]
     entries.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the pending list"))
-    options = _fitted_menu(entries, description_level, session=session, used_rows=used_rows)
-    await session.write_line(f"\r\n{options}")
-    await _choice_prompt(session)
+    return entries
 
 
 async def _file_action_screen(
@@ -21812,6 +22337,14 @@ async def _file_action_screen(
             except FileEntryError as exc:
                 _announce(session, f"Error: {exc}", error=True)
             await _draw()
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Pending file help", _file_action_entries(can_download=can_download, can_flag=can_flag),
+                about="An upload waiting for approval. Callers see it in the area only once it is "
+                      "approved; rejecting deletes it.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw()
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -21902,6 +22435,16 @@ async def _expired_file_screen(
             # outcome, and the redraw below shows it.
             await send_file_to_caller(session, lane, area, entry, actor, transfers=transfers)
             await _draw()
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Expired file help",
+                [MenuEntry(label=menu_key("D", "ownload"), brief="Recover it before it is purged")]
+                if can_download else [],
+                about="A file that expired: callers can no longer reach it, and its bytes are deleted "
+                      "on the purge date. To put it back in the area, upload it again.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw()
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -21951,8 +22494,26 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
             await session.write_line("")
             await _list_doors_screen(session, lane, actor, door_services=door_services, backup_identity_dir=backup_identity_dir)
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Doors help", _DOOR_MENU,
+                about="Doors are games and programs callers run from the BBS. Register one by hand, "
+                      "from NetBBS's own gallery, or from a script already on this node.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_DOOR_MENU = (
+    MenuEntry(label=menu_key("C", "reate"), brief="Register a new door"),
+    MenuEntry(label=menu_key("G", "allery"), brief="Register one of NetBBS's own doors"),
+    MenuEntry(label=menu_key("F", "rom disk"), brief="Register a script from this node"),
+    MenuEntry(label=menu_key("U", "pload"), brief="Send a door file to this node"),
+    MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit doors"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
+)
 
 
 async def _draw_door_menu(
@@ -21965,14 +22526,7 @@ async def _draw_door_menu(
         menu_grid(
             [(
                 "",
-                [
-                    MenuEntry(label=menu_key("C", "reate"), brief="Register a new door"),
-                    MenuEntry(label=menu_key("G", "allery"), brief="Register one of NetBBS's own doors"),
-                    MenuEntry(label=menu_key("F", "rom disk"), brief="Register a script from this node"),
-                    MenuEntry(label=menu_key("U", "pload"), brief="Send a door file to this node"),
-                    MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit doors"),
-                    MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
-                ],
+                list(_DOOR_MENU),
             )],
             width=session.terminal_width,
             height=session.terminal_height,
@@ -22263,25 +22817,41 @@ async def _resolve_door_name_collision(
     existing = await lane.run(_find_door_by_name, default_name)
     if existing is None:
         return default_name
-    await session.write_line(
-        colored(f"\r\n{default_name!r} is already registered as a door.", fg_color=MUTED_COLOR)
-    )
-    await session.write_line(
-        action_bar(
-            [
-                menu_key("N", "ew instance under a different name"),
-                menu_key("E", "dit the existing one"),
-                menu_key("C", "ancel"),
-            ],
-            width=session.terminal_width,
+    async def _ask() -> None:
+        await session.write_line(
+            colored(f"\r\n{default_name!r} is already registered as a door.", fg_color=MUTED_COLOR)
         )
-    )
-    await _choice_prompt(session)
+        await session.write_line(
+            action_bar(
+                [
+                    menu_key("N", "ew instance under a different name"),
+                    menu_key("E", "dit the existing one"),
+                    menu_key("C", "ancel"),
+                ],
+                width=session.terminal_width,
+            )
+        )
+        await _choice_prompt(session)
+
+    await _ask()
     while True:
         choice = (await session.read_key()).lower()
         if choice in ("n", "e", "c"):
             await session.write_line(choice.upper())
             break
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Door name help",
+                [MenuEntry(label=menu_key("N", "ew instance under a different name"),
+                           brief="Register it again, renamed"),
+                 MenuEntry(label=menu_key("E", "dit the existing one"), brief="Open the door already registered"),
+                 MenuEntry(label=menu_key("C", "ancel"), brief="Register nothing")],
+                about="Every door needs a name of its own, and this one is taken.",
+                header_color=await lane.run(effective_header_color_256),
+                unicode_style=await lane.run(unicode_style_enabled, actor),
+            )
+            await _ask()
+            continue
         await session.write(reject_unhandled_key(choice))
     if choice == "e":
         await _door_detail_screen(session, lane, actor, existing, door_services=door_services,
@@ -22799,6 +23369,13 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                     message_failed = True
                     message = (str(exc) if isinstance(exc, OutboundError)
                                else "That is not a whole number.")
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Outbound help", options,
+                about="Whether this door may post to message boards and speak in chat channels, and "
+                      "where. It can only post where you allow it, never read the BBS or send mail.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -23237,6 +23814,11 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
                                 breadcrumb=("Content", "Doors")),
             sections=sections, actions=actions, page=page,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_title="War Dialer world help",
+            help_about=(
+                "The state of this War Dialer world. Maintenance closes it to new callers; a new season or a "
+                "competition reset needs maintenance on and asks for a reason."
+            ),
         )
 
         if choice == "b":
@@ -23329,8 +23911,23 @@ async def _channel_menu(
             await session.write_line("")
             await _list_channels_screen(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
             await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, "Chat channels help", _CHANNEL_MENU,
+                about="Add chat channels and change or remove existing ones. Pick a channel from the "
+                      "list to edit it.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_CHANNEL_MENU = (
+    MenuEntry(label=menu_key("C", "reate"), brief="Add a new chat channel"),
+    MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit channels"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
+)
 
 
 async def _draw_channel_menu(
@@ -23341,11 +23938,7 @@ async def _draw_channel_menu(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
     await session.write_line(
         _menu_row(
-            [
-                MenuEntry(label=menu_key("C", "reate"), brief="Add a new chat channel"),
-                MenuEntry(label=menu_key("L", "ist"), brief="Browse and edit channels"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to the Content menu"),
-            ],
+            list(_CHANNEL_MENU),
             description_level,
             width=session.terminal_width,
             height=session.terminal_height,
@@ -24329,8 +24922,23 @@ async def _generic_category_screen(
                 update=update, move=move, create=create, error_type=error_type,
             )
             await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await show_menu_help(
+                session, f"{title} help", _GENERIC_CATEGORY_MENU,
+                about="Categories group the items of one kind into folders callers browse, at most two "
+                      "levels deep. Pick one from the list to rename, move or remove it.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
+
+
+_GENERIC_CATEGORY_MENU = (
+    MenuEntry(label=menu_key("C", "reate"), brief="Add a new category"),
+    MenuEntry(label=menu_key("L", "ist"), brief="Edit, order and remove categories"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to Categories"),
+)
 
 
 async def _draw_generic_category_menu(
@@ -24343,11 +24951,7 @@ async def _draw_generic_category_menu(
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
     await session.write_line(
         _menu_row(
-            [
-                MenuEntry(label=menu_key("C", "reate"), brief="Add a new category"),
-                MenuEntry(label=menu_key("L", "ist"), brief="Edit, order and remove categories"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Categories"),
-            ],
+            list(_GENERIC_CATEGORY_MENU),
             description_level,
             width=session.terminal_width,
             height=session.terminal_height,
@@ -24647,12 +25251,21 @@ async def _pick_moderator_scope(
         menu_key("e", "verything", prefix="blanket across "),
         menu_key("B", "ack"),
     ]
-    await session.write_line("Scope:")
-    await write_prompt(session, f"{action_bar(scope_options, width=session.terminal_width)}: ")
-    scope_key = (await session.read_key()).lower()
-    await session.write_line("")
-    accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
+    while True:
+        await session.write_line("Scope:")
+        await write_prompt(session, f"{action_bar(scope_options, width=session.terminal_width)}: ")
+        scope_key = (await session.read_key()).lower()
+        await session.write_line("")
+        if scope_key != HELP_KEY:
+            break
+        await show_menu_help(
+            session, "Moderator scope help", _MODERATOR_SCOPE_HELP,
+            about="What the new grant covers: one board, file area or chat channel, or all of "
+                  "one kind at once. Any other key cancels.",
+            header_color=header_color, unicode_style=unicode_style,
+        )
+    accent_color = await lane.run(effective_accent_color_256)
     if scope_key == "b":
         return None  # Back: nothing chosen, nothing said
     if scope_key == "m":
@@ -24704,6 +25317,16 @@ async def _pick_moderator_scope(
 
 
 
+
+_MODERATOR_SCOPE_HELP = (
+    MenuEntry(label=menu_key("m", "essage board"), brief="One board you pick next"),
+    MenuEntry(label=menu_key("a", "rea", prefix="file "), brief="One file area you pick next"),
+    MenuEntry(label=menu_key("n", "nel", prefix="chat cha"), brief="One chat channel you pick next"),
+    MenuEntry(label=menu_key("x"), brief="Every message board"),
+    MenuEntry(label=menu_key("y"), brief="Every file area"),
+    MenuEntry(label=menu_key("z"), brief="Every chat channel"),
+    MenuEntry(label=menu_key("e", "verything"), brief="Every board, area and channel"),
+)
 
 _MODERATOR_PRESETS = ["full", "limited", "post", "read"]
 

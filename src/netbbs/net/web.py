@@ -1104,6 +1104,8 @@ class WebSession(Session):
                 return EditorKey(EditorKeyKind.ESCAPE)
             if len(char) == 1 and ord(char) < 0x20:
                 return EditorKey(EditorKeyKind.CTRL, char=chr(ord(char) + 0x60))
+            if char == "?" and distinguish_ctrl_h:
+                return EditorKey(EditorKeyKind.CTRL, char="h")  # help (issue #1158), as char_input
             return EditorKey(EditorKeyKind.CHAR, char=char)
         finally:
             self._clicks_blocked -= blocked

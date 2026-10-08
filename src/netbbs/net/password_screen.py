@@ -64,12 +64,16 @@ from netbbs.auth.users import (
     set_password_hash,
     verify_password_off_loop,
 )
+from netbbs.net.char_input import HELP_KEY
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.notices import announce, write_notices
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session, write_prompt
+from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import LABEL_COLOR, MUTED_COLOR, action_bar, colored, menu_key, sanitize_text
 from netbbs.rendering.ansi import clear_screen
+from netbbs.rendering.layout import MenuEntry
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -130,6 +134,24 @@ async def manage_password_screen(session: Session, lane: DatabaseLane, target: U
             target = await _change_password(session, lane, target, changed_by=changed_by, password_set=password_set)
         elif choice == "r" and password_set and key_count > 0:
             target = await _remove_password(session, lane, target, changed_by=changed_by, self_service=self_service)
+        elif choice == HELP_KEY:
+            help_entries = [MenuEntry(
+                label=options[0],
+                brief=(
+                    ("Asks for the current password first, then the new one twice" if self_service
+                     else "Type the new password twice")
+                    if password_set else "Type a password twice, to sign in with it as well as a key"
+                ),
+            )]
+            if password_set and key_count > 0:
+                help_entries.append(MenuEntry(
+                    label=options[1], brief="Sign in with an SSH key only; a password login stops working",
+                ))
+            await show_menu_help(
+                session, "Password help", help_entries,
+                about=f"The password that signs in to {possessive} account.",
+                unicode_style=await lane.run(unicode_style_enabled, changed_by),
+            )
         else:
             await session.write_line("")
 

@@ -46,7 +46,7 @@ class FakeSession(Session):
     async def read_line(self, echo: bool = True, history=None, completer=None, **kwargs) -> str:
         return self._inputs.pop(0)
 
-    async def read_editor_key(self):
+    async def read_editor_key(self, **kwargs):
         raise NotImplementedError
 
     async def close(self) -> None:

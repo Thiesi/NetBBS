@@ -31,7 +31,8 @@ from typing import Awaitable, Callable
 
 from netbbs.auth.users import User
 from netbbs.net import notices
-from netbbs.net.char_input import EditorKey, EditorKeyKind
+from netbbs.net.char_input import HELP_KEY, EditorKey, EditorKeyKind
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.live_screen import (
     HIDE_CURSOR,
     SHOW_CURSOR,
@@ -50,9 +51,10 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.rendering import sanitize_text
+from netbbs.rendering import menu_key, sanitize_text
 from netbbs.rendering.gradient import gradient_color
-from netbbs.rendering.ansi import clear_line, colored, move_cursor, strip_ansi
+from netbbs.rendering.ansi import clear_line, clear_screen, colored, move_cursor, strip_ansi
+from netbbs.rendering.layout import MenuEntry
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer
 from netbbs.rendering.theme import (
     ACCENT_COLOR,
@@ -639,6 +641,35 @@ async def _chat(
         state.say(f"{name} disconnected during the chat.", ERROR_COLOR)
 
 
+#: The monitor's help: its action bar, one key a row.
+_HELP_ENTRIES = (
+    MenuEntry(label=menu_key("S", "noop"), brief="Watch the selected caller's screen, live; they are not told"),
+    MenuEntry(label=menu_key("C", "hat"), brief="Break into the selected caller's session for a chat"),
+    MenuEntry(label=menu_key("M", "essage"), brief="Send the selected caller a one-line message"),
+    MenuEntry(label=menu_key("K", "ick"), brief="Disconnect the selected caller, with an optional message"),
+    MenuEntry(label=menu_key("U", "nwind"), brief="Send the selected caller back to the main menu"),
+    MenuEntry(label=menu_key("O", "rder"), brief="Sort by time on, idle time or user name"),
+    MenuEntry(label=menu_key("Q", "uit"), brief="Leave the monitor"),
+)
+
+
+async def _show_monitor_help(session: Session, state: MonitorState, *, unicode_style: bool) -> None:
+    """The help on a screen of its own: the live frame is cleared, and
+    the caller repaints all of it afterwards."""
+    await session.write(clear_screen() + SHOW_CURSOR)
+    try:
+        await show_menu_help(
+            session, "Monitor help", _HELP_ENTRIES,
+            about=(
+                "Everyone connected to this node, refreshed every few seconds. "
+                "Up and Down select a caller; the actions work on the selected one."
+            ),
+            header_color=state.header_color, unicode_style=unicode_style,
+        )
+    finally:
+        await write_quietly(session, HIDE_CURSOR)
+
+
 def _move(state: MonitorState, controls: NodeControls, step: int) -> None:
     ids = [e.session_id for e in sort_entries(controls.session_registry.list_entries(), state.order)]
     if not ids:
@@ -667,13 +698,14 @@ async def monitor_screen(
         timezone: datetime.tzinfo = ZoneInfo(timezone_name)
     except (ZoneInfoNotFoundError, ValueError):
         timezone = datetime.timezone.utc
+    unicode_style = await lane.run(unicode_style_enabled, actor)
     state = MonitorState(
         viewer=session,
         timezone=timezone,
         header_color=await lane.run(effective_header_color_256),
         accent_color=await lane.run(effective_accent_color_256),
         name_gradient=session.node_name_gradient,
-        glyphs=monitor_glyphs(session, unicode_style=await lane.run(unicode_style_enabled, actor)),
+        glyphs=monitor_glyphs(session, unicode_style=unicode_style),
     )
 
     async def on_key(key: EditorKey) -> KeyOutcome:
@@ -692,6 +724,11 @@ async def monitor_screen(
             return KeyOutcome.CONTINUE
         if key.kind is EditorKeyKind.ESCAPE:
             return KeyOutcome.EXIT
+        if (key.kind is EditorKeyKind.CTRL and key.char == "h") or (
+            key.kind is EditorKeyKind.CHAR and key.char == HELP_KEY
+        ):
+            await _show_monitor_help(session, state, unicode_style=unicode_style)
+            return KeyOutcome.REPAINT
         if key.kind is not EditorKeyKind.CHAR or not key.char:
             return KeyOutcome.CONTINUE
         choice = key.char.lower()

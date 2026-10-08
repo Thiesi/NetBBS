@@ -11,6 +11,7 @@ calls nothing else in `login_flow`.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
@@ -22,8 +23,9 @@ from netbbs.doors import list_doors
 from netbbs.mail import sender_unblockable_reason
 from netbbs.messaging_preferences import accepts_direct_messages, live_message_refusal
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
-from netbbs.net.char_input import reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, reject_unhandled_key
 from netbbs.net.chat_flow import run_direct_chat_invite_flow
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.mail_flow import (
     BlockTarget, is_blocked, mail_blocked_notice, mail_open_to, mail_someone, toggle_block,
 )
@@ -190,10 +192,20 @@ async def _show_vcard(
         await write_prompt(session, "Choice: ")
         while True:
             action = (await session.read_key()).lower()
+            if action == HELP_KEY:
+                await show_menu_help(
+                    session, "Member profile help", entries,
+                    about="What this member has chosen to share about themselves.",
+                    header_color=effective_header_color(session, db),
+                    unicode_style=unicode_style_enabled(db, requesting_user),
+                )
+                break  # the card is drawn again
             if action == "b" or (offer_mail and action == "m"):
                 await session.write_line("")
                 break
             await session.write(reject_unhandled_key(action))
+        if action == HELP_KEY:
+            continue
         if action == "b":
             return
         assert lane is not None  # offer_mail's own condition
@@ -414,18 +426,32 @@ async def _caller_who_screen(
         ]
         return local + _remote_who_entries(db, link_context)
 
-    async def _choose(options: list[tuple[str, MenuEntry]]) -> str:
-        """Draw the action row, then read one of its keys."""
-        await session.write_line(
-            menu_row(
-                [entry for _, entry in options], width=session.terminal_width, height=session.terminal_height,
-                description_level=menu_description_level(db, user),
+    async def _choose(options: list[tuple[str, MenuEntry]], header: Callable[[], Awaitable[None]]) -> str:
+        """Draw `header` and the action row, then read one of its keys.
+        Help draws them both again once it is dismissed."""
+        async def _draw() -> None:
+            await header()
+            await session.write_line(
+                menu_row(
+                    [entry for _, entry in options], width=session.terminal_width, height=session.terminal_height,
+                    description_level=menu_description_level(db, user),
+                )
             )
-        )
-        await write_prompt(session, "Choice: ")
+            await write_prompt(session, "Choice: ")
+
+        await _draw()
         keys = {key for key, _ in options}
         while True:
             action = (await session.read_key()).lower()
+            if action == HELP_KEY:
+                await show_menu_help(
+                    session, "Who's online help", [entry for _, entry in options],
+                    about="What you can do with the caller you picked.",
+                    header_color=effective_header_color(session, db),
+                    unicode_style=unicode_style_enabled(db, user),
+                )
+                await _draw()
+                continue
             if action in keys:
                 await session.write_line("")
                 return action
@@ -484,27 +510,30 @@ async def _caller_who_screen(
                 )
                 return
             node_label = _remote_who_node_label(db, selected)
+
             # Issue #282: selecting a remote caller used to drop straight
             # into the message prompt, so someone who picked the name only
             # to see where they were connected had to Enter past a blank
             # line to get out. Same [M]essage/[B]ack shape as a local entry
             # (minus the chat invite, which stays local-only).
-            await session.write_line(
-                "\r\n" + screen_title(
-                    link_address_label(sanitize_text(selected.username), sanitize_text(node_label)),
-                    breadcrumb=(session.node_display_name, "Who's online"),
-                    subtitle=(
-                        "Connected to a different linked node -- a live one-off message is available."
-                        if live else "Connected to a different linked node."
-                    ),
-                    width=session.terminal_width,
-                    clear=redraw_in_place_enabled(db, user),
-                    unicode_style=unicode_style_enabled(db, user),
-                    collapsed=breadcrumb_collapsed_enabled(db, user),
-                    header_color=effective_header_color(session, db),
-                    node_name_gradient=session.node_name_gradient,
+            async def _remote_header() -> None:
+                await session.write_line(
+                    "\r\n" + screen_title(
+                        link_address_label(sanitize_text(selected.username), sanitize_text(node_label)),
+                        breadcrumb=(session.node_display_name, "Who's online"),
+                        subtitle=(
+                            "Connected to a different linked node -- a live one-off message is available."
+                            if live else "Connected to a different linked node."
+                        ),
+                        width=session.terminal_width,
+                        clear=redraw_in_place_enabled(db, user),
+                        unicode_style=unicode_style_enabled(db, user),
+                        collapsed=breadcrumb_collapsed_enabled(db, user),
+                        header_color=effective_header_color(session, db),
+                        node_name_gradient=session.node_name_gradient,
+                    )
                 )
-            )
+
             # Blocked by their address there, as a letter's sender is (#925).
             remote_block = BlockTarget(user_id=None, address=f"{selected.username}@{selected.node_fingerprint}")
             options = []
@@ -515,7 +544,7 @@ async def _caller_who_screen(
             if lane is not None:
                 options.append(await _block_option(remote_block))
             options.append(_BACK)
-            action = await _choose(options)
+            action = await _choose(options, _remote_header)
             if action == "b":
                 return
             if action == "k":
@@ -580,18 +609,21 @@ async def _caller_who_screen(
             subtitle = f"{target.username} has opted out of direct messages; e-mail still reaches them."
         else:
             subtitle = refusal
-        await session.write_line(
-            "\r\n" + screen_title(
-                target.username,
-                breadcrumb=(session.node_display_name, "Who's online"),
-                subtitle=subtitle,
-                width=session.terminal_width,
-                clear=redraw_in_place_enabled(db, user),
-                unicode_style=unicode_style_enabled(db, user),
-                collapsed=breadcrumb_collapsed_enabled(db, user),
-                header_color=effective_header_color(session, db),
-            node_name_gradient=session.node_name_gradient)
-        )
+
+        async def _local_header() -> None:
+            await session.write_line(
+                "\r\n" + screen_title(
+                    target.username,
+                    breadcrumb=(session.node_display_name, "Who's online"),
+                    subtitle=subtitle,
+                    width=session.terminal_width,
+                    clear=redraw_in_place_enabled(db, user),
+                    unicode_style=unicode_style_enabled(db, user),
+                    collapsed=breadcrumb_collapsed_enabled(db, user),
+                    header_color=effective_header_color(session, db),
+                node_name_gradient=session.node_name_gradient)
+            )
+
         options = []
         if live:
             options.append(("m", MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off message")))
@@ -603,7 +635,7 @@ async def _caller_who_screen(
         if offer_block:
             options.append(await _block_option(local_block))
         options.append(_BACK)
-        action = await _choose(options)
+        action = await _choose(options, _local_header)
 
         if action == "b":
             return

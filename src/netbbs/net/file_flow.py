@@ -116,7 +116,8 @@ from netbbs.link.files import (
 )
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
-from netbbs.net.char_input import REDRAW_KEY, EditorKey, EditorKeyKind, page_step, reject_unhandled_key
+from netbbs.net.char_input import HELP_KEY, REDRAW_KEY, EditorKey, EditorKeyKind, page_step, reject_unhandled_key
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import edit_line_body
 from netbbs.net.confirm import prompt_yes_no
@@ -608,6 +609,43 @@ async def _render_area_page(
         unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
         gates=gates, unmet=unmet,
     )
+    options, hints = _area_page_menus(
+        session, page, can_write=can_write, can_describe=can_describe,
+        describable_pending=describable_pending, show_transfer_hint=show_transfer_hint,
+        show_remote_hint=show_remote_hint, can_pin=can_pin, can_keep=can_keep, following=following,
+        queue_count=queue_count,
+    )
+    await session.write_line(
+        f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
+    )
+    if hints:
+        # An empty page with nothing this caller may do on it has no
+        # hints at all, and a blank row is not a menu.
+        await session.write_line(
+            _menu_row(
+                hints, width=session.terminal_width, height=session.terminal_height,
+                description_level=description_level,
+            )
+        )
+    await _write_choice_prompt(session)
+
+
+def _area_page_menus(
+    session: Session,
+    page: FileEntryPage,
+    *,
+    can_write: bool,
+    can_describe: bool = False,
+    describable_pending: bool = False,
+    show_transfer_hint: bool = False,
+    show_remote_hint: bool = False,
+    can_pin: bool = False,
+    can_keep: bool = False,
+    following: bool | None = None,
+    queue_count: int = 0,
+) -> tuple[list[MenuEntry], list[MenuEntry]]:
+    """The listing's two menu rows, navigation and actions: what
+    `_render_area_page` draws and what its help describes."""
     options = []
     if page.has_older:
         options.append(MenuEntry(label=menu_key("<", " Older"), brief="Show older files"))
@@ -615,9 +653,6 @@ async def _render_area_page(
         options.append(MenuEntry(label=menu_key(">", " Newer"), brief="Show newer files"))
         options.append(MenuEntry(label=menu_key("R", "ecent"), brief="Jump to the newest page"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
-    await session.write_line(
-        f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
-    )
 
     # Named for what this caller's transport can actually do (issue
     # #475): telling a browser caller to "receive via Zmodem" describes
@@ -676,16 +711,7 @@ async def _render_area_page(
         hints.append(MenuEntry(label=menu_key("i", "n", prefix="P"), brief="Pin or unpin a file at the top"))
         if can_keep:
             hints.append(MenuEntry(label=menu_key("K", "eep"), brief="Keep a file from expiring, or stop"))
-    if hints:
-        # An empty page with nothing this caller may do on it has no
-        # hints at all, and a blank row is not a menu.
-        await session.write_line(
-            _menu_row(
-                hints, width=session.terminal_width, height=session.terminal_height,
-                description_level=description_level,
-            )
-        )
-    await _write_choice_prompt(session)
+    return options, hints
 
 
 # This screen's one prompt string, written by whoever last put
@@ -812,6 +838,7 @@ async def _read_file_choice(
       ('follow', None, highlighted) - follow the area or stop (issue #675)
       ('queue', None, highlighted) - the area's moderation queue (issue #678)
       ('refresh', None, highlighted) - re-query and redraw (Ctrl-L)
+      ('help', None, highlighted) - the screen's help (`?`, F1, Ctrl-H)
       ('highlight', None, new_index) - arrow key highlight change
       ('none', None, highlighted) - no-op / rejected key
 
@@ -834,7 +861,9 @@ async def _read_file_choice(
     read_editor_key = getattr(session, "read_editor_key", None)
     if read_editor_key is not None:
         try:
-            key = await read_editor_key()
+            # Ctrl-H, F1 and `?` as help (issue #1158): without the flag,
+            # Ctrl-H arrived as Backspace and F1 not at all.
+            key = await read_editor_key(distinguish_ctrl_h=True)
             if key.kind == EditorKeyKind.DOWN:
                 if not page.entries:
                     await session.write("\a")
@@ -891,6 +920,8 @@ async def _read_file_choice(
                 # acts on, the file the caller just sent stays invisible
                 # until they leave the area and come back.
                 return ("refresh", None, highlighted)
+            elif key.kind == EditorKeyKind.CTRL and key.char == "h":
+                return ("help", None, highlighted)
             else:
                 await session.write("\a")
                 return ("none", None, highlighted)
@@ -911,6 +942,8 @@ async def _read_file_choice(
         # and agree on the answer. `read_key` returns it unechoed, so
         # there is nothing to erase and no newline to owe.
         return ("refresh", None, highlighted)
+    if char == HELP_KEY:
+        return ("help", None, highlighted)
     action = _key_action(char, page, highlighted)
     if action is None:
         await session.write(reject_unhandled_key(char))
@@ -1120,6 +1153,17 @@ async def _show_area(
 
         await _pending_files_screen(session, lane, user, area, link_context=link_context, transfers=transfers)
 
+    async def _menu_flags(current_page: FileEntryPage) -> dict:
+        """What decides the listing's menus, for its render and its help."""
+        return dict(
+            can_write=can_write, can_describe=_can_describe(current_page),
+            describable_pending=bool(describable_pending),
+            show_transfer_hint=transfers is not None,
+            show_remote_hint=show_remote_hint, can_pin=can_edit_any_file,
+            can_keep=_keep_offered(area, current_page), following=follows["on"],
+            queue_count=await _queue_count(),
+        )
+
     async def _render_and_advance_cursor(current_page: FileEntryPage, highlighted: int | None = None) -> None:
         """The one place every render in this loop funnels through
         (issue #56) -- advances `user`'s file-area read cursor to
@@ -1142,15 +1186,11 @@ async def _show_area(
             )
             _set_highlight(highlighted)
         await _render_area_page(
-            session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement,
-            can_describe=_can_describe(current_page),
-            describable_pending=bool(describable_pending),
-            show_transfer_hint=transfers is not None,
-            show_remote_hint=show_remote_hint, can_pin=can_edit_any_file,
-            can_keep=_keep_offered(area, current_page), following=follows["on"],
+            session, lane, area_name, current_page, name_requirement=effective_name_requirement,
+            **await _menu_flags(current_page),
             description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
-            queue_count=await _queue_count(), gates=area_gates, unmet=area_unmet,
+            gates=area_gates, unmet=area_unmet,
         )
         if current_page.entries:
             await lane.run(record_file_area_seen, user, area, current_page.entries[-1])
@@ -1189,6 +1229,18 @@ async def _show_area(
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "none":
+                continue
+            elif kind == "help":
+                options, hints = _area_page_menus(session, page, **await _menu_flags(page))
+                await show_menu_help(
+                    session, "File area help", [*options, *hints],
+                    about=(
+                        "The files in this area, newest first. Arrow keys move a highlight; "
+                        "Enter or a file's number downloads it."
+                    ),
+                    header_color=await lane.run(effective_header_color_256), unicode_style=unicode_style,
+                )
+                await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "download":
                 # A number key or Enter arrives with its entry; `[D]`
@@ -1581,6 +1633,17 @@ async def _show_area(
             )
             await _write_choice_prompt(session)
             continue
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "File area help", _empty_hints(),
+                about="This area has no files yet. Its first upload, or a file fetched over Link, appears here.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            # Drawn again as Ctrl-L would: a file may have arrived meanwhile.
+            if await _still_empty():
+                continue
+            await _show_area(session, lane, area, user, link_context=link_context, transfers=transfers)
+            return
         if choice == "f":
             await session.write_line("")
             if follows["on"]:
@@ -2687,15 +2750,17 @@ async def _transfer_link_screen(
     elif len(page.entries) == 1:
         target = page.entries[0]
 
+    unicode_style = await lane.run(unicode_style_enabled, user)
+    header_color = await lane.run(effective_header_color_256)
     heading = screen_title(
         "Browser transfer",
         breadcrumb=(session.node_display_name, "Files", sanitize_text(area.name)),
         subtitle="for a terminal without Zmodem",
         width=session.terminal_width,
         clear=await lane.run(redraw_in_place_enabled, user),
-        unicode_style=await lane.run(unicode_style_enabled, user),
+        unicode_style=unicode_style,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
-        header_color=await lane.run(effective_header_color_256),
+        header_color=header_color,
         node_name_gradient=session.node_name_gradient,
     )
     while True:
@@ -2728,6 +2793,16 @@ async def _transfer_link_screen(
 
         if choice == "b":
             return
+        if choice == HELP_KEY:
+            await show_menu_help(
+                session, "Browser transfer help", options,
+                about=(
+                    "A link to open in a web browser, for a terminal that cannot send or receive "
+                    "files itself. Each link works once."
+                ),
+                header_color=header_color, unicode_style=unicode_style,
+            )
+            continue
         if choice == "u" and can_write:
             await _offer_transfer_link(session, lane, user, area, transfers, direction=UPLOAD)
             return
