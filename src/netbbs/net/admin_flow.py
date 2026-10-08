@@ -6105,7 +6105,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["domain_id"] or not draft["scopes"]:
-                raise ValueError("choose a [N]ode and fill in the domain ID ([I]) and scopes ([C]) first")
+                raise ValueError("choose a [N]ode and fill in the domain ID ([D]) and scopes ([C]) first")
             scopes = _parse_reporter_scopes(draft["scopes"])
             await lane.run(
                 configure_trusted_reporter, draft["node"], domain_id=draft["domain_id"], scopes=scopes,
@@ -12116,7 +12116,7 @@ async def _carry_decisions_screen(
                     # A channel coming back (or gone for good) changes which
                     # MRC rooms the running bridge maps, as hiding it did.
                     await mrc_bridge.refresh_channel_mappings()
-        elif choice == "x":
+        elif choice == "e":
             try:
                 await lane.run(exclude_offer, selected.kind, selected.resource_id, actor=actor)
             except CarryDecisionError as exc:
