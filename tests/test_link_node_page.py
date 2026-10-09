@@ -263,3 +263,30 @@ def test_a_revoked_name_has_no_web_page_row_or_key(db, lane, sysop):
     assert "www.netbbs.org/~" not in text
     assert "[W]eb page" not in text
     assert get_node_page(db) == NODE_PAGE_SHOWN
+
+
+def test_a_lapsed_names_help_lists_the_web_page_key(db, lane, sysop):
+    from netbbs.net.char_input import HELP_KEY
+
+    _live_name(db)
+    set_registration_status(db, RegistrationStatus.RELEASED)
+    text = _dns_screen(lane, sysop, [HELP_KEY, "b"])
+    help_page = text[text.index("Managed DNS help"):]
+    help_page = help_page[:help_page.index("[Enter] Continue")]
+    assert "[W]eb page" in help_page
+
+
+def test_during_a_rename_a_lapsed_new_name_does_not_mark_the_live_page_as_left(db, lane, sysop):
+    """The page shown during a rename is the current name's, still live,
+    even when the new name it waits for has been abandoned."""
+    from netbbs.managed_dns.state import set_previous_name, set_previous_published, set_previous_status
+
+    _live_name(db, "newname")
+    set_registration_status(db, RegistrationStatus.ABANDONED)
+    set_previous_name(db, "oldname")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    text = _dns_screen(lane, sysop, [])
+    assert "https://www.netbbs.org/~oldname" in text
+    assert "[W]eb page" in text
+    assert "no longer registered" not in text

@@ -9939,7 +9939,9 @@ async def _draw_managed_dns_status(
                 "Web page",
                 _node_page_lines(
                     previous_name or name, await lane.run(get_node_page),
-                    lapsed=status not in _MANAGED_DNS_ACTIVE_STATUSES,
+                    # During a rename the page shown is the current name's,
+                    # still live, whatever has become of the new one.
+                    lapsed=status not in _MANAGED_DNS_ACTIVE_STATUSES and previous_name is None,
                 ),
             ))
     await _write_sections(session, sections, unicode_style=unicode_style)
@@ -10172,7 +10174,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
                                               brief="Release the name"))
                 help_entries.append(MenuEntry(label=menu_key("N", "ew name"),
                                               brief="Move to a different name"))
-            if status in _MANAGED_DNS_ACTIVE_STATUSES:
+            if status in _NODE_PAGE_STATUSES:
                 help_entries.append(MenuEntry(label=menu_key("W", "eb page"),
                                               brief="Show, index or hide the web page"))
             if admin_token is not None:
