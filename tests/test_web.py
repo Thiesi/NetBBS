@@ -456,6 +456,58 @@ def test_static_assets_are_served():
     asyncio.run(scenario())
 
 
+def test_the_browser_terminal_serves_its_icon_where_browsers_ask():
+    """Issue #1199: a browser asks for /favicon.ico (and an iPhone for
+    /apple-touch-icon.png) at the root, without reading the page, and every
+    one of them was a 404. The page links the icons too."""
+    from netbbs.net.web import _STATIC_DIR
+
+    async def handler(session: Session):
+        pass
+
+    expected = {
+        "/favicon.ico": ("favicon.ico", "image/x-icon"),
+        "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+        "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+        "/apple-touch-icon-precomposed.png": ("apple-touch-icon.png", "image/png"),
+    }
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            async with aiohttp.ClientSession() as client:
+                for path, (name, content_type) in expected.items():
+                    async with client.get(f"http://127.0.0.1:{server.port}{path}") as resp:
+                        assert resp.status == 200, path
+                        assert resp.headers["Content-Type"] == content_type, path
+                        assert await resp.read() == (_STATIC_DIR / name).read_bytes(), path
+                async with client.get(f"http://127.0.0.1:{server.port}/") as resp:
+                    page = await resp.text()
+            assert '<link rel="icon" href="/favicon.ico"' in page
+            assert '<link rel="icon" href="/favicon.svg" type="image/svg+xml"' in page
+            assert '<link rel="apple-touch-icon" href="/apple-touch-icon.png"' in page
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_the_browser_terminal_and_the_website_show_the_same_icon():
+    """One picture (scripts/website_favicon.py), written to both places: the
+    stored copies are the same bytes as each other and as the generator's."""
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("website_favicon", root / "scripts" / "website_favicon.py")
+    favicon = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(favicon)
+    generated = favicon.icon_files()
+    for name in favicon.FILES:
+        for target in favicon.TARGETS:
+            assert (root / target / name).read_bytes() == generated[name], f"{target}/{name}"
+
+
 def test_box_drawing_glyphs_join_between_rows():
     # Issue #1083: with a row taller than the font (lineHeight 1.15), a
     # frame's vertical lines and block art showed gaps between rows in the

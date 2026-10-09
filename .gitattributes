@@ -25,6 +25,8 @@ web/shots/raw-*.txt binary
 # carries, and the icon would no longer open.
 web/*.png binary
 web/*.ico binary
+src/netbbs/web/static/*.png binary
+src/netbbs/web/static/*.ico binary
 
 # Guest-side scripts run inside a Linux VM; a CR would break their shebang.
 examples/doors/vm/* text eol=lf

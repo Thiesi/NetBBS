@@ -94,6 +94,24 @@ _logger = logging.getLogger(__name__)
 # a transport-layer concern the way this module's actual code is.
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "static"
 
+# The browser terminal's icon at the root paths browsers request themselves
+# (issue #1199), with the type said outright: `mimetypes` names an .ico
+# differently from one platform to the next. The files are the website's
+# own, made by `scripts/website_favicon.py`.
+_ROOT_ICONS: dict[str, tuple[str, str]] = {
+    "/favicon.ico": ("favicon.ico", "image/x-icon"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+    "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+    "/apple-touch-icon-precomposed.png": ("apple-touch-icon.png", "image/png"),
+}
+
+
+def _icon_handler(name: str, content_type: str):
+    async def handle(request: web.Request) -> web.FileResponse:
+        return web.FileResponse(_STATIC_DIR / name, headers={"Content-Type": content_type})
+
+    return handle
+
 
 def _avoid_asyncio_sendfile_fallback() -> None:
     """Keep `FileResponse` off asyncio's sendfile fallback (issue #961).
@@ -1287,6 +1305,10 @@ class WebServer:
         app.on_response_prepare.append(_set_server_header)
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/ws", self._handle_websocket)
+        # Browsers ask for these at the root on their own, without reading
+        # the page (issue #1199): a tab, a bookmark, a phone's home screen.
+        for path, (name, content_type) in _ROOT_ICONS.items():
+            app.router.add_get(path, _icon_handler(name, content_type))
         app.router.add_static("/static/", _STATIC_DIR)
         if self._transfers is not None:
             self._transfers.add_routes(app)
