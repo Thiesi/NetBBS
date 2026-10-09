@@ -313,6 +313,7 @@ async def pick_item(
     slot_column_of: Callable[[T], str] | None = None,
     slot_fields: Mapping[str, str] | None = None,
     art_speed: int = 0,
+    art_limit: float = 0,
     art_once: str = "",
     linked_of: Callable[[T], bool] | None = None,
 ) -> T | None:
@@ -562,7 +563,9 @@ async def pick_item(
     (`list_art.BOARD_LIST`, ...), so it plays once per session
     (`art_pacing.will_pace` holds the other rules). Every later draw in
     this call -- a page, a cursor move, a search, a redraw -- sends the art
-    at once. The defaults never pace.
+    at once. The defaults never pace. `art_limit` is the SysOp's time
+    limit for that draw (`art_pacing.ART_TIME_LIMITS`): past it, the rest
+    of the art goes out at once; 0, the default, plays it to the end.
 
     `linked_of` (issue #1104) says which items are Linked -- shared with
     other nodes over NetBBS Link. Their names take `LINKED_COLOR` instead
@@ -770,9 +773,9 @@ async def pick_item(
         art_drawn = True
         if first and art_once and art_speed:
             if laid_out:
-                await write_paced_art_text(session, text, speed=art_speed, once=art_once)
+                await write_paced_art_text(session, text, speed=art_speed, once=art_once, limit=art_limit)
             else:
-                await write_paced_art(session, text, speed=art_speed, once=art_once)
+                await write_paced_art(session, text, speed=art_speed, once=art_once, limit=art_limit)
         elif laid_out:
             await write_art_text(session, text)
         else:

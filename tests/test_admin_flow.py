@@ -11151,6 +11151,33 @@ def test_each_list_masthead_has_its_own_speed(db, lane, sysop, screen_key, kind)
     assert [r["detail"] for r in rows] == [f"{kind}=2400", f"{kind}=9600"]
 
 
+# -- paced art time limit ------------------------------------------------------
+
+
+@pytest.mark.parametrize(("path", "kind"), [
+    (["s", "m", "s", "w"], "welcome"),
+    (["s", "m", "m", "m"], "main_menu"),
+    (["s", "m", "m", "d"], "board_list"),
+    (["s", "m", "m", "f"], "file_area"),
+    (["s", "m", "m", "c"], "chat_channel_picker"),
+])
+def test_each_art_screen_cycles_its_own_time_limit(db, lane, sysop, path, kind):
+    """[T]ime limit steps off -> 10 -> 30 -> 60 -> off, audited each time,
+    and the toggle shows its state."""
+    from netbbs.net.art_pacing import art_time_limit
+
+    session = FakeSession([*path, "t", "t", "t", "t", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert art_time_limit(db, kind) == 0
+    text = _visible(_written_text(session))
+    for state in ("off", "10 s", "30 s", "60 s"):
+        assert f"[T]ime limit: {state}" in text
+    rows = db.connection.execute(
+        "SELECT detail FROM moderation_log WHERE action = 'set_art_time_limit' ORDER BY id"
+    ).fetchall()
+    assert [r["detail"] for r in rows] == [f"{kind}={limit}" for limit in (10, 30, 60, 0)]
+
+
 def test_who_posts_steps_through_the_modes_on_an_originated_board(db, lane, sysop):
     """Issue #993: [W]ho posts on a Linked board this node originated signs a
     board_posting and steps anyone -> origin starts threads -> origin only."""

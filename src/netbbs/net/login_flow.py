@@ -98,7 +98,7 @@ from netbbs.guest import guest_is_eligible, guest_login_for, pre_login_notice
 from netbbs.guest_call import guest_call
 from netbbs.user_preferences import session_scoped_preferences
 from netbbs.net.animation_preference import animations_enabled
-from netbbs.net.art_pacing import WELCOME_ART, art_speed, write_paced_art
+from netbbs.net.art_pacing import WELCOME_ART, art_speed, art_time_limit, write_paced_art
 from netbbs.net.welcome_banner import load_welcome_banner, pre_login_unicode_style
 from netbbs.permissions import meets_level
 from netbbs.net.banner_fields import banner_fields, count_callers_online
@@ -429,6 +429,7 @@ async def _run_authenticated_session(
             # Paced art (issue #929): the welcome art plays once per
             # connection, at the speed the SysOp set for it.
             speed=art_speed(db, WELCOME_ART), once=WELCOME_ART,
+            limit=art_time_limit(db, WELCOME_ART),
         )
         # Design doc -- node management, Thiesi's own request: shown to
         # *every* connecting client, SysOp-to-be or not -- account level
