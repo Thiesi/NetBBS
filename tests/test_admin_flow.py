@@ -1062,6 +1062,30 @@ def test_list_users_and_select_shows_detail(db, lane, sysop):
     assert "Level: 255" in _normalized_visible(_written_text(session))
 
 
+def _user_detail_bar(session) -> list[str]:
+    text = _visible(_written_text(session))
+    end = text.rfind("[U]se promotion")
+    rows = text[text.rfind("\n", 0, end) + 1:].split("\r\n")
+    return rows[: next(i for i, row in enumerate(rows) if row.startswith("(Ctrl-H"))]
+
+
+def test_user_detail_bar_aligns_its_hotkeys_only_where_the_panel_leaves_room(db, lane, sysop):
+    """`_fitted_menu` budgets the bar against what is already on screen: at
+    80x30 the keys line up in columns, at 80x24 the panel leaves no row for
+    that and the bar stays packed rather than push the panel's top away."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+    tall = FakeSession(["u", "u", "/", "alice", "b", "b", "b", "b"])
+    tall.terminal_height = 30
+    _run(tall, lane, sysop)
+    rows = _user_detail_bar(tall)
+    assert len(rows) > 1
+    assert len({row.index("[", 1) for row in rows if row.count("[") > 1}) == 1
+
+    short = FakeSession(["u", "u", "/", "alice", "b", "b", "b", "b"])
+    _run(short, lane, sysop)
+    assert _user_detail_bar(short)[0].startswith("[L]evel  [U]se promotion rules  ")
+
+
 def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
     # Dogfood feature request: this bespoke cursor-nav screen (built
     # this same session, alongside review_composition) had no on-demand

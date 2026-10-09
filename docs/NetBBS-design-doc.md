@@ -980,6 +980,22 @@ banner and masthead screens do the same (issue #662): each fits at 40, 64 and
 71 columns, and the board-list, file-area and chat-channel mastheads, which ran
 three rows past 80x24 before, fit there too.
 
+**An action bar that wraps lines its hotkeys up (maintainer request,
+2026-10-09).** Packed rows started wherever the row before ended, so on a
+screen too narrow for one row the keys sat at random columns and were hard to
+scan. A bar that needs more than one row is now laid out in aligned columns
+(`netbbs.rendering.layout.action_bar`): filled in reading order, each column as
+wide as its widest entry, as many columns as fit. Aligned columns cost rows (the
+user editor's bar is 5 rows at 80 columns where packing took 3), so they give
+way to the packed rows when the aligned bar would take more than a quarter of
+the terminal's height: 6 rows at 24 lines, 3 at 12. A paged screen with a
+floor under its page (`show_detail`, the post and mail review) also packs the
+bar when the page would otherwise sit at that floor and run off the screen,
+and a console screen that draws a panel above its menu (`_fitted_menu`) uses
+the aligned bar only if it still fits under the panel. The user editor's panel
+leaves no row for it at 80x24, so there the bar stays packed; from about 30
+lines it lines up.
+
 **Known limit below 72 columns (issue #662, decided).** Below 72 columns
 `menu_grid` gives each entry two rows and paired fields go one to a row, and
 the packed-bar fallback is not paging. Five screens are still taller than 24

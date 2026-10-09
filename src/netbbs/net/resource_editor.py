@@ -472,7 +472,7 @@ def _build_menu_line(
     if save is not None:
         menu_entries.append(MenuEntry(label=save_menu_text, brief=save_brief))
     menu_entries.append(MenuEntry(label=back_menu_text, brief=back_brief))
-    menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
+    menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width, height=session.terminal_height)
     if description_level != "off":
         # Descriptions are a nice-to-have; being able to see the whole
         # screen is the point, so the compact row stays whenever the

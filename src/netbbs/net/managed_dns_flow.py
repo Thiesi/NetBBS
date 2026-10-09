@@ -942,7 +942,7 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
         if row.status != "revoked":
             actions.append(menu_key("R", "evoke"))
         actions.append(menu_key("B", "ack"))
-        await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
+        await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width, height=session.terminal_height))
         await write_prompt(session, "Choice: ")
 
         while True:

@@ -55,14 +55,20 @@ from netbbs.rendering import (
 )
 
 
-def _menu_row(entries: list[MenuEntry], *, width: int, height: int, description_level: str) -> str:
+def _menu_row(
+    entries: list[MenuEntry], *, width: int, height: int, description_level: str, aligned: bool = True
+) -> str:
     """Compact `action_bar` packing when descriptions are off, `menu_grid`'s
     taller one-entry-per-line layout once the caller has opted into "brief"/
     "detailed" (issue #160's rollout) -- see `netbbs.net.resource_editor.
     edit_resource_draft`'s identical branch for why `menu_grid` alone isn't a
-    byte-for-byte substitute for `action_bar`'s packed row at the off level."""
+    byte-for-byte substitute for `action_bar`'s packed row at the off level.
+
+    `aligned=False` keeps the bar's rows packed even where `action_bar` would
+    line its hotkeys up in columns: a screen with no rows to spare asks for
+    the shorter bar."""
     if description_level == "off":
-        return action_bar([e.label for e in entries], width=width)
+        return action_bar([e.label for e in entries], width=width, height=height if aligned else None)
     return menu_grid([("", entries)], width=width, height=height, description_level=description_level)
 
 
@@ -792,7 +798,9 @@ async def review_composition(
         # not leave room for gets the packed bar instead, before any paging
         # (design doc §3.5's rule for a detail screen with a described menu).
         level = "off" if packed else description_level
-        row = _menu_row(options, width=width, height=session.terminal_height, description_level=level)
+        row = _menu_row(
+            options, width=width, height=session.terminal_height, description_level=level, aligned=aligned
+        )
         return _rows(row, width)
 
     def _head() -> list[str]:
@@ -829,14 +837,17 @@ async def review_composition(
         )
         return rows
 
-    def _budget(paged: bool, packed: bool) -> int:
+    def _room(paged: bool, packed: bool) -> int:
         # Lead-in, heading and fields, two rules, the blank row and menu,
         # the page line, the help hint, carried outcomes, the prompt.
         fixed = (
             (0 if redraw_in_place else 1) + len(_head()) + 2 + 1 + len(_menu(paged, packed))
             + (1 if paged else 0) + 1 + len(message_rows) + 1
         )
-        return max(_MIN_PAGE_ROWS, session.terminal_height - fixed)
+        return session.terminal_height - fixed
+
+    def _budget(paged: bool, packed: bool) -> int:
+        return max(_MIN_PAGE_ROWS, _room(paged, packed))
 
     # Each step is tried only when the one before does not fit, and the
     # screen is drawn with the layout its pages were cut for: the described
@@ -844,6 +855,7 @@ async def review_composition(
     # #861: a body fitting only the packed bar was drawn under the
     # described menu, overflowing the terminal).
     paged = packed = False
+    aligned = True
     pages = paginate(blocks, budget=_budget(paged, packed)) or [[]]
     if len(pages) > 1 and description_level != "off":
         packed = True
@@ -851,6 +863,12 @@ async def review_composition(
     if len(pages) > 1:
         packed = paged = True
         pages = paginate(blocks, budget=_budget(paged, packed))
+    if paged and _room(paged, packed) < _MIN_PAGE_ROWS:
+        # Last, the bar's aligned columns give their rows back: a page held
+        # at the floor would run off the bottom of the screen.
+        aligned = False
+        pages = paginate(blocks, budget=_budget(paged, packed))
+        paged = len(pages) > 1
     page = 0
 
     async def draw() -> None:

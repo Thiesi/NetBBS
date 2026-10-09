@@ -615,7 +615,7 @@ async def _previous_callers_screen(
         # this screen is for, and on a short terminal every row the bar
         # took would be a caller fewer (the 40x12 floor has two to spare).
         bar = (
-            action_bar([menu_key("M", "ail a caller"), menu_key("B", "ack")], width=session.terminal_width)
+            action_bar([menu_key("M", "ail a caller"), menu_key("B", "ack")], width=session.terminal_width, height=session.terminal_height)
             if offer_mail else None
         )
         # The budget counts the bar's rows beyond the one line "Press any
@@ -2565,7 +2565,7 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
         if existing_age is not None or existing_name is not None:
             actions.append(menu_key("R", "evoke"))
         actions.append(menu_key("B", "ack"))
-        await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
+        await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width, height=session.terminal_height))
         # What the last action reported (issue #1124): shown above the
         # prompt of the redrawn status, not held behind a keypress.
         await write_notices(session)

@@ -284,7 +284,7 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
         await session.write_line(
             action_bar(
                 [menu_key("P", "assword"), menu_key("K", "ey (ssh-ed25519)"), menu_key("T", "wo (password and key)")],
-                width=session.terminal_width,
+                width=session.terminal_width, height=session.terminal_height,
             )
         )
         await write_prompt(session, "Sign in with: ")
