@@ -1,6 +1,6 @@
 # Node pages for www.netbbs.org
 
-Builds `https://www.netbbs.org/~<name>`, one public page per board that holds
+Builds `https://www.netbbs.org/~<name>`, one public page per node that holds
 a managed netbbs.org name and that Reliable Link has met, plus the list at
 `https://www.netbbs.org/nodes/`. The design is design doc §8.13 and the §16
 entry for issue #1165. This file covers what the generator needs and how it
