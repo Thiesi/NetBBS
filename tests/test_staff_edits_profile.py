@@ -85,8 +85,10 @@ def test_a_sysop_is_offered_a_members_profile_but_not_their_own(db, sysop, alice
     assert "e" not in _user_detail_keys(sysop, sysop)
 
 
-def test_nobody_is_offered_the_guest_accounts_profile(db, sysop, alice):
-    assert "e" not in _user_detail_keys(sysop, alice, guest=True)
+def test_only_a_sysop_is_offered_the_guest_defaults(db, sysop, alice):
+    """The guest account's Profile is what every guest starts with: the
+    whole node's, so a SysOp's and not a manager's."""
+    assert "e" in _user_detail_keys(sysop, alice, guest=True)
     assert "e" not in _user_detail_keys(_manager(db, sysop), alice, guest=True)
 
 
@@ -141,13 +143,32 @@ def test_a_change_whose_record_fails_is_not_kept(db, sysop, alice, monkeypatch):
     assert _profile_edits(db, alice) == []
 
 
-def test_write_as_staff_refuses_plain_staff_and_the_guest_account(db, sysop, alice):
+def test_write_as_staff_refuses_plain_staff(db, sysop, alice):
     approver = _manager(db, sysop, name="otto", permissions=StaffPermission.APPROVE_ACCOUNTS)
     with pytest.raises(UserManagementError):
         write_as_staff(db, approver, alice, _write_nothing)
+    assert _profile_edits(db, alice) == []
+
+
+def test_only_a_sysop_writes_the_guest_defaults(db, sysop, alice):
+    manager = _manager(db, sysop)
     set_guest_user(db, alice)
-    with pytest.raises(UserManagementError):
-        write_as_staff(db, sysop, alice, _write_nothing)
+    with pytest.raises(UserManagementError, match="only a SysOp"):
+        write_as_staff(db, manager, alice, _write_nothing)
+    write_as_staff(db, sysop, alice, _write_nothing)
+    assert [entry.actor_user_id for entry in _profile_edits(db, alice)] == [sysop.id]
+
+
+def test_a_sysop_disabled_while_the_screen_is_open_no_longer_writes_the_guest_defaults(db, sysop, alice):
+    """The SysOp is read fresh, as every other authority check reads its
+    actor: the account object the open screen holds still says 255."""
+    from netbbs.auth.users import set_user_disabled
+
+    other = create_user(db, "ops", password="correct horse", user_level=SYSOP_LEVEL)
+    set_guest_user(db, alice)
+    set_user_disabled(db, other, True, changed_by=sysop)
+    with pytest.raises(UserManagementError, match="only a SysOp"):
+        write_as_staff(db, other, alice, _write_nothing)
     assert _profile_edits(db, alice) == []
 
 
@@ -183,6 +204,48 @@ def test_a_members_character_set_never_reaches_the_sysops_session(db, lane, syso
     assert session.output_charset == "utf-8"
     assert session.animations_enabled is True
     assert len(_profile_edits(db, alice)) == 2
+
+
+# -- the guest defaults -----------------------------------------------------------
+
+# On the guest defaults, Name & details and read receipts are left out, so
+# Menu descriptions is the twelfth field.
+_GUEST_DESCRIPTIONS = ["1", "2"]
+
+
+def test_the_guest_defaults_leave_out_what_a_shared_account_has_no_use_for(db, lane, sysop, alice):
+    set_guest_user(db, alice)
+    # Every section in turn: the fields are paged by section on 80x24.
+    session = FakeSession(keys=[">", ">", "b"])
+    asyncio.run(_edit_profile(session, lane, alice, actor=sysop))
+    screen = squeezed(session.visible_output)
+    assert "Guest defaults" in screen and "What every guest starts with" in screen
+    for gone in ("Name & details", "Let senders see when I've read their mail", "Sort preferences",
+                 "SSH public key", "Password"):
+        assert gone not in screen, gone
+    for kept in ("Bio", "Signature", "Direct messages", "Blocked people", "Character set", "Menu descriptions"):
+        assert kept in screen, kept
+
+
+def test_a_guest_starts_with_the_default_and_keeps_their_own_change_to_the_call(db, lane, sysop, alice):
+    from netbbs.net.menu_description_preference import set_menu_description_level
+    from netbbs.user_preferences import session_scoped_preferences
+
+    set_guest_user(db, alice)
+    session = FakeSession(keys=[*_GUEST_DESCRIPTIONS, "b"])
+    asyncio.run(_edit_profile(session, lane, alice, actor=sysop))
+    default = menu_description_level(db, alice)
+    [entry] = _profile_edits(db, alice)
+    assert entry.detail == f"Menu descriptions: {default}"
+
+    with session_scoped_preferences(alice):
+        # A guest's call starts from the stored default...
+        assert menu_description_level(db, alice) == default
+        mine = "off" if default != "off" else "detailed"
+        set_menu_description_level(db, alice, mine)
+        assert menu_description_level(db, alice) == mine
+    # ...and their own change never becomes the next guest's.
+    assert menu_description_level(db, alice) == default
 
 
 def test_your_own_character_set_still_applies_to_your_session(db, lane, alice):

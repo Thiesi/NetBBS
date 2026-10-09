@@ -2475,8 +2475,7 @@ screen, acting on their account: the same fields, sections and help they see,
 from the bio, signature, location and blocked people to their display, mail
 and chat settings. It is offered to whoever may manage the account (a SysOp,
 or a staff member with manage accounts within reach), never on your own
-account, whose Profile is on the main menu, and never on the guest account,
-whose settings each guest chooses for their own call. The screen is drawn the
+account, whose Profile is on the main menu. The screen is drawn the
 way the SysOp's own screens are, with the member's values, and nothing on it
 reaches the SysOp's session: a character set chosen there is the member's.
 Every write checks the actor's authority again (`netbbs.profile_admin`) and is
@@ -2488,6 +2487,21 @@ the account detail. Whether a verification is shared over Link stays the
 member's own choice (§5.5). The username is not editable. A member who is
 signed in sees some display changes, such as the character set, only when
 they next sign in.
+
+**Guest defaults.** On the guest account `[E]dit profile` is a SysOp's alone,
+and it sets what every guest starts with. A guest's own changes last only for
+their call and sit over what the guest account stores (§13, issue #1073), so
+the stored values are the defaults. The screen is titled **Guest defaults** and
+offers what a shared account without a credential, identity or mailbox can use:
+the bio, its visibility and the signature; direct messages, blocked people
+(which refuses that person's live messages to guests; the account has no
+mail), the MRC settings and whether the name is shown to other callers; and the
+display settings. It leaves out Name & details, read receipts, sort
+preferences (nothing ever stores one for the guest account, so there is none to
+clear), the SSH keys and the password. A guest can still change the display
+settings, the fullscreen editor and stylized MRC names for their own call; the
+rest is the shared account's, the same for every guest. Each change is recorded
+as on any account.
 
 **What staff can never do.** A staff member acts only on accounts below level
 255 that hold no staff permission; a moderator-only account is within reach.
@@ -16013,6 +16027,16 @@ retired names. A rename is its own design if it is ever wanted.
 **Decision 4 — recorded, without private text.** Every change is in the
 account's admin history; a setting with its new value, text the member wrote
 or names they block only as changed.
+
+**Decision 5 — the guest defaults are a SysOp's (maintainer, 2026-10-09).** At
+first `[E]dit profile` was not offered on the guest account. But what the guest
+account stores is what every guest starts with, under each guest's own
+per-call changes, and nothing could set it short of turning guest login off and
+signing in as the account. A SysOp now sets it with `[E]dit profile` on the
+guest account: the display defaults and the shared account's public face (bio,
+signature, messaging and MRC settings), without Name & details, read receipts,
+sort preferences, keys or password. Staff with manage accounts do not get it:
+the defaults are the whole node's.
 
 ### SFTP over the SSH transport — declined
 

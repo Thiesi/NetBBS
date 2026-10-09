@@ -62,6 +62,7 @@ from netbbs.directory import (
     set_bio_visible,
 )
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
+from netbbs.guest import is_guest_account
 from netbbs.link.boards import LinkContext
 from netbbs.link.attestation_delivery import attestation_delivery_counts
 from netbbs.link.remote_attestation import count_attestation_recipients
@@ -1108,6 +1109,20 @@ _STAFF_PROFILE_NOTE = (
 )
 
 
+_GUEST_DEFAULTS_NOTE = (
+    "What every guest starts with. A guest can change Display settings, the "
+    "fullscreen editor and stylized MRC names for their own call only; the rest is "
+    "the shared guest account's, the same for every guest. Changes are recorded in "
+    "the account's admin history."
+)
+
+# Not on the guest defaults (design doc §5.6): the guest account signs in
+# without a credential and has no identity of its own, it has no mailbox, so
+# read receipts mean nothing, and nothing ever stores a sort order for it
+# (a guest's choices last only for their call), so there is none to clear.
+_NOT_GUEST_DEFAULTS = frozenset({"identity_details", "read_receipts", "sort_preferences", "ssh_public_key", "password"})
+
+
 _SHARED_ACCOUNT_NOTE = (
     "You signed in as a guest, on an account every guest shares. What other callers see of it "
     "can't be changed here; display settings you change last for this call only."
@@ -1210,8 +1225,14 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User, *, act
     own screens are, with `user`'s values. Every change is checked and
     recorded in the account's admin history, and nothing reaches `actor`'s
     session: a character set chosen here is the member's, not the SysOp's.
+
+    On the guest account it sets the guest defaults: what every guest starts
+    with, under the changes each guest makes for their own call. Only the
+    fields that mean something for a shared account without a credential,
+    identity or mailbox are offered (`_NOT_GUEST_DEFAULTS`).
     """
     viewer = actor or user
+    guest_defaults = actor is not None and await lane.run(is_guest_account, user)
     description_level = await lane.run(menu_description_level, viewer)
     redraw_in_place = await lane.run(redraw_in_place_enabled, viewer)
     unicode_style = await lane.run(unicode_style_enabled, viewer)
@@ -1371,9 +1392,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User, *, act
                 for line in reflow(_SHARED_ACCOUNT_NOTE, width=session.terminal_width).split("\n")
             )
         if actor is not None:
+            note = _GUEST_DEFAULTS_NOTE if guest_defaults else _STAFF_PROFILE_NOTE
             lines.extend(
                 colored(line, fg_color=MUTED_COLOR)
-                for line in reflow(_STAFF_PROFILE_NOTE, width=session.terminal_width).split("\n")
+                for line in reflow(note, width=session.terminal_width).split("\n")
             )
         if actor is None:
             # About this connection, which on a member's Profile is the SysOp's.
@@ -1810,6 +1832,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User, *, act
         title, breadcrumb = "Profile", (sanitize_text(user.username),)
         # Short enough for one row: a subtitle is cut, not wrapped.
         subtitle = f"{_possessive(user)} profile. Every change is logged."
+        if guest_defaults:
+            fields = [field for field in fields if field.key not in _NOT_GUEST_DEFAULTS]
+            title = "Guest defaults"
+            subtitle = "What every guest starts with. Every change is logged."
     await edit_resource_draft(
         session, lane,
         title=title,
