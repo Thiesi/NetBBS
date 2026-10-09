@@ -307,6 +307,29 @@ def test_review_edits_the_subject_where_it_is_drawn():
     assert not any("\n" in text for text in after)
 
 
+def test_a_resize_during_an_in_place_subject_edit_says_so_on_the_next_draw():
+    """Rows counted for one terminal size are wrong for another, so a resize
+    cancels the edit; the review's next draw says why the subject is
+    unchanged, as the account detail's in-place edits do."""
+    from netbbs.net.composition import read_subject
+    from netbbs.net.notices import take_notices
+
+    class ResizingSession(NavigableFakeSession):
+        async def read_line(self, *args, **kwargs):
+            self.terminal_width -= 1  # the terminal is resized while the edit is open
+            return await super().read_line(*args, **kwargs)
+
+    session = ResizingSession(keys=("u",), lines=("Typed before the resize",))
+    places = {}
+    asyncio.run(review_composition(
+        session, recipient=None, subject="Old", body="Body", commit_key="p", commit_label="ost",
+        redraw_in_place=True, places=places,
+    ))
+    subject = asyncio.run(read_subject(session, max_bytes=200, current="Old", place=places["u"]))
+    assert subject == "Old"
+    assert any("Terminal resized" in line for line in take_notices(session))
+
+
 def test_a_refused_subject_is_said_on_the_prompt_row_and_reopens_in_place():
     from netbbs.net.composition import read_subject
 

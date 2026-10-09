@@ -27,7 +27,7 @@ from netbbs.net.char_input import (
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
-from netbbs.net.notices import take_notices, write_notices
+from netbbs.net.notices import announce, take_notices, write_notices
 from netbbs.net.resource_editor import editing_in_place, read_field_line, write_field_prompt
 from netbbs.net.session import Session, post_body_width, write_laid_out_row, write_prompt
 from netbbs.net.session_activity import records_activity
@@ -64,14 +64,21 @@ from netbbs.rendering import (
 ReviewPlace = tuple[int, int, int]
 
 # What the prompt row says while a field is edited where it is drawn.
-_IN_PLACE_HINT = "Enter saves, Esc keeps"
+_IN_PLACE_HINT = "Enter saves, Esc cancels"
 
 
 @contextmanager
 def _reading_at(session: Session, place: ReviewPlace) -> Iterator[None]:
+    """Read at `place`; whatever the edit had to say on the way out (a
+    terminal resized mid-edit cancels it) is shown on the review's next
+    draw, as the account detail's in-place edits do."""
     row, column, prompt_row = place
-    with editing_in_place(session, row=row, column=column, rows=1, prompt_row=prompt_row):
-        yield
+    with editing_in_place(session, row=row, column=column, rows=1, prompt_row=prompt_row) as position:
+        try:
+            yield
+        finally:
+            if position.message:
+                announce(session, position.message, tone="muted")
 
 
 def _menu_row(
