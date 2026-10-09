@@ -1209,7 +1209,9 @@ field test's newcomer typed "3" and Enter where "03" was wanted, and nothing
 happened. Every list numbers its rows this way, `01` to `99`: the picker, a
 board's posts, the mailbox and a file area (issue #1158,
 `netbbs.net.row_numbers`). The three that draw their own screen used to take
-one digit, `1`-`9`, so a row past the ninth had no number to type. A whole word typed at a one-key prompt ("Communities", "no") acts on
+one digit, `1`-`9`, so a row past the ninth had no number to type.
+
+A whole word typed at a one-key prompt ("Communities", "no") acts on
 its first letter only: after a main-menu key or a yes/no answer, letters that
 follow within 0.6 seconds of each other, and the Enter that ends them, are
 dropped rather than read by the next screen as keys (`char_input.
