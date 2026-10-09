@@ -24,6 +24,7 @@ from netbbs.auth.users import (
     User,
     UserManagementError,
     get_user_by_id,
+    is_usable_sysop,
     require_account_authority,
 )
 from netbbs.guest import is_guest_account
@@ -40,15 +41,21 @@ def check_profile_authority(db: Database, actor: User, target: User) -> User:
     """Refuse unless `actor` may edit `target`'s Profile; returns `target`
     read fresh. The rule of every account change (`require_account_authority`
     with manage accounts), plus two of this screen's own: your own Profile is
-    the one on the main menu, and the guest account's preferences belong to
-    each guest's call, not to a stored row anyone should set."""
+    the one on the main menu, and the guest account's is a SysOp's alone.
+
+    What the guest account stores is what every guest starts with: a guest's
+    own changes last only for their call (`netbbs.user_preferences`), over
+    the stored values. Those defaults are the whole node's, so a staff member
+    with manage accounts does not set them; a SysOp does."""
     current = get_user_by_id(db, target.id)
     if current is None:
         raise UserManagementError("that account no longer exists")
     if current.id == actor.id:
         raise UserManagementError("change your own Profile from the main menu")
     if is_guest_account(db, current):
-        raise UserManagementError(f"{current.username!r} is the guest account; each guest sets its own preferences")
+        if not is_usable_sysop(actor):
+            raise UserManagementError("only a SysOp can set the guest defaults")
+        return current
     require_account_authority(db, actor, current, StaffPermission.MANAGE_ACCOUNTS)
     return current
 

@@ -7770,19 +7770,19 @@ def _user_detail_keys(actor: User, target: User, *, guest: bool = False) -> froz
     verification, or deleting an account.
 
     `[E]dit profile` is never offered on your own account, whose Profile is
-    on the main menu, nor on the guest account (`guest`): each guest's
-    preferences last for their own call (`netbbs.user_preferences`).
+    on the main menu. On the guest account (`guest`) it sets what every guest
+    starts with, which is the whole node's, so only a SysOp is offered it.
 
     Presentation only: the mutators check again against the database, so
     a permission revoked while this screen is open refuses the action.
     """
-    profile = set() if guest or actor.id == target.id else {"e"}
+    profile = set() if actor.id == target.id else {"e"}
     if is_usable_sysop(actor):
         return _ALL_USER_DETAIL_KEYS - ({"e"} - profile)
     keys = {"h"}
     within_reach = target.user_level < SYSOP_LEVEL and not target.staff_permissions
     if within_reach and actor.has_staff(StaffPermission.MANAGE_ACCOUNTS):
-        keys |= {"l", "u", "t", "p", "n", "w"} | profile
+        keys |= {"l", "u", "t", "p", "n", "w"} | (set() if guest else profile)
     if within_reach and target.pending_approval and actor.has_staff(StaffPermission.APPROVE_ACCOUNTS):
         keys |= {"a", "d"}
     return frozenset(keys)
@@ -7978,7 +7978,8 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
         "signature, location, who they block, and their display, mail and chat "
         "settings. Each change is recorded in the account's history; private text such "
         "as the bio, and who they block, is recorded as changed, never quoted. Whether a "
-        "verification is shared over Link stays their own choice.",
+        "verification is shared over Link stays their own choice. On the guest account "
+        "it sets the guest defaults, what every guest starts with; only a SysOp can.",
     ),
 }
 

@@ -602,7 +602,8 @@ their own choice, and only you, not staff, can change an account's SSH keys.
 The username can't be changed. A member who is signed in sees some display
 changes only when they next sign in. Staff with **Manage accounts** get
 **[E]dit profile** too, for accounts within their reach; nobody gets it on
-their own account or on the guest account.
+their own account. On the guest account only you get it, and it sets the
+**guest defaults** (see **Guest access** below).
 
 To take a verification back, use **[V]erification: revoke** on the same
 screen; it appears only while the account has a verified age or real name.
@@ -1549,10 +1550,17 @@ blocks, whether it takes messages, its MRC settings, its chat alias or its MRC
 hub registration. Without that, any anonymous caller could rewrite the profile
 every caller sees, and a self-entered birthdate would open age-gated areas for
 every later guest. A guest may still change display settings (character set,
-colors, redraw style, banners, sort orders), but only for that call. To set the
-profile and the display defaults every guest starts with, turn guest login off,
-sign in as the account with its password, set them under **Profile**, and turn
-guest login back on.
+colors, redraw style, banners, sort orders), but only for that call.
+
+To set what every guest starts with, open the guest account in **Users** and
+press **[E]dit profile**: the screen is titled **Guest defaults**. It offers the
+guest account's bio and signature, whether it takes messages, who it blocks
+(their live messages to guests are refused), its MRC settings, whether its name
+is shown to other callers, and the display settings. Each guest can still
+change the display settings, the fullscreen editor and stylized MRC names for
+their own call; the rest is the same for every guest. Name and details, read
+receipts, sort preferences, keys and password are not on it. Only a SysOp can
+set the guest defaults, and each change goes into the account's **History**.
 
 Each guest call is kept apart from the next in three more ways. Its drafts are
 its own and are deleted at hang-up. It may edit, withdraw or describe only the
