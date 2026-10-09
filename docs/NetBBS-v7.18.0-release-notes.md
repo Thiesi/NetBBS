@@ -275,7 +275,10 @@ On the first start after the upgrade:
   the default, **combined**. Earlier lines do not change.
 - **MANUAL — choose the node page.** A node with a managed name will have a
   public page once the pages go live, shown but not indexed by default. To
-  have none, set **Managed DNS → `[W]eb page`** to off. To list public boards,
+  have none, set **Managed DNS → `[W]eb page`** to off while the name is
+  pending or matured: the setting is not offered once a name is abandoned or
+  released, although such a name keeps its page (#1177, to be fixed before
+  the pages go live). To list public boards,
   your guest account must be able to read them; to list none, leave guest
   login off.
 - **Nodes start signing the new descriptor fields** from the first sync
@@ -305,7 +308,7 @@ upgrade is lost with it. After the rollback:
   does not answer, although the Managed DNS screen already shows the address.
   No page has been built from ReLink's real node map or the live
   registrations database. A headless render matched the website at 1100
-  columns; the 390-pixel (phone) render was not checked.
+  pixels; the 390-pixel (phone) render was not checked.
 - **Mixed-version Link** was checked by reading v7.17.1's descriptor
   handling (signature over the whole envelope, no field list), not by a
   session between a 7.17.1 node and a 7.18.0 node.
