@@ -263,7 +263,7 @@ def test_the_index_lists_every_page_and_stays_out_of_search_results():
 
 
 def test_an_empty_index_says_so():
-    assert "No board has a page yet." in render_index([], NOW)
+    assert "No node has a page yet." in render_index([], NOW)
 
 
 # -- the sources and the site ------------------------------------------------------
