@@ -195,8 +195,6 @@ def _visible(text: str) -> str:
 def _name_field() -> FieldSpec:
     return FieldSpec(
         key="name",
-        hotkey="n",
-        menu_text=menu_key("N", "ame"),
         label="Name",
         render=lambda draft: draft.get("name") or "(blank)",
         prompt=text_field("name", required=True),
@@ -206,8 +204,6 @@ def _name_field() -> FieldSpec:
 def _name_field_with_help() -> FieldSpec:
     return FieldSpec(
         key="name",
-        hotkey="n",
-        menu_text=menu_key("N", "ame"),
         label="Name",
         render=lambda draft: draft.get("name") or "(blank)",
         prompt=text_field("name", required=True),
@@ -218,8 +214,6 @@ def _name_field_with_help() -> FieldSpec:
 def _pinned_field() -> FieldSpec:
     return FieldSpec(
         key="pinned",
-        hotkey="p",
-        menu_text=menu_key("P", "inned"),
         label="Pinned",
         render=lambda draft: "yes" if draft.get("pinned") else "no",
         prompt=bool_field("pinned"),
@@ -232,8 +226,6 @@ _NAME_REQUIREMENT_VALUES = [None, "verified", "verified_and_displayed"]
 def _name_requirement_field() -> FieldSpec:
     return FieldSpec(
         key="name_requirement",
-        hotkey="q",
-        menu_text=menu_key("Q", "uirement", prefix="Name req"),
         label="Name requirement",
         render=lambda draft: draft.get("name_requirement") or "none",
         prompt=choice_field("name_requirement", _NAME_REQUIREMENT_VALUES),
@@ -577,8 +569,6 @@ def test_multiple_fields_render_together_and_can_be_edited_in_any_order():
 def _pinned_field_with_help() -> FieldSpec:
     return FieldSpec(
         key="pinned",
-        hotkey="p",
-        menu_text=menu_key("P", "inned"),
         label="Pinned",
         render=lambda draft: "yes" if draft.get("pinned") else "no",
         prompt=bool_field("pinned"),
@@ -1038,8 +1028,6 @@ def test_ctrl_h_with_nothing_highlighted_still_shows_the_full_list():
 def _pinned_field_with_brief() -> FieldSpec:
     return FieldSpec(
         key="pinned",
-        hotkey="p",
-        menu_text=menu_key("P", "inned"),
         label="Pinned",
         render=lambda draft: "yes" if draft.get("pinned") else "no",
         prompt=bool_field("pinned"),
@@ -1088,8 +1076,6 @@ def test_description_level_detailed_prefers_help_over_brief():
 
     field = FieldSpec(
         key="pinned",
-        hotkey="p",
-        menu_text=menu_key("P", "inned"),
         label="Pinned",
         render=lambda draft: "yes" if draft.get("pinned") else "no",
         prompt=bool_field("pinned"),
@@ -1156,7 +1142,7 @@ def test_description_level_brief_also_describes_save_and_back():
 
 def _brief_field(key: str, letter: str, label: str) -> FieldSpec:
     return FieldSpec(
-        key=key, hotkey=letter.lower(), menu_text=menu_key(letter, ""), label=label,
+        key=key, label=label,
         render=lambda draft: draft.get(key) or "(blank)", prompt=text_field(key),
         brief=f"Description of {label}",
     )
@@ -1217,8 +1203,6 @@ def test_description_level_brief_still_shows_when_it_fits():
 def _description_field() -> FieldSpec:
     return FieldSpec(
         key="description",
-        hotkey="d",
-        menu_text=menu_key("D", "escription"),
         label="Description",
         render=lambda draft: draft.get("description") or "(none)",
         prompt=text_field("description"),
@@ -1384,13 +1368,13 @@ def test_redraw_hint_omitted_when_not_requested():
 def _sectioned_fields() -> list[FieldSpec]:
     return [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             render=lambda draft: draft.get("name") or "(blank)",
             prompt=text_field("name", required=True),
             section="Identity",
         ),
         FieldSpec(
-            key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
+            key="pinned", label="Pinned",
             render=lambda draft: "yes" if draft.get("pinned") else "no",
             prompt=bool_field("pinned"),
             section="Display",
@@ -1475,7 +1459,7 @@ def _many_sectioned_fields() -> list[FieldSpec]:
             hotkey = _letter(i * 2 + j)
             fields.append(
                 FieldSpec(
-                    key=key, hotkey=hotkey, menu_text=menu_key(hotkey.upper(), "x"),
+                    key=key,
                     label=f"Field {i}{j}",
                     render=lambda draft, key=key: draft.get(key) or "(blank)",
                     prompt=text_field(key),
@@ -1500,7 +1484,7 @@ def _many_single_field_sections() -> list[FieldSpec]:
         hotkey = _letter(i)
         fields.append(
             FieldSpec(
-                key=key, hotkey=hotkey, menu_text=menu_key(hotkey.upper(), "x"),
+                key=key,
                 label=f"Field {i}",
                 render=lambda draft, key=key: draft.get(key) or "(blank)",
                 prompt=text_field(key),
@@ -1589,7 +1573,7 @@ def test_mixed_sectioned_and_unsectioned_fields_never_paginate_or_crash():
     fields = _many_sectioned_fields()  # 6 sections x 2 fields, dense enough alone to paginate
     fields.append(
         FieldSpec(
-            key="unsectioned", hotkey="z", menu_text=menu_key("Z", ""), label="Unsectioned",
+            key="unsectioned", label="Unsectioned",
             render=lambda draft: draft.get("unsectioned") or "(blank)",
             prompt=text_field("unsectioned"),
             section=None,
@@ -1867,9 +1851,9 @@ class InlineSession(NavigableFakeSession):
 
 def _inline_fields():
     return [
-        FieldSpec("description", "d", menu_key("D", "escription"), "Description",
+        FieldSpec("description", "Description",
                   lambda d: d["description"], text_field("description"), section="Identity"),
-        FieldSpec("name", "n", menu_key("N", "ame"), "Name",
+        FieldSpec("name", "Name",
                   lambda d: d["name"], text_field("name"), section="Identity"),
     ]
 
@@ -1939,7 +1923,7 @@ def test_numeric_and_optional_fields_use_their_displayed_row(kind):
     session = InlineSession(["v", "s"], script=b"\x7f\x7f\r")
     value = "21" if kind == "optional_text" else 21
     result = asyncio.run(edit_resource_draft(
-        session, None, title="Edit", fields=[FieldSpec("value", "v", "Value", "Value", lambda d: str(d["value"]), prompts[kind])],
+        session, None, title="Edit", fields=[FieldSpec("value", "Value", lambda d: str(d["value"]), prompts[kind])],
         draft={"value": value}, save=_save_dict, save_menu_text="Save", back_menu_text="Back", redraw_in_place=True,
     ))
     row, col, screen = session.before[0]
@@ -1963,7 +1947,7 @@ def test_resize_during_in_place_edit_keeps_the_draft_and_redraws():
 def test_labels_and_wrapped_values_share_a_column_across_sections(width):
     from netbbs.net.resource_editor import _field_value_lines
     from netbbs.rendering import strip_ansi, display_width
-    fields = _inline_fields() + [FieldSpec("long", "l", "Long", "A longer label for narrow screens",
+    fields = _inline_fields() + [FieldSpec("long", "A longer label for narrow screens",
                                          lambda d: "second value", text_field("long"), section="Other")]
     rows = [strip_ansi(row) for row in _field_value_lines(
         fields, {"description": "first " + "words " * 20, "name": "third value"},
@@ -1977,9 +1961,9 @@ def test_labels_and_wrapped_values_share_a_column_across_sections(width):
 @pytest.mark.parametrize("long_value", [False, True])
 def test_off_page_hotkey_draws_its_field_before_reading_even_when_the_form_overflows(long_value):
     session = InlineSession(["z", "s"], width=40, height=12)
-    fields = [FieldSpec(str(i), _letter(i), "Field", "Long label", lambda d: "x", text_field(str(i)),
+    fields = [FieldSpec(str(i), "Long label", lambda d: "x", text_field(str(i)),
                         section="First") for i in range(10)]
-    fields.append(FieldSpec("target", "z", "Target", "Target", lambda d: d["target"], text_field("target"), section="Second"))
+    fields.append(FieldSpec("target", "Target", lambda d: d["target"], text_field("target"), section="Second"))
     value = "many words " * 80 if long_value else "value"
     result = asyncio.run(edit_resource_draft(
         session, None, title="Edit", fields=fields, draft={"target": value},
@@ -1995,7 +1979,7 @@ def test_invalid_inline_age_remains_visible_after_redraw_and_does_not_change_the
     from netbbs.net.admin_flow import _min_age_field
     session = InlineSession(["v", "s"], script=b"\x7f\x7f999\r")
     result = asyncio.run(edit_resource_draft(
-        session, None, title="Edit", fields=[FieldSpec("value", "v", "Value", "Value", lambda d: str(d["value"]), _min_age_field("value"))],
+        session, None, title="Edit", fields=[FieldSpec("value", "Value", lambda d: str(d["value"]), _min_age_field("value"))],
         draft={"value": 21}, save=_save_dict, save_menu_text="Save", back_menu_text="Back", redraw_in_place=True,
     ))
     assert result["value"] == 21
@@ -2013,9 +1997,105 @@ def test_position_is_cleared_after_a_field_raises():
     async def run():
         with pytest.raises(RuntimeError, match="disconnected"):
             await edit_resource_draft(
-                session, None, title="Edit", fields=[FieldSpec("name", "n", "Name", "Name", lambda d: "value", broken)],
+                session, None, title="Edit", fields=[FieldSpec("name", "Name", lambda d: "value", broken)],
                 draft={}, back_menu_text="Back", redraw_in_place=True,
             )
         assert _field_position.get() is None
 
     asyncio.run(run())
+
+
+# -- Fields are chosen by number (issue #1158 step 3, design doc §3.5) --
+
+
+def test_each_field_is_drawn_with_its_number_and_the_bar_offers_the_range():
+    session = FakeSession(["b"])
+    asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", fields=[_name_field(), _pinned_field()],
+        draft={"name": "lobby", "pinned": False}, save=_save_dict, save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+    ))
+    text = _visible(_written_text(session))
+    assert "01 Name:" in text and "02 Pinned:" in text
+    assert "[01-02] change" in text
+    assert "[N]" not in text and "[P]" not in text
+
+
+def test_two_digits_open_that_field():
+    session = NavigableFakeSession(["0", "2", "s"])
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", fields=[_name_field(), _pinned_field()],
+        draft={"name": "lobby", "pinned": False}, save=_save_dict, save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+    ))
+    assert result == {"name": "lobby", "pinned": True}
+
+
+def test_one_digit_and_enter_open_that_field():
+    session = NavigableFakeSession(["2", "ENTER", "s"])
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", fields=[_name_field(), _pinned_field()],
+        draft={"name": "lobby", "pinned": False}, save=_save_dict, save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+    ))
+    assert result == {"name": "lobby", "pinned": True}
+
+
+@pytest.mark.parametrize("keys", [["9", "9"], ["0", "0"], ["3", "ENTER"], ["1", "x"]])
+def test_a_number_that_names_no_field_is_refused_and_changes_nothing(keys):
+    session = NavigableFakeSession([*keys, "b"])
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", fields=[_name_field(), _pinned_field()],
+        draft={"name": "lobby", "pinned": False}, save=_save_dict, save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+    ))
+    assert result is None
+    assert "\a" in _written_text(session)
+
+
+def test_a_fields_old_letter_no_longer_opens_it():
+    """A field has no letter: `p` was Pinned's, and now it only rings."""
+    session = NavigableFakeSession(["p", "s"])
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", fields=[_name_field(), _pinned_field()],
+        draft={"name": "lobby", "pinned": False}, save=_save_dict, save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+    ))
+    assert result == {"name": "lobby", "pinned": False}
+    assert "\a" in _written_text(session)
+
+
+def test_numbers_run_straight_through_the_sections_and_turn_to_the_fields_page():
+    """Twelve fields in six sections, one section per page: `11` is the
+    first field of the sixth section, typed from the first page."""
+    session = NavigableFakeSession(["1", "1", "value", "s"])
+    session.terminal_height = 12
+    fields = _many_sectioned_fields()
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", fields=fields, draft={f.key: "" for f in fields},
+        save=_save_dict, save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+    ))
+    assert result["f5_0"] == "value"
+    text = _visible(_written_text(session))
+    first_page = text.split("Choice:")[0]
+    assert "01 Field 00:" in first_page and "Section 1 of 6" in first_page
+    assert "11 Field 50:" not in first_page
+    assert "11 Field 50:" in text.split("Choice:")[-2] and "Section 6 of 6" in text
+    assert "[01-12] change" in first_page
+
+
+def test_the_highlighted_fields_description_is_shown_under_the_list():
+    fields = [
+        dataclasses.replace(_name_field(), brief="What callers see in lists"),
+        dataclasses.replace(_pinned_field(), brief="Keep it at the top"),
+    ]
+    session = NavigableFakeSession(["DOWN", "DOWN", "b"])
+    asyncio.run(edit_resource_draft(
+        session, None, title="Edit thing", fields=fields, draft={"name": "lobby", "pinned": False},
+        save=_save_dict, save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level="brief",
+    ))
+    draws = _visible(_written_text(session)).split("Choice:")
+    assert "What callers see in lists" not in draws[0] and "Keep it at the top" not in draws[0]
+    assert "What callers see in lists" in draws[1]
+    assert "Keep it at the top" in draws[2]

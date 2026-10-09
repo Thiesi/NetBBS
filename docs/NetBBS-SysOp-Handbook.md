@@ -425,8 +425,11 @@ screen: **[B]ack** or Esc leaves it (Esc first clears a highlighted row or
 field), **<** **>** or PgUp/PgDn turn a page or a form's section, **/** finds,
 and **?**, F1 or Ctrl+H show help. On a list Left/Right turn the page too; on
 a form they step the highlighted field's value. Draft editors keep changes
-local until **Save**; Back discards the draft after asking. Up/Down move
-between fields, and Enter or Space opens the selected field.
+local until **Save**; Back discards the draft after asking. Fields are
+numbered **01**, **02** and on through every section of the screen: type a
+field's number (two digits, or one and Enter) to open it from any page, or
+move with Up/Down and press Enter or Space. Letters on these screens are only
+their actions.
 
 In current field prompts, the existing value is already in the input line:
 Enter accepts it, Escape cancels the field edit, and deleting all text clears
@@ -491,7 +494,7 @@ can post on a board through a grant does not "lose" it in a demotion. Press
 opens and closes nothing is applied straight away, and the line under the
 screen says so.
 
-New callers can also move up on their own. Under **Users ▸ Pr[o]motion
+New callers can also move up on their own. Under **Users ▸ Auto-promotion
 rules**, `C` creates a rule: accounts at one level are raised to a higher
 one once they are old enough (hours since signup), have logged in often
 enough, and optionally have posted enough here. A common first rule is
@@ -762,8 +765,9 @@ draft and save it explicitly.
 
 **A resource's screen is its editor.** Choosing a Community, category,
 message board, file area, chat channel or door opens it on its own fields,
-with the cursor on the first: move it with Up and Down, press Enter (or
-Space) to change a field, and Left and Right step a choice. A line above the
+with the cursor on the first: type a field's number, or move with Up and
+Down and press Enter (or Space), to change it, and Left and Right step a
+choice. A line above the
 fields says what the screen is about: a board's posts and latest activity, its
 place in the list and whether it is Linked; a channel's MRC room; a door's
 compatibility. Longer details follow the fields: a Linked board's or area's
@@ -1813,8 +1817,8 @@ is used up, so it doesn't also act at the prompt that follows. A draw stops
 being paced after 5 seconds. Each piece plays once per connection: the welcome
 banner when a caller connects, the masthead on their first main menu, a list's
 art on the first visit to that list, never on a redraw, a page change or a
-cursor move. Callers who read plain ASCII, and callers who set **Profile → [Q]uick
-or animated banners** to quick, get the art at once. The piece's **Preview**
+cursor move. Callers who read plain ASCII, and callers who set **Profile → Banner
+animations** to quick, get the art at once. The piece's **Preview**
 plays it at its speed every time you use it, so you can see the animation
 without signing in as a caller.
 
@@ -1843,7 +1847,7 @@ Every caller gets text in the character set their terminal reads:
     presets look the way they do in a modern terminal. Other classic terminals
     get 256 colours. A caller can still pick a colour depth in their Profile.
 - **After sign-in:**
-  - Each caller's own **Profile → Unicode or CP437** choice applies.
+  - Each caller's own **Profile → Character set** choice applies.
   - A caller whose terminal wasn't recognised is asked once which of two sample
     lines looks right.
 

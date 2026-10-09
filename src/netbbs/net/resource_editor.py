@@ -12,7 +12,8 @@ until an explicit [S]ave; [B]ack simply discards the draft.
 
 Generalizes `netbbs.net.login_flow`'s own profile screen
 (`_render_profile`/`_edit_profile`) shape -- show every field's
-current value, one hotkey per field, redraw after each edit -- into a
+current value, one number per field (issue #1158; letters until then),
+redraw after each edit -- into a
 reusable driver (`edit_resource_draft`) parameterized by a list of
 `FieldSpec` entries, instead of each resource hand-writing its own
 sequential prompt chain. `netbbs.net.admin_flow` supplies each
@@ -45,6 +46,7 @@ from netbbs.net.char_input import (
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import take_notices
+from netbbs.net.row_numbers import ROW_NUMBER_WIDTH, read_row_number, row_number_label, row_range_label
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import (
     ACCENT_COLOR,
@@ -57,8 +59,10 @@ from netbbs.rendering import (
     action_bar,
     clear_screen,
     colored,
+    cut_to_width,
     display_width,
     menu_grid,
+    menu_key,
     move_cursor,
     sanitize_text,
     screen_title,
@@ -188,11 +192,9 @@ async def read_field_line(session: Session, *, initial: str) -> str:
 class FieldSpec:
     """One editable field on a draft-based resource editor screen.
 
-    `menu_text` is a pre-rendered `netbbs.rendering.menu_key(...)`
-    string (e.g. `menu_key("N", "ame")`) -- built by the caller, not
-    this module, the same way every other menu in this codebase
-    assembles its own options list; keeps this module free of any
-    opinion on hotkey/prefix choices. `render(draft)` is called fresh
+    A field has no key of its own: it is chosen by its two-digit number,
+    its position in the screen's field list (issue #1158, design doc
+    §3.5), or by the cursor. `render(draft)` is called fresh
     on every redraw and must be a pure, cheap read of the draft, no I/O
     -- the "current value" line shown above the menu.
 
@@ -203,17 +205,15 @@ class FieldSpec:
     `help` is simply omitted from that screen.
 
     `brief` (issue #160's own rollout to this screen), if given, is a
-    short (~30 char) one-line description shown indented under this
-    field's hotkey when the caller's menu-description preference
-    (`netbbs.net.menu_description_preference`) is `"brief"` or
-    `"detailed"` -- see `MenuEntry`. The screen's own title already
+    short (~30 char) one-line description shown under the field list
+    while this field is highlighted, when the caller's menu-description
+    preference (`netbbs.net.menu_description_preference`) is `"brief"`
+    or `"detailed"`. The screen's own title already
     names the resource kind in full ("Edit message board"/"file
     area"/"chat channel"), so `brief` text may use the short noun
     ("the board", "the area") rather than repeating the full term on
-    every field and blowing the width budget. At the `"detailed"`
-    level, `help` is shown instead of `brief` when a field has both --
-    the existing Ctrl-H writeup doubles as the richer description for
-    free, no separate text required.
+    every field and blowing the width budget. A field with no `brief`
+    shows the start of its `help` there instead.
 
     `step` (dogfood feature request, issue #160's own cursor-navigation
     follow-up), if given, is a synchronous, no-I/O `(draft, direction)
@@ -228,10 +228,7 @@ class FieldSpec:
     own flat field list read as wildly different levels of polish for
     no principled reason), if given, groups this field under a bold,
     uppercased heading shared with every other field carrying the same
-    `section` string -- both in the current-value list above the menu
-    row and in the hotkey menu row itself (which already routes through
-    `menu_grid`, so it gains real per-section columns, not just a
-    heading). `None` by default, and a screen where every field leaves
+    `section` string in the field list. `None` by default, and a screen where every field leaves
     this unset renders byte-for-byte as before: sectioning only ever
     activates once a caller actually opts in, so every existing
     `edit_resource_draft` call site (create/edit forms for boards,
@@ -244,8 +241,6 @@ class FieldSpec:
     """
 
     key: str
-    hotkey: str
-    menu_text: str
     label: str
     render: Callable[[Draft], str]
     prompt: FieldPrompt
@@ -259,13 +254,10 @@ class FieldSpec:
     # activating the field says so instead of opening its prompt.
     locked: str | None = None
 
-    def __post_init__(self) -> None:
-        _refuse_reserved_hotkey(self.hotkey, self.label)
-
 
 #: The keys that mean the same on every screen (issue #1158, design doc §3.5):
-#: Back, the page keys, Find and Help. A field or action never takes one --
-#: a computed hotkey included, which no test of a label could catch.
+#: Back, the page keys, Find and Help. An action never takes one -- a
+#: computed hotkey included, which no test of a label could catch.
 RESERVED_HOTKEYS = frozenset({"b", "<", ">", "/", "?"})
 
 
@@ -289,6 +281,9 @@ class DetailAction:
 
     def __post_init__(self) -> None:
         _refuse_reserved_hotkey(self.hotkey, self.menu_text)
+        if self.hotkey.isdigit():
+            # A digit starts a field's number on the same screen (issue #1158).
+            raise ValueError(f"{self.menu_text!r} cannot use {self.hotkey!r}: digits are field numbers")
 
 
 @dataclass
@@ -309,8 +304,8 @@ class DetailState:
 @dataclass(frozen=True)
 class DetailMode:
     """Turns `edit_resource_draft` into a resource's one screen (issue
-    #1081, design doc §3.5): read-only header, then the fields chosen by
-    the cursor alone (no field letters, so actions keep theirs), then the
+    #1081, design doc §3.5): read-only header, then the fields (chosen by
+    number or cursor, so the letters are the actions'), then the
     actions. `refresh` loads a `DetailState`; it runs on entry, after a
     save and after an action that stays. While the draft differs from
     what is stored only `[S]ave` and `[B]ack` are offered.
@@ -356,15 +351,24 @@ def _field_value_lines(
     a page-scoped call and a full-list call have different valid index
     ranges for "the selected field," so identity is the only primitive
     that works correctly for both without the caller reinterpreting an
-    index per call."""
+    index per call.
+
+    `label_fields` is the screen's whole field list when `fields` is one
+    page of it: labels are measured across all of them, and a field's
+    number is its place there, straight through the sections (issue
+    #1158)."""
     lines: list[str] = []
     sectioned = any(f.section is not None for f in fields)
     previous_section = _NO_SECTION_YET
-    label_size = max((display_width(sanitize_text(f.label)) for f in (label_fields or fields)), default=0)
+    all_fields = label_fields or fields
+    numbers = {id(f): index + 1 for index, f in enumerate(all_fields)}
+    label_size = max((display_width(sanitize_text(f.label)) for f in all_fields), default=0)
+    # The cursor mark, the number and a space before the label.
+    lead = 2 + ROW_NUMBER_WIDTH + 1
     # Keep a useful value column on narrow terminals. If labels cannot
     # share a row with it, every value uses the same indented next row.
-    stacked = label_size + 4 > terminal_width - 12
-    value_column = 2 if stacked else label_size + 4
+    stacked = lead + label_size + 2 > terminal_width - 12
+    value_column = 2 if stacked else lead + label_size + 2
     for f in fields:
         if sectioned and f.section != previous_section:
             # Same "uppercased, bold, METADATA_COLOR" heading `menu_grid`
@@ -393,7 +397,8 @@ def _field_value_lines(
         label = sanitize_text(f.label)
         padding = "" if stacked else " " * (label_size - display_width(label))
         prefix = colored(
-            f"{marker}{label}:", fg_color=accent_color if is_selected else LABEL_COLOR, bold=is_selected,
+            f"{marker}{row_number_label(numbers[id(f)])} {label}:",
+            fg_color=accent_color if is_selected else LABEL_COLOR, bold=is_selected,
         )
         # Dogfood report: a long field value (a free-text description,
         # most often) used to print as one raw unwrapped line regardless
@@ -421,8 +426,19 @@ def _field_value_lines(
     return lines
 
 
+def _field_description(field: FieldSpec | None, *, width: int) -> str:
+    """The highlighted field's description, one row under the field list
+    (issue #1158): its `brief`, or the start of its `help`. Empty with no
+    field highlighted, so the row keeps its place and the screen does not
+    shift as the cursor moves."""
+    if field is None:
+        return ""
+    text = sanitize_text(field.brief or (field.help or "").split("\n", 1)[0])
+    return colored(cut_to_width(f"  {text}", max(1, width - 1)), fg_color=MUTED_COLOR) if text else ""
+
+
 def _build_menu_line(
-    fields: list[FieldSpec],
+    field_count: int,
     *,
     save: Callable[[Draft], Awaitable[Any]] | None,
     save_menu_text: str | None,
@@ -434,97 +450,35 @@ def _build_menu_line(
     extra_entries: Sequence[MenuEntry] = (),
     save_brief: str = _SAVE_BRIEF,
 ) -> str:
-    """Builds the hotkey/menu row for one field subset (the whole
-    screen, or one page's worth once `edit_resource_draft` has
-    paginated) -- the same three-tier descriptive/sectioned-compact/
-    flat fallback this screen has always used, extracted into its own
-    function so the fit-check that decides whether to paginate at all
-    and the real render can never disagree about what the menu row
-    actually looks like.
+    """The action bar under the field list: the range of field numbers
+    (issue #1158), then the screen's actions, `[S]ave` and `[B]ack`.
 
-    `fixed_lines` is everything else already committed to on screen
-    (title/preamble/field values/Ctrl-H hint/prompt line, plus the
-    page-position hint once paginated) -- this function only ever
-    budgets its own height against what's left, it never recomputes
-    anyone else's."""
-    menu_entries = [MenuEntry(label=f.menu_text, brief=f.brief, detailed=f.help) for f in fields]
-    # A resource's own screen (issue #1081) passes no fields here -- they
-    # are chosen by the cursor -- and its actions instead.
+    Fields are chosen by number, so the bar names the range rather than
+    a key per field. `fixed_lines` is everything else already committed
+    to on screen; the descriptive `menu_grid` form is used only when the
+    caller's preference asks for it and it fits what is left of the
+    height, and the one-row `action_bar` otherwise."""
+    menu_entries: list[MenuEntry] = []
+    if field_count:
+        menu_entries.append(MenuEntry(
+            label=menu_key(row_range_label(field_count), " change"), brief="Change a field by its number",
+        ))
     menu_entries.extend(extra_entries)
     if save is not None:
         menu_entries.append(MenuEntry(label=save_menu_text, brief=save_brief))
     menu_entries.append(MenuEntry(label=back_menu_text, brief=back_brief))
-    # Grouped into the same sections the value list above just used
-    # (empty title = "no heading," `menu_grid`'s own existing
-    # convention) -- a sectioned screen's menu row gets real per-section
-    # columns from `menu_grid` for free, not just a heading; an
-    # unsectioned screen collapses back to today's single flat group,
-    # identical entries and order. [S]ave/[B]ack ride along at the end
-    # of the *last* group -- the same "trails the content it acts on"
-    # position every other menu row in this codebase already puts its
-    # own exit/commit actions in, not a section of their own.
-    menu_sections: list[tuple[str, list[MenuEntry]]] = []
-    current_title: object = _NO_SECTION_YET
-    for f, entry in zip(fields, menu_entries):
-        section_title = f.section if f.section is not None else ""  # menu_grid uppercases its own titles
-        if section_title != current_title:
-            menu_sections.append((section_title, []))
-            current_title = section_title
-        menu_sections[-1][1].append(entry)
-    if not menu_sections:
-        menu_sections.append(("", []))
-    menu_sections[-1][1].extend(menu_entries[len(fields):])
-    # Dogfood report: on an ordinary terminal, this screen's own
-    # sectioned value list above already leaves no height budget for
-    # the *descriptive* menu_grid form below to fit (see that form's
-    # own height-fit check) -- meaning a sectioned screen's menu row
-    # fell all the way back to this compact one, which had no grouping
-    # concept at all: exactly the "chaotic options list" complaint that
-    # prompted sectioning in the first place, just moved from the value
-    # list down to here. Built from the same `menu_sections` the
-    # descriptive form uses instead of one flat `action_bar` call
-    # whenever there's more than one real group -- an unsectioned
-    # screen (`len(menu_sections) == 1`) renders byte-for-byte as
-    # before.
-    flat_menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
-    menu_line = flat_menu_line
-    if len(menu_sections) > 1:
-        compact_lines: list[str] = []
-        for section_title, entries in menu_sections:
-            if section_title:
-                compact_lines.append(colored(section_title.upper(), fg_color=METADATA_COLOR, bold=True))
-            compact_lines.append(action_bar([e.label for e in entries], width=session.terminal_width))
-        sectioned_compact_menu_line = "\r\n".join(compact_lines)
-        # Codex review (PR #229): unlike the old always-one-line flat
-        # form, a sectioned compact row grows with the section count --
-        # easily enough on its own to push a real 24-row terminal's
-        # field list off the top before `Choice:` ever appears, the
-        # exact scroll-off regression the descriptive-form check below
-        # already guards against. Reuses that same budget rather than a
-        # separate one -- if even the sectioned compact row doesn't
-        # fit, fall all the way back to the flat one line. (If *that*
-        # doesn't fit either, `edit_resource_draft`'s own caller-side
-        # fit-check is what catches it and paginates instead -- this
-        # function itself has no further fallback below flat.)
-        sectioned_compact_lines = sectioned_compact_menu_line.count("\r\n") + 1
-        if fixed_lines + sectioned_compact_lines <= session.terminal_height:
-            menu_line = sectioned_compact_menu_line
+    menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
     if description_level != "off":
-        # `menu_grid` always renders one entry per line, even with
-        # descriptions off -- unlike `action_bar`'s packed single-line
-        # row, that's not a byte-for-byte-compatible substitute at this
-        # level. Falls back to the compact row, regardless of
-        # preference, whenever the descriptive form wouldn't fit this
-        # terminal at all -- descriptions are a nice-to-have, being able
-        # to see the whole screen is the point.
+        # Descriptions are a nice-to-have; being able to see the whole
+        # screen is the point, so the compact row stays whenever the
+        # descriptive form would not fit.
         descriptive_menu_line = menu_grid(
-            menu_sections,
+            [("", menu_entries)],
             width=session.terminal_width,
             height=session.terminal_height,
             description_level=description_level,
         )
-        descriptive_lines = descriptive_menu_line.count("\r\n") + 1
-        if fixed_lines + descriptive_lines <= session.terminal_height:
+        if fixed_lines + descriptive_menu_line.count("\r\n") + 1 <= session.terminal_height:
             menu_line = descriptive_menu_line
     return menu_line
 
@@ -556,8 +510,9 @@ async def edit_resource_draft(
 ) -> Any | None:
     """
     Drives one draft-based create/edit screen: renders `title` plus
-    every field's current value, offers one hotkey per field (jumps
-    straight to that field's own `prompt`) plus save/back, and loops
+    every field's current value, numbered `01`-`99` straight through its
+    sections (issue #1158, design doc §3.5: two digits, or one and Enter,
+    open that field's own `prompt`) plus save/back, and loops
     until the caller either saves (returns whatever `save` returns) or
     backs out (returns `None`, `draft` discarded, nothing persisted or
     changed).
@@ -586,8 +541,7 @@ async def edit_resource_draft(
     Dogfood feature request, issue #160's own follow-up: every field is
     also reachable by moving a `>` cursor with Up/Down and activating
     the highlighted one with Space or Enter (delegating to that field's
-    own `prompt`, exactly what its hotkey letter already does) -- purely
-    additive, every hotkey keeps working exactly as before. Nothing is
+    own `prompt`, exactly what its number does). Nothing is
     highlighted until the first arrow press (the screen looks identical
     to today until then); Up from that unselected state lands on the
     last field, Down on the first, and the cursor then wraps at either
@@ -600,12 +554,9 @@ async def edit_resource_draft(
     ("off"/"brief"/"detailed") -- fetched once by the caller before
     entering this screen, not by this function on every redraw of its
     own loop (a per-redraw lookup here previously perturbed async
-    cancellation timing elsewhere in this rollout). Field rows render
-    through `menu_grid` with each `FieldSpec.brief`/`.help` as the
-    description text; a field with neither shows only its hotkey label,
-    identical to `description_level="off"`. The menu row falls back to
-    the compact form, regardless of preference, whenever the
-    descriptive form wouldn't fit this terminal at all.
+    cancellation timing elsewhere in this rollout). With descriptions on,
+    the highlighted field's `brief` is shown under the field list, and
+    the action bar renders through `menu_grid` when that fits.
 
     Codex-review-prompted (a dense, sectioned screen genuinely doesn't
     fit a real 24-row terminal no matter how the menu row degrades):
@@ -615,11 +566,10 @@ async def edit_resource_draft(
     Up`/`Page Down` (already fully decoded by `read_editor_key`, and
     previously dead-ending here at the plain-key bell-reject) cycling
     between them and wrapping at either end, same convention as
-    cursor-nav Up/Down. Every hotkey keeps working regardless of which
-    page is currently shown -- typing a field's own letter always jumps
+    cursor-nav Up/Down. Every number keeps working regardless of which
+    page is currently shown -- typing a field's number always jumps
     straight to it (and switches to its page so the caller sees what
-    they just changed), the same "every hotkey keeps working exactly as
-    before" guarantee cursor-nav itself already established. `[S]ave`/
+    they just changed). `[S]ave`/
     `[B]ack` stay reachable from every page, not gated behind reaching a
     particular one. An *unsectioned* screen has no natural page
     boundary and keeps exactly today's behavior: if it doesn't fit, the
@@ -680,8 +630,8 @@ async def edit_resource_draft(
     screen instead of an editor reached through an overview's `[E]dit`:
     `DetailMode.refresh` supplies the stored values, a read-only header,
     a section shown after the fields and the actions. The cursor starts
-    on the first field and is how fields are chosen -- their letters are
-    not offered, so the actions keep theirs. While the draft differs from
+    on the first field; fields are chosen by it or by number, so the
+    letters are the actions'. While the draft differs from
     what is stored only `[S]ave` and `[B]ack` are offered; a save stays
     on the screen and reloads it. A `FieldSpec.locked` field is shown but
     says why it can't be changed instead of opening its prompt.
@@ -738,7 +688,7 @@ async def edit_resource_draft(
         # carry a `section` -- a field left unsectioned has no page it
         # could ever belong to (`page_fields` filters by exact section-
         # name match, and `None` was never added to `section_names`),
-        # so a mixed screen jumping to that field's own hotkey would set
+        # so a mixed screen jumping to that field's number would set
         # `current_page = None` and crash the next redraw at
         # `section_names.index(None)`. No real caller mixes the two
         # today (confirmed: Board/Area/Channel/Profile all section every
@@ -749,10 +699,9 @@ async def edit_resource_draft(
         fully_sectioned = bool(fields) and all(f.section is not None for f in fields)
         selected_field = fields[selected] if selected is not None else None
         back_brief = _BACK_BRIEF if save is not None else _BACK_BRIEF_IMMEDIATE
-        # A resource's own screen (issue #1081): fields are not on the menu
-        # row (the cursor chooses them); the actions are, but only while the
-        # draft matches what is stored -- a changed draft offers Save and Back.
-        menu_fields: list[FieldSpec] = fields
+        # A resource's own screen (issue #1081): the actions are on the bar,
+        # but only while the draft matches what is stored -- a changed draft
+        # offers Save and Back.
         menu_save = save
         extra_entries: list[MenuEntry] = []
         save_brief = _SAVE_BRIEF
@@ -761,7 +710,6 @@ async def edit_resource_draft(
             # Creating (stay_after_save=False) has nothing stored to match, so
             # Save is always offered -- a gallery prefill is savable as it is.
             dirty = draft != initial_draft or not detail.stay_after_save
-            menu_fields = []
             menu_save = save if dirty else None
             save_brief = _SAVE_BRIEF_DETAIL
             back_brief = _DISCARD_BRIEF_DETAIL if dirty else _BACK_BRIEF_DETAIL
@@ -769,6 +717,9 @@ async def edit_resource_draft(
                 extra_entries = [MenuEntry(label=a.menu_text, brief=a.brief) for a in detail_state.actions]
             after_text = detail_state.after_fields
         hint_lines = 1 if detail_state is not None and fields else 0
+        # With descriptions on, a row under the fields for the highlighted
+        # one's (issue #1158), kept even while none is highlighted.
+        description_row = 1 if description_level != "off" and any(f.brief or f.help for f in fields) else 0
         # On a resource's own screen the key hint carries Ctrl-H too.
         help_row = 0 if hint_lines else (1 if any(f.help for f in fields) else 0)
         # Everything on screen except the field values and the menu row
@@ -802,6 +753,7 @@ async def edit_resource_draft(
             + (1 if redraw_hint and redraw_count >= 1 and detail_state is None else 0)
             + (wrap_terminal_text(shown_message, width).count("\r\n") + 1 if shown_message else 0)
             + hint_lines
+            + description_row
         )
         after_lines = wrap_terminal_text(after_text, width).count("\r\n") + 1 if after_text else 0
 
@@ -821,7 +773,7 @@ async def edit_resource_draft(
             positions=positions,
         )
         full_menu_line = _build_menu_line(
-            menu_fields, save=menu_save, save_menu_text=save_menu_text, back_menu_text=back_menu_text,
+            len(fields), save=menu_save, save_menu_text=save_menu_text, back_menu_text=back_menu_text,
             back_brief=back_brief, description_level=description_level, session=session,
             fixed_lines=base_fixed_lines + len(full_lines) + after_lines,
             extra_entries=extra_entries, save_brief=save_brief,
@@ -856,7 +808,7 @@ async def edit_resource_draft(
             # every page keeps its rows for its own fields.
             shown_after = after_text if current_page == section_names[-1] else ""
             menu_line = _build_menu_line(
-                page_fields if detail_state is None else [], save=menu_save, save_menu_text=save_menu_text,
+                len(fields), save=menu_save, save_menu_text=save_menu_text,
                 back_menu_text=back_menu_text, back_brief=back_brief, description_level=description_level,
                 session=session,
                 fixed_lines=(
@@ -866,6 +818,8 @@ async def edit_resource_draft(
                 extra_entries=extra_entries, save_brief=save_brief,
             )
 
+        if description_row:
+            value_lines = [*value_lines, _field_description(selected_field, width=width)]
         if shown_after:
             value_lines = [*value_lines, *shown_after.split("\r\n")]
         tail_blocks = [f"\r\n{menu_line}"]
@@ -940,7 +894,7 @@ async def edit_resource_draft(
                 _field_position.reset(token)
             field_message = field_position.message if field_position else None
             continue
-        key = await _read_navigable_key(session)
+        key, echoed = await _read_navigable_key_echoed(session)
 
         if key.kind == EditorKeyKind.UP:
             if paginated:
@@ -1023,7 +977,7 @@ async def edit_resource_draft(
                 # rejected hotkey gets.
                 await session.write("\a")
                 continue
-            # Codex review (PR #238): the hotkey-dispatch branch below
+            # Codex review (PR #238): the number-dispatch branch below
             # primes `current_page` unconditionally before invoking a
             # field's prompt, for the live-resize case where pagination
             # newly activates while that prompt is still running -- but
@@ -1032,7 +986,7 @@ async def edit_resource_draft(
             # no equivalent priming. Without it, an Enter/Space-activated
             # field on a page that only *becomes* current after a
             # mid-prompt resize would still show the stale page on the
-            # next redraw, same bug as the hotkey path already fixed.
+            # next redraw, same bug as the number path already fixed.
             if fields[selected].section is not None and fields[selected].section != current_page:
                 current_page = fields[selected].section
             if fields[selected].locked:
@@ -1075,8 +1029,18 @@ async def edit_resource_draft(
                 if not await prompt_yes_no(session, "Discard unsaved changes?", default=False):
                     continue
             return None
+        field_index: int | None = None
+        if len(choice) == 1 and choice.isascii() and choice.isdigit() and fields:
+            # A field's number (issue #1158): two digits, or one and Enter.
+            number = await read_row_number(
+                session, choice, row_count=len(fields), first_echoed=echoed,
+                read=lambda: _read_navigable_key_echoed(session),
+            )
+            if number is None:
+                continue
+            field_index = number - 1
         dirty = draft != initial_draft or (detail is not None and not detail.stay_after_save)
-        if save is not None and choice == save_hotkey and (detail_state is None or dirty):
+        if field_index is None and save is not None and choice == save_hotkey and (detail_state is None or dirty):
             await session.write_line("")
             try:
                 result = await save(draft)
@@ -1099,9 +1063,9 @@ async def edit_resource_draft(
             initial_draft = dict(draft)
             continue
 
-        if detail_state is not None:
-            # Fields are chosen by the cursor here; letters are the actions',
-            # offered only while nothing is waiting to be saved.
+        if field_index is None and detail_state is not None:
+            # Letters are the actions', offered only while nothing is
+            # waiting to be saved.
             action = None if dirty else next(
                 (a for a in detail_state.actions if a.hotkey.lower() == choice), None
             )
@@ -1117,18 +1081,15 @@ async def edit_resource_draft(
             initial_draft = dict(draft)
             continue
 
-        field_index = next((i for i, f in enumerate(fields) if f.hotkey.lower() == choice), None)
         if field_index is None:
             await session.write(reject_unhandled_key(choice))
             continue
         selected = field_index
         if fields[field_index].section is not None and fields[field_index].section != current_page:
-            # Every hotkey keeps working regardless of which page is
-            # currently shown (cursor-nav's own established "purely
-            # additive, nothing existing stops working" precedent) --
-            # jump to the field's own page too, or the caller would type
-            # a real hotkey, watch a field they can't see get edited, and
-            # see no visible change on the next redraw.
+            # Every number works regardless of which page is currently
+            # shown -- jump to the field's own page too, or the caller
+            # would type a number, watch a field they can't see get
+            # edited, and see no visible change on the next redraw.
             #
             # Codex review (PR #236): deliberately *not* gated on this
             # redraw's own `paginated` value -- the screen might fit
@@ -1136,7 +1097,7 @@ async def edit_resource_draft(
             # fitting by the time this field's own prompt returns (a
             # live terminal resize mid-interaction is the real case:
             # NAWS renegotiates while the caller is still typing into
-            # the sub-prompt this hotkey just opened). Priming
+            # the sub-prompt this number just opened). Priming
             # `current_page` unconditionally means that if pagination
             # *does* newly activate on the very next redraw, it already
             # shows the field just edited instead of the stale default
@@ -1159,6 +1120,12 @@ async def edit_resource_draft(
 
 
 async def _read_navigable_key(session: Session) -> EditorKey:
+    """`_read_navigable_key_echoed` without the echo flag."""
+    key, _ = await _read_navigable_key_echoed(session)
+    return key
+
+
+async def _read_navigable_key_echoed(session: Session) -> tuple[EditorKey, bool]:
     """Best-effort structured key read for `edit_resource_draft`'s
     arrow navigation -- falls back to the plain single-keystroke
     reader, wrapped as an `EditorKeyKind.CHAR`, for lightweight
@@ -1176,15 +1143,18 @@ async def _read_navigable_key(session: Session) -> EditorKey:
     is passed here because this screen's own dispatch never needs a
     real Backspace at this level (typing happens inside each field's
     own sub-prompt), the same carve-out `read_key()`'s pre-existing
-    `HELP_KEY` already makes for the identical byte."""
+    `HELP_KEY` already makes for the identical byte.
+
+    The flag says whether the key was echoed (only `read_key` echoes), so
+    a refused field number erases only what was drawn."""
     read_editor_key = getattr(session, "read_editor_key", None)
     if read_editor_key is not None:
         try:
-            return await read_editor_key(distinguish_ctrl_h=True)
+            return await read_editor_key(distinguish_ctrl_h=True), False
         except NotImplementedError:
             pass
     raw = await session.read_key()
-    return EditorKey(EditorKeyKind.CHAR, char=raw)
+    return EditorKey(EditorKeyKind.CHAR, char=raw), True
 
 
 async def _show_field_help(
@@ -1373,7 +1343,7 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
 
 def bool_field(key: str) -> FieldPrompt:
     """A yes/no field that flips on one keystroke (issue #751): the
-    hotkey, Space or Enter turns `draft[key]` from off to on or back,
+    field's number, Space or Enter turns `draft[key]` from off to on or back,
     with no sub-prompt. A draft field writes nothing before Save, so
     the menu rule "a toggle toggles" applies -- a yes/no question is
     kept for the last keystroke before an irreversible, destructive or
@@ -1398,9 +1368,9 @@ def bool_step(key: str) -> Callable[[Draft, int], None]:
 
 def choice_field(key: str, values: list[Any]) -> FieldPrompt:
     """A cycling multi-value toggle field (dogfood feature request,
-    issue #153) -- `bool_field`'s "press the hotkey, no typing" shape
-    generalized past two states: each press of the field's own hotkey
-    advances `draft[key]` to the next entry in `values`, wrapping back
+    issue #153) -- `bool_field`'s "press the number, no typing" shape
+    generalized past two states: each choice of the field (its number,
+    Space or Enter) advances `draft[key]` to the next entry in `values`, wrapping back
     to the first after the last. No sub-prompt, no I/O beyond the
     immediate advance -- exactly one keystroke changes the value, the
     same way `edit_resource_draft`'s outer loop already redraws the
@@ -1433,7 +1403,7 @@ def live_choice_field(
     Deliberately has no `FieldSpec.step` counterpart, unlike
     `choice_field`/`choice_step` -- `step` stays synchronous and no-I/O
     for every field across this module, so it cannot persist; a live
-    field's value only ever changes on Space/Enter/its hotkey, exactly like
+    field's value only ever changes on Space/Enter/its number, exactly like
     `choice_field` without `choice_step`."""
 
     async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
@@ -1456,7 +1426,7 @@ def choice_step(key: str, values: list[Any]) -> Callable[[Draft, int], None]:
     """`FieldSpec.step` counterpart to `choice_field` (dogfood feature
     request, issue #160's cursor-navigation follow-up): Left/Right on a
     highlighted `choice_field`-backed field step it backward/forward
-    through the exact same `values` cycle its hotkey/Space/Enter
+    through the exact same `values` cycle its number/Space/Enter
     already advances one direction through -- same index math, just
     parameterized by `direction` instead of always `+1`. A separate
     function rather than folding into `choice_field` itself so a field

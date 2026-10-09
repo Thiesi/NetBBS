@@ -66,12 +66,12 @@ class Store:
 def _fields(*, lock_name: bool = False) -> list[FieldSpec]:
     return [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             render=lambda d: d.get("name") or "(blank)", prompt=text_field("name", required=True),
             section="Identity", locked="set by origin" if lock_name else None,
         ),
         FieldSpec(
-            key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
+            key="pinned", label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no", prompt=bool_field("pinned"),
             step=bool_step("pinned"), section="Organization",
         ),

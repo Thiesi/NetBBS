@@ -1315,7 +1315,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
     # one, "(none)", consistently used wherever a field has nothing set.
     fields = [
         FieldSpec(
-            key="bio", hotkey="e", menu_text=menu_key("E", "dit bio"), label="Bio",
+            key="bio", label="Bio",
             render=lambda d: f"{len(d['bio'].splitlines())} line(s)" if d["bio"] else "(none)",
             prompt=_unless_signed_in_without_credential("the bio", _bio_prompt),
             brief="Change your public bio text",
@@ -1326,7 +1326,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Identity",
         ),
         FieldSpec(
-            key="bio_visible", hotkey="v", menu_text=menu_key("V", "isibility"), label="Visibility",
+            key="bio_visible", label="Visibility",
             render=lambda d: "public" if d["bio_visible"] else "private",
             prompt=_unless_signed_in_without_credential("who sees the bio", live_choice_field(
                 "bio_visible", [False, True], persist=lambda lane, v: lane.run(set_bio_visible, user, v)
@@ -1339,7 +1339,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Identity",
         ),
         FieldSpec(
-            key="signature", hotkey="g", menu_text=menu_key("g", "nature", prefix="Si"), label="Signature",
+            key="signature", label="Signature",
             render=lambda d: f"{len(d['signature'].splitlines())} line(s)" if d["signature"] else "(none)",
             prompt=_unless_signed_in_without_credential("the signature", _signature_prompt),
             brief="Auto-appended to mail and posts you send",
@@ -1350,7 +1350,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Identity",
         ),
         FieldSpec(
-            key="identity_details", hotkey="n", menu_text=menu_key("N", "ame & details"),
+            key="identity_details",
             label="Name & details",
             render=lambda d: "(edit)",
             prompt=_unless_signed_in_without_credential("the name and details", _identity_details_prompt),
@@ -1363,7 +1363,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Identity",
         ),
         FieldSpec(
-            key="fullscreen_editor", hotkey="f", menu_text=menu_key("F", "ullscreen editor"),
+            key="fullscreen_editor",
             label="Fullscreen editor (all writing)",
             render=lambda d: "on" if d["fullscreen_editor"] else "off",
             prompt=live_choice_field(
@@ -1381,7 +1381,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
-            key="accepts_dm", hotkey="m", menu_text=menu_key("M", "essages"),
+            key="accepts_dm",
             label="Direct messages",
             render=lambda d: "accepted" if d["accepts_dm"] else "not accepted",
             prompt=_unless_signed_in_without_credential("whether this account takes messages", live_choice_field(
@@ -1398,7 +1398,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
-            key="blocked_senders", hotkey="o", menu_text=menu_key("o", "cked people", prefix="Bl"),
+            key="blocked_senders",
             label="Blocked people",
             render=lambda d: f"{d['blocked_sender_count']} blocked" if d["blocked_sender_count"] else "(none)",
             prompt=_unless_signed_in_without_credential("who this account blocks", _blocked_senders_prompt),
@@ -1416,7 +1416,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
-            key="read_receipts", hotkey="x", menu_text=menu_key("x", "change read receipts", prefix="E"),
+            key="read_receipts",
             label="Let senders see when I've read their mail",
             render=lambda d: "yes" if d["read_receipts"] else "no",
             prompt=_unless_signed_in_without_credential("read receipts", live_choice_field(
@@ -1437,7 +1437,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
-            key="mrc_private", hotkey="p", menu_text=menu_key("P", "rivate MRC messages"),
+            key="mrc_private",
             label="Private messages from MRC users",
             render=lambda d: "accepted" if d["mrc_private"] else "not accepted",
             prompt=_unless_signed_in_without_credential("private MRC messages", live_choice_field(
@@ -1454,7 +1454,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
-            key="mrc_lastseen", hotkey="w", menu_text=menu_key("W", "hen last seen on MRC"),
+            key="mrc_lastseen",
             label="MRC may remember when you were last seen",
             render=lambda d: "yes" if d["mrc_lastseen"] else "no",
             prompt=_unless_signed_in_without_credential("what MRC remembers", live_choice_field(
@@ -1470,7 +1470,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
-            key="mrc_names", hotkey="z", menu_text=menu_key("z", "ed MRC names", prefix="Styli"),
+            key="mrc_names",
             label="Stylized MRC names",
             render=lambda d: _MRC_NAME_STYLE_LABELS[d["mrc_names"]],
             prompt=live_choice_field(
@@ -1489,7 +1489,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
-            key="history_name_visible", hotkey="h", menu_text=menu_key("H", "istory visibility"),
+            key="history_name_visible",
             label="Name shown to other callers",
             render=lambda d: "yes" if d["history_name_visible"] else "no (hidden)",
             prompt=_unless_signed_in_without_credential("whether the name is shown", live_choice_field(
@@ -1506,7 +1506,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Communication",
         ),
         FieldSpec(
-            key="color_depth", hotkey="c", menu_text=menu_key("C", "olor depth"), label="Color depth",
+            key="color_depth", label="Color depth",
             render=_color_depth_render,
             prompt=live_choice_field(
                 "color_depth", ["auto", "truecolor", "256"],
@@ -1521,7 +1521,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="description_level", hotkey="d", menu_text=menu_key("D", "escriptions"),
+            key="description_level",
             label="Menu descriptions",
             render=lambda d: d["description_level"],
             prompt=live_choice_field(
@@ -1537,7 +1537,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="redraw_in_place", hotkey="r", menu_text=menu_key("R", "edraw style"), label="In-place redraw",
+            key="redraw_in_place", label="In-place redraw",
             render=lambda d: "on" if d["redraw_in_place"] else "off",
             prompt=live_choice_field(
                 "redraw_in_place", [False, True],
@@ -1553,7 +1553,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="animations", hotkey="q", menu_text=menu_key("Q", "uick or animated banners"),
+            key="animations",
             label="Banner animations",
             render=lambda d: "animated" if d["animations"] else "quick",
             prompt=live_choice_field(
@@ -1570,7 +1570,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="charset", hotkey="u", menu_text=menu_key("U", "nicode or CP437"),
+            key="charset",
             label="Character set",
             render=lambda d: _charset_label(d["charset"], session),
             prompt=live_choice_field(
@@ -1587,7 +1587,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="post_colors", hotkey="t", menu_text=menu_key("t", " colors", prefix="Pos"),
+            key="post_colors",
             label="Colors in posts and mail",
             render=lambda d: "on" if d["post_colors"] else "off",
             prompt=live_choice_field(
@@ -1604,7 +1604,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="mrc_colors", hotkey="i", menu_text=menu_key("I", "nter-BBS chat colors"),
+            key="mrc_colors",
             label="Inter-BBS chat (MRC) colors",
             render=lambda d: "on" if d["mrc_colors"] else "off",
             prompt=live_choice_field(
@@ -1620,7 +1620,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="mrc_nick_color", hotkey="y", menu_text=menu_key("Y", "our MRC nick color"),
+            key="mrc_nick_color",
             label="MRC nick color",
             render=lambda d: f"{CGA_COLOR_NAMES[d['mrc_nick_color']]} (|{d['mrc_nick_color']:02d})",
             prompt=_unless_signed_in_without_credential("the MRC nick color", live_choice_field(
@@ -1636,7 +1636,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="breadcrumb_collapsed", hotkey="l", menu_text=menu_key("L", "ocation style"),
+            key="breadcrumb_collapsed",
             label="Location style",
             render=lambda d: "always collapsed" if d["breadcrumb_collapsed"] else "auto",
             prompt=live_choice_field(
@@ -1653,7 +1653,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Display",
         ),
         FieldSpec(
-            key="sort_preferences", hotkey="s", menu_text=menu_key("S", "ort preferences"),
+            key="sort_preferences",
             label="Sort preferences",
             render=lambda d: f"{d['sort_preference_count']} saved" if d["sort_preference_count"] else "(none)",
             prompt=_sort_preferences_prompt,
@@ -1666,7 +1666,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Account",
         ),
         FieldSpec(
-            key="ssh_public_key", hotkey="k", menu_text=menu_key("k", "ey", prefix="SSH public "),
+            key="ssh_public_key",
             label="SSH public key(s)",
             render=lambda d: f"{d['ssh_key_count']} key(s)" if d["ssh_key_count"] else "(none)",
             prompt=_ssh_public_key_prompt,
@@ -1684,7 +1684,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             section="Account",
         ),
         FieldSpec(
-            key="password", hotkey="a", menu_text=menu_key("A", "ccount password"),
+            key="password",
             label="Password",
             render=lambda d: "set" if d["password_set"] else "(none -- key login only)",
             prompt=_password_prompt,
@@ -2070,7 +2070,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
     )
     fields = [
         FieldSpec(
-            key="display_name", hotkey="d", menu_text=menu_key("D", "isplay name"), label="Display name",
+            key="display_name", label="Display name",
             render=lambda d: sanitize_text(d["display_name"]) if d["display_name"] else "(not set)",
             prompt=_display_name_prompt,
             brief="Set your shown display name",
@@ -2082,8 +2082,8 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             section="Self-reported",
         ),
         FieldSpec(
-            key="display_name_visible", hotkey="i",
-            menu_text=menu_key("i", "splay name visibility", prefix="D"), label="Display name visibility",
+            key="display_name_visible",
+            label="Display name visibility",
             render=_visibility_render("display_name_visible"),
             prompt=live_choice_field(
                 "display_name_visible", [False, True],
@@ -2094,7 +2094,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             section="Self-reported",
         ),
         FieldSpec(
-            key="location", hotkey="l", menu_text=menu_key("L", "ocation"), label="Location",
+            key="location", label="Location",
             render=lambda d: sanitize_text(d["location"]) if d["location"] else "(not set)",
             prompt=_location_prompt,
             brief="Set your shown location",
@@ -2106,8 +2106,8 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             section="Self-reported",
         ),
         FieldSpec(
-            key="location_visible", hotkey="o",
-            menu_text=menu_key("o", "cation visibility", prefix="L"), label="Location visibility",
+            key="location_visible",
+            label="Location visibility",
             render=_visibility_render("location_visible"),
             prompt=live_choice_field(
                 "location_visible", [False, True],
@@ -2118,7 +2118,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             section="Self-reported",
         ),
         FieldSpec(
-            key="birthdate", hotkey="a", menu_text=menu_key("A", "ge/birthdate"), label="Birthdate",
+            key="birthdate", label="Birthdate",
             render=_birthdate_render,
             prompt=_birthdate_prompt,
             brief="Set your birthdate",
@@ -2131,8 +2131,8 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             section="Self-reported",
         ),
         FieldSpec(
-            key="birthdate_visible", hotkey="g",
-            menu_text=menu_key("g", "e visibility", prefix="A"), label="Age visibility",
+            key="birthdate_visible",
+            label="Age visibility",
             render=_visibility_render("birthdate_visible"),
             prompt=live_choice_field(
                 "birthdate_visible", [False, True],
@@ -2143,7 +2143,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             section="Self-reported",
         ),
         FieldSpec(
-            key="verified_badge_visible", hotkey="v", menu_text=menu_key("V", "erified badge visibility"),
+            key="verified_badge_visible",
             label="Verified badge",
             render=_visibility_render("verified_badge_visible"),
             prompt=live_choice_field(
@@ -2159,7 +2159,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             section="SysOp-verified",
         ),
         FieldSpec(
-            key="age_attestation", hotkey="s", menu_text=menu_key("S", "hare age over Link"),
+            key="age_attestation",
             label="Share verified age over Link",
             render=_link_share_render("age"),
             prompt=_link_share_toggle("age"),
@@ -2180,7 +2180,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             section="SysOp-verified",
         ),
         FieldSpec(
-            key="name_attestation", hotkey="h", menu_text=menu_key("h", "are name over Link", prefix="S"),
+            key="name_attestation",
             label="Share verified name over Link",
             render=_link_share_render("name"),
             prompt=_link_share_toggle("name"),

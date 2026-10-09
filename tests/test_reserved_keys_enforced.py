@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from netbbs.net.resource_editor import RESERVED_HOTKEYS, DetailAction, FieldSpec, text_field
+from netbbs.net.resource_editor import RESERVED_HOTKEYS, DetailAction
 
 SOURCE = Path(__file__).resolve().parent.parent / "src" / "netbbs"
 
@@ -89,15 +89,21 @@ def test_every_label_on_a_reserved_key_says_what_the_key_means():
 
 
 @pytest.mark.parametrize("key", sorted(RESERVED_HOTKEYS) + ["B"])
-def test_a_field_or_action_refuses_a_reserved_hotkey(key):
-    with pytest.raises(ValueError, match="works everywhere"):
-        FieldSpec(key="x", hotkey=key, menu_text=f"[{key}]x", label="X", render=lambda d: "", prompt=text_field("x"))
-
+def test_an_action_refuses_a_reserved_hotkey(key):
+    # A field has no key to refuse: it is chosen by its number (step 3).
     async def run(session, lane):
         return False
 
     with pytest.raises(ValueError, match="works everywhere"):
         DetailAction(hotkey=key, menu_text=f"[{key}]x", run=run)
+
+
+def test_an_action_refuses_a_digit_which_would_start_a_field_number():
+    async def run(session, lane):
+        return False
+
+    with pytest.raises(ValueError, match="field numbers"):
+        DetailAction(hotkey="1", menu_text="[1]x", run=run)
 
 
 _NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)

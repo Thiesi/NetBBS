@@ -1081,7 +1081,24 @@ toggle names its setting and shows the current state after a colon,
 `[F]ollow: off` / `[F]ollow: on`, so the key and the label stay the same
 whichever way it is set. A label that is an explicit action (`[T]urn off`)
 is not a toggle label and may stay. Settings and field screens are outside
-this rule; they move to two-digit numbers (step 3). A test keeps it.
+this rule: their fields are numbered (below). A test keeps it.
+
+**A field is chosen by its number** (issue #1158, step 3). On every draft
+field editor -- the Profile, Name & details, the console's settings and
+editors, and a resource's own screen -- each field is drawn with a two-digit
+number in front of its label, `01` to `99`, and the number is read like a
+list's row number: two digits, or one digit and Enter. The numbers run
+straight through a screen's sections, so on the Profile `13` is Color depth on
+every page, and typing a field's number from another section turns to that
+section and opens the field. ↑↓ and Enter still choose the highlighted field,
+and ←→ still step its value. Fields have no letters, so a screen's letters
+belong to its actions: `[S]ave`, `[B]ack`, and a resource's `[U]p`,
+`[R]emove` or `[L]ink`. The action bar offers the range, `[01-24] change`,
+where a row of field letters used to be, which also makes a form shorter.
+With menu descriptions on, the highlighted field's description is shown under
+the list, where the field letters' descriptions used to be. A handbook names
+a field by its label, not its number, because a number moves when a field is
+added.
 
 A key a caller can press is highlighted wherever it is offered, not only on
 menus (issue #974): a prompt that lists its choices in running text
@@ -1140,10 +1157,10 @@ be edited first, in a compact header of one or two rows (counts, place in the
 callers' list, Link status), then the editable fields with the cursor already
 on the first one, then the actions. Long Link details (origin, closure, pending
 transfers, peer reach) form a "NetBBS Link" section after the fields. A field
-is chosen by the cursor only: ↑↓ to choose, Enter or Space to change it, ←→ to
-step a value. Fields have no letters on these screens, so the action keys
-(`[U]p`, `[R]emove`, `[P]ending posts`, `[L]ink`, `[S]tart service` and the
-rest) keep theirs. Changes go into a draft as on every other editor; nothing is
+is chosen by its number or by the cursor, as on every field editor (above):
+↑↓ to choose, Enter or Space to change it, ←→ to step a value. Fields have no
+letters, so the action keys (`[U]p`, `[R]emove`, `[P]ending posts`, `[L]ink`,
+`[S]tart service` and the rest) keep theirs. Changes go into a draft as on every other editor; nothing is
 stored before `[S]ave`. Once a field differs from what is stored, the action
 bar shows only `[S]ave` and `[B]ack`, so no action runs against values the
 screen no longer shows. `[B]ack` leaves at once while nothing has changed. With
@@ -9137,9 +9154,9 @@ Completed product work informed by dogfood includes:
   every other screen renders byte-for-byte as before). A dense, sectioned
   screen that still doesn't fit the caller's terminal even at its most
   compact menu tier paginates by section — `Page Up`/`Page Down` cycle
-  between them, wrapping at either end, while every field's own hotkey
+  between them, wrapping at either end, while every field's number
   keeps working regardless of which page is showing (jumping straight to
-  it, switching pages to match) and `[S]ave`/`[B]ack` stay reachable from
+  it, switching pages to match; issue #1158 replaced the field letters) and `[S]ave`/`[B]ack` stay reachable from
   every page. An unsectioned screen has no natural page boundary and keeps
   today's behavior unchanged if it doesn't fit. Profile (14 fields across 4
   sections, plus a bio-preview/transport-diagnostic preamble) is the first
@@ -15543,12 +15560,14 @@ description travel to its peers once per save, the moderation log keeps one
 entry per save, and with the cursor resting on a live field a stray Enter or
 arrow key would change a resource at once.
 
-**Decision 2 — fields by the cursor, actions by their keys.** On every one of
-these screens a field letter collided with an action letter (on a board, `D`
-was Description and Down, `R` Read level and Remove, `P` Pinned and Pending
-posts; on a door, `D` was Description and Delete). Rejected: keeping field
-letters and moving the actions to a second page, which adds a keystroke to
-every action instead of removing one from every edit.
+**Decision 2 — fields without letters, actions by their keys.** On every one
+of these screens a field letter collided with an action letter (on a board,
+`D` was Description and Down, `R` Read level and Remove, `P` Pinned and
+Pending posts; on a door, `D` was Description and Delete). Fields were chosen
+by the cursor alone until issue #1158 numbered every editor's fields (its
+Decision 8); numbers cannot collide with the action letters. Rejected:
+keeping field letters and moving the actions to a second page, which adds a
+keystroke to every action instead of removing one from every edit.
 
 **Decision 3 — a changed draft hides the actions.** While the draft differs
 from what is stored only `[S]ave` and `[B]ack` are offered. Otherwise `[U]p`,
@@ -15768,11 +15787,25 @@ key inside the label.
   already called them topic spaces; the screens keep the word Communities),
   `S[t]aff list` becomes `[O]perators`, `P[r]evious callers` becomes
   `[R]ecent callers` and `Moder[a]tion` becomes `[A]pprovals`.
-- **Settings and field screens are left to step 3**, which numbers them, so
-  their fields are not reworded twice.
+- **Settings and field screens are left to step 3**, which numbers them
+  (Decision 8), so their fields are not reworded twice.
 - **Row numbers are two digits on every list**, as decided for the tracker:
   a board's posts, the mailbox and a file area took one digit and now read
   `01`-`99` like the picker (two digits, or one and Enter).
+
+**Decision 8 — a field is chosen by its number, straight through.** Step 3 of
+the tracker. Every draft field editor draws a two-digit number in front of each
+field and reads it like a list's row number; ↑↓ and Enter still work, and a
+field has no letter. The numbers run through the whole screen instead of
+restarting in each section, so a number names one field on every page, a
+SysOp helping a caller can say "Profile, 13", and typing it from another page
+turns there. A resource's own screen (issue #1081) numbers its fields too:
+numbers cannot collide with its action letters, which is what kept letters
+off its fields. Rejected: restarting at `01` in each section, which keeps the
+numbers small but makes `03` a different field on every page; keeping
+resource screens on the cursor alone, which leaves the one field list
+without numbers; and numbers only where letters ran out, which keeps two
+schemes.
 
 ### Issue #1156 — how an MRC sender's styled name is shown — decided
 
