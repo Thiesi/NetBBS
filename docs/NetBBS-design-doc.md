@@ -5995,9 +5995,17 @@ states, and every node quarantined or blocked there. The friendly name and
 `dial_in` addresses are read from the node's signed descriptor by the same
 validating readers the node map uses, and are remote text, escaped where they
 are written. "Known to Reliable Link since" is the first direct contact
-Reliable Link has on record (`link_peers.first_contact_at`; for a peer met
-before that column existed, the earliest time its row already held, a date by
-which Reliable Link certainly knew it); "last heard" is the node map's
+Reliable Link has on record (`link_peers.first_contact_at`), set at a peer's
+first direct contact and never moved. For a peer met before that column
+existed (v7.18.0), migration 123 could only take the earliest time the row
+held, and those times move with every contact, so on a node upgraded while in
+regular contact the date is about the upgrade day (issue #1181). No record
+holds the true first contact: `link_trust_subjects.first_verified_hello_at`
+is also set when a node is only introduced, authors carried content or is
+vouched for, and direct-activity days start at issue #1035. Reliable Link's
+rows were corrected by hand from its own records, so the pages are right;
+another node's `export-node-map` keeps the approximate dates for peers it
+knew before upgrading. "Last heard" is the node map's
 (§8.12). Reliable Link writes the caller's map as JSON with `python -m
 netbbs.admin export-node-map`, which copies a fixed list of fields from each
 entry, so a field added to the map later stays off the pages until it is
