@@ -992,9 +992,13 @@ the terminal's height: 6 rows at 24 lines, 3 at 12. A paged screen with a
 floor under its page (`show_detail`, the post and mail review) also packs the
 bar when the page would otherwise sit at that floor and run off the screen,
 and a console screen that draws a panel above its menu (`_fitted_menu`) uses
-the aligned bar only if it still fits under the panel. The user editor's panel
-leaves no row for it at 80x24, so there the bar stays packed; from about 30
-lines it lines up.
+the aligned bar only if it still fits under the panel. The user editor gave
+up the two rows that takes: its read-only record continues the account's
+fields with no heading or blank row of its own, so at 80x24 with
+redraw-in-place on its bar lines up and the screen is exactly 24 rows. A
+screen that scrolls keeps the blank row its title is written after, and a
+carried result line takes a row too; either way that draw falls back to the
+packed bar.
 
 **Known limit below 72 columns (issue #662, decided).** Below 72 columns
 `menu_grid` gives each entry two rows and paired fields go one to a row, and
@@ -2461,7 +2465,7 @@ it in one confirmed step: it sets all three staff permissions. Afterwards the
 account holds exactly those permissions, and the SysOp can remove any of them
 one at a time. The account detail lists the staff permissions and the
 verify-identity permission among its editable fields, and a summary of the
-account's moderator grants in its read-only Record group, so a SysOp sees
+account's moderator grants among its read-only facts, so a SysOp sees
 everything an account may do in one place. The editable fields are one column
 in the cursor's order and the read-only facts sit below them (issue #1119): a
 two-column layout made the cursor zigzag and step over read-only rows.

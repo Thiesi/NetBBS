@@ -1070,20 +1070,33 @@ def _user_detail_bar(session) -> list[str]:
 
 
 def test_user_detail_bar_aligns_its_hotkeys_only_where_the_panel_leaves_room(db, lane, sysop):
-    """`_fitted_menu` budgets the bar against what is already on screen: at
-    80x30 the keys line up in columns, at 80x24 the panel leaves no row for
-    that and the bar stays packed rather than push the panel's top away."""
-    create_user(db, "alice", password="hunter2", user_level=10)
-    tall = FakeSession(["u", "u", "/", "alice", "b", "b", "b", "b"])
-    tall.terminal_height = 30
-    _run(tall, lane, sysop)
-    rows = _user_detail_bar(tall)
-    assert len(rows) > 1
-    assert len({row.index("[", 1) for row in rows if row.count("[") > 1}) == 1
+    """`_fitted_menu` budgets the bar against what is already on screen. The
+    account's record continues its fields with no heading of its own, so at
+    80x24 a cleared screen has the room and the keys line up in columns
+    (maintainer request, 2026-10-09). A screen that scrolls keeps the blank
+    row the title is written after, and there the bar stays packed rather
+    than push the title away."""
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+    from netbbs.rendering import clear_screen
 
-    short = FakeSession(["u", "u", "/", "alice", "b", "b", "b", "b"])
-    _run(short, lane, sysop)
-    assert _user_detail_bar(short)[0].startswith("[L]evel  [U]se promotion rules  ")
+    create_user(db, "alice", password="hunter2", user_level=10)
+
+    def aligned(rows: list[str]) -> bool:
+        return len(rows) > 1 and len({row.index("[", 1) for row in rows if row.count("[") > 1}) == 1
+
+    set_redraw_in_place_enabled(db, sysop, True)
+    cleared = FakeSession(["u", "u", "/", "alice", "b", "b", "b", "b"])
+    _run(cleared, lane, sysop)
+    text = _visible(_written_text(cleared))
+    screen = text[text.rfind(clear_screen(), 0, text.rfind("[U]se promotion")):]
+    assert aligned(_user_detail_bar(cleared))
+    assert len(screen[: screen.index("Choice:")].split("\r\n")) == 24
+    assert "RECORD" not in screen and "Member since:" in screen
+
+    set_redraw_in_place_enabled(db, sysop, False)
+    scrolling = FakeSession(["u", "u", "/", "alice", "b", "b", "b", "b"])
+    _run(scrolling, lane, sysop)
+    assert _user_detail_bar(scrolling)[0].startswith("[L]evel  [U]se promotion rules  ")
 
 
 def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
