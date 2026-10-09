@@ -12,6 +12,6 @@ Replies to you: 1 -- [R]eplies to read them
 [38;5;46m  05. [0m[38;5;220mClassifieds[0m[38;5;248m - board, not yet visited[0m
 [38;5;46m  06. [0m[38;5;220mNetBBS Users[0m[38;5;248m - board, not yet visited, 3 posts[0m
 
-[[1m[38;5;46mS[0m]earch  [[1m[38;5;46mM[0m]ark read  [[1m[38;5;46mF[0m]ollow  [[1m[38;5;46mV[0m]iew followed  [[1m[38;5;46mR[0m]eplies  [[1m[38;5;46mE[0m]-mail  [[1m[38;5;46mB[0m]ack
+[[1m[38;5;46m/[0m] Find  [[1m[38;5;46mM[0m]ark read  [[1m[38;5;46mF[0m]ollow  [[1m[38;5;46mV[0m]iew followed  [[1m[38;5;46mR[0m]eplies  [[1m[38;5;46mE[0m]-mail  [[1m[38;5;46mB[0m]ack
 or type a number to select; Ctrl-L: redraw, Ctrl-H: help
 Choice: 

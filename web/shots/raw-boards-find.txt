@@ -4,5 +4,5 @@
 [38;5;46m  01. [0m[38;5;220mZip disk click of death -- myth?[0m[38;5;248m - [POST] Retro Computing: My Zip 100 s[0m...
 [38;5;46m  02. [0m[38;5;220mWhich 3.5" drives still read 720K?[0m[38;5;248m - [POST] Retro Computing: I have a s[0m...
 
-[[1m[38;5;46mS[0m]earch  [[1m[38;5;46mB[0m]ack — or type a number to select; Ctrl-L: redraw, Ctrl-H: help
+[[1m[38;5;46m/[0m] Find  [[1m[38;5;46mB[0m]ack — or type a number to select; Ctrl-L: redraw, Ctrl-H: help
 Choice: 

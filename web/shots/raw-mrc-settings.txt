@@ -5,12 +5,18 @@ central hub. Enable it here, then bridge individual channels from each channel's
 own screen.
 Link now: [1m[38;5;82m● CONNECTED[0m
 [1m[38;5;246mHUB[0m
-[38;5;75m  Enabled:[0m                                    [38;5;248myes[0m
-[38;5;75m  Hub host:[0m                                   [38;5;248mmrc.bottomlessabyss.net[0m
-[38;5;75m  Hub port:[0m                                   [38;5;248m5001[0m
-[38;5;75m  TLS:[0m                                        [38;5;248myes[0m
+[38;5;75m  01 Enabled:[0m                                    [38;5;248myes[0m
+[38;5;75m  02 Hub host:[0m                                   [38;5;248mmrc.bottomlessabyss.net[0m
+[38;5;75m  03 Hub port:[0m                                   [38;5;248m5001[0m
+[38;5;75m  04 TLS:[0m                                        [38;5;248myes[0m
 
-[[1m[38;5;46mE[0m]nable/Disable  [[1m[38;5;46mH[0m]ost  [[1m[38;5;46mP[0m]ort  [[1m[38;5;46mT[0m]LS  [[1m[38;5;46mS[0m]ave & apply  [[1m[38;5;46mB[0m]ack
+
+  [[1m[38;5;46m01-19[0m] change
+[38;5;248m    Change a field by its number[0m
+  [[1m[38;5;46mS[0m]ave & apply
+[38;5;248m    Write this draft to the database[0m
+  [[1m[38;5;46mB[0m]ack
+[38;5;248m    Discard the draft, nothing saved[0m
 [38;5;248m(Ctrl-H for help on these fields)[0m
-[38;5;248m(Section 1 of 5 -- PgUp/PgDn to switch)[0m
+[38;5;248m(Section 1 of 5: < > switches)[0m
 Choice: 

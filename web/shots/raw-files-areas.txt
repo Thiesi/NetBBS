@@ -7,8 +7,8 @@
 [38;5;46m  04. [0m[38;5;220mText Files[0m[38;5;248m - Guides, histories and the occasional rant[0m
 [38;5;46m  05. [0m[38;5;220mIncoming[0m[38;5;248m - New uploads, checked by the SysOp before they go public[0m
 
-  [[1m[38;5;46mS[0m]earch                                 [[1m[38;5;46mB[0m]ack
-[38;5;248m    Search by name[0m                       [38;5;248m    Return without picking[0m
+  [[1m[38;5;46m/[0m] Find                                 [[1m[38;5;46mB[0m]ack
+[38;5;248m    Find by name[0m                         [38;5;248m    Return without picking[0m
   [[1m[38;5;46mO[0m]rder
 [38;5;248m    Change sort order[0m
 Sort: SysOp's order; or type a number to select; Ctrl-L: redraw, Ctrl-H: help

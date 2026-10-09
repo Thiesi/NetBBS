@@ -8,14 +8,14 @@
 [1m[38;5;51m║ [0m  [38;5;246mSysOps: [0m[1m[38;5;252m1[0m    [38;5;246mActive ratio: [0m[38;5;246m[[0m[38;5;82m████████[0m[38;5;248m░░[0m[38;5;246m][0m [1m[38;5;252m9/11[0m                            [1m[38;5;51m ║[0m
 [1m[38;5;51m║ [0m  [1m[38;5;214m⚠ 1 registration awaiting review[0m                                        [1m[38;5;51m ║[0m
 [1m[38;5;51m╚════════════════════════════════════════════════════════════════════════════╝[0m
-  [[1m[38;5;46mC[0m]reate user                            Pr[[1m[38;5;46mo[0m]motion rules
+  [[1m[38;5;46mC[0m]reate user                            [[1m[38;5;46mA[0m]uto-promotion rules
 [38;5;248m    Add a new user account[0m               [38;5;248m    Raise new accounts automatically[0m
-  [[1m[38;5;46mL[0m]ist users                             [[1m[38;5;46mE[0m]nable/disable
+  [[1m[38;5;46mU[0m]ser list                              [[1m[38;5;46mE[0m]nable/disable
 [38;5;248m    Browse and edit accounts[0m             [38;5;248m    Toggle account access[0m
   [[1m[38;5;46mR[0m]egistration                           [[1m[38;5;46mD[0m]elete user
 [38;5;248m    Signup policy settings[0m               [38;5;248m    Permanently remove a user[0m
-  [[1m[38;5;46mP[0m]romote/demote                         Re[[1m[38;5;46mt[0m]ired names
+  [[1m[38;5;46mP[0m]romote/demote                         [[1m[38;5;46mH[0m]eld names
 [38;5;248m    Change a user's level[0m                [38;5;248m    Names held for deleted accounts[0m
-  Le[[1m[38;5;46mv[0m]els                                 [[1m[38;5;46mB[0m]ack
+  [[1m[38;5;46mL[0m]evels (LAST)                          [[1m[38;5;46mB[0m]ack
 [38;5;248m    What each level opens[0m                [38;5;248m    Return to the SysOp console[0m
 Choice: 

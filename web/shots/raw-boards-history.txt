@@ -4,5 +4,5 @@
 [38;5;46m  01. [0m[38;5;220m06.09.2026 19:51[0m[38;5;248m - current[0m
 [38;5;46m  02. [0m[38;5;220m04.09.2026 19:09[0m[38;5;248m - original[0m
 
-[[1m[38;5;46mS[0m]earch  [[1m[38;5;46mB[0m]ack — or type a number to select; Ctrl-L: redraw, Ctrl-H: help
+[[1m[38;5;46m/[0m] Find  [[1m[38;5;46mB[0m]ack — or type a number to select; Ctrl-L: redraw, Ctrl-H: help
 Choice: 

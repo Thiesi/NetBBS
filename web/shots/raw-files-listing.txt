@@ -4,24 +4,24 @@
 
 [1m[38;5;51m #   Filename                                            Size Date             Uploader[0m
 [38;5;238m──── ────────────────────────────────────────────── ───────── ──────────────── ────────[0m
-[38;5;46m [ 1][0m [38;5;220mbackup-rotate.sh                              [0m [38;5;255m  1.3 KiB[0m [38;5;110m14.08.2026 21:07[0m [38;5;79motto    [0m
+[38;5;46m [01][0m [38;5;220mbackup-rotate.sh                              [0m [38;5;255m  1.3 KiB[0m [38;5;110m14.08.2026 21:07[0m [38;5;79motto    [0m
       [38;5;252mNightly backup rotation, seven days retained.[0m
-[38;5;46m [ 2][0m [38;5;220mansi-preview.py                               [0m [38;5;255m  6.8 KiB[0m [38;5;110m22.08.2026 18:41[0m [38;5;79mwren    [0m
+[38;5;46m [02][0m [38;5;220mansi-preview.py                               [0m [38;5;255m  6.8 KiB[0m [38;5;110m22.08.2026 18:41[0m [38;5;79mwren    [0m
       [38;5;252mPreview an .ANS file at 80 or 132 columns before you upload it.[0m
-[7m>[ 3] zmodem-howto.txt                                 4.3 KiB 02.09.2026 19:41 keeper  [0m
+[7m>[03] zmodem-howto.txt                                 4.3 KiB 02.09.2026 19:41 keeper  [0m
       [38;5;252mGetting files to and from this node: SyncTERM, NetRunner[0m
       [38;5;252mand plain lrzsz, with screenshots.[0m
-[38;5;46m [ 4][0m [38;5;220mnodelist-tools.zip                            [0m [38;5;255m 86.2 KiB[0m [38;5;110m11.09.2026 11:52[0m [38;5;79motto    [0m
+[38;5;46m [04][0m [38;5;220mnodelist-tools.zip                            [0m [38;5;255m 86.2 KiB[0m [38;5;110m11.09.2026 11:52[0m [38;5;79motto    [0m
       [38;5;252mNODELIST TOOLS v2.1[0m
       [38;5;252m  merge, diff and pretty-print[0m
       [38;5;252m  BBS lists. Freeware.[0m
-[38;5;46m [ 5][0m [38;5;220mnetbbs-7.15.3.tar.gz                          [0m [38;5;255m  3.8 MiB[0m [38;5;110m04.10.2026 10:12[0m [38;5;79mkeeper  [0m
+[38;5;46m [05][0m [38;5;220mnetbbs-7.15.3.tar.gz                          [0m [38;5;255m  3.8 MiB[0m [38;5;110m04.10.2026 10:12[0m [38;5;79mkeeper  [0m
       [38;5;252mThe current NetBBS release, source distribution.[0m
 
   [[1m[38;5;46mB[0m]ack
 [38;5;248m    Return to the previous menu[0m
-  [[1m[38;5;46m1-5[0m] — receive via Zmodem                   [[1m[38;5;46mU[0m]pload
+  [[1m[38;5;46m01-05[0m] — receive via Zmodem                 [[1m[38;5;46mU[0m]pload
                                              [38;5;248m    Send a file via Zmodem[0m
-  [[1m[38;5;46mD[0m]ownload                                   [[1m[38;5;46mF[0m]ollow
+  [[1m[38;5;46mD[0m]ownload                                   [[1m[38;5;46mF[0m]ollow: off
 [38;5;248m    Receive this file via Zmodem[0m             [38;5;248m    List this area first in New scan[0m
 Choice: 
