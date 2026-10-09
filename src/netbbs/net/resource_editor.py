@@ -180,12 +180,15 @@ async def write_field_message(session: Session, text: str) -> None:
         position.message = text
 
 
-async def read_field_line(session: Session, *, initial: str) -> str:
-    """Read a seeded value using the field's measured row when available."""
+async def read_field_line(session: Session, *, initial: str, echo: bool = True) -> str:
+    """Read a seeded value using the field's measured row when available.
+
+    `echo=False` reads a secret (a password): typed at the same place,
+    nothing shown."""
     position = _position_for(session)
     if position is None:
         return await session.read_line(
-            initial=initial, cancellable=True,
+            initial=initial, cancellable=True, echo=echo,
             viewport=lambda: session.terminal_width, viewport_owns_row=True,
         )
 
@@ -208,7 +211,7 @@ async def read_field_line(session: Session, *, initial: str) -> str:
         await session.write(move_cursor(min(position.prompt_row, session.terminal_height), 1) + "\x1b[2K")
 
     try:
-        value = await session.read_line(initial=initial, cancellable=True, viewport=viewport)
+        value = await session.read_line(initial=initial, cancellable=True, echo=echo, viewport=viewport)
         viewport()
     except InputCancelled:
         await restore_prompt()

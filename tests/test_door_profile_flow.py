@@ -117,8 +117,8 @@ def test_invalid_import_preserves_existing_draft(db, lane, player, tmp_path, val
     path = tmp_path / "import.json"
     path.write_text(json.dumps(value))
     door = create_door(db,"Import",sys.executable,creator=player)
-    # The refusal is held until a key: the editor's redraw used to wipe it unread.
-    session = FakeSession(["0", "2", str(path), " ", "b"])  # 02 Import JSON
+    # The refusal is carried into the editor's next redraw, which used to wipe it unread.
+    session = FakeSession(["0", "2", str(path), "b"])  # 02 Import JSON
     assert asyncio.run(edit_door_profile(session,lane,player,door)) is None
     assert get_door_by_name(db,door.name) == door
     assert message in "".join(session.written)

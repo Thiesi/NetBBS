@@ -999,7 +999,7 @@ def test_trust_anchor_removal_picker_shows_the_technical_identity(db, lane, syso
 
 
 def test_create_user_with_password_only(db, lane, sysop):
-    session = FakeSession(["u", "c", "0", "1", "alice", "0", "2", "y", "hunter2", "hunter2", "0", "4", "10", "c", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "alice", "0", "2", "hunter2", "hunter2", "0", "4", "10", "c", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "alice")
     assert created.user_level == 10
@@ -1009,7 +1009,7 @@ def test_create_user_with_password_only(db, lane, sysop):
 def test_create_user_with_pubkey_only_raw_base64(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
-    session = FakeSession(["u", "c", "0", "1", "bob", "0", "3", "y", raw_b64, "c", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "bob", "0", "3", raw_b64, "c", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "bob")
     assert created.fingerprint is not None
@@ -1017,7 +1017,7 @@ def test_create_user_with_pubkey_only_raw_base64(db, lane, sysop):
 
 def test_create_user_with_pubkey_only_openssh_line(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
-    session = FakeSession(["u", "c", "0", "1", "carol", "0", "3", "y", _openssh_line(verify_key), "c", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "carol", "0", "3", _openssh_line(verify_key), "c", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "carol")
     assert created.fingerprint is not None
@@ -1026,7 +1026,7 @@ def test_create_user_with_pubkey_only_openssh_line(db, lane, sysop):
 def test_create_user_with_both_password_and_pubkey(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
-    session = FakeSession(["u", "c", "0", "1", "dave", "0", "2", "y", "hunter2", "hunter2", "0", "3", "y", raw_b64, "c", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "dave", "0", "2", "hunter2", "hunter2", "0", "3", raw_b64, "c", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "dave")
     assert created.fingerprint is not None
@@ -1047,7 +1047,7 @@ def test_create_user_with_blank_username_is_cancelled(db, lane, sysop):
     # create_user checks "has a password or key" before it validates the
     # username, so a password is set here to actually reach (and prove)
     # the username-grammar rejection on the still-blank username field.
-    session = FakeSession(["u", "c", "0", "2", "y", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
+    session = FakeSession(["u", "c", "0", "2", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
     _run(session, lane, sysop)
     assert "usernames may only contain" in _written_text(session)
 
@@ -6832,9 +6832,13 @@ def test_backing_out_of_a_clear_leaves_the_override_in_place(db, lane, sysop):
 
 
 def test_clearing_when_already_default_makes_no_change(db, lane, sysop):
+    from netbbs.net.node_theme import accent_color_override
+
+    # The field opens on "default"; entering it again is no change at all.
     session = FakeSession(["s", "c", "0", "1", "default", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "Already using the default" in _written_text(session)
+    assert accent_color_override(db) is None
+    assert "Not a valid" not in _written_text(session)
 
 
 def test_editor_preamble_shows_overridden_and_default_slots_side_by_side(db, lane, sysop):
@@ -10486,7 +10490,7 @@ def test_creating_a_retired_name_tells_the_sysop_why_and_keeps_the_draft(db, lan
     _retire(db, sysop)
     # [U]sers -> [C]reate -> Username (01) alice -> Password (02) -> [C]reate is
     # refused; the draft survives, so [B]ack asks before discarding it.
-    session = FakeSession(["u", "c", "0", "1", "alice", "0", "2", "y", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "alice", "0", "2", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
 
     _run(session, lane, sysop)
 

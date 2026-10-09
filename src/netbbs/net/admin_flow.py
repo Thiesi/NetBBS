@@ -5764,6 +5764,7 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
         existing_domains = {d.domain_id: d for d in domains}
         id_field = text_field("domain_id", required=True)
 
+        @inline_field
         async def _id_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
             # Entering the ID of an existing domain seeds its name and
             # weight, so updating one field cannot silently reset the
@@ -7105,27 +7106,63 @@ async def _retired_usernames_screen(session: Session, lane: DatabaseLane, actor:
 
 
 def _create_user_password_field() -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
-    """Reuses `_prompt_optional_password` as-is on every activation --
-    "no" always (re)clears `draft["password"]` to `None`, "yes" always
-    prompts a fresh password and replaces whatever was there, so the
-    field's own y/n gate doubles as its only clear/replace mechanism.
-    Deliberately not a richer set/replace/clear menu of its own: this
-    screen's draft is never seeded from an existing account (create-only,
-    unlike `edit_resource_draft`'s other callers), so there's no "current
-    real password" a clear/keep distinction would need to protect."""
+    """The new account's password, typed unseen into the field and then
+    once more to confirm it. An empty first answer clears it; a mismatch
+    keeps what the draft had and says so. This screen's draft is never
+    seeded from an existing account, so there is no stored password a
+    clear/keep distinction would need to protect."""
 
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        draft["password"] = await _prompt_optional_password(session)
+        await write_field_prompt(
+            session, colored("Password (typed unseen; Enter on an empty line clears it):", fg_color=MUTED_COLOR),
+            hint="Password, typed unseen; empty clears it",
+        )
+        try:
+            first = await _read_seeded_line(session, initial="", echo=False)
+            if not first:
+                draft["password"] = None
+                return
+            await write_field_prompt(
+                session, colored("Confirm password:", fg_color=MUTED_COLOR), hint="Type it again to confirm",
+            )
+            second = await _read_seeded_line(session, initial="", echo=False)
+        except InputCancelled:
+            return
+        if first != second:
+            await write_field_message(
+                session, colored("Passwords did not match -- password unchanged.", fg_color=MUTED_COLOR),
+            )
+            return
+        draft["password"] = first
 
     return prompt
 
 
 def _create_user_pubkey_field() -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
-    """`_create_user_password_field`'s counterpart for the public key,
-    same reused-prompt/replace-or-clear shape."""
+    """`_create_user_password_field`'s counterpart for the public key: pasted
+    into the field, an empty line clears it, a key that does not parse
+    keeps what the draft had and says why."""
 
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        draft["verify_key"] = await _prompt_optional_pubkey(session)
+        await write_field_prompt(
+            session, colored("Public key (base64, or an ssh-ed25519 line; empty clears it):", fg_color=MUTED_COLOR),
+            hint="Paste the key; empty clears it",
+        )
+        try:
+            text = (await _read_seeded_line(session, initial="")).strip()
+        except InputCancelled:
+            return
+        if not text:
+            draft["verify_key"] = None
+            return
+        try:
+            draft["verify_key"] = parse_verify_key(text)
+        except IdentityError as exc:
+            await write_field_message(
+                session, colored(f"Could not parse key: {exc} -- key unchanged.", fg_color=MUTED_COLOR),
+            )
 
     return prompt
 
@@ -7150,9 +7187,8 @@ def _create_user_field_specs() -> list[FieldSpec]:
             render=lambda d: "set" if d.get("password") else "(not set)",
             prompt=_create_user_password_field(),
             help=(
-                "An account needs a password, a public key, or both. Answering 'no' here "
-                "clears any password already entered on this draft; answering 'yes' always "
-                "prompts for and replaces it with a fresh one."
+                "An account needs a password, a public key, or both. Type it, unseen, then "
+                "again to confirm; an empty answer clears the password from this draft."
             ),
         ),
         FieldSpec(
@@ -7233,33 +7269,6 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
                 fg_color=MUTED_COLOR,
             )
         )
-
-
-async def _prompt_optional_password(session: Session) -> str | None:
-    if not await prompt_yes_no(session, "Set a password?", default=False):
-        return None
-    await session.write("Password: ")
-    first = await session.read_line(echo=False)
-    await session.write("Confirm password: ")
-    second = await session.read_line(echo=False)
-    if not first or first != second:
-        _announce_line(session,
-            colored("Passwords did not match or were blank -- no password set.", fg_color=MUTED_COLOR)
-        )
-        return None
-    return first
-
-
-async def _prompt_optional_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
-    if not await prompt_yes_no(session, "Add a public key?", default=False):
-        return None
-    await write_prompt(session, "Paste the public key (base64, or an ssh-ed25519 line): ")
-    text = (await session.read_line()).strip()
-    try:
-        return parse_verify_key(text)
-    except IdentityError as exc:
-        _announce_line(session, colored(f"Could not parse key: {exc} -- no key set.", fg_color=MUTED_COLOR))
-        return None
 
 
 # -- list / detail -------------------------------------------------------
@@ -10368,10 +10377,16 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
 
+    @inline_field
     async def _format_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await write_prompt(session, f"New format [{draft['format']!r}] (blank to leave unchanged): ")
-        new_fmt = (await session.read_line()).strip()
-        if not new_fmt:
+        await write_field_prompt(
+            session, colored(f"Timestamp format ({_EDIT_HINT}):", fg_color=MUTED_COLOR), hint=_EDIT_HINT,
+        )
+        try:
+            new_fmt = (await _read_seeded_line(session, initial=draft["format"])).strip()
+        except InputCancelled:
+            return
+        if not new_fmt or new_fmt == draft["format"]:
             return
 
         def _apply(db: Database) -> None:
@@ -10381,7 +10396,7 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
         try:
             await lane.run(_apply)
         except ValueError as exc:
-            _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
+            await write_field_message(session, colored(str(exc), fg_color=MUTED_COLOR))
         else:
             draft["format"] = new_fmt
 
@@ -14323,6 +14338,7 @@ def _delay_seconds_field(key: str = "delay_seconds") -> Callable[[Session, Datab
     dogfood-reported bug: mistyping the delay used to discard the
     mode/message already chosen)."""
 
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         # Opens on the current value, like every other number in the console
         # (issue #845, F136).
@@ -14338,10 +14354,10 @@ def _delay_seconds_field(key: str = "delay_seconds") -> Callable[[Session, Datab
         try:
             value = float(raw)
         except ValueError:
-            _announce_line(session, colored("Not a number.", fg_color=MUTED_COLOR))
+            await write_field_message(session, colored("Not a number.", fg_color=MUTED_COLOR))
             return
         if value < 0:
-            _announce_line(session, colored("Delay cannot be negative.", fg_color=MUTED_COLOR))
+            await write_field_message(session, colored("Delay cannot be negative.", fg_color=MUTED_COLOR))
             return
         draft[key] = value
 
@@ -18518,29 +18534,29 @@ def _theme_color_field(slot: str) -> Callable[[Session, DatabaseLane, dict], Awa
     until [S]ave."""
     label = _THEME_SLOT_LABELS[slot]
 
+    @inline_field
     async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
         current = draft[slot]
         current_text = f"{current[0]},{current[1]},{current[2]}" if current is not None else "default"
-        await session.write_line(
-            colored(
-                "Enter a color as R,G,B (each 0-255), 'default' to clear the override, "
-                "or leave blank to keep it.",
-                fg_color=MUTED_COLOR,
-            )
+        await write_field_prompt(
+            session,
+            colored(f"{label}: R,G,B (each 0-255) or 'default' ({_EDIT_HINT}):", fg_color=MUTED_COLOR),
+            hint="R,G,B or default; Enter saves, Esc cancels",
         )
-        await write_prompt(session, f"{label} [{current_text}]: ")
-        raw = (await session.read_line()).strip()
-        if not raw:
+        try:
+            raw = (await _read_seeded_line(session, initial=current_text)).strip()
+        except InputCancelled:
+            return
+        if not raw or raw.lower() == current_text:
             return
         if raw.lower() == "default":
-            if current is None:
-                _announce_line(session, "Already using the default -- no change.")
-                return
             draft[slot] = None
             return
         rgb = _parse_rgb(raw)
         if rgb is None:
-            _announce_line(session, colored("Not a valid R,G,B triple (each 0-255) -- no change.", fg_color=ERROR_COLOR))
+            await write_field_message(
+                session, colored("Not a valid R,G,B triple (each 0-255) -- no change.", fg_color=ERROR_COLOR),
+            )
             return
         draft[slot] = rgb
 
@@ -18983,7 +18999,7 @@ def _seconds_text(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else repr(float(value))
 
 
-async def _read_seeded_line(session: Session, *, initial: str) -> str:
+async def _read_seeded_line(session: Session, *, initial: str, echo: bool = True) -> str:
     """Read one line opening on `initial`, with a row to do it in.
 
     Every prompt below writes its label as a line of its own and then
@@ -19003,9 +19019,9 @@ async def _read_seeded_line(session: Session, *, initial: str) -> str:
     now have.
 
     Raises `InputCancelled` on Escape, which every caller reads as
-    "leave the value alone".
+    "leave the value alone". `echo=False` reads a password unseen.
     """
-    return await read_field_line(session, initial=initial)
+    return await read_field_line(session, initial=initial, echo=echo)
 
 
 #: Bounds for an age gate (issue #540). `0` stays accepted and keeps its

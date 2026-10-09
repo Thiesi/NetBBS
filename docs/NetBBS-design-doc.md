@@ -1423,6 +1423,18 @@ all values move to a separate row with a shared two-column indent; labels and
 values wrap without truncation. This layout also supplies the physical row
 and column used for in-place editing.
 
+**Every typed field edits in place (maintainer request, 2026-10-09).** With
+redraw-in-place on, choosing a field that takes typed input (by its number,
+or the cursor and Enter) puts the cursor in that field's value, with a short
+hint on the prompt row; a problem with the entry is shown on the next redraw.
+A field never draws a prompt of its own below `Choice:` and never asks a
+yes/no question before the typing: a new account's password is typed unseen
+into its field and once more to confirm, its public key pasted into its
+field, an empty answer clears either. Fields that open a picker or a list of
+their own (a trust anchor's node, the MRC room blocklist) are not typed
+fields, and a multi-line text opens its editor. With redraw-in-place off the
+same prompts run on a line of their own below the screen.
+
 ---
 
 ## 4. Accounts, authentication, identity, and addressing
