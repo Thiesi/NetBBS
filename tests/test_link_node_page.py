@@ -238,3 +238,28 @@ def test_during_a_rename_the_page_keeps_the_current_name(db, lane, sysop):
     text = _dns_screen(lane, sysop, [])
     assert "https://www.netbbs.org/~oldname" in text
     assert "~newname" not in text
+
+
+@pytest.mark.parametrize("status", [RegistrationStatus.ABANDONED, RegistrationStatus.RELEASED])
+def test_a_lapsed_name_keeps_its_page_and_the_setting_that_turns_it_off(db, lane, sysop, status):
+    """Issue #1177: an abandoned or released name keeps its page, marked as
+    left, so its SysOp must still be able to take the page down."""
+    _live_name(db)
+    set_registration_status(db, status)
+    text = _dns_screen(lane, sysop, [])
+    assert "https://www.netbbs.org/~myboard" in text
+    assert "[W]eb page" in text
+    assert "no longer registered, but its page stays" in text
+
+    _dns_screen(lane, sysop, ["w", "w"])
+    assert get_node_page(db) == NODE_PAGE_OFF
+
+
+def test_a_revoked_name_has_no_web_page_row_or_key(db, lane, sysop):
+    """A revoked name loses its page, so there is nothing to set."""
+    _live_name(db)
+    set_registration_status(db, RegistrationStatus.REVOKED)
+    text = _dns_screen(lane, sysop, ["w"])
+    assert "www.netbbs.org/~" not in text
+    assert "[W]eb page" not in text
+    assert get_node_page(db) == NODE_PAGE_SHOWN

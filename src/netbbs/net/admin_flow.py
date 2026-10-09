@@ -9767,6 +9767,17 @@ async def _backup_schedule_editor(
 
 _MANAGED_DNS_ACTIVE_STATUSES = (ManagedDnsRegistrationStatus.PENDING, ManagedDnsRegistrationStatus.MATURED)
 
+# Where the node page's setting is offered (issue #1177): wherever the name
+# has a page or will have one. A matured name has one, and keeps it once
+# abandoned or released (marked "left"; design doc §8.13), so the SysOp can
+# still turn it off; a pending name can be set in advance. A revoked name
+# loses its page, and no name has none.
+_NODE_PAGE_STATUSES = (
+    *_MANAGED_DNS_ACTIVE_STATUSES,
+    ManagedDnsRegistrationStatus.ABANDONED,
+    ManagedDnsRegistrationStatus.RELEASED,
+)
+
 
 async def _draw_managed_dns_status(
     session: Session, lane: DatabaseLane, actor: User
@@ -9923,8 +9934,13 @@ async def _draw_managed_dns_status(
                 "Reaching this board by name",
                 [Note(line) for line in managed_dns_standard_ports_lines(listeners)],
             ))
+        if status in _NODE_PAGE_STATUSES:
             sections.append(Section(
-                "Web page", _node_page_lines(previous_name or name, await lane.run(get_node_page)),
+                "Web page",
+                _node_page_lines(
+                    previous_name or name, await lane.run(get_node_page),
+                    lapsed=status not in _MANAGED_DNS_ACTIVE_STATUSES,
+                ),
             ))
     await _write_sections(session, sections, unicode_style=unicode_style)
     actions = [menu_key("R", "egister")]
@@ -9934,7 +9950,7 @@ async def _draw_managed_dns_status(
         if previous_name is None:
             actions.append(menu_key("G", "ive up name"))
             actions.append(menu_key("N", "ew name"))
-    if status in _MANAGED_DNS_ACTIVE_STATUSES:
+    if status in _NODE_PAGE_STATUSES:
         actions.append(menu_key("W", "eb page"))
     if await lane.run(get_managed_dns_admin_token) is not None:
         # Design doc §16 Decision 4: the one node whose operator also
@@ -9953,12 +9969,13 @@ _NODE_PAGE_DESCRIPTIONS = {
 }
 
 
-def _node_page_lines(name: str, setting: str) -> list[Field | Note]:
+def _node_page_lines(name: str, setting: str, *, lapsed: bool = False) -> list[Field | Note]:
     """The "Web page" section of the DNS screen (design doc §8.13, issue
     #1165): where this node's page lives and the SysOp's choice about it.
     The page is built from what Reliable Link knows, so it appears only
     once Reliable Link has met this node, and a change reaches it with
-    the next contact."""
+    the next contact. `lapsed` (an abandoned or released name, issue
+    #1177) says the page stays, marked as left, until it is turned off."""
     rows: list[Field | Note] = [
         Field("Address", f"{NODE_PAGE_URL_PREFIX}{name}"),
         Field(
@@ -9971,6 +9988,11 @@ def _node_page_lines(name: str, setting: str) -> list[Field | Note]:
             "here reaches it with the next contact. [W]eb page steps through the settings."
         ),
     ]
+    if lapsed:
+        rows.append(Note(
+            "This name is no longer registered, but its page stays, marked as left. "
+            "Set it to off here to take the page down."
+        ))
     return rows
 
 
@@ -10113,7 +10135,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             await cancel_registration_rename(flow, lane)
             flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
-        elif choice == "w" and status in _MANAGED_DNS_ACTIVE_STATUSES:
+        elif choice == "w" and status in _NODE_PAGE_STATUSES:
             # Issue #1165: a toggle that steps through the three settings.
             # The setting and its audit entry commit together.
             def _step(db: Database) -> None:

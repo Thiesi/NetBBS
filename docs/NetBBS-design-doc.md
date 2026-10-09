@@ -6040,7 +6040,10 @@ new holder never inherits the old one's dates. A rename moves the page to the ne
 engines index it, or turn it off, on the DNS screen's `[W]eb page`. The choice
 travels as the descriptor's `node_page` field (§8.2), so the node states it
 itself and nobody needs a login on the website; it takes effect at Reliable
-Link's next contact with the node.
+Link's next contact with the node. The setting is offered wherever the name
+has a page or will have one: pending, matured, and abandoned or released, since
+a page that has left stays until it is turned off (issue #1177). A revoked name
+has no page, so nothing to set.
 
 ## 9. Linked boards and resource lifecycle
 

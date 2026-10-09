@@ -1356,7 +1356,8 @@ never the address the DNS service sees.
 The DNS screen's **[W]eb page** steps through the three settings: shown but
 hidden from search engines (the default), shown and indexed, or off. Your node
 signs the choice into what it sends Reliable Link, so a change takes effect at
-the next contact.
+the next contact. Giving up or releasing the name does not take the page down:
+it stays, marked as left, and **[W]eb page** is still there to turn it off.
 
 `python -m netbbs.admin export-node-map [--output FILE]` prints your own node
 map as your callers see it, as JSON: the same document Reliable Link builds the
