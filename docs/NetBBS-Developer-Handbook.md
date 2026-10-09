@@ -710,8 +710,8 @@ A few keys mean the same on every hotkey screen (issue #1158, §3.5 "Keys that
 work everywhere"): `B` and Esc go back, `<` `>` turn a page, `/` finds, and
 `?`, F1 and Ctrl-H show help. A new screen:
 
-- never gives one of them another meaning. `FieldSpec` and `DetailAction`
-  refuse them as hotkeys;
+- never gives one of them another meaning. `DetailAction` refuses them (and
+  digits) as hotkeys;
 - answers help. A hotkey read returns `HELP_KEY`, a structured read
   `EditorKey(CTRL, "h")`. `help_overlay.show_menu_help` builds the page from
   the screen's own menu entries and a sentence about the screen. A
@@ -722,6 +722,14 @@ work everywhere"): `B` and Esc go back, `<` `>` turn a page, `/` finds, and
 A key-reading function that is a question rather than a screen (a yes/no, an
 editor's "Save, Discard or Cancel?") goes on its exception list, with the
 reason.
+
+Two more rules from the same issue (§3.5). A menu, action-bar or one-key
+question key is its label's very first letter (`[R]ecent callers`, never
+`P[r]evious callers`); a collision is resolved by rewording a label, and
+`tests/test_first_letter_keys.py` checks it across the source. A list row or a
+settings field is chosen by a two-digit number instead of a letter: read it
+with `netbbs.net.row_numbers.read_row_number`, and give a `FieldSpec` no key
+at all, since `edit_resource_draft` numbers fields by their position.
 
 For bundled door presentation, inspect real renders, not just width tests.
 [door_gallery.py](../scripts/door_gallery.py) renders Voidrunner and War Dialer;
