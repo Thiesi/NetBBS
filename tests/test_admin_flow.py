@@ -1099,6 +1099,86 @@ def test_user_detail_bar_aligns_its_hotkeys_only_where_the_panel_leaves_room(db,
     assert _user_detail_bar(scrolling)[0].startswith("[L]evel  [U]se promotion rules  ")
 
 
+def _user_detail_screen_rows(text: str, marker: str) -> list[str]:
+    """The cleared user-editor screen drawn just before `marker` was written."""
+    end = text.index(marker)
+    screen = text[text.rfind("\x1b[2J", 0, end):end]
+    return _visible(screen).split("\r\n")
+
+
+def test_user_detail_edits_the_level_where_it_is_drawn(db, lane, sysop):
+    """With redraw-in-place on, `[L]evel` puts the cursor in the level's value
+    and the hint on the `Choice:` row, as a Create/Edit screen does -- no
+    "New level for" prompt below the screen (maintainer request)."""
+    from netbbs.net.admin_flow import _EDIT_HINT
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+
+    create_user(db, "alice", password="hunter2", user_level=10)
+    set_redraw_in_place_enabled(db, sysop, True)
+    session = FakeSession(["u", "u", "/", "alice", "l", "12", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "New level for" not in text
+    sgr = r"(?:\x1b\[[0-9;]*m)*"
+    move = re.search(
+        r"\x1b\[(\d+);1H\x1b\[2K" + sgr + re.escape(_EDIT_HINT) + sgr + r"\x1b\[(\d+);(\d+)H", text,
+    )
+    assert move is not None
+    prompt_row, row, column = (int(value) for value in move.groups())
+    rows = _user_detail_screen_rows(text, move.group(0))
+    assert rows[row - 1].startswith("> Level:")
+    assert rows[row - 1][column - 1:].startswith("10")
+    assert rows[prompt_row - 1].startswith("Choice:")
+    assert next(u for u in list_users(db) if u.username == "alice").user_level == 12
+
+
+def test_user_detail_carries_a_refused_level_into_the_next_draw(db, lane, sysop):
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+
+    create_user(db, "alice", password="hunter2", user_level=10)
+    set_redraw_in_place_enabled(db, sysop, True)
+    session = FakeSession(["u", "u", "/", "alice", "l", "not-a-level", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    edit = text.index("Enter saves, Esc cancels")
+    redraw = text.index("\x1b[2J", edit)
+    assert "Not a level or a level's name" in text[redraw:text.index("Choice:", redraw)]
+    assert next(u for u in list_users(db) if u.username == "alice").user_level == 10
+
+
+def test_user_detail_edits_the_display_name_where_it_is_drawn(db, lane, sysop):
+    from netbbs.attestation import get_display_name
+    from netbbs.auth.users import get_user_by_username
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+
+    create_user(db, "alice", password="hunter2", user_level=10)
+    set_redraw_in_place_enabled(db, sysop, True)
+    session = FakeSession(["u", "u", "/", "alice", "n", "Alice Moreau", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "(blank clears it" not in text
+    move = re.search(r"Enter saves, Esc cancels(?:\x1b\[[0-9;]*m)*\x1b\[(\d+);(\d+)H", text)
+    assert move is not None
+    row, column = (int(value) for value in move.groups())
+    rows = _user_detail_screen_rows(text, move.group(0))
+    assert rows[row - 1].startswith("> Display name:")
+    assert rows[row - 1][column - 1:].startswith("(not set)")
+    assert get_display_name(db, get_user_by_username(db, "alice")) == "Alice Moreau"
+
+
+def test_user_detail_without_redraw_in_place_still_prompts_below(db, lane, sysop):
+    from netbbs.net.redraw_preference import set_redraw_in_place_enabled
+
+    create_user(db, "alice", password="hunter2", user_level=10)
+    set_redraw_in_place_enabled(db, sysop, False)
+    session = FakeSession(["u", "u", "/", "alice", "l", "12", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "New level for" in text
+    assert not re.search(r"\x1b\[\d+;\d+H", text)
+    assert next(u for u in list_users(db) if u.username == "alice").user_level == 12
+
+
 def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
     # Dogfood feature request: this bespoke cursor-nav screen (built
     # this same session, alongside review_composition) had no on-demand

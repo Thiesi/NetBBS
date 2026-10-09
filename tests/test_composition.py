@@ -273,6 +273,110 @@ def test_review_arrow_nav_activates_the_highlighted_field():
     assert action is ReviewAction.EDIT_BODY
 
 
+def _screen_rows(session) -> list[str]:
+    """The last cleared screen, one entry per row, SGR stripped."""
+    text = "".join(session.written)
+    text = text[text.rfind("\x1b[2J"):]
+    return re.sub(r"\x1b\[[0-9;]*m", "", text).split("\n")
+
+
+def test_review_edits_the_subject_where_it_is_drawn():
+    """With the screen redrawn in place, `[U]pdate subject` puts the cursor in
+    the Subject's value and the hint on the `Choice:` row, as a Create/Edit
+    screen does -- no `Subject:` prompt below the screen."""
+    from netbbs.net.composition import read_subject
+
+    session = NavigableFakeSession(keys=("u",), lines=("New subject",))
+    places = {}
+    action = asyncio.run(review_composition(
+        session, recipient=None, subject="Old subject", body="Body", commit_key="p", commit_label="ost",
+        redraw_in_place=True, places=places,
+    ))
+    assert action is ReviewAction.EDIT_SUBJECT
+    row, column, prompt_row = places["u"]
+    rows = _screen_rows(session)
+    assert rows[row - 1].startswith("> Subject: Old subject")
+    assert rows[prompt_row - 1].startswith("Choice:")
+    assert column == len("> Subject: ")
+    assert session.written[-1] == "Choice: "  # no line written below it
+    before = len(session.written)
+    subject = asyncio.run(read_subject(session, max_bytes=200, current="Old subject", place=places["u"]))
+    assert subject == "New subject"
+    after = session.written[before:]
+    assert f"\x1b[{row};{column + 1}H" in "".join(after)
+    assert not any("\n" in text for text in after)
+
+
+def test_a_resize_during_an_in_place_subject_edit_says_so_on_the_next_draw():
+    """Rows counted for one terminal size are wrong for another, so a resize
+    cancels the edit; the review's next draw says why the subject is
+    unchanged, as the account detail's in-place edits do."""
+    from netbbs.net.composition import read_subject
+    from netbbs.net.notices import take_notices
+
+    class ResizingSession(NavigableFakeSession):
+        async def read_line(self, *args, **kwargs):
+            self.terminal_width -= 1  # the terminal is resized while the edit is open
+            return await super().read_line(*args, **kwargs)
+
+    session = ResizingSession(keys=("u",), lines=("Typed before the resize",))
+    places = {}
+    asyncio.run(review_composition(
+        session, recipient=None, subject="Old", body="Body", commit_key="p", commit_label="ost",
+        redraw_in_place=True, places=places,
+    ))
+    subject = asyncio.run(read_subject(session, max_bytes=200, current="Old", place=places["u"]))
+    assert subject == "Old"
+    assert any("Terminal resized" in line for line in take_notices(session))
+
+
+def test_a_refused_subject_is_said_on_the_prompt_row_and_reopens_in_place():
+    from netbbs.net.composition import read_subject
+
+    session = NavigableFakeSession(keys=("u",), lines=("x" * 250, "Short enough"))
+    places = {}
+    asyncio.run(review_composition(
+        session, recipient=None, subject="Old", body="Body", commit_key="p", commit_label="ost",
+        redraw_in_place=True, places=places,
+    ))
+    before = len(session.written)
+    subject = asyncio.run(read_subject(session, max_bytes=200, current="Old", place=places["u"]))
+    assert subject == "Short enough"
+    after = "".join(session.written[before:])
+    row, column, prompt_row = places["u"]
+    assert f"\x1b[{prompt_row};1H\x1b[2K" in after
+    assert "That subject is 50 characters too long" in after
+    assert after.count(f"\x1b[{row};{column + 1}H") >= 2  # read twice, both times on the value
+    assert "\n" not in after
+
+
+def test_review_edits_the_recipient_where_it_is_drawn():
+    from netbbs.net.composition import read_prefilled_field
+
+    session = NavigableFakeSession(keys=("t",), lines=("carol",))
+    places = {}
+    action = asyncio.run(review_composition(
+        session, recipient="bob", subject="Hi", body="Body", commit_key="s", commit_label="end",
+        redraw_in_place=True, places=places,
+    ))
+    assert action is ReviewAction.EDIT_RECIPIENT
+    row, column, _prompt_row = places["t"]
+    assert _screen_rows(session)[row - 1].startswith("> To: bob")
+    before = len(session.written)
+    assert asyncio.run(read_prefilled_field(session, "To", "bob", place=places["t"])) == "carol"
+    assert f"\x1b[{row};{column + 1}H" in "".join(session.written[before:])
+
+
+def test_review_without_redraw_in_place_offers_no_places():
+    session = NavigableFakeSession(keys=("u",))
+    places = {}
+    asyncio.run(review_composition(
+        session, recipient=None, subject="Hi", body="Body", commit_key="p", commit_label="ost", places=places,
+    ))
+    assert places == {}
+    assert session.written[-1] == "\n"  # the prompt below, as before
+
+
 def test_review_escape_clears_the_cursor_highlight_without_acting():
     session = NavigableFakeSession(keys=("DOWN", "ESCAPE", "p"))
     action = asyncio.run(

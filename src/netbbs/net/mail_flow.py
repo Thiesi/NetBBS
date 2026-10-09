@@ -154,6 +154,7 @@ from netbbs.net.composition import (
     characters_over,
     edit_line_body,
     read_prefilled_field,
+    ReviewPlace,
     read_subject,
     review_composition,
     show_compose_screen,
@@ -2739,8 +2740,9 @@ async def write_to_all_callers(
         if too_long is not None:
             announce(session, too_long, tone="error")
         announce(session, await audience(), tone="muted")
+        review_places: dict[str, ReviewPlace] = {}
         action = await review_composition(
-            session, recipient=None, subject=subject, body=body,
+            session, places=review_places, recipient=None, subject=subject, body=body,
             commit_key="s", commit_label="end", commit_brief="Send it to all callers",
             description_level=description_level, redraw_in_place=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, accent_color=accent_color,
@@ -2761,7 +2763,9 @@ async def write_to_all_callers(
             announce(session, "Message cancelled.", tone="muted")
             return False
         if action is ReviewAction.EDIT_SUBJECT:
-            subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject)
+            subject = await read_subject(
+                session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject, place=review_places.get("u"),
+            )
             keep_fields()
             continue
         if action is ReviewAction.EDIT_BODY:
@@ -3232,8 +3236,9 @@ async def _compose_mail(
             too_long = _file_lines_too_long(await lane.run(body_with_link_text, body, files))
         if too_long is not None:
             announce(session, too_long, tone="error")
+        review_places: dict[str, ReviewPlace] = {}
         action = await review_composition(
-            session,
+            session, places=review_places,
             # The account's own name, not the text as typed (issue #813).
             recipient=recipient_label,
             subject=subject,
@@ -3269,7 +3274,7 @@ async def _compose_mail(
         if action is ReviewAction.EDIT_RECIPIENT:
             # Opened on the name the caller reads, not a technical identity
             # the To prompt resolved it to (issue #826); unchanged keeps it.
-            edited = await read_prefilled_field(session, "To", recipient_label)
+            edited = await read_prefilled_field(session, "To", recipient_label, place=review_places.get("t"))
             edited_entries = split_recipients(edited)
             request = picker_request(edited_entries[-1], link_enabled=link_enabled) if edited_entries else None
             if request is not None:
@@ -3283,7 +3288,9 @@ async def _compose_mail(
                 recipient_text, recipient_label = await settle_recipient(edited)
             continue
         if action is ReviewAction.EDIT_SUBJECT:
-            subject = await read_subject(session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject)
+            subject = await read_subject(
+                session, max_bytes=MAX_MAIL_SUBJECT_BYTES, current=subject, place=review_places.get("u"),
+            )
             continue
         if action is ReviewAction.EDIT_BODY:
             # A letter kept from here keeps the To and Subject review
