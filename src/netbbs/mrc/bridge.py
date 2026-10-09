@@ -161,6 +161,16 @@ def _sender_fields(body: str, from_user: str, sender: str, message: str) -> dict
 # lines pass this allowance instead of the node-wide inbound one
 # (`_is_caller_reply`), so the caller's own bound is the one that applies.
 REPLY_BURST = 300
+# Every server command `_handle_server_packet` acts on by name, before a
+# line addressed to a caller falls through to `_deliver_reply`. Such a
+# packet pays the node-wide inbound allowance even when it names a caller:
+# its branch writes state (a room topic, a roster) or answers the hub, and
+# never reaches the per-caller one. A test reads the dispatcher and keeps
+# this set complete.
+_SERVER_COMMANDS_HANDLED_BY_NAME = frozenset({
+    "BANNER", "GOODBYE", "HELLO", "NEWUPDATE", "NOTIFY", "OLDVERSION", "PING", "PONG",
+    "PROTOCOLVERSION", "ROOMTOPIC", "STATS", "TERMINATE", "USERLIST", "USERNICK", "USERROOM",
+})
 REPLY_RATE_PER_SECOND = 10.0
 # CTCP: every request costs one reply, so a remote sender is bounded on
 # its own -- three quick ones, then one every two seconds.
@@ -945,14 +955,17 @@ class MrcBridge:
         Such a reply comes as one fast burst, and the node-wide inbound
         allowance (40 lines) cut a `/BBSES` listing of every connected
         board off after its first 39 entries, silently. It is shown to that
-        caller alone and written nowhere, so `_deliver_reply`'s per-caller
-        allowance bounds it and says so when it cuts. A room or nick
-        correction (`USERROOM`, `USERNICK`) changes this node's state, so
-        it stays under the node-wide allowance like room traffic."""
+        caller alone, so `_deliver_reply`'s per-caller allowance bounds it
+        and says so when it cuts; a `LIST` row also feeds the room
+        directory, whose one write waits for the listing's footer and
+        answers one request. A command the bridge acts on by name
+        (`_SERVER_COMMANDS_HANDLED_BY_NAME`: a room topic, a roster, a room
+        or nick correction) never reaches that allowance, so it stays under
+        the node-wide one like room traffic, whoever it names."""
         if not packet.is_server or self._caller_for_nick(packet.to_user) is None:
             return False
         command, _params = protocol.parse_server_command(packet.body)
-        return command not in ("USERROOM", "USERNICK")
+        return command not in _SERVER_COMMANDS_HANDLED_BY_NAME
 
     async def _writer_loop(self, writer: asyncio.StreamWriter) -> None:
         while True:
