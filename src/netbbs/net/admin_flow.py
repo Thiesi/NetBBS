@@ -1521,15 +1521,21 @@ def _fitted_menu(options: list[MenuEntry], description_level: str, *, session: S
     the described form pushed the panel's own top row off a 24-row terminal.
     Measured here instead, the way `edit_resource_draft` measures its own:
     the described grid if it fits under what is already on screen, else the
-    packed one-line bar."""
+    bar with its hotkeys aligned in columns if that fits, else the packed
+    bar, the fewest rows."""
+    def fits(menu: str) -> bool:
+        return used_rows + _pending_notice_rows(session) + menu.count("\r\n") + 2 <= session.terminal_height
+
     if description_level != "off":
         described = menu_grid(
             [("", options)], width=session.terminal_width, height=session.terminal_height,
             description_level=description_level,
         )
-        if used_rows + _pending_notice_rows(session) + described.count("\r\n") + 2 <= session.terminal_height:
+        if fits(described):
             return described
-    return action_bar([entry.label for entry in options], width=session.terminal_width, height=session.terminal_height)
+    labels = [entry.label for entry in options]
+    aligned = action_bar(labels, width=session.terminal_width, height=session.terminal_height)
+    return aligned if fits(aligned) else action_bar(labels, width=session.terminal_width, height=None)
 
 
 async def _write_counted(session: Session, text: str) -> int:

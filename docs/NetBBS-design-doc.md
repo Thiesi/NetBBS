@@ -990,7 +990,11 @@ user editor's bar is 5 rows at 80 columns where packing took 3), so they give
 way to the packed rows when the aligned bar would take more than a quarter of
 the terminal's height: 6 rows at 24 lines, 3 at 12. A paged screen with a
 floor under its page (`show_detail`, the post and mail review) also packs the
-bar when the page would otherwise sit at that floor and run off the screen.
+bar when the page would otherwise sit at that floor and run off the screen,
+and a console screen that draws a panel above its menu (`_fitted_menu`) uses
+the aligned bar only if it still fits under the panel. The user editor's panel
+leaves no row for it at 80x24, so there the bar stays packed; from about 30
+lines it lines up.
 
 **Known limit below 72 columns (issue #662, decided).** Below 72 columns
 `menu_grid` gives each entry two rows and paired fields go one to a row, and

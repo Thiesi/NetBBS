@@ -868,6 +868,7 @@ async def review_composition(
         # at the floor would run off the bottom of the screen.
         aligned = False
         pages = paginate(blocks, budget=_budget(paged, packed))
+        paged = len(pages) > 1
     page = 0
 
     async def draw() -> None:
