@@ -527,8 +527,8 @@ def test_the_ftn_status_screen_has_help_and_h_is_still_held_packets(db, lane, sy
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(ftn_status_screen(session, lane, sysop, _controls()))
     text = session.squeezed()
-    assert "FTN mail help" in text and "What the echomail and netmail gateway last did" in text
-    assert "[H]eld packets" in text.split("FTN mail help")[1]
+    assert "Echomail & netmail help" in text and "What the echomail and netmail gateway last did" in text
+    assert "[H]eld packets" in text.split("Echomail & netmail help")[1]
     assert session.leftover == []
 
 

@@ -8,7 +8,7 @@ Configuration and operation are kept apart, as MRC's are:
   default character set, Origin line, netmail level, and the node-wide
   answer port. A new network starts as fsxNet's main hub, the usual first
   network for a new BBS; the SysOp fills in the address fsxNet gave them.
-- **Node → FTN mail** (`ftn_status_screen`): what the mailer and listener
+- **Node → Echomail & netmail (FTN)** (`ftn_status_screen`): what the mailer and listener
   last did, what waits, and the work on a running network: poll now,
   AreaFix requests, nodelist import, held packets.
 - **A board's echo** (`board_echo_action`): which echo area a board carries,
@@ -290,7 +290,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
     return saved
 
 
-# --- Node → FTN mail ---------------------------------------------------------
+# --- Node → Echomail & netmail (FTN) ---------------------------------------------
 
 
 def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> list[Section]:
@@ -339,12 +339,12 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
         chrome = await af._load_chrome(lane, actor)
         sections = await lane.run(lambda db: _status_sections(db, mailer, listener, unicode_style=chrome.unicode_style))
         choice, page = await af.show_detail(
-            session, title=af._detail_title(session, chrome, "FTN mail", breadcrumb=("Node",)),
+            session, title=af._detail_title(session, chrome, "Echomail & netmail (FTN)", breadcrumb=("Node",)),
             sections=sections, page=page, message=message,
             actions=[("p", menu_key("P", "oll now")), ("a", menu_key("A", "reaFix")),
                      ("n", menu_key("N", "odelist import")), ("h", menu_key("H", "eld packets")), af._BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
-            help_title="FTN mail help",
+            help_title="Echomail & netmail help",
             help_about=(
                 "What the echomail and netmail gateway last did, network by network. "
                 "Each action asks which network it is for."
@@ -519,7 +519,7 @@ async def board_echo_action(session: Session, lane: DatabaseLane, actor: User, b
     await session.write_line("")
     await session.write_line(colored(
         f"The {network.name} echo tag this board carries (e.g. FSX_GEN). An empty line makes it local again; "
-        f"link the echo at the hub with AreaFix (Node → FTN mail).", fg_color=MUTED_COLOR))
+        f"link the echo at the hub with AreaFix (Node → Echomail & netmail (FTN)).", fg_color=MUTED_COLOR))
     await af.write_prompt(session, "Echo tag: ")
     try:
         tag = (await session.read_line(cancellable=True,

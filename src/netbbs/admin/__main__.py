@@ -504,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Replace an FTN network's stored nodelist with the given (unpacked) nodelist file. "
             "Netmail to a node the list says answers BinkP then goes to it directly; the rest goes "
-            "via the uplink. The console does the same from Node, FTN mail, [N]odelist import. "
+            "via the uplink. The console does the same from Node, Echomail & netmail (FTN), [N]odelist import. "
             "Safe while the node runs."
         ),
     )
