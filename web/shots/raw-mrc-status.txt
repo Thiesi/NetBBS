@@ -1,4 +1,4 @@
-[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mNode[0m[38;5;246m › [0m[38;5;51mChat bridge (MRC)[0m
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mNode[0m[38;5;246m › [0m[38;5;51mInter-BBS chat (MRC)[0m
 [38;5;246mThis node's link to the Multi Relay Chat network, live.[0m
 [38;5;240m───────────────────────────────────────────────────────[0m
 
@@ -16,7 +16,7 @@
 [1m[38;5;246mNETWORK[0m
 [38;5;75m  Network size:[0m        [38;5;252m12 users on 7 boards, 3 rooms, low activity (as of 0 min[0m
                        [38;5;252mago)[0m
-[38;5;75m  Hub round trip:[0m      [38;5;252m1 ms (as of 0 s ago)[0m
+[38;5;75m  Hub round trip:[0m      [38;5;252m1 ms (as of 2 s ago)[0m
 
 [[1m[38;5;46mR[0m]econnect now  [[1m[38;5;46mS[0m]ettings  [[1m[38;5;46m<[0m] Prev  [[1m[38;5;46m>[0m] Next  [[1m[38;5;46mB[0m]ack
 [38;5;248m(Page 1 of 2: < > turns)[0m
