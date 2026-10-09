@@ -67,6 +67,13 @@ def test_a_second_key_that_is_no_digit_is_refused_and_erased():
     assert number is None and shown.count("\b") == 2
 
 
+def test_a_control_key_read_key_did_not_draw_erases_only_the_digit():
+    """`read_key` returns Ctrl-H, Ctrl-L and the like unechoed, so the
+    refusal must not erase a character of the screen it never drew."""
+    number, shown = _read("1", _char("\x08"), first_echoed=True, echoed=True)
+    assert number is None and shown.count("\b") == 2 and shown.endswith("\a")
+
+
 def test_keys_the_reader_already_echoed_are_not_drawn_twice():
     number, shown = _read("1", _char("2"), first_echoed=True, echoed=True)
     assert number == 12 and shown == ""

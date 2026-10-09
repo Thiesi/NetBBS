@@ -349,11 +349,14 @@ def test_download_via_second_number_shortcut(tmp_path, monkeypatch):
 
 
 def test_download_via_one_digit_and_enter(tmp_path, monkeypatch):
-    """One digit and Enter names that row too (issue #1158)."""
+    """One digit and Enter names that row too (issue #1158). Enter
+    arrives through `read_editor_key`: a plain `read_key` skips it."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    session = FakeSession(keys=["2", "\r", "b"])
+    session = FakeInteractiveSession(editor_keys=[
+        EditorKey(EditorKeyKind.CHAR, char="2"), EditorKey(EditorKeyKind.ENTER),
+    ])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -418,7 +421,7 @@ def test_download_key_backed_out_of_the_picker_downloads_nothing(tmp_path, monke
     db.close()
 
 
-@pytest.mark.parametrize("number_keys", [["0", "9"], ["9", "\r"], ["0", "0"], ["1", "x"]])
+@pytest.mark.parametrize("number_keys", [["0", "9"], ["0", "\x08"], ["0", "0"], ["1", "x"]])
 def test_download_out_of_range_number_beeps_and_stays(tmp_path, monkeypatch, number_keys):
     db_path = tmp_path / "node.db"
     db = Database(db_path)

@@ -14,9 +14,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from netbbs.digits import is_ascii_number
-from netbbs.net.char_input import EditorKey, EditorKeyKind
+from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, REDRAW_KEY, REFRESH_KEY, EditorKey, EditorKeyKind
 from netbbs.net.session import Session
 from netbbs.rendering.ansi import reject_keystroke
+
+# What `read_key` returns without drawing it (see `reject_unhandled_key`):
+# a reader that "echoed" one of these drew nothing to erase.
+_UNECHOED_KEYS = (REDRAW_KEY, REFRESH_KEY, HELP_KEY, CANCEL_KEY)
 
 
 ROW_NUMBER_WIDTH = 2
@@ -47,7 +51,11 @@ async def read_row_number(
     Reads one more key with `read` (which says whether it echoed it):
     a second digit completes the number, Enter takes `first` alone.
     Every digit is shown on the prompt line, and a refusal erases
-    exactly what was shown, so the prompt is as it was."""
+    exactly what was shown, so the prompt is as it was.
+
+    A plain `read_key` reader never returns Enter (it skips CR and LF),
+    so through one a number is two digits only; every transport has
+    `read_editor_key`, which does."""
     shown = 1
     if not first_echoed:
         await session.write(first)
@@ -59,7 +67,9 @@ async def read_row_number(
         if second is not None:
             if not echoed:
                 await session.write(second)
-            shown = 2
+                shown = 2
+            elif second not in _UNECHOED_KEYS:
+                shown = 2
         if second is None or not is_ascii_number(second):
             await session.write(reject_keystroke(shown))
             return None
