@@ -61,7 +61,16 @@ from netbbs.net.notices import announce
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.net.resource_editor import FieldSpec, choice_field, choice_step, edit_resource_draft
+from netbbs.net.char_input import InputCancelled
+from netbbs.net.resource_editor import (
+    FieldSpec,
+    choice_field,
+    choice_step,
+    edit_resource_draft,
+    inline_field,
+    read_field_line,
+    write_field_prompt,
+)
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import (
@@ -391,12 +400,17 @@ async def register_via_prompt(
     draft: dict = {"name": previous_name or "", "dynamic": previous_dynamic}
     listeners = await lane.run(get_local_listeners)
 
+    @inline_field
     async def _name_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        shown = sanitize_text(draft["name"]) if draft["name"] else "(none)"
-        await write_prompt(
-            session, f"Desired subdomain name (letters, digits, hyphens) [{shown}] (blank = keep): ",
+        await write_field_prompt(
+            session,
+            colored("Desired subdomain name (letters, digits, hyphens; Enter saves, Esc cancels):", fg_color=MUTED_COLOR),
+            hint="Letters, digits, hyphens; Enter saves, Esc cancels",
         )
-        raw = (await session.read_line()).strip()
+        try:
+            raw = (await read_field_line(session, initial=sanitize_text(draft["name"] or ""))).strip()
+        except InputCancelled:
+            return
         if raw:
             draft["name"] = raw
 

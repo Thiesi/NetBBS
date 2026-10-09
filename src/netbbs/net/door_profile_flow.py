@@ -14,7 +14,20 @@ from netbbs.doors.registry import DoorError, update_door
 from netbbs.doors.runtime import run_door, war_dialer_world_path, war_dialer_path_problem
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.picker import pick_item
-from netbbs.net.resource_editor import FieldSpec, bool_field, bool_step, choice_field, edit_resource_draft, text_field
+from netbbs.net.char_input import InputCancelled
+from netbbs.net.redraw_preference import redraw_in_place_enabled
+from netbbs.net.resource_editor import (
+    FieldSpec,
+    bool_field,
+    bool_step,
+    choice_field,
+    edit_resource_draft,
+    inline_field,
+    read_field_line,
+    text_field,
+    write_field_message,
+    write_field_prompt,
+)
 from netbbs.net.session import write_prompt
 from netbbs.rendering import (
     ERROR_COLOR, LABEL_COLOR, METADATA_COLOR, MUTED_COLOR, SUCCESS_COLOR, VALUE_COLOR, WARNING_COLOR,
@@ -95,9 +108,16 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
                                 profile=DoorProfile.from_json(json.dumps(value["profile"])))
             draft.update(_draft(candidate))
 
+    @inline_field
     async def import_prompt(session, lane, draft):
-        await write_prompt(session, "Profile JSON path (blank keeps draft): ")
-        name = (await session.read_line()).strip()
+        await write_field_prompt(
+            session, colored("Profile JSON path (empty keeps the draft):", fg_color=MUTED_COLOR),
+            hint="Path to a profile JSON; empty keeps the draft",
+        )
+        try:
+            name = (await read_field_line(session, initial="")).strip()
+        except InputCancelled:
+            return
         if not name:
             return
         try:
@@ -115,10 +135,9 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
             candidate = replace(door, profile=profile, executable_path=executable, args=tuple(args))
             draft.update(_draft(candidate))
         except (OSError, ValueError, TypeError) as exc:
-            # Held until a key: the editor's next redraw would wipe it unread.
-            await _heading(session, "Import failed")
-            await _problem(session, str(exc))
-            await _pause(session)
+            # Carried into the editor's next redraw, which would otherwise
+            # wipe it unread.
+            await write_field_message(session, colored(f"Import failed: {exc}", fg_color=ERROR_COLOR))
 
     async def check_prompt(session, lane, draft):
         await _heading(session, "Setup check")
@@ -276,7 +295,11 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
 
     # As the editor's own preamble: written before it, the editor's first
     # clear-and-draw wiped the line before it was ever on screen.
+    # Typed fields edit in place, as on every other editor; this one had
+    # never been told the caller's redraw preference, so none of them could.
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     return await edit_resource_draft(session, lane, title="Door compatibility", fields=fields,
+                                     redraw_in_place=redraw_in_place,
                                      preamble=colored(
                                          "External installs are manual. See docs/NetBBS-door-guide.md. "
                                          "Templates need local paths and game setup.", fg_color=MUTED_COLOR),

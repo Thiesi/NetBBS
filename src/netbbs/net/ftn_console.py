@@ -52,6 +52,7 @@ from netbbs.ftn.nodelist import MAX_NODELIST_BYTES, NodelistError, import_nodeli
 from netbbs.ftn.queue import FtnQueueFullError, count_pending_outbound, delete_held, list_held
 from netbbs.ftn.tosser import release_held
 from netbbs.moderation.log import record_action
+from netbbs.net.resource_editor import read_field_line
 from netbbs.net.session import Session
 from netbbs.rendering import MUTED_COLOR, colored
 from netbbs.rendering.detail import Field, Note, Section
@@ -137,7 +138,7 @@ def _secret_field(key: str, label: str):
         await af.write_field_prompt(session, colored(f"{label} (typed unseen; Enter on an empty line clears it):",
                                                      fg_color=MUTED_COLOR))
         try:
-            value = await session.read_line(echo=False, cancellable=True)
+            value = await read_field_line(session, initial="", echo=False)
         except af.InputCancelled:
             return
         draft[key] = value.strip()

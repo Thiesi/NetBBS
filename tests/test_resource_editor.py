@@ -1948,6 +1948,52 @@ def test_numeric_and_optional_fields_use_their_displayed_row(kind):
     assert result["value"] == (None if kind in ("age", "level") else "" if kind == "optional_text" else 21)
 
 
+@pytest.mark.parametrize("kind", ["delay", "color", "password", "pubkey"])
+def test_console_fields_that_drew_their_own_prompt_now_edit_at_their_row(kind):
+    """These typed fields used to write a prompt of their own below
+    `Choice:`, or ask a yes/no question first: they edit where the value
+    is shown now, like every other typed field."""
+    import base64
+
+    import nacl.signing
+
+    from netbbs.net.admin_flow import (
+        _create_user_password_field,
+        _create_user_pubkey_field,
+        _delay_seconds_field,
+        _theme_color_field,
+    )
+
+    key_b64 = base64.b64encode(bytes(nacl.signing.SigningKey.generate().verify_key)).decode()
+    cases = {
+        "delay": (_delay_seconds_field("value"), 30.0, b"\x7f\x7f45\r", lambda v: v == 45.0),
+        "color": (_theme_color_field("accent"), None, b"\x7f" * 7 + b"1,2,3\r", lambda v: v == (1, 2, 3)),
+        "password": (_create_user_password_field(), None, b"s3cret\r", lambda v: v == "s3cret"),
+        "pubkey": (_create_user_pubkey_field(), None, key_b64.encode() + b"\r", lambda v: v is not None),
+    }
+    prompt, initial, script, check = cases[kind]
+    draft_key = "accent" if kind == "color" else "value"
+    if kind == "password":
+        draft_key = "password"
+    if kind == "pubkey":
+        draft_key = "verify_key"
+    session = InlineSession(["0", "1", "s"], script=script)
+    result = asyncio.run(edit_resource_draft(
+        session, None, title="Edit",
+        fields=[FieldSpec(draft_key, "Value", lambda d: str(d[draft_key]), prompt)],
+        draft={draft_key: initial}, save=_save_dict, save_menu_text="Save", back_menu_text="Back",
+        redraw_in_place=True,
+    ))
+    row, col, screen = session.before[0]
+    assert "> 01 Value" in screen[row]
+    assert col == len("  01 Value: ")
+    assert check(result[draft_key])
+    if kind == "password":
+        # Typed unseen, then once more at the same place to confirm.
+        assert [options.get("echo") for options in session.read_options] == [False, False]
+        assert session.before[1][:2] == (row, col)
+
+
 def test_resize_during_in_place_edit_keeps_the_draft_and_redraws():
     session = InlineSession(["0", "2", "s"])
     session.resize_on_read = True
