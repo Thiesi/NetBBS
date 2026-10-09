@@ -120,6 +120,27 @@ def test_write_as_staff_refuses_a_sysop_staff_or_yourself(db, sysop, alice, targ
         write_as_staff(db, manager, target, _write_nothing)
 
 
+def test_a_change_whose_record_fails_is_not_kept(db, sysop, alice, monkeypatch):
+    """The change and its admin-history row are one transaction: a record
+    that cannot be saved takes the change with it."""
+    from netbbs import profile_admin
+    from netbbs.directory import set_bio
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("database is full")
+
+    monkeypatch.setattr(profile_admin, "record_action_without_commit", fail)
+
+    def write(db, target):
+        set_bio(db, target, "Written by staff")
+        return None, "Bio changed"
+
+    with pytest.raises(RuntimeError):
+        write_as_staff(db, sysop, alice, write)
+    assert get_bio(db, alice) is None
+    assert _profile_edits(db, alice) == []
+
+
 def test_write_as_staff_refuses_plain_staff_and_the_guest_account(db, sysop, alice):
     approver = _manager(db, sysop, name="otto", permissions=StaffPermission.APPROVE_ACCOUNTS)
     with pytest.raises(UserManagementError):
