@@ -1109,6 +1109,18 @@ def test_user_detail_escape_clears_the_cursor_highlight_without_leaving(db, lane
     assert updated.disabled_at is None
 
 
+def test_user_detail_rejects_an_unknown_key_without_erasing(db, lane, sysop):
+    """A key this screen does not use rings the bell and nothing else.
+    `read_editor_key` echoes nothing, so the old erase-then-bell backspaced
+    over the prompt once per press."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["u", "u", "/", "alice", "z", "z", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert text.count("\a") >= 2
+    assert "\b \b" not in text
+
+
 def test_user_detail_recent_admin_actions_show_who_performed_them(db, lane, sysop):
     # Dogfood follow-up: this list used to show *what* happened but
     # never *who* did it, even though actor_user_id is stored for
