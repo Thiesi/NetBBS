@@ -9,7 +9,8 @@ for validation and persistence; finishing an editor only returns a draft.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from enum import Enum, auto
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
 from netbbs.net.notices import take_notices, write_notices
+from netbbs.net.resource_editor import editing_in_place, read_field_line, write_field_prompt
 from netbbs.net.session import Session, post_body_width, write_laid_out_row, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.digits import is_ascii_number
@@ -47,12 +49,29 @@ from netbbs.rendering import (
     action_bar,
     clear_screen,
     colored,
+    cut_to_width,
     menu_grid,
     menu_key,
     reflow,
     sanitize_text,
     screen_title,
+    visible_width,
 )
+
+#: Where the review drew a field's value, for an edit in place: its 1-based
+#: screen row, the 0-based column it starts at, and the `Choice:` row
+#: (`review_composition`'s `places`).
+ReviewPlace = tuple[int, int, int]
+
+# What the prompt row says while a field is edited where it is drawn.
+_IN_PLACE_HINT = "Enter saves, Esc keeps"
+
+
+@contextmanager
+def _reading_at(session: Session, place: ReviewPlace) -> Iterator[None]:
+    row, column, prompt_row = place
+    with editing_in_place(session, row=row, column=column, rows=1, prompt_row=prompt_row):
+        yield
 
 
 def _menu_row(
@@ -113,29 +132,44 @@ async def show_compose_screen(
     await write_notices(session)
 
 
-async def read_prefilled_field(session: Session, label: str, current: str) -> str:
+async def read_prefilled_field(
+    session: Session, label: str, current: str, *, place: ReviewPlace | None = None,
+) -> str:
     """A required one-line field (a subject, a recipient) opened on its
     current value (design doc §3.5, issue #529's rule; applied here by issue
     #680): Enter saves what is shown, Esc leaves it unchanged. A field that
     may not be empty keeps its value when the line is emptied, rather than
-    turning blank -- "keep" is Esc, not an empty answer."""
-    prompt = f"{label}: "
-    await write_prompt(session, prompt)
+    turning blank -- "keep" is Esc, not an empty answer.
+
+    `place`, from the review that offered the field (`review_composition`'s
+    `places`), edits it where the review drew it: the cursor in the value,
+    the hint on the `Choice:` row. Without one, the field is a prompt of its
+    own below."""
     # The editor echoes its initial buffer, and a subject carried over Link
     # can hold control sequences: it is shown sanitized, and handed back
     # untouched when the caller saves it without changing it.
     shown = sanitize_text(current)
-    try:
-        value = await session.read_line(
-            initial=shown, cancellable=True,
-            # The columns left after the label on this row: the viewport is
-            # measured from the cursor, and a full-width one would wrap a
-            # long subject and edit against the wrong row.
-            viewport=lambda: max(1, session.terminal_width - display_width(prompt)),
-        )
-    except InputCancelled:
-        await session.write_line("")
-        return current
+    if place is not None:
+        try:
+            with _reading_at(session, place):
+                await write_field_prompt(session, f"{label}:", hint=_IN_PLACE_HINT)
+                value = await read_field_line(session, initial=shown)
+        except InputCancelled:
+            return current
+    else:
+        prompt = f"{label}: "
+        await write_prompt(session, prompt)
+        try:
+            value = await session.read_line(
+                initial=shown, cancellable=True,
+                # The columns left after the label on this row: the viewport is
+                # measured from the cursor, and a full-width one would wrap a
+                # long subject and edit against the wrong row.
+                viewport=lambda: max(1, session.terminal_width - display_width(prompt)),
+            )
+        except InputCancelled:
+            await session.write_line("")
+            return current
     value = value.strip()
     if not value or value == shown.strip():
         return current
@@ -165,6 +199,7 @@ def too_long_message(what: str, over: int) -> str:
 
 async def read_subject(
     session: Session, *, max_bytes: int, current: str | None = None, blank_cancels: bool = False,
+    place: ReviewPlace | None = None,
 ) -> str | None:
     """The Subject prompt of every composition (issue #812), which checks
     the subject where it is typed rather than after the body is written.
@@ -180,7 +215,11 @@ async def read_subject(
 
     A subject over `max_bytes` is refused with how many characters to
     remove, and the prompt reopens on it to be shortened (Ctrl-U clears
-    it). The storage layer's byte check stays the backstop."""
+    it). The storage layer's byte check stays the backstop.
+
+    `place` edits the subject where the review drew it, as
+    `read_prefilled_field` does; a refusal is said on the `Choice:` row and
+    the value reopens where it is."""
     prefilled = current is not None
     if prefilled:
         prompt = "Subject: "
@@ -195,15 +234,25 @@ async def read_subject(
     # the same reasoning as `read_prefilled_field`.
     shown = sanitize_text(current or "")
     seed = shown
+    refusal: str | None = None
     while True:
-        await write_prompt(session, prompt)
         try:
-            value = await session.read_line(
-                initial=seed, cancellable=True,
-                viewport=lambda: max(1, session.terminal_width - display_width(prompt)),
-            )
+            if place is not None:
+                with _reading_at(session, place):
+                    # A refusal takes the hint's place, cut to the row rather
+                    # than wrapped below the screen.
+                    hint = cut_to_width(refusal, max(1, session.terminal_width - 1)) if refusal else _IN_PLACE_HINT
+                    await write_field_prompt(session, prompt, hint=hint)
+                    value = await read_field_line(session, initial=seed)
+            else:
+                await write_prompt(session, prompt)
+                value = await session.read_line(
+                    initial=seed, cancellable=True,
+                    viewport=lambda: max(1, session.terminal_width - display_width(prompt)),
+                )
         except InputCancelled:
-            await session.write_line("")
+            if place is None:
+                await session.write_line("")
             return current
         value = value.strip()
         if prefilled and (not value or value == shown.strip()):
@@ -211,19 +260,16 @@ async def read_subject(
         if not value:
             if blank_cancels:
                 return None
-            await session.write_line(
-                colored(f"A subject is required -- type one, or press Esc to {escape_does}.", fg_color=ERROR_COLOR)
-            )
+            refusal = f"A subject is required -- type one, or press Esc to {escape_does}."
+            if place is None:
+                await session.write_line(colored(refusal, fg_color=ERROR_COLOR))
             seed = ""
             continue
         over = characters_over(value, max_bytes)
         if over:
-            await session.write_line(
-                colored(
-                    f"{too_long_message('That subject is', over)} -- shorten it, or press Esc to {escape_does}.",
-                    fg_color=ERROR_COLOR,
-                )
-            )
+            refusal = f"{too_long_message('That subject is', over)} -- shorten it, or press Esc to {escape_does}."
+            if place is None:
+                await session.write_line(colored(refusal, fg_color=ERROR_COLOR))
             seed = value
             continue
         return value
@@ -700,8 +746,15 @@ async def review_composition(
     breadcrumb: Sequence[str] = ("Compose",),
     extra_rows: Sequence[str] = (),
     extra_actions: Sequence[tuple[str, str, str | None]] = (),
+    places: dict[str, ReviewPlace] | None = None,
 ) -> ReviewAction | str:
     """Render a complete draft and return one explicit review action.
+
+    `places`, if given, receives where the last draw put the To (`"t"`) and
+    Subject (`"u"`) values, for a caller to edit the one it was asked to
+    where it is (`read_prefilled_field`, `read_subject`): only with
+    redraw-in-place on, a screen that fits, and a value on one row. Without
+    an entry the caller prompts below, as it always has.
 
     `extra_rows` and `extra_actions` are a caller's own additions (issue
     #830: mail's attached files): rows, already styled, shown under the
@@ -803,6 +856,10 @@ async def review_composition(
         )
         return _rows(row, width)
 
+    # Where `_head` put each field's line: (index among its rows, rows, the
+    # column its value starts at).
+    head_fields: dict[str, tuple[int, int, int]] = {}
+
     def _head() -> list[str]:
         heading = screen_title(
             "Review composition",
@@ -815,19 +872,24 @@ async def review_composition(
             node_name_gradient=session.node_name_gradient,
         )
         rows = _rows(heading, width)
+        head_fields.clear()
         if recipient is not None:
-            rows.extend(_rows(
+            line = _rows(
                 _review_field_line(
                     "t", "To: ", sanitize_text(recipient), selected=selected, bold_value=False, accent=accent_color
                 ),
                 width,
-            ))
-        rows.extend(_rows(
+            )
+            head_fields["t"] = (len(rows), len(line), 2 + len("To: "))
+            rows.extend(line)
+        line = _rows(
             _review_field_line(
                 "u", "Subject: ", sanitize_text(subject), selected=selected, bold_value=True, accent=accent_color
             ),
             width,
-        ))
+        )
+        head_fields["u"] = (len(rows), len(line), 2 + len("Subject: "))
+        rows.extend(line)
         for extra in extra_rows:
             rows.extend(_rows(extra, width))
         rows.append(
@@ -880,6 +942,19 @@ async def review_composition(
         # this redraw would erase a line written before it (issue #680).
         rows.extend(message_rows)
         lead = clear_screen() if redraw_in_place else "\r\n"
+        if places is not None:
+            places.clear()
+            # Counted from the top of a cleared screen, which holds only while
+            # no row is wider than the terminal (an art post's may be) and
+            # the screen does not scroll.
+            prompt_row = len(rows) + 1
+            if (
+                redraw_in_place and prompt_row <= session.terminal_height
+                and all(visible_width(row) <= width for row in rows)
+            ):
+                for key, (index, count, column) in head_fields.items():
+                    if count == 1:
+                        places[key] = (index + 1, column, prompt_row)
         # An art post's rows are drawn for the terminal's real width (issue
         # #964): `write_laid_out_row` keeps them whole.
         for index, row in enumerate(rows):
@@ -958,6 +1033,14 @@ async def review_composition(
                 continue
             return action
         if action is not None:
+            field = {ReviewAction.EDIT_RECIPIENT: "t", ReviewAction.EDIT_SUBJECT: "u"}.get(action)
+            if field is not None and places is not None and field in places:
+                # Edited where it is drawn: redrawn with the field marked, so
+                # the caller's cursor lands on a highlighted value.
+                selected = field
+                await draw()
+                if field in places:
+                    return action
             await session.write_line("")
             return action
         if choice in extra_keys:

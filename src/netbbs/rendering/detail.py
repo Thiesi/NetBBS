@@ -141,6 +141,18 @@ def _right_label_width(sections: Sequence[Section]) -> int:
 
 
 def _field_lines(row: Field, *, column: int, width: int) -> list[str]:
+    return _field_layout(row, column=column, width=width)[0]
+
+
+#: Where a field's value sits among its own rows: `(first value row, value
+#: column, value rows)`, the row an offset into the field's lines, the column
+#: 0-based, and the rows the value's own text (not its note) takes. What an
+#: in-place edit needs to put the cursor on the value (`FieldPlace`).
+FieldPlace = tuple[int, int, int]
+
+
+def _field_layout(row: Field, *, column: int, width: int) -> tuple[list[str], FieldPlace]:
+    """`_field_lines`, and where in them the value is."""
     label = sanitize_text(row.label)
     label_size = display_width(label)
     # The cursor takes the indent's two columns, so selecting a row never
@@ -169,14 +181,16 @@ def _field_lines(row: Field, *, column: int, width: int) -> list[str]:
             for line in (wrap_to_width(sanitize_text(row.value), available) or [""])
         ]
     indent = " " * value_column
+    value_rows = len(value_lines)
     if row.note:
         value_lines.extend(
             colored(line, fg_color=MUTED_COLOR) for line in wrap_to_width(sanitize_text(row.note), available)
         )
     if stacked:
-        return [head, *(indent + line for line in value_lines)]
+        return [head, *(indent + line for line in value_lines)], (1, value_column, value_rows)
     padding = " " * (column - label_size + 1)
-    return [head + padding + value_lines[0], *(indent + line for line in value_lines[1:])]
+    lines = [head + padding + value_lines[0], *(indent + line for line in value_lines[1:])]
+    return lines, (0, value_column, value_rows)
 
 
 def _paired_lines(
@@ -298,9 +312,15 @@ class Block:
 
 
 def render_section(
-    section: Section, *, column: int, width: int, unicode_style: bool = False, right_column: int | None = None
+    section: Section, *, column: int, width: int, unicode_style: bool = False, right_column: int | None = None,
+    places: dict[int, FieldPlace] | None = None,
 ) -> Block:
-    """One section as styled rows. Every row fits `width`."""
+    """One section as styled rows. Every row fits `width`.
+
+    `places`, if given, receives where each one-to-a-row field's value was
+    drawn, keyed by `id()` of the `Field`, the row an offset into the block's
+    `rows` (its heading not counted). A paired field gets none: its value
+    shares a row with another's."""
     heading = None
     if section.title:
         heading = colored(
@@ -315,7 +335,10 @@ def render_section(
             return Block(heading, paired)
     for row in section.rows:
         if isinstance(row, Field):
-            rows.extend(_field_lines(row, column=column, width=width))
+            lines, (offset, value_column, value_rows) = _field_layout(row, column=column, width=width)
+            if places is not None:
+                places[id(row)] = (len(rows) + offset, value_column, value_rows)
+            rows.extend(lines)
         elif isinstance(row, Note):
             rows.extend(_note_lines(row, width=width))
         elif isinstance(row, Styled):
@@ -325,18 +348,31 @@ def render_section(
     return Block(heading, rows)
 
 
-def render_sections(sections: Sequence[Section], *, width: int, unicode_style: bool = False) -> list[Block]:
+def render_sections(
+    sections: Sequence[Section], *, width: int, unicode_style: bool = False,
+    places: dict[int, tuple[int, FieldPlace]] | None = None,
+) -> list[Block]:
     """Every non-empty section as its own block, sharing one label column.
     Blocks rather than one flat list so `paginate` can keep a group of facts
-    together on a page."""
+    together on a page.
+
+    `places` receives `render_section`'s places, each with the index of its
+    block in the returned list."""
     column = label_width(sections)
     right_column = _right_label_width(sections)
-    return [
-        render_section(
-            section, column=column, width=width, unicode_style=unicode_style, right_column=right_column
-        )
-        for section in sections if section.rows
-    ]
+    blocks: list[Block] = []
+    for section in sections:
+        if not section.rows:
+            continue
+        section_places: dict[int, FieldPlace] | None = {} if places is not None else None
+        blocks.append(render_section(
+            section, column=column, width=width, unicode_style=unicode_style, right_column=right_column,
+            places=section_places,
+        ))
+        if places is not None and section_places:
+            for key, place in section_places.items():
+                places[key] = (len(blocks) - 1, place)
+    return blocks
 
 
 def paginate(blocks: Sequence[Block], *, budget: int) -> list[list[str]]:

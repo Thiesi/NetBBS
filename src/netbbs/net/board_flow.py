@@ -101,6 +101,7 @@ from netbbs.net.composition import (
     ReviewAction,
     characters_over,
     edit_line_body,
+    ReviewPlace,
     read_subject,
     review_composition,
     show_compose_screen,
@@ -2261,8 +2262,9 @@ async def _review_and_commit(
             too_long = _file_lines_too_long(body_with_link_text(db, body, files))
         if too_long is not None:
             announce(session, too_long, tone="error")
+        review_places: dict[str, ReviewPlace] = {}
         action = await review_composition(
-            session,
+            session, places=review_places,
             recipient=None,
             subject=subject,
             body=body,
@@ -2301,7 +2303,9 @@ async def _review_and_commit(
             announce(session, cancelled_notice, tone="muted")
             return
         if action is ReviewAction.EDIT_SUBJECT:
-            subject = await read_subject(session, max_bytes=MAX_SUBJECT_BYTES, current=subject)
+            subject = await read_subject(
+                session, max_bytes=MAX_SUBJECT_BYTES, current=subject, place=review_places.get("u"),
+            )
             continue
         if action is ReviewAction.EDIT_BODY:
             editor = _draw_body if layout == "art" else partial(

@@ -27,9 +27,10 @@ resource kind's own fields, domain functions, or error types.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any, Awaitable, Callable
 
 from netbbs.net.char_input import (
@@ -124,6 +125,36 @@ _field_position: ContextVar[_FieldPosition | None] = ContextVar("field_position"
 def _position_for(session: Session) -> _FieldPosition | None:
     position = _field_position.get()
     return position if position is not None and position.session is session else None
+
+
+@contextmanager
+def editing_in_place(
+    session: Session, *, row: int, column: int, rows: int, prompt_row: int,
+) -> Iterator[_FieldPosition]:
+    """Edit one value where it is drawn, on a screen that lays itself out.
+
+    `edit_resource_draft` measures its own form; a screen with a cursor of
+    its own (the account detail, the post review) draws its rows itself and
+    says where a value is: `row` is its 1-based screen row, `column` the
+    0-based column the value starts at, `rows` the rows its text takes, and
+    `prompt_row` the row of the screen's `Choice:` prompt. Inside the block,
+    `write_field_prompt` puts its hint on that prompt row, `read_field_line`
+    reads on the value itself, and `write_field_message` keeps its text on
+    the yielded position's `message` for the screen's next draw. A resize
+    while reading cancels the edit, as on any form.
+
+    Only for a screen that was just drawn from the top (redraw-in-place)
+    and fits the terminal: where it scrolled, the rows counted from the top
+    are not where the value is, and the caller reads below its prompt as it
+    always has."""
+    position = _FieldPosition(
+        session, row, column, rows, session.terminal_width, session.terminal_height, prompt_row,
+    )
+    token = _field_position.set(position)
+    try:
+        yield position
+    finally:
+        _field_position.reset(token)
 
 
 async def write_field_prompt(session: Session, text: str, *, hint: str = "Enter submits; Esc keeps") -> None:

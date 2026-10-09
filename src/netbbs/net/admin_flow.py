@@ -625,6 +625,7 @@ from netbbs.net.draft_storage import DraftPruneReport, prune_stale_drafts
 from netbbs.net.help_overlay import show_help, show_menu_help
 from netbbs.net.picker import ListColumn, pick_item as _pick_item
 from netbbs.net.resource_editor import (
+    editing_in_place,
     inline_field,
     read_field_line,
     write_field_prompt,
@@ -1498,7 +1499,8 @@ async def _show_report(
 
 
 async def _write_sections(
-    session: Session, sections: Sequence[Section], *, unicode_style: bool, joined: int = 0
+    session: Session, sections: Sequence[Section], *, unicode_style: bool, joined: int = 0,
+    places: dict[int, tuple[int, int, int]] | None = None,
 ) -> int:
     """Write a grouped label/value panel for a screen that keeps its own menu
     and key loop below it, a blank row between groups. Returns the rows
@@ -1506,23 +1508,32 @@ async def _write_sections(
     terminal instead of pushing the panel's top off it.
 
     The first `joined` sections after the first continue it: no blank row
-    before them. Give them no title, or they read as a group of their own."""
+    before them. Give them no title, or they read as a group of their own.
+
+    `places`, if given, receives where each one-to-a-row field's value was
+    drawn, keyed by `id()` of the `Field`: its first row as a 0-based offset
+    into the panel, the 0-based column it starts at, and its rows -- what an
+    in-place edit needs (`editing_in_place`)."""
     rows = 0
-    blocks = render_sections(sections, width=session.terminal_width, unicode_style=unicode_style)
+    block_places: dict[int, tuple[int, tuple[int, int, int]]] | None = {} if places is not None else None
+    blocks = render_sections(
+        sections, width=session.terminal_width, unicode_style=unicode_style, places=block_places,
+    )
+    starts: list[int] = []
     for index, block in enumerate(blocks):
-        if 0 < index <= joined:
-            for line in block.lines:
-                await session.write_line(line)
-            rows += len(block.lines)
-            continue
-        # Led by a blank row, the first group included: what sits above a
-        # panel is a title rule or a status line, and the panel is a new
-        # paragraph either way.
-        await session.write_line("")
-        rows += 1
+        if not 0 < index <= joined:
+            # Led by a blank row, the first group included: what sits above a
+            # panel is a title rule or a status line, and the panel is a new
+            # paragraph either way.
+            await session.write_line("")
+            rows += 1
+        starts.append(rows + (1 if block.heading is not None else 0))
         for line in block.lines:
             await session.write_line(line)
         rows += len(block.lines)
+    if places is not None and block_places:
+        for key, (block_index, (offset, column, value_rows)) in block_places.items():
+            places[key] = (starts[block_index] + offset, column, value_rows)
     return rows
 
 
@@ -7573,6 +7584,7 @@ async def _draw_user_detail(
     *,
     selected: str | None = None,
     allowed: frozenset[str] | None = None,
+    layout: dict[str, Any] | None = None,
 ) -> bool:
     """Returns whether `target` is currently on the local blocklist --
     unlike `disabled_at`, blocked status isn't a field on `User` itself,
@@ -7590,16 +7602,23 @@ async def _draw_user_detail(
     Save/Back convention) renders identically to before this feature.
 
     `allowed` (issue #836) narrows the menu to what a staff member may do
-    (`_user_detail_keys`); `None` is the SysOp's full screen."""
-    await session.write_line(
-        "\r\n" + screen_title(sanitize_text(target.username),
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
-    )
+    (`_user_detail_keys`); `None` is the SysOp's full screen.
+
+    `layout`, if given, receives where the screen put what an in-place edit
+    needs: `fields` maps each editable field's key to its value's 1-based
+    screen row, 0-based column and rows, `prompt_row` is the `Choice:` row,
+    and `fits` says whether the screen fitted the terminal, without which
+    rows counted from the top are not where anything is."""
+    title = screen_title(sanitize_text(target.username),
+        breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+        header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient)
+    await session.write_line("\r\n" + title)
     accent = await lane.run(effective_accent_color_256)
+    editable: dict[str, Field] = {}
 
     def _editable(hotkey: str, label: str, value: str, *, color: int = VALUE_COLOR) -> Field:
-        return Field(label, value, color=color, selected=selected == hotkey, accent=accent)
+        editable[hotkey] = Field(label, value, color=color, selected=selected == hotkey, accent=accent)
+        return editable[hotkey]
 
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     member_since = format_for_display(
@@ -7693,7 +7712,8 @@ async def _draw_user_detail(
             Note(f"Asked: {sanitize_text(signup_answer.question)}"),
             Note(f"Answer: {sanitize_text(signup_answer.answer)}"),
         ]))
-    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style, joined=1)
+    places: dict[int, tuple[int, int, int]] = {}
+    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style, joined=1, places=places)
     offered = allowed if allowed is not None else _ALL_USER_DETAIL_KEYS
     options = []
     if target.pending_approval and "a" in offered:
@@ -7735,10 +7755,21 @@ async def _draw_user_detail(
     # cleared, which takes it -- the blank row the title is written after.
     # Below it: the blank row before the menu and the help hint.
     chrome_rows = 4 if redraw_in_place else 5
-    await session.write_line(
-        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + chrome_rows)
-    )
+    menu = _fitted_menu(options, description_level, session=session, used_rows=panel_rows + chrome_rows)
+    await session.write_line("\r\n" + menu)
     await session.write_line(colored(f"({help_key_label(session)} for help on these fields)", fg_color=MUTED_COLOR))
+    if layout is not None:
+        # Counted from the top of a cleared screen: the title, the panel, the
+        # blank row and the menu, the help hint, any carried outcome, then
+        # `Choice:`. Every row is drawn to fit the width, so none wraps.
+        title_rows = title.count("\r\n") + 1
+        prompt_row = title_rows + panel_rows + 1 + menu.count("\r\n") + 1 + 1 + _pending_notice_rows(session) + 1
+        layout["fields"] = {
+            key: (title_rows + places[id(field)][0] + 1, places[id(field)][1], places[id(field)][2])
+            for key, field in editable.items() if id(field) in places
+        }
+        layout["prompt_row"] = prompt_row
+        layout["fits"] = redraw_in_place and prompt_row <= session.terminal_height
     await _choice_prompt(session)
     return blocked
 
@@ -7985,11 +8016,16 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
 
 
 async def _edit_account_detail(
-    session: Session, lane: DatabaseLane, actor: User, target: User, choice: str
+    session: Session, lane: DatabaseLane, actor: User, target: User, choice: str,
+    *, run_read: Callable[[Callable[[], Awaitable[str]]], Awaitable[str]] | None = None,
 ) -> None:
     """Issue #1110: correct or clear `target`'s display name (`n`) or
     birthdate (`w`). The value opens in the line, as the level does; blank
-    clears it, Esc keeps it."""
+    clears it, Esc keeps it.
+
+    `run_read` runs the prompt and read: the account detail's own puts them
+    on the value where it is drawn (`_user_detail_screen`). Without one they
+    go below the screen's prompt."""
     if choice == "n":
         current = await lane.run(get_display_name, target) or ""
         label = f"Display name for {target.username!r} (blank clears it, {_EDIT_HINT}):"
@@ -7997,9 +8033,12 @@ async def _edit_account_detail(
         stored = await lane.run(get_birthdate, target)
         current = stored.isoformat() if stored else ""
         label = f"Birthdate for {target.username!r} as YYYY-MM-DD (blank clears it, {_EDIT_HINT}):"
-    await write_field_prompt(session, colored(label, fg_color=MUTED_COLOR), hint=_EDIT_HINT)
+    async def read() -> str:
+        await write_field_prompt(session, colored(label, fg_color=MUTED_COLOR), hint=_EDIT_HINT)
+        return (await _read_seeded_line(session, initial=current)).strip()
+
     try:
-        raw = (await _read_seeded_line(session, initial=current)).strip()
+        raw = await (run_read or _read_below_prompt(session))(read)
     except InputCancelled:
         return
     if raw == current:
@@ -8021,6 +8060,16 @@ async def _edit_account_detail(
         return
     if changed:
         _announce_line(session, what)
+
+
+def _read_below_prompt(session: Session) -> Callable[[Callable[[], Awaitable[str]]], Awaitable[str]]:
+    """A field's prompt and read on the rows below the screen's `Choice:`."""
+
+    async def run(read: Callable[[], Awaitable[str]]) -> str:
+        await session.write_line("")
+        return await read()
+
+    return run
 
 
 async def _revoke_verification(session: Session, lane: DatabaseLane, actor: User, target: User) -> None:
@@ -8207,7 +8256,7 @@ async def _user_detail_screen(
     selected: str | None = None
     target_is_guest = await lane.run(is_guest_account, target)
 
-    async def _redraw() -> bool:
+    async def _redraw(layout: dict[str, Any] | None = None) -> bool:
         # Recomputed on every draw: an approval or a level change can move
         # the account in or out of a staff member's reach.
         nonlocal allowed, field_order
@@ -8215,8 +8264,38 @@ async def _user_detail_screen(
         field_order = tuple(key for key in _USER_DETAIL_FIELD_ORDER if key in allowed)
         return await _draw_user_detail(
             session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
-            selected=selected, allowed=allowed if allowed != _ALL_USER_DETAIL_KEYS else None,
+            selected=selected, allowed=allowed if allowed != _ALL_USER_DETAIL_KEYS else None, layout=layout,
         )
+
+    def _edit_in_place(hotkey: str) -> Callable[[Callable[[], Awaitable[str]]], Awaitable[str]]:
+        """A typed field's prompt and read, on its value where the screen draws
+        it: redrawn with the field highlighted, the hint on the `Choice:` row
+        and the cursor in the value, as on every Create/Edit screen. A screen
+        that scrolls, or does not fit, reads below its prompt as before."""
+
+        async def run(read: Callable[[], Awaitable[str]]) -> str:
+            nonlocal blocked, selected
+            if redraw_in_place:
+                if hotkey in field_order:
+                    selected = hotkey
+                layout: dict[str, Any] = {}
+                blocked = await _redraw(layout)
+                place = layout["fields"].get(hotkey) if layout.get("fits") else None
+                if place is not None:
+                    row, column, rows = place
+                    with editing_in_place(
+                        session, row=row, column=column, rows=rows, prompt_row=layout["prompt_row"],
+                    ) as position:
+                        try:
+                            return await read()
+                        finally:
+                            # A resize cancels the edit and says so on the next draw.
+                            if position.message:
+                                _announce_line(session, colored(position.message, fg_color=MUTED_COLOR))
+            await session.write_line("")
+            return await read()
+
+        return run
 
     allowed: frozenset[str] = _ALL_USER_DETAIL_KEYS
     field_order: tuple[str, ...] = _USER_DETAIL_FIELD_ORDER
@@ -8291,17 +8370,20 @@ async def _user_detail_screen(
                     _announce_line(session, f"{target.username!r} approved.")
             blocked = await _redraw()
         elif choice == "l":
-            await session.write_line("")
             # One style for a number (issue #845, F136): the value opens in
             # the line to edit, as on every Create/Edit screen, instead of a
-            # `[current]` default beside an empty line.
-            await write_field_prompt(
-                session,
-                colored(f"New level for {target.username!r} ({_EDIT_HINT}):", fg_color=MUTED_COLOR),
-                hint=_EDIT_HINT,
-            )
+            # `[current]` default beside an empty line -- and, with the screen
+            # redrawn in place, on the level itself.
+            async def _read_level() -> str:
+                await write_field_prompt(
+                    session,
+                    colored(f"New level for {target.username!r} ({_EDIT_HINT}):", fg_color=MUTED_COLOR),
+                    hint=_EDIT_HINT,
+                )
+                return (await _read_seeded_line(session, initial=str(target.user_level))).strip()
+
             try:
-                raw = (await _read_seeded_line(session, initial=str(target.user_level))).strip()
+                raw = await _edit_in_place("l")(_read_level)
             except InputCancelled:
                 raw = ""
             if raw and raw != str(target.user_level):
@@ -8345,8 +8427,7 @@ async def _user_detail_screen(
                         await _revoke_live_sessions(session, node_controls, target, actor)
             blocked = await _redraw()
         elif choice in ("n", "w"):
-            await session.write_line("")
-            await _edit_account_detail(session, lane, actor, target, choice)
+            await _edit_account_detail(session, lane, actor, target, choice, run_read=_edit_in_place(choice))
             blocked = await _redraw()
         elif choice == "v":
             await session.write_line("")

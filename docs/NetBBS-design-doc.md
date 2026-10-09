@@ -1063,6 +1063,17 @@ keeps a one-row window over the buffer and scrolls it to follow the cursor, so a
 value wider than the terminal is edited like any other. A value longer than the
 editor's own buffer cap still falls back to the older prompt, blank-keeps-it and
 all, and says so.
+**A typed field is edited where it is drawn** (maintainer request,
+2026-10-09). With redraw-in-place on, choosing a field that takes typed text
+redraws the screen with the field highlighted, puts the cursor in its value and
+the hint ("Enter saves, Esc cancels") on the `Choice:` row; a refusal is said
+on that row or carried into the next draw. Field editors get this from
+`edit_resource_draft`; a screen with a cursor of its own says where it drew
+the value (`netbbs.net.resource_editor.editing_in_place`): the account detail
+for Level, Display name and Birthdate, and the review after writing a post or
+mail for To and Subject. A screen that scrolls, one taller than the terminal,
+or redraw-in-place off still opens the prompt below `Choice:`, since rows
+counted from the top are then not where the value is.
 Every single-line prompt scrolls this way, not only those that ask for it (issue
 #964): an answer that outgrew the row after a long prompt used to wrap onto a
 second row, where Backspace could not reach the text before the wrap. A prompt
