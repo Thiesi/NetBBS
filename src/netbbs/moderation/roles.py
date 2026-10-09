@@ -387,7 +387,7 @@ _KIND_WORDS: dict[str, tuple[str, str]] = {
 
 def describe_grant(db: Database, grant: ModeratorGrant) -> str:
     """One grant in words (design doc §5.6: the account detail's grant
-    summary, which the Staff list repeats): `board "News": approve,
+    summary, which the Operators list repeats): `board "News": approve,
     delete`, `every file area: approve`, `channels in "Pens": moderate`.
     Permission names are lower-case; an object or Community that is gone
     reads as its id."""

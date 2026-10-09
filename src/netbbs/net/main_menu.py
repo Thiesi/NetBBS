@@ -1315,7 +1315,7 @@ async def _main_menu_loop(
                 if lane is not None:
                     await staff_list_screen(session, lane, user)
                 else:
-                    announce(session, "The Staff list is not available in this context.", tone="muted")
+                    announce(session, "Operators is not available in this context.", tone="muted")
                 redraw = True
             elif choice == "s" and is_staff(user):
                 await end_choice_line(session)
@@ -1333,7 +1333,7 @@ async def _main_menu_loop(
                         transfers=node_controls.transfers if node_controls is not None else None,
                     )
                 else:
-                    announce(session, "Moderation is not available in this context.", tone="muted")
+                    announce(session, "Approvals is not available in this context.", tone="muted")
                 redraw = True
             else:
                 await session.write(reject_unhandled_key(choice))

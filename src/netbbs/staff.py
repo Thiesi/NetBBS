@@ -1,8 +1,8 @@
 """
 What the main menu and the Staff console need to know about who runs the node
 (design doc §5.2, §5.6, issue #836): who is told that accounts wait for
-approval, what a moderator's `Moderation (n)` queue covers, the Staff list
-members see, and the away notice.
+approval, what a moderator's `Approvals (n)` queue covers, the Operators
+list members see, and the away notice.
 
 Kept out of `netbbs.net` so the main menu can ask on every redraw without
 importing the console, and out of `netbbs.auth` because the moderation half
@@ -83,7 +83,7 @@ def moderation_scope(db: Database, user: User) -> tuple[list[Board], list[FileAr
 
 def has_moderation_scope(db: Database, user: User) -> bool:
     """Whether `user` approves held posts or uploads anywhere -- whether the
-    main menu offers them `Moderation (n)` (design doc §5.2)."""
+    main menu offers them `Approvals (n)` (design doc §5.2)."""
     scope = moderation_scope(db, user)
     return scope is None or bool(scope[0] or scope[1])
 
@@ -101,7 +101,7 @@ def count_moderation_items(db: Database, user: User) -> int:
 
 # -- the away notice (design doc §5.6) ------------------------------------------
 
-#: One short line: it sits beside a name on the Staff list and inside the
+#: One short line: it sits beside a name under Operators and inside the
 #: message a pending caller reads.
 MAX_AWAY_MESSAGE_CHARS = 60
 
@@ -206,7 +206,7 @@ def describe_away(notice: AwayNotice, since_date: str) -> str:
     return f"{when} -- {notice.message}"
 
 
-# -- the Staff list ------------------------------------------------------------
+# -- the Operators list --------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -229,7 +229,7 @@ _ACCESS_BITS = BoardPermission.READ | BoardPermission.WRITE
 
 def _moderation_part(grant: ModeratorGrant) -> ModeratorGrant | None:
     """`grant` with its access bits dropped, or `None` when nothing is left:
-    what of it the Staff list names. Grants on one object share a row, so a
+    what of it the Operators list names. Grants on one object share a row, so a
     board's "Read and post" and its "Limited" moderator merge into one
     (review on #977). Every channel bit moderates; channels have no access
     bits."""
@@ -243,7 +243,7 @@ def list_staff(db: Database, *, today: datetime.date | None = None) -> list[Staf
     """
     Who runs the node, for every member (design doc §5.6): usable SysOps,
     then staff members, then moderators, each group by name. Disabled and
-    pending accounts are on none of them. The Previous callers privacy
+    pending accounts are on none of them. The Recent callers privacy
     choice hides nobody here -- these are the people members are meant to
     find.
     """

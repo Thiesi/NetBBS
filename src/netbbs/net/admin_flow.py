@@ -1248,7 +1248,7 @@ def _co_sysop_question(username: str) -> str:
         "password reset, display names and birthdates, levels up to 254) and moderate "
         "everything? They can't act on "
         "SysOps or other staff, or reach Settings, Link, Node, DNS or backups, and members "
-        "see them on the Staff list. Verifying identity is separate: [V]erify identity "
+        "see them under Operators. Verifying identity is separate: [V]erify identity "
         "on this screen."
     )
 
@@ -2032,7 +2032,7 @@ def _staff_menu_entries(user: User, *, moderates: bool) -> list[MenuEntry]:
 
 def _date_of(db: Database, stamp: str | None) -> str | None:
     """A stored timestamp as the node-local date alone (design doc §5.6:
-    the Staff list shows the day of a last session, not the time)."""
+    Operators shows the day of a last session, not the time)."""
     if not stamp:
         return None
     _fmt, tz_name = resolve_display_preferences(db)
@@ -2101,7 +2101,7 @@ async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None
             )
             await show_menu_help(
                 session, "Away notice help", help_entries,
-                about="Tell members you are away. The notice shows beside your name on the Staff list; "
+                about="Tell members you are away. The notice shows beside your name under Operators; "
                       "it changes none of your permissions.",
                 header_color=header_color, unicode_style=unicode_style,
             )
@@ -2130,7 +2130,7 @@ async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None
         except UserManagementError as exc:
             _announce_line(session, colored(str(exc), fg_color=MUTED_COLOR))
             continue
-        _announce_line(session, "You are marked away. Members see it on the Staff list.")
+        _announce_line(session, "You are marked away. Members see it under Operators.")
         return
 
 
@@ -8466,7 +8466,7 @@ async def _staff_permissions_screen(
             question = (
                 f"{'Give' if giving else 'Remove'} {STAFF_PERMISSION_LABELS[flag]} "
                 f"{'to' if giving else 'from'} {target.username!r}?"
-                + (" Staff are shown to members on the Staff list." if giving and not target.staff_permissions else "")
+                + (" Staff are shown to members under Operators." if giving and not target.staff_permissions else "")
             )
         elif choice == "c":
             new_mask = int(CO_SYSOP_PRESET)
@@ -19490,7 +19490,7 @@ async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> 
             await show_menu_help(
                 session, "Communities help", _COMMUNITY_MENU,
                 about="A Community is a topic with its own boards, chat channels, file areas and games. "
-                      "Callers reach them under Communities on the main menu.",
+                      "Callers reach them under Topics on the main menu.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -21285,7 +21285,7 @@ def _load_pending_items(
     entries: list[tuple[FileEntry, FileArea]] = []
     scope = moderation_scope(db, actor) if node_wide else None
     if scope is not None:
-        # A moderator's `Moderation (n)` queue (design doc §5.2): one queue
+        # A moderator's `Approvals (n)` queue (design doc §5.2): one queue
         # across what their grants cover, drawn like the SysOp's.
         boards, areas = scope
     if node_wide and scope is None:
@@ -21389,7 +21389,7 @@ async def moderation_queue(
     session: Session, lane: DatabaseLane, actor: User, *,
     link_context: LinkContext | None = None, transfers: Any = None,
 ) -> None:
-    """`Moderation (n)` on the main menu (design doc §5.2, issue #836): the
+    """`Approvals (n)` on the main menu (design doc §5.2, issue #836): the
     node-wide queue, narrowed by `_load_pending_items` to the boards and
     areas `actor` approves on -- one queue, not a visit to each board."""
     await _pending_review_screen(session, lane, actor, link_context=link_context, transfers=transfers)
@@ -25641,8 +25641,8 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         label = draft["label"]
         if community is not None:
             label = f"{label} scoped to Community {community.name!r}"
-        # Access presets make nobody a moderator, so nobody joins the Staff list.
-        staff_list_note = "" if draft["preset"] in _ACCESS_PRESETS else " Members see moderators on the Staff list."
+        # Access presets make nobody a moderator, so nobody joins Operators.
+        staff_list_note = "" if draft["preset"] in _ACCESS_PRESETS else " Members see moderators under Operators."
         if draft["object_type"] == _EVERYWHERE:
             preset_label = _moderator_preset_label(_EVERYWHERE, draft["preset"])
             await lane.run(
