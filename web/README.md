@@ -19,10 +19,19 @@ web/
   netbbs-files.html      -> https://www.netbbs.org/files.html    subsystem each,
   netbbs-doors.html      -> https://www.netbbs.org/doors.html    linked from both
   netbbs-mrc.html        -> https://www.netbbs.org/mrc.html      main pages
+  favicon.ico            -> https://www.netbbs.org/favicon.ico   the icon: a
+  favicon.svg            -> https://www.netbbs.org/favicon.svg   terminal with a
+  apple-touch-icon.png   -> https://www.netbbs.org/apple-touch-icon.png  prompt
   shots/
     raw-*.txt            raw ANSI as the door wrote it
     shot-*.html          the same capture converted for embedding
 ```
+
+The three icon files are generated, never edited: the picture is the 16x16
+grid in `scripts/website_favicon.py`, and `python scripts/website_favicon.py`
+redraws all three from it. Every page links them in its `<head>`. The site
+root's `favicon.ico` also serves pages that do not link it, such as the node
+pages under `/nodes/`, because a browser asks for it there by itself.
 
 ## Rules that are easy to get wrong
 
@@ -69,6 +78,9 @@ plink -batch -agent thiesi@Roanoke.NetWorkXXIII.de \
   "sudo mv /tmp/index.html.new $D/index.html && \
    sudo /sbin/chown root:wheel $D/index.html && sudo /bin/chmod 644 $D/index.html"
 ```
+
+The icon files go the same way, each to its own name at the docroot's top
+level. They change only when the picture does.
 
 Verify the **full SHA-256 chain** every time — local, the `/tmp` copy, the
 docroot copy, and a `curl` of the live URL must all be the same hash. Then:
