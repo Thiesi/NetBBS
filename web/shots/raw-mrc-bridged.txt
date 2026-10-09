@@ -1,4 +1,4 @@
-[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mNode[0m[38;5;246m › [0m[38;5;51mChat bridge (MRC)[0m
+[2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;246mNode[0m[38;5;246m › [0m[38;5;51mInter-BBS chat (MRC)[0m
 [38;5;246mThis node's link to the Multi Relay Chat network, live.[0m
 [38;5;240m───────────────────────────────────────────────────────[0m
 
