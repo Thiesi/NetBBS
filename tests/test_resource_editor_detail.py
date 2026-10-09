@@ -1,7 +1,7 @@
 """
 Issue #1081: `edit_resource_draft`'s detail mode -- a console resource's one
-screen. Read-only header, fields chosen by the cursor alone (their letters
-not offered, so actions keep theirs), actions hidden while the draft differs
+screen. Read-only header, fields chosen by the cursor or by number (issue
+#1158; fields have no letters, so actions keep theirs), actions hidden while the draft differs
 from what is stored, a save that stays and reloads, and fields locked by a
 Linked resource's origin.
 """
@@ -66,12 +66,12 @@ class Store:
 def _fields(*, lock_name: bool = False) -> list[FieldSpec]:
     return [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             render=lambda d: d.get("name") or "(blank)", prompt=text_field("name", required=True),
             section="Identity", locked="set by origin" if lock_name else None,
         ),
         FieldSpec(
-            key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
+            key="pinned", label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no", prompt=bool_field("pinned"),
             step=bool_step("pinned"), section="Organization",
         ),
@@ -103,7 +103,10 @@ def test_the_screen_opens_on_its_fields_with_the_cursor_on_the_first_and_actions
     first = _screens(session)[0]
     assert result is None
     assert "412 posts" in first  # the read-only header
-    assert "> Name:" in first  # cursor already on the first field
+    assert "> 01 Name:" in first  # cursor already on the first field
+    # Fields are chosen by number; the key hint names the range, the bar keeps the actions.
+    assert "01-02 or Up/Down choose" in first
+    assert "[01-02] change" not in first
     assert "[U]p" in first and "[R]emove" in first  # actions keep their letters
     assert "[N]ame" not in first and "[P]inned" not in first  # no field letters on the bar
     assert "[S]ave" not in first  # nothing to save yet
@@ -167,7 +170,7 @@ def test_a_locked_field_says_why_and_never_opens_its_prompt():
 def test_escape_keeps_the_cursor_on_a_resources_screen():
     store = Store()
     session, _ = _run(store, ["ESCAPE", "b"])
-    assert "> Name:" in _screens(session)[-1]
+    assert "> 01 Name:" in _screens(session)[-1]
 
 
 def test_creating_returns_the_saved_resource_instead_of_staying():
@@ -177,11 +180,12 @@ def test_creating_returns_the_saved_resource_instead_of_staying():
     assert store.refreshes == 1
 
 
-def test_a_locked_fields_own_hotkey_does_not_open_it_on_an_ordinary_editor():
+def test_a_locked_fields_number_does_not_open_it_on_an_ordinary_editor():
     """`locked` is a FieldSpec attribute, not a detail-mode one: an ordinary
-    editor that still offers field letters must refuse a locked field's too."""
+    editor, where fields are chosen by number too, must refuse a locked
+    field's number."""
     store = Store()
-    session = NavigableFakeSession(["n", "b"])
+    session = NavigableFakeSession(["0", "1", "b"])
     draft = dict(store.values)
     asyncio.run(edit_resource_draft(
         session, None, title="Pen Repair", fields=_fields(lock_name=True), draft=draft,
@@ -190,6 +194,17 @@ def test_a_locked_fields_own_hotkey_does_not_open_it_on_an_ordinary_editor():
     ))
     assert draft["name"] == "Pen Repair"
     assert "Name: set by origin, so it can't be changed here." in _visible(_written_text(session))
+
+
+def test_a_field_number_opens_the_field_and_an_action_letter_still_runs_its_action():
+    """On a resource's own screen digits are field numbers and letters are
+    the actions' (issue #1158): `u` runs Up, `01` opens Name."""
+    store = Store()
+    session, result = _run(store, ["u", "0", "1", "Nib Repair", "s", "b"])
+    assert result is None
+    assert store.ran == ["up"]
+    assert store.saves == [{"name": "Nib Repair", "pinned": False}]
+    assert "> 01 Name:" in _screens(session)[-1]
 
 
 def test_creating_offers_save_even_for_an_untouched_prefilled_draft():

@@ -1,7 +1,7 @@
 """
 Tests for the "Your sort preferences" review/clear screen
 (`netbbs.net.profile_flow._sort_preferences_screen`, reached from
-`_edit_profile`'s own `[S]ort preferences` option) -- design doc,
+`_edit_profile`'s own Sort preferences field) -- design doc,
 dogfood feature request: the discoverability half of the `[O]rder`
 command, so a saved override is never a silent, forgotten surprise.
 """
@@ -150,16 +150,16 @@ def test_profile_screen_shows_the_saved_preference_count_and_offers_the_menu_opt
     # FakeSession's own `read_editor_key` isn't implemented (falls back
     # to plain single-character `read_key()`), so it can't script a
     # `PAGE_DOWN` press the way a full navigable session could -- the
-    # only way to reach the Account page here is a hotkey jump (every
-    # hotkey works regardless of current page, by design), so this
-    # presses [S]ort preferences itself (which also opens its own
+    # only way to reach the Account page here is a field-number jump
+    # (every number works regardless of current page, by design), so
+    # this types 22, Sort preferences itself (which also opens its own
     # picker screen), backs out of that picker, and checks the
     # resulting Profile re-render -- now sitting on the Account page --
     # instead of the very first, pre-navigation one.
     set_sort_preference(db, alice, "channel", "alphabetical")
     set_sort_preference(db, alice, "board", "volume")
-    session = FakeSession(["s", "b", "b"])
+    session = FakeSession(["2", "2", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible_text(session)
     assert re.search(r"Sort preferences: +2 saved", text)
-    assert "ort preferences" in text  # the [S]ort preferences menu option itself
+    assert "22 Sort preferences:" in text  # the numbered field itself

@@ -556,7 +556,7 @@ def test_profile_screen_toggles_session_history_name_visibility(tmp_path):
     alice = create_user(database, "alice", password="hunter2", user_level=10)
     assert session_history_name_visible(database, alice) is True  # default
 
-    session = FakeSession(["p", "h", "b", "l", "y"])
+    session = FakeSession(["p", "1", "2", "b", "l", "y"])
     asyncio.run(_run_main_menu(session, database, alice, lane=lane))
 
     assert session_history_name_visible(database, alice) is False
@@ -576,26 +576,26 @@ def test_profile_shows_color_capability_provenance(tmp_path):
     # FakeSession has no `read_editor_key` at all (falls back to plain
     # single-character `read_key()`), so it can't script a `PAGE_DOWN`
     # press -- the only way here to reach the Display page is a
-    # hotkey. Uses `r` (In-place redraw), a *different* Display-section
-    # field, not `c` (Color depth) itself: activating any field's
-    # hotkey also marks it cursor-nav-selected on the next redraw
+    # field number. Uses `15` (In-place redraw), a *different* Display-section
+    # field, not `13` (Color depth) itself: opening any field by its
+    # number also marks it cursor-nav-selected on the next redraw
     # (bold/accent-colored, a different string than this test's own
-    # assertion expects), so jumping via Color depth's own hotkey would
+    # assertion expects), so jumping via Color depth's own number would
     # change the very text being checked. `redraw_in_place`'s prompt
     # (`live_choice_field`, same as Color depth's) cycles and persists
-    # immediately, no separate sub-screen to back out of first, so `r`
+    # immediately, no separate sub-screen to back out of first, so `15`
     # both jumps to the Display page *and* redraws showing it, with
     # Color depth itself still rendered unselected.
     database = db_(tmp_path)
     lane = DatabaseLane(database.path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["p", "r", "b", "l", "y"])
+    session = FakeSession(["p", "1", "5", "b", "l", "y"])
     session.truecolor_diagnostic = "SSH client did not forward COLORTERM; using 256-color"
 
     asyncio.run(_run_main_menu(session, database, alice, lane=lane))
 
     text = _written_text(session)
-    assert colored("  Color depth:", fg_color=LABEL_COLOR) in text
+    assert colored("  13 Color depth:", fg_color=LABEL_COLOR) in text
     assert colored("Transport report: ", fg_color=LABEL_COLOR) in squeezed(text)
     assert colored(session.truecolor_diagnostic, fg_color=METADATA_COLOR) in text
     lane.close()

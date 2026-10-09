@@ -396,12 +396,12 @@ def test_mail_to_all_callers_counts_readers_rather_than_naming_them(db, lane):
 
 def test_profile_turns_read_receipts_off_and_on(db, lane):
     alice = _user(db, "alice")
-    session = ProfileSession(["x", "x", "x", "b"])
+    session = ProfileSession(["0", "8", "0", "8", "0", "8", "b"])
 
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     assert shares_read_receipts(db, alice) is False
     text = squeezed(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", "".join(session.written)))
-    assert "E[x]change read receipts" in text
+    assert "08 Let senders see when I've read their mail" in text
     assert "Let senders see when I've read their mail: no" in text
     assert "Let senders see when I've read their mail: yes" in text

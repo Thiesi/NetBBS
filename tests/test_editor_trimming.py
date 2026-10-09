@@ -98,7 +98,7 @@ def test_help_lists_the_new_commands_and_the_fullscreen_editor():
 
 def test_the_line_editor_points_to_the_fullscreen_editor_when_it_opens():
     _, session = _line_edit(["x", "/done"])
-    assert "Profile > [F]ullscreen editor" in _text(session)
+    assert "Profile > Fullscreen editor" in _text(session)
 
 
 # -- Ctrl+E in the fullscreen editor -------------------------------------

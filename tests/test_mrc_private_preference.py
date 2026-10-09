@@ -55,14 +55,14 @@ def test_profile_screen_toggles_it(db, alice):
 
     lane = DatabaseLane(db.path)
     try:
-        # "p" jumps to the Communication section and turns the opt-in on;
+        # "09" jumps to the Communication section and turns the opt-in on;
         # the second press turns it back off. Each press persists at once.
-        session = FakeSession(["p", "b"])
+        session = FakeSession(["0", "9", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
         text = _visible(_written_text(session))
         assert re.search(r"Private messages from MRC users: +accepted", text)
         assert mrc_private_messages_enabled(db, alice) is True
-        session = FakeSession(["p", "b"])
+        session = FakeSession(["0", "9", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
         assert re.search(r"Private messages from MRC users: +not accepted", _visible(_written_text(session)))
         assert mrc_private_messages_enabled(db, alice) is False

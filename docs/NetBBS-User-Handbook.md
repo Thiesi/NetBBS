@@ -21,7 +21,7 @@ can log in: until the SysOp approves your account, logging in tells you it is
 still waiting, and you cannot look around in the meantime. If registration is
 closed, contact the SysOp. Accounts and access rules belong to each node.
 
-Change your password under **Profile → Account password**: you type the
+Change your password under **Profile → Password**: you type the
 current one, then the new one twice, and nothing is echoed. If you have
 forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 
@@ -30,7 +30,10 @@ forgotten it, ask the SysOp to set a new one; nobody can recover the old one.
 Press a highlighted letter such as **[M]** for **Message boards**. Most menus react
 immediately, without Enter. In the browser you can also click an entry or a
 numbered row. In a list, type a row's number: two digits (**03**) or one digit
-and Enter (**3** Enter). A pause that waits for you reads **[Enter] Continue**:
+and Enter (**3** Enter). Settings screens such as **Profile** number their
+settings the same way: type a setting's number, or move to it with Up/Down and
+press Enter, and Left/Right step the highlighted one's value. The numbers run
+on through a screen's sections, so a number works from any page of it. A pause that waits for you reads **[Enter] Continue**:
 any key goes on, and in the browser so does a click on it. **[?] Help** on the
 main menu sums up how the board works and who runs it. To write to the SysOp,
 send E-mail **To: sysop**.
@@ -395,7 +398,7 @@ Delivery line when you open it:
 A letter shows the way its writer typed it: each line stays a line, and
 only a line too wide for your screen wraps. Mail can be in color, written
 with pipe codes like `|12` or pasted in, as on a board that allows color.
-Profile's **Pos[t] colors** switch covers mail too; with it off, colored mail
+Profile's **Colors in posts and mail** switch covers mail too; with it off, colored mail
 reads as plain text.
 
 When mail bounces or expires you are told at the main menu, once, even if it
@@ -492,8 +495,8 @@ simply reads as not read: nobody learns that you deleted it. The same goes the
 other way: whoever writes to you sees when you first open their letter.
 
 This is on for everyone unless they turn it off, and it works both ways. In
-**Profile → E[x]change read receipts** ("Let senders see when I've read their
-mail") you can turn it off: then no one sees when you read their mail, and you
+**Profile → Let senders see when I've read their mail** you can turn it
+off: then no one sees when you read their mail, and you
 no longer see when anyone reads yours. Turning it off also hides the receipts
 you already gave; turning it on again shows them again. But a letter opened
 while either of you had receipts off never shows as read, even once you both
@@ -520,7 +523,7 @@ A line from MRC starts with **[MRC]**, and its sender reads `nick@theirBBS`,
 with their BBS in a color of its own.
 
 Some MRC users' software puts a styled name in front of their lines, such as
-`+Nick+[CASTLE BBS]`. Profile's **Styli[z]ed MRC names** chooses how you see it:
+`+Nick+[CASTLE BBS]`. Profile's **Stylized MRC names** chooses how you see it:
 
 - **combined** (the default): `<+Nick+@Castle_BBS (CASTLE BBS)>`, the styled
   name in place of the plain one and the rest in brackets;
@@ -599,7 +602,7 @@ Your SysOp controls the time allowed and can help with a missing or locked save.
 ## Preferences and help
 
 Use **Profile** for display, editor, and chat preferences, your SSH keys, and
-your password. **Profile → [U]nicode or CP437** sets the characters NetBBS sends
+your password. **Profile → Character set** sets the characters NetBBS sends
 your terminal:
 
 - **Auto**, the default, follows what your terminal reports when you connect.
@@ -613,7 +616,7 @@ your terminal:
 
 Some nodes draw their welcome art or main-menu art slowly, at the speed of an
 old modem. Press any key to draw the rest at once; that key is used up, so it
-doesn't also act at the next prompt. **Profile → [Q]uick or animated banners**
+doesn't also act at the next prompt. **Profile → Banner animations**
 set to quick draws every banner after you sign in at once. The welcome banner
 comes before you sign in, so it plays at the node's speed whatever you chose;
 any key still draws the rest.

@@ -103,7 +103,7 @@ def test_a_guest_changes_the_character_set_for_this_call_only(db, lane, guest):
     """Profile's Character set entry, pressed as a guest: the session renders
     with the new set, the account keeps the old one, and the next guest gets
     the account's."""
-    session = FakeSession(keys=["u", "u", "b"], guest=True)
+    session = FakeSession(keys=["1", "7", "1", "7", "b"], guest=True)
 
     async def first_guest():
         with session_scoped_preferences(guest):
@@ -124,7 +124,7 @@ def test_a_guest_changes_the_character_set_for_this_call_only(db, lane, guest):
 
 def test_a_guest_redraw_style_change_does_not_reach_the_account(db, lane, guest):
     before = _stored_rows(db, guest)
-    session = FakeSession(keys=["r", "b"], guest=True)
+    session = FakeSession(keys=["1", "5", "b"], guest=True)
 
     async def scenario():
         with session_scoped_preferences(guest):
@@ -136,7 +136,7 @@ def test_a_guest_redraw_style_change_does_not_reach_the_account(db, lane, guest)
 
 
 def test_an_ordinary_session_still_saves_its_preferences(db, lane, guest):
-    session = FakeSession(keys=["r", "b"], guest=False)
+    session = FakeSession(keys=["1", "5", "b"], guest=False)
 
     asyncio.run(profile_flow._edit_profile(session, lane, guest))
 

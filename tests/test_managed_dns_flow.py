@@ -256,7 +256,7 @@ def test_offer_opt_in_accept_and_register_succeeds_end_to_end(tmp_path):
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
             # accept, name, decline standard-ports confirmation, decline dynamic tracking
-            session = FakeSession(["y", "n", "MyBoard", "d", "r"])
+            session = FakeSession(["y", "0", "1", "MyBoard", "0", "2", "r"])
 
             await offer_managed_dns_opt_in(session, lane)
 
@@ -294,7 +294,7 @@ def test_fresh_registration_clears_expired_local_rename_state_and_credential(tmp
             save_credential(previous_credential_path_for(db.path), "expired-old-secret")
             lane = DatabaseLane(db.path)
 
-            session = FakeSession(["n", "fresh-name", "d", "r", "y"])
+            session = FakeSession(["0", "1", "fresh-name", "0", "2", "r", "y"])
             await register_via_prompt(session, lane)
 
             lane.close()
@@ -327,11 +327,11 @@ def test_register_via_prompt_blank_name_defaults_to_the_previous_registration(tm
             lane = DatabaseLane(db.path)
 
             # First registration, then release it.
-            await register_via_prompt(FakeSession(["n", "myboard", "d", "r"]), lane)
+            await register_via_prompt(FakeSession(["0", "1", "myboard", "0", "2", "r"]), lane)
             await release_registration(FakeSession(["y"]), lane)
 
             # Reclaim via a blank name -- must default to "myboard".
-            session = FakeSession(["d", "r"])  # the previous name is prefilled -- just register
+            session = FakeSession(["0", "2", "r"])  # the previous name is prefilled -- just register
             await register_via_prompt(session, lane)
 
             lane.close()
@@ -364,7 +364,7 @@ def test_register_via_prompt_reclaim_keeps_the_previous_dynamic_setting(tmp_path
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            await register_via_prompt(FakeSession(["n", "myboard", "d", "r"]), lane)  # dynamic off
+            await register_via_prompt(FakeSession(["0", "1", "myboard", "0", "2", "r"]), lane)  # dynamic off
             assert get_dynamic(db) is False
             await release_registration(FakeSession(["y"]), lane)
             await register_via_prompt(FakeSession(["r"]), lane)  # plain reclaim
@@ -389,7 +389,7 @@ def test_register_via_prompt_service_rejection_keeps_the_draft(tmp_path):
         set_service_url(db, "http://127.0.0.1:1")  # nothing listens here
         set_node_fingerprint(db, "fp-1")
         lane = DatabaseLane(db.path)
-        session = FakeSession(["n", "myboard", "r", "b", "y"])
+        session = FakeSession(["0", "1", "myboard", "r", "b", "y"])
         wrote = await register_via_prompt(session, lane)
         lane.close()
         return db, session, wrote
@@ -418,7 +418,7 @@ def test_register_via_prompt_reclaims_a_matured_registration(tmp_path):
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
 
-            await register_via_prompt(FakeSession(["n", "myboard", "d", "r"]), lane)
+            await register_via_prompt(FakeSession(["0", "1", "myboard", "0", "2", "r"]), lane)
             # min_age_seconds=0 -- a heartbeat matures it immediately.
             import aiohttp
 
@@ -431,7 +431,7 @@ def test_register_via_prompt_reclaims_a_matured_registration(tmp_path):
                 )
             await release_registration(FakeSession(["y"]), lane)
 
-            session = FakeSession(["d", "r"])  # prefilled with "myboard" -- reclaim it
+            session = FakeSession(["0", "2", "r"])  # prefilled with "myboard" -- reclaim it
             await register_via_prompt(session, lane)
 
             lane.close()
@@ -470,7 +470,7 @@ def test_release_registration_declining_the_confirmation_does_nothing(tmp_path):
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            await register_via_prompt(FakeSession(["n", "myboard", "d", "r"]), lane)
+            await register_via_prompt(FakeSession(["0", "1", "myboard", "0", "2", "r"]), lane)
 
             session = FakeSession(["n"])  # decline the release confirmation
             await release_registration(session, lane)
@@ -496,7 +496,7 @@ def test_release_registration_succeeds_end_to_end(tmp_path):
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            await register_via_prompt(FakeSession(["n", "myboard", "d", "r"]), lane)
+            await register_via_prompt(FakeSession(["0", "1", "myboard", "0", "2", "r"]), lane)
 
             session = FakeSession(["y"])
             await release_registration(session, lane)
@@ -537,7 +537,7 @@ def test_register_via_prompt_states_the_ports_convention_against_this_nodes_list
             set_node_fingerprint(db, "fp-1")
             set_local_listeners(db, ListenerFacts(telnet_port=None, ssh_port=2222, web_port=None, web_public_url=None))
             lane = DatabaseLane(db.path)
-            session = FakeSession(["n", "myboard", "d", "r"])  # no [W] field any more
+            session = FakeSession(["0", "1", "myboard", "0", "2", "r"])  # no [W] field any more
 
             await register_via_prompt(session, lane)
 
@@ -598,7 +598,7 @@ def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path, 
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            await register_via_prompt(FakeSession(["n", "old-name", "d", "r"]), lane)
+            await register_via_prompt(FakeSession(["0", "1", "old-name", "0", "2", "r"]), lane)
             old_credential = load_credential(credential_path_for(db.path))
             await rename_registration(FakeSession(["new-name", "y"]), lane)
             assert get_registered_name(db) == "new-name"
@@ -737,7 +737,7 @@ def test_cancelled_rename_is_recoverable_if_reverse_credential_journaling_crashe
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            await register_via_prompt(FakeSession(["n", "old-name", "d", "r"]), lane)
+            await register_via_prompt(FakeSession(["0", "1", "old-name", "0", "2", "r"]), lane)
             old_credential = load_credential(credential_path_for(db.path))
             await rename_registration(FakeSession(["new-name", "y"]), lane)
             replacement_credential = load_credential(credential_path_for(db.path))
@@ -866,8 +866,8 @@ def test_registering_with_a_new_service_starts_over_instead_of_reclaiming(tmp_pa
             set_service_url(db, new_url)
             lane = DatabaseLane(db.path)
             # the name is prefilled from the existing registration:
-            # [D]ynamic off, [R]egister, then confirm the replacement
-            session = FakeSession(["d", "r", "y"])
+            # 02 (dynamic) off, [R]egister, then confirm the replacement
+            session = FakeSession(["0", "2", "r", "y"])
 
             await register_via_prompt(session, lane)
 
@@ -892,9 +892,9 @@ def test_declining_the_credential_replacement_registers_nothing(tmp_path):
     db = _registered_against(tmp_path, "https://dns.example")
     set_service_url(db, "https://other.example")
     lane = DatabaseLane(db.path)
-    # [D]ynamic off, [R]egister, refuse the replacement, [B]ack out and
+    # 02 (dynamic) off, [R]egister, refuse the replacement, [B]ack out and
     # discard the edited draft
-    session = FakeSession(["d", "r", "n", "b", "y"])
+    session = FakeSession(["0", "2", "r", "n", "b", "y"])
 
     asyncio.run(register_via_prompt(session, lane))
 
@@ -1071,7 +1071,7 @@ def test_release_adopts_a_revocation_the_updater_has_not_seen_yet(tmp_path):
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            await register_via_prompt(FakeSession(["n", "myboard", "d", "r"]), lane)
+            await register_via_prompt(FakeSession(["0", "1", "myboard", "0", "2", "r"]), lane)
             import aiohttp
 
             async with aiohttp.ClientSession() as http_session:
@@ -1183,7 +1183,7 @@ def test_registering_after_declining_the_opt_in_accepts_it_and_checks_in_at_once
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            session = FakeSession(["n", "myboard", "r"])
+            session = FakeSession(["0", "1", "myboard", "r"])
             await register_via_prompt(session, lane)
             lane.close()
             return db, session, get_registration_by_name(backend_db, "myboard")
@@ -1221,7 +1221,7 @@ def test_registering_says_so_when_the_first_check_in_cannot_reach_the_service(tm
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            session = FakeSession(["n", "myboard", "r"])
+            session = FakeSession(["0", "1", "myboard", "r"])
             await register_via_prompt(session, lane)
             lane.close()
             return db, session
@@ -1291,7 +1291,7 @@ def test_the_deferred_registration_is_offered_once_the_node_has_started(tmp_path
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")  # what netbbs.__main__.run caches at startup
             lane = DatabaseLane(db.path)
-            session = FakeSession(["n", "myboard", "r"])
+            session = FakeSession(["0", "1", "myboard", "r"])
             await offer_deferred_registration(session, lane)
             again = FakeSession([])
             await offer_deferred_registration(again, lane)

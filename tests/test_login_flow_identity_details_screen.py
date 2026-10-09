@@ -1,7 +1,7 @@
 """
 Tests for the "Name & details" screen
 (`netbbs.net.profile_flow._identity_details_screen`, reached from
-`_edit_profile`'s own `[N]ame & details` option) -- previously
+`_edit_profile`'s own Name & details field) -- previously
 untested; converted onto `edit_resource_draft` alongside the profile
 screen itself (issue #160's cursor-nav follow-up).
 """
@@ -174,7 +174,7 @@ def test_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
 
 
 def test_display_name_edit_sets_only_the_value(db, lane, alice):
-    session = FakeSession(["d", "Alice W", "b"])
+    session = FakeSession(["0", "1", "Alice W", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_display_name(db, alice) == "Alice W"
     assert is_display_name_visible(db, alice) is False
@@ -182,7 +182,7 @@ def test_display_name_edit_sets_only_the_value(db, lane, alice):
 
 
 def test_display_name_visibility_is_its_own_toggle(db, lane, alice):
-    session = FakeSession(["i", "b"])
+    session = FakeSession(["0", "2", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert is_display_name_visible(db, alice) is True
     assert "Display name visibility: public" in squeezed(_visible(session))
@@ -200,7 +200,7 @@ def test_blank_value_prompt_leaves_visibility_untouched(db, lane, alice):
     set_location_visible(db, alice, True)
     set_birthdate(db, alice, date(2000, 1, 1))
     set_birthdate_visible(db, alice, True)
-    session = FakeSession(["d", "Alice W", "l", "Retro City", "a", "2000-01-01", "b"])
+    session = FakeSession(["0", "1", "Alice W", "0", "3", "Retro City", "0", "5", "2000-01-01", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_display_name(db, alice) == "Alice W"
     assert is_display_name_visible(db, alice) is True
@@ -212,7 +212,7 @@ def test_blank_value_prompt_leaves_visibility_untouched(db, lane, alice):
 
 
 def test_location_edit_and_visibility_toggle(db, lane, alice):
-    session = FakeSession(["l", "Retro City", "o", "o", "b"])
+    session = FakeSession(["0", "3", "Retro City", "0", "4", "0", "4", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_location(db, alice) == "Retro City"
     # Two presses of the toggle return to the starting state.
@@ -224,7 +224,7 @@ def test_location_edit_and_visibility_toggle(db, lane, alice):
 
 
 def test_birthdate_edit_sets_value_and_age(db, lane, alice):
-    session = FakeSession(["a", "2000-01-01", "g", "b"])
+    session = FakeSession(["0", "5", "2000-01-01", "0", "6", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_birthdate(db, alice) == date(2000, 1, 1)
     assert is_birthdate_visible(db, alice) is True
@@ -249,7 +249,7 @@ def test_each_value_opens_in_its_own_line_and_esc_keeps_it(db, lane, alice):
             seeded.append(kwargs.get("initial"))
             raise InputCancelled
 
-    session = Escaping(["d", "a", "b"])
+    session = Escaping(["0", "1", "0", "5", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert seeded == ["Alice W", "2000-01-01"]
     assert get_display_name(db, alice) == "Alice W"
@@ -260,7 +260,7 @@ def test_each_value_opens_in_its_own_line_and_esc_keeps_it(db, lane, alice):
 
 
 def test_birthdate_rejects_an_invalid_date_format(db, lane, alice):
-    session = FakeSession(["a", "not-a-date", "b"])
+    session = FakeSession(["0", "5", "not-a-date", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_birthdate(db, alice) is None
     assert "Not a valid date" in _written_text(session)
@@ -268,7 +268,7 @@ def test_birthdate_rejects_an_invalid_date_format(db, lane, alice):
 
 def test_verified_badge_visibility_toggles(db, lane, alice):
     assert is_verified_badge_visible(db, alice) is False  # default
-    session = FakeSession(["v", "v", "b"])
+    session = FakeSession(["0", "7", "0", "7", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     # Two presses of a bool toggle return to the starting state.
     assert is_verified_badge_visible(db, alice) is False
@@ -286,7 +286,7 @@ def test_verified_summary_shows_attested_attributes(db, lane, alice):
 
 
 def test_remote_sharing_rejects_an_attribute_with_no_attestation(db, lane, alice):
-    session = FakeSession(["s", "b"])
+    session = FakeSession(["0", "8", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert "No age attestation exists" in _written_text(session)
     assert get_attestation(db, alice, "age") is None
@@ -295,7 +295,7 @@ def test_remote_sharing_rejects_an_attribute_with_no_attestation(db, lane, alice
 def test_remote_sharing_toggles_both_ways_without_a_question(db, lane, alice):
     verifier = create_user(db, "sysop", password="hunter2", user_level=255)
     attest_name(db, alice, "Alice Wonderland", verifier=verifier)
-    session = FakeSession(["h", "b"])
+    session = FakeSession(["0", "9", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_attestation(db, alice, "name").link_visible is True
     # Issue #596: "on" with nobody named to receive it shares nothing, and
@@ -306,7 +306,7 @@ def test_remote_sharing_toggles_both_ways_without_a_question(db, lane, alice):
     # Turning it off is the same single keystroke -- previously the
     # sub-screen toggled off silently but asked a yes/no before turning
     # on (issue #282).
-    session = FakeSession(["h", "b"])
+    session = FakeSession(["0", "9", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_attestation(db, alice, "name").link_visible is False
     assert "Share verified name over Link: off" in squeezed(_visible(session))
@@ -336,7 +336,7 @@ def test_remote_sharing_refreshes_instead_of_toggling_a_changed_attestation(db, 
                 attest_age(db, alice, date(1991, 6, 2), verifier=verifier)
             return await super().read_key(echo)
 
-    session = ReattestingSession(["s", "b"])
+    session = ReattestingSession(["0", "8", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
     assert "Share verified age over Link: on" in squeezed(text)  # what the caller saw first
@@ -344,7 +344,7 @@ def test_remote_sharing_refreshes_instead_of_toggling_a_changed_attestation(db, 
     assert get_attestation(db, alice, "age").link_visible is False
     assert get_attestation(db, alice, "age").attested_value == "1991-06-02"
     # The redraw now shows the real state; a second press acts on it.
-    session = FakeSession(["s", "b"])
+    session = FakeSession(["0", "8", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_attestation(db, alice, "age").link_visible is True
 
@@ -370,7 +370,7 @@ def test_remote_sharing_reports_an_attestation_removed_since_the_draw(db, lane, 
                 db.connection.commit()
             return await super().read_key(echo)
 
-    session = RevokingSession(["h", "b"])
+    session = RevokingSession(["0", "9", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
     assert "was removed since this screen was drawn" in text
@@ -467,7 +467,7 @@ def test_remote_sharing_says_not_delivered_until_a_snapshot_is_sent(db, lane, al
     configure_attestation_recipient(db, "a" * 32, reason="first")
     record_link_reachability(db, outgoing_only=True)
 
-    session = FakeSession(["h", "b"])
+    session = FakeSession(["0", "9", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
 
     text = squeezed(_visible(session))

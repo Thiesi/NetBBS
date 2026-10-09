@@ -223,8 +223,8 @@ def test_overview_lists_groups_and_says_changes_need_a_restart(db, lane, sysop):
 
 
 def test_editing_a_group_saves_and_audits(db, lane, sysop):
-    # Carry caps, then its first field (Carried boards, hotkey c), then Save.
-    session = FakeSession(["s", "o", "c", "c", "0", "s", "b", "b", "b"])
+    # Carry caps, then its first field (Carried boards, 01), then Save.
+    session = FakeSession(["s", "o", "c", "0", "1", "0", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     assert load_stored_policy(db) == {"link.max_carried_boards": 0}
@@ -235,7 +235,7 @@ def test_editing_a_group_saves_and_audits(db, lane, sysop):
 
 def test_a_setting_the_config_file_holds_is_shown_and_not_editable(db, lane, sysop):
     record_startup_policy(db, NodeConfig(explicit_keys=frozenset({"link.max_carried_boards"})))
-    session = FakeSession(["s", "o", "c", "c", "s", "b", "b", "b"])
+    session = FakeSession(["s", "o", "c", "0", "1", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     text = _normalized_visible(_written_text(session))
@@ -255,16 +255,16 @@ def test_running_value_differing_from_saved_is_called_out(db, lane, sysop):
 
 
 def test_bool_setting_toggles(db, lane, sysop):
-    # Peering: Peers remembered (p), Manual seeds (m), Sync interval (y --
-    # s is Save), Relay for others (r) ...
-    session = FakeSession(["s", "o", "p", "r", "s", "b", "b", "b"])
+    # Peering: Peers remembered (01), Manual seeds (02), Sync interval (03),
+    # Relay for others (04) ...
+    session = FakeSession(["s", "o", "p", "0", "4", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert load_stored_policy(db) == {"link.relay_serving_enabled": False}
 
 
 def test_bool_toggled_back_to_its_default_forgets_the_stored_value(db, lane, sysop):
     _save(db, {"link.relay_serving_enabled": False})
-    session = FakeSession(["s", "o", "p", "r", "s", "b", "b", "b"])
+    session = FakeSession(["s", "o", "p", "0", "4", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert load_stored_policy(db) == {}
 
@@ -291,8 +291,8 @@ def test_a_failed_start_does_not_record_a_snapshot(tmp_path):
 
 def test_blank_seeds_return_to_the_default(db, lane, sysop):
     _save(db, {"link.seeds": ["https://seed.example"]})
-    # Peering, then Manual seeds (m), clear the line, Save.
-    session = FakeSession(["s", "o", "p", "m", "", "s", "b", "b", "b"])
+    # Peering, then Manual seeds (02), clear the line, Save.
+    session = FakeSession(["s", "o", "p", "0", "2", "", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert load_stored_policy(db) == {}
 

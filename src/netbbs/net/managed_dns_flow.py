@@ -402,7 +402,7 @@ async def register_via_prompt(
 
     fields = [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Subdomain name",
+            key="name", label="Subdomain name",
             render=lambda d: f"{sanitize_text(d['name'])}.netbbs.org" if d["name"] else "(required)",
             prompt=_name_prompt,
             brief="The <name>.netbbs.org to register",
@@ -412,7 +412,7 @@ async def register_via_prompt(
             ),
         ),
         FieldSpec(
-            key="dynamic", hotkey="d", menu_text=menu_key("D", "ynamic IP"), label="Follow address changes",
+            key="dynamic", label="Follow address changes",
             render=lambda d: "yes" if d["dynamic"] else "no",
             prompt=choice_field("dynamic", [True, False]), step=choice_step("dynamic", [True, False]),
             brief="Keep the record pointed at this node",

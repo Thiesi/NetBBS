@@ -587,7 +587,7 @@ def test_profile_screen_toggles_direct_message_acceptance(tmp_path):
     alice = create_user(database, "alice", password="hunter2", user_level=10)
     assert accepts_direct_messages(database, alice) is True  # default
 
-    session = FakeSession(["p", "m", "b", "l", "y"])
+    session = FakeSession(["p", "0", "6", "b", "l", "y"])
     asyncio.run(
         _main_menu(
             session, database, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice,

@@ -29,7 +29,7 @@ from tests.test_admin_flow import (  # noqa: F401
 
 def test_an_account_can_be_designated(db, lane, sysop):
     create_user(db, "guest", password="hunter2", user_level=1)
-    _run(FakeSession(["s", "g", "g", "guest", "s", "b", "b"]), lane, sysop)
+    _run(FakeSession(["s", "g", "0", "1", "guest", "s", "b", "b"]), lane, sysop)
     assert guest_user(db).username == "guest"
 
 
@@ -40,7 +40,7 @@ def test_erasing_the_field_turns_guest_login_off(db, lane, sysop):
     short of deleting the account."""
     guest = create_user(db, "guest", password="hunter2", user_level=1)
     set_guest_user(db, guest)
-    _run(FakeSession(["s", "g", "g", "", "s", "b", "b"]), lane, sysop)
+    _run(FakeSession(["s", "g", "0", "1", "", "s", "b", "b"]), lane, sysop)
     assert guest_user(db) is None
 
 
@@ -49,7 +49,7 @@ def test_the_account_survives_being_undesignated(db, lane, sysop):
 
     guest = create_user(db, "guest", password="hunter2", user_level=1)
     set_guest_user(db, guest)
-    _run(FakeSession(["s", "g", "g", "", "s", "b", "b"]), lane, sysop)
+    _run(FakeSession(["s", "g", "0", "1", "", "s", "b", "b"]), lane, sysop)
     assert authenticate_password(db, "guest", "hunter2") is not None
 
 
@@ -61,13 +61,13 @@ def test_an_account_named_none_can_be_designated(db, lane, sysop):
     so a node can have one -- and typing it meant "turn guest login
     off" rather than "designate this account"."""
     create_user(db, "none", password="hunter2", user_level=1)
-    _run(FakeSession(["s", "g", "g", "none", "s", "b", "b"]), lane, sysop)
+    _run(FakeSession(["s", "g", "0", "1", "none", "s", "b", "b"]), lane, sysop)
     assert guest_user(db) is not None
     assert guest_user(db).username == "none"
 
 
 def test_a_notice_reading_none_can_be_set(db, lane, sysop):
-    _run(FakeSession(["s", "g", "n", "none", "s", "b", "b"]), lane, sysop)
+    _run(FakeSession(["s", "g", "0", "2", "none", "s", "b", "b"]), lane, sysop)
     assert pre_login_notice(db) == "none"
 
 
@@ -122,7 +122,7 @@ def test_an_account_named_new_cannot_be_designated(db, lane, sysop):
     db.connection.execute("UPDATE users SET username = ? WHERE id = ?", ("new", stray.id))
     db.connection.commit()
 
-    session = FakeSession(["s", "g", "g", "new", "s", "b", "y", "b", "b"])
+    session = FakeSession(["s", "g", "0", "1", "new", "s", "b", "y", "b", "b"])
     _run(session, lane, sysop)
 
     assert guest_user(db) is None

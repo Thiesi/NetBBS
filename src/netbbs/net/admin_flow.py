@@ -542,7 +542,6 @@ from netbbs.net.nodeconfig import NodeConfig
 from netbbs.net.policy_settings import (
     GROUPS as POLICY_GROUPS,
     SETTINGS as POLICY_SETTINGS,
-    PolicySetting,
     PolicyValueError,
     PolicyView,
     format_value as format_policy_value,
@@ -3026,26 +3025,26 @@ async def _edit_promotion_rule(
     names = await lane.run(get_level_names)
     fields = [
         FieldSpec(
-            key="from_level", hotkey="f", menu_text=menu_key("F", "rom level"), label="From level",
+            key="from_level", label="From level",
             render=lambda d: level_label(d["from_level"], names),
             prompt=_int_field("from_level", "Level the account is at"), brief="Accounts at this level",
             help="The rule looks at accounts at exactly this level. One rule per level.", section="Step",
         ),
         FieldSpec(
-            key="to_level", hotkey="t", menu_text=menu_key("T", "o level"), label="To level",
+            key="to_level", label="To level",
             render=lambda d: level_label(d["to_level"], names),
             prompt=_int_field("to_level", "Level to raise it to"), brief="Raised to this level",
             help=f"The level the account is raised to; higher than From, at most {SYSOP_LEVEL - 1}.",
             section="Step",
         ),
         FieldSpec(
-            key="min_age_hours", hotkey="a", menu_text=menu_key("A", "ge (hours)"), label="Account age",
+            key="min_age_hours", label="Account age",
             render=lambda d: f"{d['min_age_hours']} hours",
             prompt=_int_field("min_age_hours", "Hours since the account was created"),
             brief="Hours since signup", help="How long the account must have existed.", section="Needs",
         ),
         FieldSpec(
-            key="min_logins", hotkey="l", menu_text=menu_key("L", "ogins"), label="Logins",
+            key="min_logins", label="Logins",
             render=lambda d: str(d["min_logins"]),
             prompt=_int_field("min_logins", "Logins, this one included"),
             brief="Logins, this one included",
@@ -3053,7 +3052,7 @@ async def _edit_promotion_rule(
             section="Needs",
         ),
         FieldSpec(
-            key="min_posts", hotkey="p", menu_text=menu_key("P", "osts"), label="Posts",
+            key="min_posts", label="Posts",
             render=lambda d: str(d["min_posts"]),
             prompt=_int_field("min_posts", "Approved posts"), brief="Approved posts on this node",
             help="Approved posts the account wrote on this node, each counted once however often edited. "
@@ -4209,7 +4208,7 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
 
     fields = [
         FieldSpec(
-            key="guest_username", hotkey="g", menu_text=menu_key("G", "uest account"),
+            key="guest_username",
             label="Guest account",
             render=lambda d: d.get("guest_username") or "(guest login off)",
             # Two Codex rounds landed on this one field. It could not
@@ -4236,7 +4235,7 @@ async def _guest_access_screen(session: Session, lane: DatabaseLane, actor: User
             ),
         ),
         FieldSpec(
-            key="notice", hotkey="n", menu_text=menu_key("N", "otice"),
+            key="notice",
             label="Pre-login notice",
             render=lambda d: d.get("notice") or "(none)",
             prompt=text_field("notice"),
@@ -5428,15 +5427,15 @@ async def _set_trust_override_screen(
     """
     Issue #820: `state` and `all_dimensions` open the editor already filled
     in, which is all `[E]stablish` and `[D]eny` are -- the same editor, the
-    same reason, the same confirmations, the same audit. `S[t]ate` and
-    `[D]imension` stay editable, so a preset is a starting point, not a
+    same reason, the same confirmations, the same audit. State and
+    Dimension stay editable, so a preset is a starting point, not a
     different path.
 
 
     Issue #282: was a fixed five-step chain (dimension, state, reason,
     then up to two confirmations) with no way back -- an invalid key
-    anywhere cancelled everything. Now a draft editor: `[D]imension`
-    and `S[t]ate` open their own small action bars, `[R]eason` is the
+    anywhere cancelled everything. Now a draft editor: the Dimension
+    and State fields open their own small action bars, Reason is the
     mandatory free text, and `[S]ave` runs the two safety
     confirmations exactly as before (the audited-deviation question for
     ESTABLISHED, and the changed-identity re-check loop) before
@@ -5484,7 +5483,7 @@ async def _set_trust_override_screen(
 
     fields = [
         FieldSpec(
-            key="dimension", hotkey="d", menu_text=menu_key("D", "imension"), label="Dimension",
+            key="dimension", label="Dimension",
             render=lambda d: _dimension_text(d["dimension"]),
             prompt=_dimension_prompt,
             brief="Which trust dimension to force",
@@ -5494,7 +5493,7 @@ async def _set_trust_override_screen(
             ),
         ),
         FieldSpec(
-            key="state", hotkey="t", menu_text=menu_key("t", "ate", prefix="S"), label="State",
+            key="state", label="State",
             render=lambda d: d["state"].value if d["state"] is not None else "(not chosen)",
             prompt=_state_prompt,
             brief="The state to force",
@@ -5504,7 +5503,7 @@ async def _set_trust_override_screen(
             ),
         ),
         FieldSpec(
-            key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+            key="reason", label="Reason",
             render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
             prompt=text_field("reason", required=True),
             brief="Mandatory audit note",
@@ -5515,7 +5514,7 @@ async def _set_trust_override_screen(
     async def save(draft: dict) -> bool | None:
         dimension, state, reason = draft["dimension"], draft["state"], draft["reason"]
         if dimension is None or state is None:
-            raise ValueError("choose a dimension ([D]) and a state ([T]) first")
+            raise ValueError("choose a Dimension and a State first")
         if not reason:
             raise ValueError("a reason is required")
         if state == TrustState.ESTABLISHED:
@@ -5743,21 +5742,21 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
 
         fields = [
             FieldSpec(
-                key="domain_id", hotkey="i", menu_text=menu_key("I", "D", prefix="Domain "), label="Domain ID",
+                key="domain_id", label="Domain ID",
                 render=lambda d: sanitize_text(d["domain_id"]) if d["domain_id"] else "(required)",
                 prompt=_id_then_seed,
                 brief="Stable identifier for the domain",
                 help="The identifier trusted reporters are assigned to. Reusing an existing ID updates it.",
             ),
             FieldSpec(
-                key="display_name", hotkey="n", menu_text=menu_key("N", "ame"), label="Display name",
+                key="display_name", label="Display name",
                 render=lambda d: sanitize_text(d["display_name"]) if d["display_name"] else "(none)",
                 prompt=text_field("display_name"),
                 brief="Human-readable name",
                 help="Shown in listings and audit history instead of the bare ID.",
             ),
             FieldSpec(
-                key="weight", hotkey="w", menu_text=menu_key("W", "eight"), label="Weight",
+                key="weight", label="Weight",
                 render=lambda d: f"{d['weight']:.2f}",
                 prompt=_float_field("weight", label="Weight (0.0-1.0)", minimum=0.0, maximum=1.0),
                 brief="0.0-1.0 influence on trust signals",
@@ -5926,14 +5925,14 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
 
         fields = [
             FieldSpec(
-                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
+                key="node", label="Node",
                 render=_node_render("node"),
                 prompt=_node_then_seed,
                 brief="Which linked node to anchor",
                 help="A stored peer, or a name/DNS name/technical identity typed in.",
             ),
             FieldSpec(
-                key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+                key="reason", label="Reason",
                 render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
                 prompt=text_field("reason", required=True),
                 brief="Mandatory audit note",
@@ -5943,7 +5942,7 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["reason"]:
-                raise ValueError("choose a [N]ode and give a [R]eason first")
+                raise ValueError("choose a Node and give a Reason first")
             await lane.run(
                 configure_trust_anchor, draft["node"], reason=draft["reason"], actor_user_id=actor.id,
             )
@@ -6064,21 +6063,21 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
 
         fields = [
             FieldSpec(
-                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
+                key="node", label="Node",
                 render=_node_render("node"),
                 prompt=_node_then_seed,
                 brief="Which linked node reports",
                 help="A stored peer, or a name/DNS name/technical identity typed in.",
             ),
             FieldSpec(
-                key="domain_id", hotkey="d", menu_text=menu_key("D", "omain ID"), label="Domain ID",
+                key="domain_id", label="Domain ID",
                 render=lambda d: sanitize_text(d["domain_id"]) if d["domain_id"] else "(required)",
                 prompt=text_field("domain_id", required=True),
                 brief="Domain this reporter belongs to",
                 help="Must name a configured trust domain (see Trust [D]omains).",
             ),
             FieldSpec(
-                key="scopes", hotkey="c", menu_text=menu_key("c", "opes", prefix="S"), label="Scopes",
+                key="scopes", label="Scopes",
                 render=lambda d: sanitize_text(d["scopes"]) if d["scopes"] else "(required)",
                 prompt=text_field("scopes", required=True),
                 brief="dimension:category, by commas",
@@ -6089,7 +6088,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 ),
             ),
             FieldSpec(
-                key="can_vouch_nodes", hotkey="v", menu_text=menu_key("V", "ouch for nodes"), label="May vouch for nodes",
+                key="can_vouch_nodes", label="May vouch for nodes",
                 render=lambda d: "yes" if d["can_vouch_nodes"] else "no",
                 prompt=choice_field("can_vouch_nodes", [False, True]),
                 step=choice_step("can_vouch_nodes", [False, True]),
@@ -6097,7 +6096,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 help="Whether a vouch from this reporter counts toward a node leaving probation.",
             ),
             FieldSpec(
-                key="can_vouch_users", hotkey="u", menu_text=menu_key("u", "sers", prefix="Vouch for "),
+                key="can_vouch_users",
                 label="May vouch for users",
                 render=lambda d: "yes" if d["can_vouch_users"] else "no",
                 prompt=choice_field("can_vouch_users", [False, True]),
@@ -6109,7 +6108,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["domain_id"] or not draft["scopes"]:
-                raise ValueError("choose a [N]ode and fill in the domain ID ([D]) and scopes ([C]) first")
+                raise ValueError("choose a Node and fill in the Domain ID and Scopes first")
             scopes = _parse_reporter_scopes(draft["scopes"])
             await lane.run(
                 configure_trusted_reporter, draft["node"], domain_id=draft["domain_id"], scopes=scopes,
@@ -6216,7 +6215,7 @@ async def _attestation_authorities_screen(
 
         fields = [
             FieldSpec(
-                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
+                key="node", label="Node",
                 render=_node_render("node"),
                 prompt=_node_then_seed,
                 brief="Which linked node may attest",
@@ -6227,7 +6226,7 @@ async def _attestation_authorities_screen(
                 ),
             ),
             FieldSpec(
-                key="attributes", hotkey="a", menu_text=menu_key("A", "ttributes"), label="Attributes",
+                key="attributes", label="Attributes",
                 render=lambda d: d["attributes"],
                 prompt=choice_field("attributes", attribute_sets),
                 step=choice_step("attributes", attribute_sets),
@@ -6235,7 +6234,7 @@ async def _attestation_authorities_screen(
                 help="Which verified attributes this authority's signed attestations are accepted for.",
             ),
             FieldSpec(
-                key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+                key="reason", label="Reason",
                 render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
                 prompt=text_field("reason", required=True),
                 brief="Mandatory audit note",
@@ -6245,7 +6244,7 @@ async def _attestation_authorities_screen(
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["reason"]:
-                raise ValueError("choose a [N]ode and give a [R]eason first")
+                raise ValueError("choose a Node and give a Reason first")
             await lane.run(
                 configure_attestation_authority, draft["node"],
                 attributes=[part.strip() for part in draft["attributes"].split(",")],
@@ -6348,7 +6347,7 @@ async def _attestation_recipients_screen(
 
         fields = [
             FieldSpec(
-                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
+                key="node", label="Node",
                 render=_node_render("node"),
                 prompt=_node_then_seed,
                 brief="Which linked node receives them",
@@ -6360,7 +6359,7 @@ async def _attestation_recipients_screen(
                 ),
             ),
             FieldSpec(
-                key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+                key="reason", label="Reason",
                 render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
                 prompt=text_field("reason", required=True),
                 brief="Mandatory audit note",
@@ -6370,7 +6369,7 @@ async def _attestation_recipients_screen(
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["reason"]:
-                raise ValueError("choose a [N]ode and give a [R]eason first")
+                raise ValueError("choose a Node and give a Reason first")
             await lane.run(
                 configure_attestation_recipient, draft["node"],
                 reason=draft["reason"], actor_user_id=actor.id,
@@ -6736,14 +6735,14 @@ async def _remote_attestation_override_screen(
     draft: dict = {"attribute": "age", "decision": "reject", "reason": ""}
     fields = [
         FieldSpec(
-            key="attribute", hotkey="a", menu_text=menu_key("A", "ttribute"), label="Attribute",
+            key="attribute", label="Attribute",
             render=lambda d: d["attribute"],
             prompt=choice_field("attribute", attributes), step=choice_step("attribute", attributes),
             brief="age or name",
             help="Which remote attestation this override applies to.",
         ),
         FieldSpec(
-            key="decision", hotkey="d", menu_text=menu_key("D", "ecision"), label="Decision",
+            key="decision", label="Decision",
             render=lambda d: "accept current trusted record" if d["decision"] == "accept" else "reject",
             prompt=choice_field("decision", decisions), step=choice_step("decision", decisions),
             brief="reject, or accept current record",
@@ -6754,7 +6753,7 @@ async def _remote_attestation_override_screen(
             ),
         ),
         FieldSpec(
-            key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+            key="reason", label="Reason",
             render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
             prompt=text_field("reason", required=True),
             brief="Mandatory audit note",
@@ -6880,7 +6879,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
 
         fields = [
             FieldSpec(
-                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Reporter node",
+                key="node", label="Reporter node",
                 render=_node_render("node"),
                 prompt=_node_reference_field(
                     "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
@@ -6889,21 +6888,21 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
                 help="A stored peer, or a name/DNS name/technical identity typed in.",
             ),
             FieldSpec(
-                key="dimension", hotkey="d", menu_text=menu_key("D", "imension"), label="Dimension",
+                key="dimension", label="Dimension",
                 render=lambda d: d["dimension"].value if d["dimension"] is not None else "(not chosen)",
                 prompt=_dimension_prompt,
                 brief="Which trust dimension",
                 help="Identity integrity, resource behavior, or content conduct.",
             ),
             FieldSpec(
-                key="category", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
+                key="category", label="Category",
                 render=lambda d: sanitize_text(d["category"]) if d["category"] else "(required)",
                 prompt=text_field("category", required=True),
                 brief="Evidence category in the dimension",
                 help="The evidence category (e.g. signed_equivocation) this single reporter may decide alone.",
             ),
             FieldSpec(
-                key="reason", hotkey="j", menu_text=menu_key("J", "ustification"), label="Justification",
+                key="reason", label="Justification",
                 render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
                 prompt=text_field("reason", required=True),
                 brief="Mandatory audit note",
@@ -6913,7 +6912,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or draft["dimension"] is None or not draft["category"] or not draft["reason"]:
-                raise ValueError("fill in [N]ode, [D]imension, [C]ategory, and [J]ustification first")
+                raise ValueError("fill in Node, Dimension, Category and Justification first")
             confirmed = await prompt_yes_no(
                 session,
                 "DANGER: one reporter will bypass the two-domain rule for this category. Continue?",
@@ -7106,13 +7105,13 @@ def _create_user_field_specs() -> list[FieldSpec]:
     account creation is the only thing this screen does."""
     return [
         FieldSpec(
-            key="username", hotkey="u", menu_text=menu_key("U", "sername"), label="Username",
+            key="username", label="Username",
             render=lambda d: d.get("username") or "",
             prompt=text_field("username", required=True),
             help="Letters, digits, '_', '-', and '.' only. Case-insensitive uniqueness.",
         ),
         FieldSpec(
-            key="password", hotkey="p", menu_text=menu_key("P", "assword"), label="Password",
+            key="password", label="Password",
             render=lambda d: "set" if d.get("password") else "(not set)",
             prompt=_create_user_password_field(),
             help=(
@@ -7122,13 +7121,13 @@ def _create_user_field_specs() -> list[FieldSpec]:
             ),
         ),
         FieldSpec(
-            key="verify_key", hotkey="k", menu_text=menu_key("K", "ey"), label="Public key",
+            key="verify_key", label="Public key",
             render=lambda d: "set" if d.get("verify_key") else "(not set)",
             prompt=_create_user_pubkey_field(),
             help="For SSH key-based login. Paste as base64, or a full 'ssh-ed25519 ...' line.",
         ),
         FieldSpec(
-            key="level", hotkey="l", menu_text=menu_key("L", "evel", prefix="Starting "), label="Starting level",
+            key="level", label="Starting level",
             render=lambda d: str(d.get("level", 0)),
             prompt=_int_field("level", "Starting level"),
             help=(
@@ -9675,7 +9674,7 @@ async def _backup_schedule_editor(
 
     fields = [
         FieldSpec(
-            key="frequency", hotkey="f", menu_text=menu_key("F", "requency"), label="Frequency",
+            key="frequency", label="Frequency",
             render=lambda d: d["frequency"],
             prompt=choice_field("frequency", list(BACKUP_FREQUENCIES)),
             step=choice_step("frequency", list(BACKUP_FREQUENCIES)),
@@ -9683,7 +9682,7 @@ async def _backup_schedule_editor(
             help="Off makes no scheduled backups. Daily and weekly run at the time below, in the node's display timezone.",
         ),
         FieldSpec(
-            key="time", hotkey="t", menu_text=menu_key("T", "ime"), label="Time",
+            key="time", label="Time",
             render=lambda d: d["time"], prompt=text_field("time"),
             brief="24-hour, node's timezone",
             help=(
@@ -9693,13 +9692,13 @@ async def _backup_schedule_editor(
             ),
         ),
         FieldSpec(
-            key="weekday", hotkey="w", menu_text=menu_key("W", "eekday"), label="Weekday (weekly)",
+            key="weekday", label="Weekday (weekly)",
             render=lambda d: WEEKDAY_NAMES[d["weekday"]],
             prompt=choice_field("weekday", list(range(7))), step=choice_step("weekday", list(range(7))),
             brief="Which day a weekly one runs",
         ),
         FieldSpec(
-            key="keep", hotkey="k", menu_text=menu_key("K", "eep"), label="Keep",
+            key="keep", label="Keep",
             render=lambda d: f"newest {d['keep']} scheduled backups",
             prompt=_int_field("keep", f"Scheduled backups to keep (1-{BACKUP_MAX_KEEP})"),
             brief="Older scheduled ones are deleted",
@@ -9710,7 +9709,7 @@ async def _backup_schedule_editor(
             ),
         ),
         FieldSpec(
-            key="destination", hotkey="d", menu_text=menu_key("D", "estination"), label="Destination",
+            key="destination", label="Destination",
             render=lambda d: d["destination"] or f"(default) {default_backup_root(db_path)}",
             prompt=_optional_text_field("destination"),
             brief="Folder for every backup",
@@ -10271,7 +10270,7 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
 
     fields = [
         FieldSpec(
-            key="format", hotkey="f", menu_text=menu_key("F", "ormat"), label="Format",
+            key="format", label="Format",
             render=lambda d: d["format"], prompt=_format_field,
             help=(
                 "A Python strftime pattern controlling the *shape* of every displayed "
@@ -10280,7 +10279,7 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
             ),
         ),
         FieldSpec(
-            key="timezone", hotkey="z", menu_text=menu_key("z", "one", prefix="Time"), label="Timezone",
+            key="timezone", label="Timezone",
             render=lambda d: d["timezone"], prompt=_timezone_field,
             help=(
                 "Opens a searchable list of every IANA timezone (e.g. 'Europe/Berlin', "
@@ -10368,7 +10367,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
     levels = await lane.run(level_context)
     fields = [
         FieldSpec(
-            key="upload_mib", hotkey="u", menu_text=menu_key("U", "pload cap (MiB)"), label="Upload cap",
+            key="upload_mib", label="Upload cap",
             render=_upload_render, prompt=_upload_field,
             brief="Largest file a caller may upload", section="Files",
             help=(
@@ -10379,7 +10378,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             ),
         ),
         FieldSpec(
-            key="grace_days", hotkey="g", menu_text=menu_key("G", "race before deletion (days)"),
+            key="grace_days",
             label="Grace before deletion",
             render=lambda d: f"{d['grace_days']} days", prompt=_int_field("grace_days", "Days"),
             brief="Days before expired items go", section="Retention",
@@ -10390,7 +10389,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             ),
         ),
         FieldSpec(
-            key="invite_days", hotkey="i", menu_text=menu_key("I", "nvitation expiry (days)"),
+            key="invite_days",
             label="Channel invitations expire after",
             render=lambda d: "never" if d["invite_days"] is None else f"{d['invite_days']} days",
             prompt=_optional_int_field("invite_days", "Days (blank = never)"),
@@ -10401,7 +10400,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             ),
         ),
         FieldSpec(
-            key="scrollback", hotkey="c", menu_text=menu_key("C", "hat scrollback (messages)"),
+            key="scrollback",
             label="Chat scrollback",
             render=lambda d: f"{d['scrollback']} messages per channel",
             prompt=_int_field("scrollback", "Messages kept per channel"),
@@ -10413,7 +10412,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             ),
         ),
         FieldSpec(
-            key="map_level", hotkey="n", menu_text=menu_key("N", "ode map level"),
+            key="map_level",
             label="Node map level",
             render=lambda d: _setting_level_label(levels, d["map_level"]),
             prompt=_int_field("map_level", "Lowest level"),
@@ -10425,7 +10424,7 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             ),
         ),
         FieldSpec(
-            key="mail_level", hotkey="m", menu_text=menu_key("M", "ail level"),
+            key="mail_level",
             label="Mail level",
             render=lambda d: _setting_level_label(levels, d["mail_level"]),
             prompt=_int_field("mail_level", "Lowest level"),
@@ -10561,23 +10560,6 @@ def _policy_running_note(view: PolicyView, next_value: Any) -> str | None:
     return f"running with {format_policy_value(view.setting, view.running)} until the next start"
 
 
-def _policy_hotkeys(settings: Sequence[PolicySetting]) -> dict[str, tuple[str, str, str]]:
-    """A hotkey for each setting in one editor: the first letter of its label
-    that nothing else on that screen uses. `s` and `b` are Save and Back."""
-    taken = {"s", "b"}
-    keys: dict[str, tuple[str, str, str]] = {}
-    for setting in settings:
-        label = setting.label
-        for index, char in enumerate(label):
-            if char.isalpha() and char.lower() not in taken:
-                taken.add(char.lower())
-                keys[setting.key] = (char.lower(), label[:index], label[index + 1:])
-                break
-        else:  # pragma: no cover -- every group has fewer settings than letters
-            raise RuntimeError(f"no hotkey left for {setting.key}")
-    return keys
-
-
 async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """Issue #730: operating policy that used to live only in `netbbs.toml`
     -- the Link carry caps, peering and limits, the live relay's bounds, the
@@ -10701,7 +10683,6 @@ async def _policy_group_editor(
 ) -> None:
     by_key = {view.setting.key: view for view in views}
     draft: dict = {view.setting.key: view.stored for view in views}
-    hotkeys = _policy_hotkeys([view.setting for view in views])
 
     def _render(key: str) -> Callable[[dict], str]:
         view = by_key[key]
@@ -10761,10 +10742,8 @@ async def _policy_group_editor(
     fields = []
     for view in views:
         key = view.setting.key
-        letter, before, after = hotkeys[key]
         fields.append(FieldSpec(
-            key=key, hotkey=letter,
-            menu_text=menu_key(letter.upper(), after) if not before else menu_key(letter, after, prefix=before),
+            key=key,
             label=view.setting.label,
             render=_render(key), prompt=_prompt(key),
             help=view.setting.help + (" " + _POLICY_CONFIG_NOTE if view.overridden else ""),
@@ -10937,62 +10916,62 @@ async def _mrc_settings_screen(
     levels = await lane.run(level_context)
     fields = [
         FieldSpec(
-            key="enabled", hotkey="e", menu_text=menu_key("E", "nable/Disable"), label="Enabled",
+            key="enabled", label="Enabled",
             render=lambda d: "yes" if d["enabled"] else "no",
             prompt=bool_field("enabled"), step=bool_step("enabled"),
             brief="Switch the hub link on or off", section="Hub",
             help="Off by default. Even when on, only channels you bridge individually reach the network.",
         ),
         FieldSpec(
-            key="host", hotkey="h", menu_text=menu_key("H", "ost"), label="Hub host",
+            key="host", label="Hub host",
             render=lambda d: d["host"], prompt=text_field("host", required=True),
             brief="The MRC hub to connect to", section="Hub",
             help="The public hub is mrc.bottomlessabyss.net. Change it only for a private hub. The protocol page (rev 1.26) also lists the operator's pool: na-multi, eu-multi and au-multi.relaychat.net (5000 plain, 5001 TLS) and mrcdev.relaychat.net for development.",
         ),
         FieldSpec(
-            key="port", hotkey="p", menu_text=menu_key("P", "ort"), label="Hub port",
+            key="port", label="Hub port",
             render=lambda d: str(d["port"]), prompt=_int_field("port", "Hub port"),
             brief="5001 with TLS, 5000 without", section="Hub",
         ),
         FieldSpec(
-            key="tls", hotkey="t", menu_text=menu_key("T", "LS"), label="TLS",
+            key="tls", label="TLS",
             render=lambda d: "yes" if d["tls"] else "no", prompt=_tls_field, step=_toggle_tls,
             brief="Encrypt the hub connection", section="Hub",
             help="Recommended. The hub's certificate is verified against the system CA store.",
         ),
         FieldSpec(
-            key="site_name", hotkey="n", menu_text=menu_key("N", "ame (site)"), label="Site name",
+            key="site_name", label="Site name",
             render=lambda d: d["site_name"], prompt=text_field("site_name", required=True),
             brief="How this BBS is named on MRC", section="Identity",
             help="Shown next to every caller from this node (nick@site). Printable ASCII, up to 30 characters; spaces become underscores on the wire.",
         ),
         FieldSpec(
-            key="info_sysop", hotkey="y", menu_text=menu_key("y", "sOp", prefix="S"), label="SysOp",
+            key="info_sysop", label="SysOp",
             render=lambda d: d["info_sysop"] or "(none)", prompt=_optional_text_field("info_sysop"),
             brief="Shown to MRC users via /info", section="Identity",
         ),
         FieldSpec(
-            key="info_description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            key="info_description", label="Description",
             render=lambda d: d["info_description"] or "(none)", prompt=_optional_text_field("info_description"),
             brief="One line about this BBS", section="Identity",
         ),
         FieldSpec(
-            key="info_telnet", hotkey="l", menu_text=menu_key("l", "net address", prefix="Te"), label="Telnet address",
+            key="info_telnet", label="Telnet address",
             render=lambda d: d["info_telnet"] or "(none)", prompt=_optional_text_field("info_telnet"),
             brief="host[:port] MRC users can call", section="Advertised addresses",
         ),
         FieldSpec(
-            key="info_ssh", hotkey="a", menu_text=menu_key("a", "ddress", prefix="SSH "), label="SSH address",
+            key="info_ssh", label="SSH address",
             render=lambda d: d["info_ssh"] or "(none)", prompt=_optional_text_field("info_ssh"),
             brief="host[:port] for SSH callers", section="Advertised addresses",
         ),
         FieldSpec(
-            key="info_web", hotkey="w", menu_text=menu_key("W", "eb address"), label="Web address",
+            key="info_web", label="Web address",
             render=lambda d: d["info_web"] or "(none)", prompt=_optional_text_field("info_web"),
             brief="URL of the web/xterm.js front door", section="Advertised addresses",
         ),
         FieldSpec(
-            key="send_caller_ip", hotkey="u", menu_text=menu_key("U", "SERIP"), label="Send callers' IP addresses (USERIP)",
+            key="send_caller_ip", label="Send callers' IP addresses (USERIP)",
             render=lambda d: "yes" if d["send_caller_ip"] else "no",
             prompt=_toggle_draft_field("send_caller_ip"),
             brief="Off: caller addresses stay local", section="About callers",
@@ -11004,7 +10983,7 @@ async def _mrc_settings_screen(
             ),
         ),
         FieldSpec(
-            key="send_caller_meta", hotkey="m", menu_text=menu_key("M", "etadata"), label="Send caller level and SysOp name (BBSMETA)",
+            key="send_caller_meta", label="Send caller level and SysOp name (BBSMETA)",
             render=lambda d: "yes" if d["send_caller_meta"] else "no",
             prompt=_toggle_draft_field("send_caller_meta"),
             brief="Off: hub learns no caller levels", section="About callers",
@@ -11015,7 +10994,7 @@ async def _mrc_settings_screen(
             ),
         ),
         FieldSpec(
-            key="open_rooms", hotkey="o", menu_text=menu_key("O", "pen rooms"), label="Callers may open any room",
+            key="open_rooms", label="Callers may open any room",
             render=lambda d: "yes" if d["open_rooms"] else "no",
             prompt=_toggle_draft_field("open_rooms"),
             brief="Callers' rooms become mrc:<room>", section="Open rooms",
@@ -11027,14 +11006,14 @@ async def _mrc_settings_screen(
             ),
         ),
         FieldSpec(
-            key="open_min_level", hotkey="v", menu_text=menu_key("v", "el for open rooms", prefix="Le"),
+            key="open_min_level",
             label="Minimum level (open rooms)",
             render=lambda d: _plain_level_label(levels, d["open_min_level"]),
             prompt=_int_field("open_min_level", "Minimum level"),
             brief="Level needed to open or enter one", section="Open rooms",
         ),
         FieldSpec(
-            key="open_min_age", hotkey="g", menu_text=menu_key("g", "e for open rooms", prefix="A"),
+            key="open_min_age",
             label="Minimum age (open rooms)",
             render=lambda d: _min_age_label(d["open_min_age"], d["open_age_requirement"]),
             prompt=_min_age_field("open_min_age", "open_age_requirement"),
@@ -11042,19 +11021,19 @@ async def _mrc_settings_screen(
             help="The minimum age to open a room." + _VERIFIED_AGE_HELP,
         ),
         FieldSpec(
-            key="open_name_requirement", hotkey="q", menu_text=menu_key("q", "uired name (open rooms)", prefix="Re"),
+            key="open_name_requirement",
             label="Name requirement (open rooms)",
             render=lambda d: d["open_name_requirement"] or "none",
             prompt=choice_field("open_name_requirement", [None, "verified", "verified_and_displayed"]),
             brief="Name gate on rooms callers open", section="Open rooms",
         ),
         FieldSpec(
-            key="open_cap", hotkey="c", menu_text=menu_key("C", "ap on open rooms"), label="Cap on open rooms",
+            key="open_cap", label="Cap on open rooms",
             render=lambda d: str(d["open_cap"]), prompt=_int_field("open_cap", "Most rooms open at once"),
             brief="Opening refuses past this cap", section="Open rooms",
         ),
         FieldSpec(
-            key="open_retention_days", hotkey="r", menu_text=menu_key("R", "etention (days)"), label="Retention (days)",
+            key="open_retention_days", label="Retention (days)",
             render=lambda d: str(d["open_retention_days"]),
             prompt=_int_field("open_retention_days", "Days an open room may sit idle"),
             brief="Idle open rooms retire after this", section="Open rooms",
@@ -11064,7 +11043,7 @@ async def _mrc_settings_screen(
             ),
         ),
         FieldSpec(
-            key="open_blocklist", hotkey="k", menu_text=menu_key("k", "list", prefix="Bloc"), label="Blocked rooms",
+            key="open_blocklist", label="Blocked rooms",
             render=lambda d: ", ".join(d["open_blocklist"]) if d["open_blocklist"] else "(none)",
             prompt=_blocklist_field, brief="Rooms callers may not open here", section="Open rooms",
         ),
@@ -11148,7 +11127,7 @@ def _mrc_unreachable_note(db: Database) -> str | None:
     if load_open_room_settings(db).enabled or any(mapping.active for mapping in list_mrc_mappings(db)):
         return None
     return (
-        "No caller can reach MRC yet: turn on [O]pen rooms here so Chat shows the network's rooms, "
+        "No caller can reach MRC yet: turn on \"Callers may open any room\" here so Chat shows the network's rooms, "
         "or bridge a channel to a room from that channel's own screen."
     )
 
@@ -12238,7 +12217,7 @@ async def _dial_in_editor(
 
     fields = [
         FieldSpec(
-            key=key, hotkey=str(position), menu_text=menu_key(str(position), f" Address {position}"),
+            key=key,
             label=f"Address {position}", render=lambda d, key=key: d[key] or "(empty)",
             prompt=text_field(key),
             brief="telnet://, ssh:// or https://",
@@ -12251,7 +12230,7 @@ async def _dial_in_editor(
         for position, key in enumerate(slots, start=1)
     ]
     fields.append(FieldSpec(
-        key="suggestions", hotkey="u", menu_text=menu_key("U", "se suggestions"), label="Suggested",
+        key="suggestions", label="Suggested",
         render=lambda d: ", ".join(suggestions) if suggestions else "(none -- no DNS name or listeners on record)",
         prompt=use_suggestions_prompt,
         brief="Fill the slots; not saved yet",
@@ -14154,7 +14133,7 @@ async def disconnect_session_draft(
         title=f"Disconnect {name}",
         fields=[
             FieldSpec(
-                key="message", hotkey="m", menu_text=menu_key("M", "essage"), label="Message",
+                key="message", label="Message",
                 render=lambda d: sanitize_text(d["message"]) if d.get("message") else "(none)",
                 prompt=text_field("message"),
                 brief="Shown to them before disconnect",
@@ -14217,7 +14196,7 @@ def _shutdown_field_specs() -> list[FieldSpec]:
     docstring for the specific bug this fixes."""
     return [
         FieldSpec(
-            key="mode", hotkey="m", menu_text=menu_key("M", "ode"), label="Mode",
+            key="mode", label="Mode",
             render=lambda d: d["mode"],
             prompt=choice_field("mode", _SHUTDOWN_DRAIN_MODES),
             step=choice_step("mode", _SHUTDOWN_DRAIN_MODES),
@@ -14228,14 +14207,14 @@ def _shutdown_field_specs() -> list[FieldSpec]:
             ),
         ),
         FieldSpec(
-            key="delay_seconds", hotkey="d", menu_text=menu_key("D", "elay"), label="Delay",
+            key="delay_seconds", label="Delay",
             render=lambda d: f"{d['delay_seconds']:g}s" if d["mode"] == "graceful" else "n/a (immediate)",
             prompt=_delay_seconds_field(),
             brief="Seconds before disconnecting",
             help="How long to wait, once triggered, before disconnecting everyone. Only used in graceful mode.",
         ),
         FieldSpec(
-            key="message", hotkey="c", menu_text=menu_key("C", "ustom message"), label="Custom message",
+            key="message", label="Custom message",
             render=lambda d: d.get("message") or "(default message)",
             prompt=text_field("message"),
             brief="Replaces the default notice",
@@ -14472,14 +14451,14 @@ def _drain_field_specs() -> list[FieldSpec]:
     since drain has no graceful/immediate mode of its own."""
     return [
         FieldSpec(
-            key="delay_seconds", hotkey="d", menu_text=menu_key("D", "elay"), label="Delay",
+            key="delay_seconds", label="Delay",
             render=lambda d: f"{d['delay_seconds']:g}s",
             prompt=_delay_seconds_field(),
             brief="Seconds before disconnecting",
             help="How long to wait, once triggered, before disconnecting every non-SysOp session.",
         ),
         FieldSpec(
-            key="message", hotkey="c", menu_text=menu_key("C", "ustom message"), label="Custom message",
+            key="message", label="Custom message",
             render=lambda d: d.get("message") or "(default message)",
             prompt=text_field("message"),
             brief="Replaces the default notice",
@@ -18388,19 +18367,19 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
 
     fields = [
         FieldSpec(
-            key="accent", hotkey="a", menu_text=menu_key("A", "ccent"), label="Accent",
+            key="accent", label="Accent",
             render=_render("accent"), prompt=_theme_color_field("accent"),
             brief="Board/channel/user-name color",
             help="Used for board, channel, and user names and other navigable items. R,G,B or 'default'.",
         ),
         FieldSpec(
-            key="header", hotkey="h", menu_text=menu_key("H", "eader"), label="Header",
+            key="header", label="Header",
             render=_render("header"), prompt=_theme_color_field("header"),
             brief="Section-header color",
             help="Used for section titles and frame borders. R,G,B or 'default'.",
         ),
         FieldSpec(
-            key="clock", hotkey="c", menu_text=menu_key("C", "lock"), label="Clock",
+            key="clock", label="Clock",
             render=_render("clock"), prompt=_theme_color_field("clock"),
             brief="Main-menu clock color",
             help="Used for the main-menu prompt's time display. R,G,B or 'default'.",
@@ -19459,14 +19438,14 @@ def _community_field_specs(
     fields (design doc §16)."""
     return [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             render=lambda d: d.get("name") or "(blank)",
             prompt=text_field("name", required=True),
             brief="The community's display name",
             help="The Community's display name, shown wherever it's listed. Must be non-blank.",
         ),
         FieldSpec(
-            key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            key="description", label="Description",
             render=lambda d: d.get("description") or "(none)",
             prompt=text_field("description"),
             brief="Shown in the community directory",
@@ -19474,7 +19453,7 @@ def _community_field_specs(
             "directory alongside its name.",
         ),
         FieldSpec(
-            key="hidden", hotkey="h", menu_text=menu_key("H", "idden"), label="Hidden",
+            key="hidden", label="Hidden",
             render=lambda d: "yes" if d.get("hidden") else "no",
             prompt=bool_field("hidden"), step=bool_step("hidden"),
             brief="Hide from the communities list",
@@ -19485,7 +19464,7 @@ def _community_field_specs(
             ),
         ),
         FieldSpec(
-            key="default_min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"),
+            key="default_min_read_level",
             label="Default read level",
             render=lambda d: _community_default_label(levels, d, "default_min_read_level", community_id),
             prompt=_optional_int_field("default_min_read_level", "Default minimum read level"),
@@ -19497,7 +19476,7 @@ def _community_field_specs(
             ),
         ),
         FieldSpec(
-            key="default_min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"),
+            key="default_min_write_level",
             label="Default write level",
             render=lambda d: _community_default_label(levels, d, "default_min_write_level", community_id),
             prompt=_optional_int_field("default_min_write_level", "Default minimum write level"),
@@ -19508,7 +19487,7 @@ def _community_field_specs(
             ),
         ),
         FieldSpec(
-            key="default_min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"),
+            key="default_min_age",
             label="Default min age",
             render=lambda d: _min_age_label(d.get("default_min_age"), d.get("default_age_requirement")),
             prompt=_min_age_field("default_min_age", "default_age_requirement"),
@@ -19519,7 +19498,7 @@ def _community_field_specs(
             ) + _VERIFIED_AGE_HELP,
         ),
         FieldSpec(
-            key="default_name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            key="default_name_requirement",
             label="Default name requirement",
             render=lambda d: _name_requirement_label(d.get("default_name_requirement")),
             prompt=_name_requirement_field("default_name_requirement"),
@@ -19803,7 +19782,7 @@ def _board_field_specs(
     docstring."""
     return [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             render=lambda d: d.get("name") or "(blank)",
             prompt=text_field("name", required=True),
             brief="The board's display name",
@@ -19811,7 +19790,7 @@ def _board_field_specs(
             section="Identity",
         ),
         FieldSpec(
-            key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            key="description", label="Description",
             render=lambda d: d.get("description") or "(none)",
             prompt=text_field("description"),
             brief="Shown when browsing the board",
@@ -19819,7 +19798,7 @@ def _board_field_specs(
             section="Identity",
         ),
         FieldSpec(
-            key="min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"), label="Min read level",
+            key="min_read_level", label="Min read level",
             render=lambda d: _resource_level_label(levels, d, "min_read_level"),
             prompt=_optional_int_field("min_read_level", "Minimum read level"),
             brief="Level required to read it",
@@ -19831,7 +19810,7 @@ def _board_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"), label="Min write level",
+            key="min_write_level", label="Min write level",
             render=lambda d: _resource_level_label(levels, d, "min_write_level"),
             prompt=_optional_int_field("min_write_level", "Minimum write level"),
             brief="Level required to post",
@@ -19843,7 +19822,7 @@ def _board_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
+            key="min_age", label="Min age",
             render=lambda d: _min_age_label(d.get("min_age"), d.get("age_requirement")),
             prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
@@ -19855,7 +19834,7 @@ def _board_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            key="name_requirement",
             label="Name requirement",
             render=lambda d: _name_requirement_label(d.get("name_requirement")),
             prompt=_name_requirement_field(),
@@ -19865,7 +19844,7 @@ def _board_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
+            key="community_id", label="Community",
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(
                 actor=actor,
@@ -19880,7 +19859,7 @@ def _board_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
+            key="category_id", label="Category",
             render=lambda d: d.get("category_id_label") or "(none)",
             prompt=_category_field(
                 actor=actor, create=create_board_category, error_type=CategoryError,
@@ -19896,7 +19875,7 @@ def _board_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
+            key="pinned", label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
             prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
@@ -19904,7 +19883,7 @@ def _board_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="moderated", hotkey="m", menu_text=menu_key("M", "oderated"), label="Moderated",
+            key="moderated", label="Moderated",
             render=lambda d: "yes" if d.get("moderated") else "no",
             prompt=bool_field("moderated"), step=bool_step("moderated"),
             brief="New posts need approval first",
@@ -19912,7 +19891,7 @@ def _board_field_specs(
             section="Moderation",
         ),
         FieldSpec(
-            key="allow_color", hotkey="o", menu_text=menu_key("o", "lor in posts", prefix="C"),
+            key="allow_color",
             label="Color in posts",
             render=lambda d: "allowed" if d.get("allow_color") else "not allowed",
             prompt=choice_field("allow_color", [False, True]),
@@ -19928,7 +19907,7 @@ def _board_field_specs(
             section="Moderation",
         ),
         FieldSpec(
-            key="max_post_age_days", hotkey="x", menu_text=menu_key("X", " post age", prefix="Ma"),
+            key="max_post_age_days",
             label="Max post age (days)",
             render=lambda d: _optional_int_label(d.get("max_post_age_days"), none_word="unlimited"),
             prompt=_optional_int_field("max_post_age_days", "Max post age in days"),
@@ -20582,7 +20561,7 @@ def _link_board_field_specs(
     of enforced settings."""
     return [
         FieldSpec(
-            key="default_min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"),
+            key="default_min_read_level",
             label="Recommended read level",
             render=lambda d: _optional_int_label(d.get("default_min_read_level")),
             prompt=_optional_int_field("default_min_read_level", "Recommended minimum read level"),
@@ -20590,7 +20569,7 @@ def _link_board_field_specs(
             help="Recommends a minimum read level to peers that don't set their own. 'none' sends no recommendation.",
         ),
         FieldSpec(
-            key="default_min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"),
+            key="default_min_write_level",
             label="Recommended write level",
             render=lambda d: _optional_int_label(d.get("default_min_write_level")),
             prompt=_optional_int_field("default_min_write_level", "Recommended minimum write level"),
@@ -20598,7 +20577,7 @@ def _link_board_field_specs(
             help="Recommends a minimum write level to peers that don't set their own. 'none' sends no recommendation.",
         ),
         FieldSpec(
-            key="default_moderated", hotkey="m", menu_text=menu_key("M", "oderated"),
+            key="default_moderated",
             label="Recommended moderated",
             render=lambda d: _link_recommendation_label(d.get("default_moderated")),
             prompt=choice_field("default_moderated", _LINK_RECOMMENDATION_VALUES),
@@ -20607,7 +20586,7 @@ def _link_board_field_specs(
             help="Recommends whether posts should need approval, to peers that don't set their own.",
         ),
         FieldSpec(
-            key="default_max_post_age_days", hotkey="x", menu_text=menu_key("X", " post age", prefix="Ma"),
+            key="default_max_post_age_days",
             label="Recommended max post age",
             render=lambda d: _optional_int_label(d.get("default_max_post_age_days"), none_word="no recommendation"),
             prompt=_optional_int_field("default_max_post_age_days", "Recommended max post age in days"),
@@ -20615,7 +20594,7 @@ def _link_board_field_specs(
             help="Recommends auto-purging posts older than N days, to peers that don't set their own.",
         ),
         FieldSpec(
-            key="default_min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"),
+            key="default_min_age",
             label="Recommended min age",
             render=lambda d: _optional_int_label(d.get("default_min_age")),
             prompt=_min_age_field("default_min_age"),
@@ -20623,7 +20602,7 @@ def _link_board_field_specs(
             help="Recommends a minimum caller age to peers that don't set their own.",
         ),
         FieldSpec(
-            key="default_name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            key="default_name_requirement",
             label="Recommended name requirement",
             render=lambda d: _name_requirement_label(d.get("default_name_requirement")),
             prompt=_name_requirement_field("default_name_requirement"),
@@ -20632,7 +20611,7 @@ def _link_board_field_specs(
             help=_NAME_REQUIREMENT_HELP + " Recommended to peers that don't set their own.",
         ),
         FieldSpec(
-            key="forked_from", hotkey="f", menu_text=menu_key("F", "ork of"), label="Fork of",
+            key="forked_from", label="Fork of",
             render=lambda d: d.get("forked_from_label") or "(not a fork)",
             prompt=_forked_from_field(
                 board, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
@@ -21657,7 +21636,7 @@ def _area_field_specs(
     `_board_field_specs`, just "file" in place of "post" throughout."""
     return [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             render=lambda d: d.get("name") or "(blank)",
             prompt=text_field("name", required=True),
             brief="The area's display name",
@@ -21665,7 +21644,7 @@ def _area_field_specs(
             section="Identity",
         ),
         FieldSpec(
-            key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            key="description", label="Description",
             render=lambda d: d.get("description") or "(none)",
             prompt=text_field("description"),
             brief="Shown when browsing the area",
@@ -21673,7 +21652,7 @@ def _area_field_specs(
             section="Identity",
         ),
         FieldSpec(
-            key="min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"), label="Min read level",
+            key="min_read_level", label="Min read level",
             render=lambda d: _resource_level_label(levels, d, "min_read_level"),
             prompt=_optional_int_field("min_read_level", "Minimum read level"),
             brief="Level required to browse it",
@@ -21685,7 +21664,7 @@ def _area_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"), label="Min write level",
+            key="min_write_level", label="Min write level",
             render=lambda d: _resource_level_label(levels, d, "min_write_level"),
             prompt=_optional_int_field("min_write_level", "Minimum write level"),
             brief="Level required to upload",
@@ -21697,7 +21676,7 @@ def _area_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
+            key="min_age", label="Min age",
             render=lambda d: _min_age_label(d.get("min_age"), d.get("age_requirement")),
             prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
@@ -21709,7 +21688,7 @@ def _area_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            key="name_requirement",
             label="Name requirement",
             render=lambda d: _name_requirement_label(d.get("name_requirement")),
             prompt=_name_requirement_field(),
@@ -21719,7 +21698,7 @@ def _area_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
+            key="community_id", label="Community",
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(
                 actor=actor,
@@ -21734,7 +21713,7 @@ def _area_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
+            key="category_id", label="Category",
             render=lambda d: d.get("category_id_label") or "(none)",
             prompt=_category_field(
                 actor=actor, create=create_file_category, error_type=FileCategoryError,
@@ -21750,7 +21729,7 @@ def _area_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
+            key="pinned", label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
             prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
@@ -21758,7 +21737,7 @@ def _area_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="moderated", hotkey="m", menu_text=menu_key("M", "oderated"), label="Moderated",
+            key="moderated", label="Moderated",
             render=lambda d: "yes" if d.get("moderated") else "no",
             prompt=bool_field("moderated"), step=bool_step("moderated"),
             brief="New uploads need approval first",
@@ -21766,7 +21745,7 @@ def _area_field_specs(
             section="Moderation",
         ),
         FieldSpec(
-            key="max_file_age_days", hotkey="x", menu_text=menu_key("X", " file age", prefix="Ma"),
+            key="max_file_age_days",
             label="Max file age (days)",
             render=lambda d: _optional_int_label(d.get("max_file_age_days"), none_word="unlimited"),
             prompt=_optional_int_field("max_file_age_days", "Max file age in days"),
@@ -22025,7 +22004,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
     `max_file_age_days` in place of `max_post_age_days`."""
     return [
         FieldSpec(
-            key="default_min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"),
+            key="default_min_read_level",
             label="Recommended read level",
             render=lambda d: _optional_int_label(d.get("default_min_read_level")),
             prompt=_optional_int_field("default_min_read_level", "Recommended minimum read level"),
@@ -22033,7 +22012,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             help="Recommends a minimum read level to peers that don't set their own. 'none' sends no recommendation.",
         ),
         FieldSpec(
-            key="default_min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"),
+            key="default_min_write_level",
             label="Recommended write level",
             render=lambda d: _optional_int_label(d.get("default_min_write_level")),
             prompt=_optional_int_field("default_min_write_level", "Recommended minimum write level"),
@@ -22041,7 +22020,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             help="Recommends a minimum write level to peers that don't set their own. 'none' sends no recommendation.",
         ),
         FieldSpec(
-            key="default_moderated", hotkey="m", menu_text=menu_key("M", "oderated"),
+            key="default_moderated",
             label="Recommended moderated",
             render=lambda d: _link_recommendation_label(d.get("default_moderated")),
             prompt=choice_field("default_moderated", _LINK_RECOMMENDATION_VALUES),
@@ -22050,7 +22029,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             help="Recommends whether uploads should need approval, to peers that don't set their own.",
         ),
         FieldSpec(
-            key="default_max_file_age_days", hotkey="x", menu_text=menu_key("X", " file age", prefix="Ma"),
+            key="default_max_file_age_days",
             label="Recommended max file age",
             render=lambda d: _optional_int_label(d.get("default_max_file_age_days"), none_word="no recommendation"),
             prompt=_optional_int_field("default_max_file_age_days", "Recommended max file age in days"),
@@ -22058,7 +22037,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             help="Recommends auto-purging files older than N days, to peers that don't set their own.",
         ),
         FieldSpec(
-            key="default_min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"),
+            key="default_min_age",
             label="Recommended min age",
             render=lambda d: _optional_int_label(d.get("default_min_age")),
             prompt=_min_age_field("default_min_age"),
@@ -22066,7 +22045,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             help="Recommends a minimum caller age to peers that don't set their own.",
         ),
         FieldSpec(
-            key="default_name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            key="default_name_requirement",
             label="Recommended name requirement",
             render=lambda d: _name_requirement_label(d.get("default_name_requirement")),
             prompt=_name_requirement_field("default_name_requirement"),
@@ -22583,7 +22562,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
     line than re-entering the field once per argument."""
     return [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             section="Door",
             render=lambda d: d.get("name") or "(blank)",
             prompt=text_field("name", required=True),
@@ -22591,7 +22570,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             help="The door's display name, shown wherever it's listed. Must be non-blank.",
         ),
         FieldSpec(
-            key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            key="description", label="Description",
             section="Door",
             render=lambda d: d.get("description") or "(none)",
             prompt=text_field("description"),
@@ -22599,7 +22578,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             help="A short explanation of what this door is, shown when browsing/selecting it.",
         ),
         FieldSpec(
-            key="executable_path", hotkey="e", menu_text=menu_key("E", "xecutable path"), label="Executable path",
+            key="executable_path", label="Executable path",
             section="Launch",
             render=lambda d: d.get("executable_path") or "(blank)",
             prompt=text_field("executable_path", required=True),
@@ -22612,7 +22591,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             ),
         ),
         FieldSpec(
-            key="args_line", hotkey="a", menu_text=menu_key("A", "rgs"), label="Arguments",
+            key="args_line", label="Arguments",
             section="Launch",
             render=lambda d: d.get("args_line") or "(none)",
             prompt=text_field("args_line"),
@@ -22620,7 +22599,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             help="Fixed arguments always passed to the door, space-separated on one line. Leave blank for none.",
         ),
         FieldSpec(
-            key="min_play_level", hotkey="p", menu_text=menu_key("P", "lay level"), label="Min play level",
+            key="min_play_level", label="Min play level",
             section="Access",
             render=lambda d: _plain_level_label(levels, d.get("min_play_level")),
             prompt=_int_field("min_play_level", "Minimum play level"),
@@ -22628,7 +22607,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             help="The permission level a caller needs to launch/play this door.",
         ),
         FieldSpec(
-            key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
+            key="community_id", label="Community",
             section="Placement",
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(actor=actor),
@@ -22636,7 +22615,7 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             help="The Community this door is offered from, if any. 'none' keeps it outside every Community.",
         ),
         FieldSpec(
-            key="pinned", hotkey="i", menu_text=menu_key("i", "nned", prefix="P"), label="Pinned",
+            key="pinned", label="Pinned",
             section="Placement",
             render=lambda d: "yes" if d.get("pinned") else "no",
             prompt=bool_field("pinned"), step=bool_step("pinned"),
@@ -23993,7 +23972,7 @@ def _channel_field_specs(
     dogfood feature request) -- see `_channel_screen`."""
     return [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             render=lambda d: d.get("name") or "(blank)",
             prompt=text_field("name", required=True),
             brief="The channel's display name",
@@ -24001,7 +23980,7 @@ def _channel_field_specs(
             section="Identity",
         ),
         FieldSpec(
-            key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            key="description", label="Description",
             render=lambda d: d.get("description") or "(none)",
             prompt=text_field("description"),
             brief="Shown when browsing channels",
@@ -24009,7 +23988,7 @@ def _channel_field_specs(
             section="Identity",
         ),
         FieldSpec(
-            key="min_level", hotkey="l", menu_text=menu_key("L", "evel"), label="Min level",
+            key="min_level", label="Min level",
             render=lambda d: _plain_level_label(levels, d.get("min_level")),
             prompt=_int_field("min_level", "Minimum level"),
             brief="Level required to join",
@@ -24021,7 +24000,7 @@ def _channel_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
+            key="min_age", label="Min age",
             render=lambda d: _min_age_label(d.get("min_age"), d.get("age_requirement")),
             prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
@@ -24033,7 +24012,7 @@ def _channel_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            key="name_requirement",
             label="Name requirement",
             render=lambda d: _name_requirement_label(d.get("name_requirement")),
             prompt=_name_requirement_field(),
@@ -24043,7 +24022,7 @@ def _channel_field_specs(
             section="Access",
         ),
         FieldSpec(
-            key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
+            key="community_id", label="Community",
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(
                 actor=actor,
@@ -24058,7 +24037,7 @@ def _channel_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
+            key="category_id", label="Category",
             render=lambda d: d.get("category_id_label") or "(none)",
             prompt=_category_field(
                 actor=actor, create=create_channel_category, error_type=ChannelCategoryError,
@@ -24074,7 +24053,7 @@ def _channel_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
+            key="pinned", label="Pinned",
             render=lambda d: "yes" if d.get("pinned") else "no",
             prompt=bool_field("pinned"), step=bool_step("pinned"),
             brief="Shown at the top of listings",
@@ -24082,7 +24061,7 @@ def _channel_field_specs(
             section="Organization",
         ),
         FieldSpec(
-            key="hidden", hotkey="h", menu_text=menu_key("H", "idden"), label="Hidden",
+            key="hidden", label="Hidden",
             render=lambda d: "yes" if d.get("hidden") else "no",
             prompt=bool_field("hidden"), step=bool_step("hidden"),
             brief="Omitted from channel listings",
@@ -24094,7 +24073,7 @@ def _channel_field_specs(
             section="Membership",
         ),
         FieldSpec(
-            key="members_only", hotkey="m", menu_text=menu_key("M", "embers-only"), label="Members-only",
+            key="members_only", label="Members-only",
             render=lambda d: "yes" if d.get("members_only") else "no",
             prompt=bool_field("members_only"), step=bool_step("members_only"),
             brief="Only invited members may join",
@@ -24102,7 +24081,7 @@ def _channel_field_specs(
             section="Membership",
         ),
         FieldSpec(
-            key="allow_member_invites", hotkey="i", menu_text=menu_key("I", "nvites"),
+            key="allow_member_invites",
             label="Allow member invites",
             render=lambda d: "yes" if d.get("allow_member_invites") else "no",
             prompt=bool_field("allow_member_invites"), step=bool_step("allow_member_invites"),
@@ -24690,7 +24669,7 @@ def _link_channel_field_specs() -> list[FieldSpec]:
     doc §9.6)."""
     return [
         FieldSpec(
-            key="default_min_level", hotkey="l", menu_text=menu_key("L", "evel"),
+            key="default_min_level",
             label="Recommended min level",
             render=lambda d: _optional_int_label(d.get("default_min_level")),
             prompt=_optional_int_field("default_min_level", "Recommended minimum level"),
@@ -24698,7 +24677,7 @@ def _link_channel_field_specs() -> list[FieldSpec]:
             help="Recommends a minimum level to peers that don't set their own. 'none' sends no recommendation.",
         ),
         FieldSpec(
-            key="default_min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"),
+            key="default_min_age",
             label="Recommended min age",
             render=lambda d: _optional_int_label(d.get("default_min_age")),
             prompt=_min_age_field("default_min_age"),
@@ -24706,7 +24685,7 @@ def _link_channel_field_specs() -> list[FieldSpec]:
             help="Recommends a minimum caller age to peers that don't set their own.",
         ),
         FieldSpec(
-            key="default_name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            key="default_name_requirement",
             label="Recommended name requirement",
             render=lambda d: _name_requirement_label(d.get("default_name_requirement")),
             prompt=_name_requirement_field("default_name_requirement"),
@@ -25058,21 +25037,21 @@ async def _create_category_screen(
 
     fields = [
         FieldSpec(
-            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            key="name", label="Name",
             render=lambda d: sanitize_text(d["name"]) if d["name"] else "(blank)",
             prompt=text_field("name", required=True),
             brief="The category's name",
             help="Shown wherever this category is listed. Required.",
         ),
         FieldSpec(
-            key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            key="description", label="Description",
             render=lambda d: sanitize_text(d["description"]) if d["description"] else "(none)",
             prompt=text_field("description"),
             brief="Optional one-line description",
             help="Optional. Shown under the category name where there is room for it.",
         ),
         FieldSpec(
-            key="parent", hotkey="p", menu_text=menu_key("P", "arent"), label="Parent",
+            key="parent", label="Parent",
             render=lambda d: sanitize_text(d["parent"].name) if d["parent"] is not None else "(none -- top-level)",
             prompt=_parent_prompt,
             brief="Nest under an existing category",
@@ -25485,7 +25464,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         if draft["object_type"] is None or draft["object_id"] is not None:
             _announce_line(session,
                 colored(
-                    "Community scoping applies to blanket grants only -- choose a blanket scope under [O]n first.",
+                    "Community scoping applies to blanket grants only -- choose a blanket scope under On first.",
                     fg_color=MUTED_COLOR,
                 )
             )
@@ -25514,14 +25493,14 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
 
     fields = [
         FieldSpec(
-            key="user", hotkey="u", menu_text=menu_key("U", "ser"), label="User",
+            key="user", label="User",
             render=lambda d: sanitize_text(d["user"].username) if d["user"] is not None else "(not chosen)",
             prompt=_user_prompt,
             brief="Who receives the grant",
             help="The account that will hold these moderator permissions.",
         ),
         FieldSpec(
-            key="label", hotkey="o", menu_text=menu_key("O", "n"), label="On",
+            key="label", label="On",
             render=lambda d: sanitize_text(d["label"]) if d["label"] else "(not chosen)",
             prompt=_scope_prompt,
             brief="One resource, or all of one kind",
@@ -25531,7 +25510,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             ),
         ),
         FieldSpec(
-            key="community", hotkey="c", menu_text=menu_key("C", "ommunity"), label="Community",
+            key="community", label="Community",
             render=_community_render,
             prompt=_community_prompt,
             brief="Narrow the grant to one Community",
@@ -25541,7 +25520,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             ),
         ),
         FieldSpec(
-            key="preset", hotkey="p", menu_text=menu_key("P", "reset"), label="Preset",
+            key="preset", label="Preset",
             render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
             prompt=choice_field("preset", _MODERATOR_PRESETS),
             step=choice_step("preset", _MODERATOR_PRESETS),
@@ -25562,7 +25541,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         if draft["user"] is None or draft["object_type"] is None:
             # Raised so the editor redraws with the draft intact (Codex
             # review on #289) rather than closing on a bare `return None`.
-            raise ModeratorGrantError("choose a [U]ser and a scope under [O]n first")
+            raise ModeratorGrantError("choose a User and a scope under On first")
         community = draft["community"]
         label = draft["label"]
         if community is not None:

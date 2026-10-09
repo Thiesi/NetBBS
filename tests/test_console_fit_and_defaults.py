@@ -82,7 +82,7 @@ def test_the_console_landing_keeps_descriptions_at_80x24(db, lane):
 
 def test_an_account_made_in_the_console_starts_redrawing_in_place(db, lane):
     sysop = create_user(db, "InkWell", password="hunter2", user_level=SYSOP_LEVEL)
-    session = ScriptedSession(["u", "c", "u", "OldNib", "p", "y", "hunter22", "hunter22", "c"])
+    session = ScriptedSession(["u", "c", "0", "1", "OldNib", "0", "2", "y", "hunter22", "hunter22", "c"])
     with pytest.raises(_Exhausted):
         asyncio.run(admin_menu(session, lane, sysop))
     made = get_user_by_username(db, "OldNib")

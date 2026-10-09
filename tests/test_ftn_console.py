@@ -74,8 +74,8 @@ def test_settings_lists_ftn_networks(db, lane, sysop):
 
 def test_a_new_network_starts_as_fsxnet_and_needs_our_address(db, lane, sysop):
     # s: Settings, e: FTN networks, c: create; save at once is refused (no
-    # address); a: our address; s: save; then back out.
-    session = FakeSession(["s", "e", "c", "s", "a", "21:1/199", "s", "b", "b", "b", "b"])
+    # address); 04: our address; s: save; then back out.
+    session = FakeSession(["s", "e", "c", "s", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _visible(_written_text(session))
     assert "starts as fsxNet's main hub" in text

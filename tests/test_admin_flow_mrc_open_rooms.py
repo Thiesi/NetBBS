@@ -38,13 +38,13 @@ from tests.test_admin_flow_mrc import (  # noqa: F401 -- fixtures and helpers
 
 
 def test_settings_screen_edits_the_open_room_half_and_its_blocklist(db, lane, sysop):
-    # s: Settings, i: MRC; o: open rooms on (a toggle toggles -- no
-    # prompt); c: cap 5; r: retention 3; k: blocklist -> a: add "Secret
+    # s: Settings, i: MRC; 13: open rooms on (a toggle toggles -- no
+    # prompt); 17: cap 5; 18: retention 3; 19: blocklist -> a: add "Secret
     # Room", a: add "|04evil", r: remove -> pick 0,1 (the first entry),
     # b: back; s: save; b/b/b out.
     session = FakeSession([
-        "s", "i", "o", "c", "5", "r", "3",
-        "k", "a", "Secret Room", "a", "|04evil", "r", "0", "1", "b",
+        "s", "i", "1", "3", "1", "7", "5", "1", "8", "3",
+        "1", "9", "a", "Secret Room", "a", "|04evil", "r", "0", "1", "b",
         "s", "b", "b", "b",
     ])
     asyncio.run(admin_menu(session, lane, sysop))
@@ -59,7 +59,7 @@ def test_settings_screen_edits_the_open_room_half_and_its_blocklist(db, lane, sy
 
 
 def test_settings_screen_rejects_a_bad_open_room_value_and_keeps_the_draft(db, lane, sysop):
-    session = FakeSession(["s", "i", "c", "0", "s", "c", "4", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "1", "7", "0", "s", "1", "7", "4", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _visible(_written_text(session))
     assert "The open-room cap must be between 1 and 500." in text

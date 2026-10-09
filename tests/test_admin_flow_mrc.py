@@ -88,7 +88,7 @@ def test_settings_menu_lists_inter_bbs_chat(db, lane, sysop):
 
 def test_mrc_settings_screen_shows_defaults_and_applies_without_a_node(db, lane, sysop):
     # s: Settings, i: MRC screen, e/y: enable, h: host, n: site name, s: save, b/b/b: back out.
-    session = FakeSession(["s", "i", "e", "h", "hub.example.org", "n", "My Board", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "0", "1", "0", "2", "hub.example.org", "0", "5", "My Board", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _visible(_written_text(session))
     assert "Multi Relay Chat is a public, unauthenticated" in text
@@ -104,32 +104,32 @@ def test_saving_mrc_on_with_nothing_reachable_warns_the_sysop(db, lane, sysop):
     # MRC on bridges nothing by itself: with open rooms off and no channel
     # mapped the link comes up and no caller can see any of it.
     warning = "No caller can reach MRC yet"
-    session = FakeSession(["s", "i", "e", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "0", "1", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert warning in _visible(_written_text(session))
     # o: open rooms on -- callers have a way in, and nothing is said.
-    session = FakeSession(["s", "i", "o", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "1", "3", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert load_mrc_settings(db).enabled and warning not in _visible(_written_text(session))
 
 
 def test_saving_mrc_on_with_a_mapped_channel_says_nothing(db, lane, sysop, lobby):
     set_mrc_room(db, lobby, "lobby")
-    session = FakeSession(["s", "i", "e", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "0", "1", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert load_mrc_settings(db).enabled
     assert "No caller can reach MRC yet" not in _visible(_written_text(session))
 
 
 def test_mrc_settings_tls_toggle_follows_the_well_known_port(db, lane, sysop):
-    session = FakeSession(["s", "i", "t", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "0", "4", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     saved = load_mrc_settings(db)
     assert saved.tls is False and saved.port == 5000
 
 
 def test_mrc_settings_rejects_a_bad_host_at_save(db, lane, sysop):
-    session = FakeSession(["s", "i", "h", "two words", "s", "b", "y", "b", "b"])
+    session = FakeSession(["s", "i", "0", "2", "two words", "s", "b", "y", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     assert "single host name" in _visible(_written_text(session))
     assert load_mrc_settings(db).host == "mrc.bottomlessabyss.net"
@@ -145,7 +145,7 @@ def test_mrc_settings_save_reconnects_the_running_bridge(db, lane, sysop, lobby)
             assert bridge.state is MrcState.DISABLED
             set_mrc_room(db, lobby, "lobby")
             session = FakeSession([
-                "s", "i", "e", "h", "127.0.0.1", "p", str(fake.port), "t", "n", "Test Board", "s",
+                "s", "i", "0", "1", "0", "2", "127.0.0.1", "0", "3", str(fake.port), "0", "4", "0", "5", "Test Board", "s",
                 "b", "b", "b",
             ])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
@@ -387,7 +387,7 @@ def test_standalone_mapping_changes_say_they_are_not_instant(db, lane, sysop, lo
 def test_mrc_settings_caller_switches_toggle_and_save(db, lane, sysop):
     """Issue #377: USERIP and BBSMETA are SysOp switches, off by default."""
     assert load_mrc_settings(db).send_caller_ip is False and load_mrc_settings(db).send_caller_meta is False
-    session = FakeSession(["s", "i", "u", "m", "s", "b", "b", "b"])
+    session = FakeSession(["s", "i", "1", "1", "1", "2", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _visible(_written_text(session))
     assert "USERIP" in text and "BBSMETA" in text

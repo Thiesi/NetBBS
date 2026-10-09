@@ -189,7 +189,7 @@ def test_the_profile_shows_the_verified_value_apart_from_the_callers_own(db, lan
 def test_a_caller_clears_their_own_birthdate_and_the_verified_one_stays(db, lane, sysop, carol):
     set_birthdate(db, carol, date(2001, 2, 3))
     attest_age(db, carol, BORN, verifier=sysop)
-    session = ProfileSession(["a", "", "b"])
+    session = ProfileSession(["0", "5", "", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, carol))
     assert get_birthdate(db, carol) is None
     assert get_attestation(db, carol, "age") is not None
@@ -199,7 +199,7 @@ def test_a_caller_clears_their_own_birthdate_and_the_verified_one_stays(db, lane
 def test_a_caller_clears_their_own_display_name_and_location(db, lane, carol):
     set_display_name(db, carol, "Caro")
     set_location(db, carol, "Leipzig")
-    session = ProfileSession(["d", "", "l", "", "b"])
+    session = ProfileSession(["0", "1", "", "0", "3", "", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, carol))
     assert get_display_name(db, carol) is None
     assert get_location(db, carol) is None

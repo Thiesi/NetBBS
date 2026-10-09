@@ -47,13 +47,13 @@ def test_profile_screen_toggles_it(db, alice):
 
     lane = DatabaseLane(db.path)
     try:
-        session = FakeSession(["w", "b"])
+        session = FakeSession(["1", "0", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
         text = _visible(_written_text(session))
         # Values sit in a shared column (#529), however wide the longest label.
         assert re.search(r"MRC may remember when you were last seen: +no", text)
         assert mrc_lastseen_recorded(db, alice) is False
-        session = FakeSession(["w", "b"])
+        session = FakeSession(["1", "0", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
         assert mrc_lastseen_recorded(db, alice) is True
     finally:

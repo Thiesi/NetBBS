@@ -28,7 +28,7 @@ def test_a_communitys_screen_opens_on_its_fields_with_its_actions(db, lane, syso
     _run(session, lane, sysop)
     screen = _screen_with(_visible(_written_text(session)), "Place 2 of 2")
     assert "in the callers' Communities list" in screen
-    assert "> Name:" in screen
+    assert "> 01 Name:" in screen
     assert "[U]p" in screen and "[R]emove" in screen and "[D]own" not in screen
     assert "[E]dit" not in screen and "[S]ave" not in screen
 
@@ -57,7 +57,7 @@ def test_a_categorys_screen_opens_on_its_fields_with_its_actions(db, lane, sysop
     _run(session, lane, sysop)
     screen = _screen_with(_visible(_written_text(session)), "among its siblings")
     assert "Place 1 of 2" in screen and "Sub-categories: none" in screen
-    assert "> Name:" in screen
+    assert "> 01 Name:" in screen
     assert "[D]own" in screen and "[R]emove" in screen and "[E]dit" not in screen
 
 
@@ -70,7 +70,7 @@ def test_a_boards_screen_opens_on_its_fields_with_its_actions(db, lane, sysop):
     session = FakeSession(["m", "m", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     screen = _screen_with(_visible(_written_text(session)), "0 posts")
-    assert "place 1 of 2" in screen and "> Name:" in screen
+    assert "place 1 of 2" in screen and "> 01 Name:" in screen
     for action in ("[D]own", "[R]emove", "[P]ending posts", "[H]istory"):
         assert action in screen
     assert "[E]dit" not in screen and "[U]p" not in screen and "[S]ave" not in screen
@@ -80,9 +80,9 @@ def test_a_changed_board_hides_its_actions_until_saved(db, lane, sysop):
     from netbbs.boards.boards import create_board, get_board_by_name
 
     create_board(db, "Pen Repair", creator=sysop)
-    # 01; Down nine times to Moderated, Enter toggles it; "r" is refused while
+    # 01; 10 (Moderated, on another section's page) toggles it; "r" is refused while
     # it waits (no removal prompt); Save; Back out.
-    session = FakeSession(["m", "m", "l", "0", "1", *(["DOWN"] * 9), "ENTER", "r", "s", "b", "b", "b", "b", "b"])
+    session = FakeSession(["m", "m", "l", "0", "1", "1", "0", "r", "s", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     changed = _screen_with(text, r"Moderated:\s+yes")
@@ -99,7 +99,7 @@ def test_a_file_areas_screen_opens_on_its_fields_with_its_actions(db, lane, syso
     session = FakeSession(["m", "f", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     screen = _screen_with(_visible(_written_text(session)), "0 files")
-    assert "place 1 of 1" in screen and "> Name:" in screen
+    assert "place 1 of 1" in screen and "> 01 Name:" in screen
     for action in ("[R]emove", "[P]ending files", "[E]xpired files", "[H]istory"):
         assert action in screen
     assert "[E]dit" not in screen
@@ -113,7 +113,7 @@ def test_a_chat_channels_screen_opens_on_its_fields_with_its_actions(db, lane, s
     session = FakeSession(["m", "l", "l", "0", "1", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     screen = _screen_with(_visible(_written_text(session)), "no MRC room")
-    assert "> Name:" in screen
+    assert "> 01 Name:" in screen
     for action in ("[D]elete", "[R]estrictions", "[M]RC room"):
         assert action in screen
     assert "[E]dit" not in screen and "[S]ave" not in screen
@@ -131,7 +131,7 @@ def test_a_doors_screen_opens_on_its_fields_and_a_changed_one_hides_delete(db, l
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     screen = _screen_with(text, "Compatibility: NetBBS native API")
-    assert "> Name:" in screen
+    assert "> 01 Name:" in screen
     for action in ("[C]ompatibility", "[L]ast diagnostic", "[O]utbound", "[D]elete"):
         assert action in screen
     assert "[E]dit" not in screen

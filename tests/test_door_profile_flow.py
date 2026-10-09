@@ -39,7 +39,7 @@ def test_check_setup_directory_error_preserves_draft(failure, db, lane, player, 
     monkeypatch.setattr(Path, "iterdir", iterdir)
     if failure == "real_permissions":
         installation.chmod(0)
-    session = FakeSession(["g", "--keep-this-draft", "k", " ", "s"])
+    session = FakeSession(["0", "7", "--keep-this-draft", "2", "8", " ", "s"])  # 07 Arguments, 28 Check setup
     try:
         saved = asyncio.run(edit_door_profile(session, lane, player, door))
     finally:
@@ -68,7 +68,7 @@ def test_compatibility_back_does_not_add_profile(db, lane, player):
 
 def test_compatibility_invalid_save_keeps_editor_open(db, lane, player):
     door = create_door(db, "Invalid draft", sys.executable, creator=player)
-    session = FakeSession(["w", "not a number", "s", "b", "y"])
+    session = FakeSession(["1", "3", "not a number", "s", "b", "y"])  # 13 Columns
     assert asyncio.run(edit_door_profile(session, lane, player, door)) is None
     assert get_door_by_name(db, door.name) == door
     assert "whole number" in "".join(session.written)
@@ -88,7 +88,7 @@ def test_restore_original_api_only_on_save(save, db, lane, player):
     door = create_door(db, "Restore", sys.executable, args=("original.py",),
                        description="Keep me", min_play_level=10, pinned=True,
                        creator=player, profile=DoorProfile(encoding="cp437"))
-    session = FakeSession(["1", "s"] if save else ["1", "b", "y"])
+    session = FakeSession(["0", "3", "s"] if save else ["0", "3", "b", "y"])  # 03 Restore original API
     result = asyncio.run(edit_door_profile(session, lane, player, door))
     stored = get_door_by_name(db, door.name)
     if save:
@@ -118,7 +118,7 @@ def test_invalid_import_preserves_existing_draft(db, lane, player, tmp_path, val
     path.write_text(json.dumps(value))
     door = create_door(db,"Import",sys.executable,creator=player)
     # The refusal is held until a key: the editor's redraw used to wipe it unread.
-    session = FakeSession(["j",str(path)," ","b"])
+    session = FakeSession(["0", "2", str(path), " ", "b"])  # 02 Import JSON
     assert asyncio.run(edit_door_profile(session,lane,player,door)) is None
     assert get_door_by_name(db,door.name) == door
     assert message in "".join(session.written)
@@ -140,7 +140,7 @@ def test_setup_check_shows_war_dialer_world_path_without_creating_world(db, lane
         assert probes[-1] != main_thread
         return original_probe(candidate, world_path)
     monkeypatch.setattr(flow, "war_dialer_path_problem", probe)
-    session = FakeSession(["k", " ", "b"])
+    session = FakeSession(["2", "8", " ", "b"])  # 28 Check setup
     assert asyncio.run(edit_door_profile(session, lane, player, door)) is None
     output = "".join(session.written)
     assert "War Dialer world:" in output

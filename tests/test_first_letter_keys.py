@@ -7,8 +7,9 @@ label: `[R]ecent callers`, never `P[r]evious callers`, `Reply [a]ll` or
 its state after a colon (`[F]ollow: on`). These tests read the source, so a
 screen added later is held to the rule too.
 
-Settings and field screens (`FieldSpec`) are left out: step 3 numbers them.
-Doors draw their own screens under their own contracts and are left out too.
+A settings field has no key at all: it is chosen by its number (step 3), so
+a field label is held to the same rule as any other text. Doors draw their
+own screens under their own contracts and are left out.
 """
 
 from __future__ import annotations
@@ -32,19 +33,6 @@ def _sources():
 
 def _name(node: ast.AST) -> str:
     return getattr(node, "id", getattr(node, "attr", ""))
-
-
-def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
-    return {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-
-
-def _in_field(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
-    """Inside a `FieldSpec(...)`: a settings field, numbered in step 3."""
-    while node in parents:
-        node = parents[node]
-        if isinstance(node, ast.Call) and _name(node.func) == "FieldSpec":
-            return True
-    return False
 
 
 def _leading_text(node: ast.AST) -> str | None:
@@ -89,17 +77,16 @@ def _docstrings(tree: ast.AST) -> set[int]:
 
 
 def _violations(rel: str, tree: ast.AST) -> list[str]:
-    parents = _parents(tree)
     docstrings = _docstrings(tree)
     wrong = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _name(node.func) == "menu_key":
             problem = _menu_key_violation(node)
-            if problem and not _in_field(node, parents):
+            if problem:
                 wrong.append(f"{rel}:{node.lineno}: {problem}")
         elif (
             isinstance(node, ast.Constant) and isinstance(node.value, str)
-            and id(node) not in docstrings and not _in_field(node, parents)
+            and id(node) not in docstrings
         ):
             for match in _MID_WORD.finditer(node.value):
                 wrong.append(f"{rel}:{node.lineno}: a key bracketed mid-word ({node.value[max(0, match.start() - 12):match.end() + 8]!r})")
@@ -125,7 +112,7 @@ def test_the_check_notices_each_shape_it_exists_to_catch():
     assert not check("menu_key('F', 'ollow: on' if following else 'ollow: off')")
     assert not check("menu_key('/', ' Find')")
     assert not check("menu_key('01-99', ' read')")
-    # Settings fields wait for step 3, which numbers them.
-    assert not check("FieldSpec(hotkey='o', menu_text=menu_key('o', 'cked', prefix='Bl'))")
+    # A settings field is no exception: it has a number, not a key.
+    assert check("FieldSpec(label='Bl[o]cked people')")
     # Code that indexes, not a label.
     assert not check("x = 'peers[0]'")

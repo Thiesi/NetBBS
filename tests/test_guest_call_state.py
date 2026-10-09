@@ -465,7 +465,7 @@ def test_the_guest_access_screen_refuses_an_account_holding_a_privilege(db, syso
     set_staff_permissions(db, account, StaffPermission.APPROVE_ACCOUNTS, changed_by=sysop)
     lane = DatabaseLane(db.path)
     try:
-        session = ConsoleSession(["s", "g", "g", "guest", "s", "b", "y", "b", "b"])
+        session = ConsoleSession(["s", "g", "0", "1", "guest", "s", "b", "y", "b", "b"])
         _run(session, lane, sysop)
     finally:
         lane.close()

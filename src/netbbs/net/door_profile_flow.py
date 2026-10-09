@@ -214,55 +214,55 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
         await _pause(session)
 
     fields = []
-    def add(key, hotkey, label, section, prompt=None, help="", step=None):
-        fields.append(FieldSpec(key=key, hotkey=hotkey, label=label, menu_text=menu_key(hotkey.upper(), " " + label),
+    def add(key, label, section, prompt=None, help="", step=None):
+        fields.append(FieldSpec(key=key, label=label,
                                  section=section, render=lambda d, k=key: sanitize_text(str(d.get(k, ""))) or "(none)",
                                  prompt=prompt or text_field(key), help=help, step=step))
-    add("preset", "p", "Setup template", "Runtime", preset_prompt)
-    add("import", "j", "Import JSON", "Runtime", import_prompt)
-    add("original_api", "1", "Restore original API on Save", "Runtime",
+    add("preset", "Setup template", "Runtime", preset_prompt)
+    add("import", "Import JSON", "Runtime", import_prompt)
+    add("original_api", "Restore original API on Save", "Runtime",
         original_api_prompt,
         help="Remove compatibility settings on Save. Keeps executable/arguments and game data; correct paths first if needed. Toggle off to keep the profile draft.")
-    add("adapter", "a", "Adapter", "Runtime", choice_field("adapter", list(ADAPTERS)))
-    add("endpoint", "i", "I/O endpoint", "Runtime", choice_field("endpoint", ["stdio", "pty", "socketpair"]))
-    add("executable_path", "e", "Executable/runtime path", "Runtime")
-    add("args_line", "g", "Arguments", "Runtime", help="Fixed argv. Available substitutions: {node_dir}, {node}, {door32}, {door_sys}, {install_dir}.")
-    add("install_dir", "d", "Persistent installation directory", "Files")
-    add("drop_files", "f", "Drop formats (JSON array)", "Files")
-    add("drop_subdir", "u", "Node drop subdirectory", "Files")
-    add("filename_case", "c", "Filename case", "Files", choice_field("filename_case", ["upper", "lower"]))
-    add("encoding", "o", "Door encoding", "Terminal", choice_field("encoding", ["utf-8", "cp437", "raw"]))
-    add("width", "w", "Columns (0=caller)", "Terminal")
-    add("height", "h", "Rows (0=caller)", "Terminal")
-    add("baud", "v", "Nominal baud", "Terminal")
-    add("security_level", "l", "Game security level", "Limits")
-    add("time_limit", "m", "Time limit (seconds, 0=none)", "Limits",
-        help="Wall-clock ceiling for one caller's run. 0 removes it: the door then ends only when it exits, "
-             "the caller disconnects, or the node stops.")
-    add("cpu_seconds", "2", "CPU seconds (0=none)", "Limits",
-        help="RLIMIT_CPU for this door's caller processes. Raise it for a door which renders continuously; "
-             "0 removes it and leaves only the wall-clock limit.")
-    add("max_sessions", "n", "Maximum simultaneous callers", "Limits")
-    add("memory_mb", "y", "Memory ceiling (MiB)", "Limits")
-    add("stop_grace_seconds", "5", "Stop grace (seconds)", "Limits",
-        help="How long this door gets to exit after SIGTERM before it is killed, on a caller disconnect, "
-             "a timeout or node shutdown. A door which exits promptly never waits this long; raise it for one which writes game data on the way out.")
-    add("multinode_certified", "z", "Multi-node certified by SysOp", "Limits", bool_field("multinode_certified"),
-        step=bool_step("multinode_certified"))
-    add("resize_signal", "3", "Signal door on terminal resize", "Terminal", bool_field("resize_signal"),
+    add("adapter", "Adapter", "Runtime", choice_field("adapter", list(ADAPTERS)))
+    add("endpoint", "I/O endpoint", "Runtime", choice_field("endpoint", ["stdio", "pty", "socketpair"]))
+    add("executable_path", "Executable/runtime path", "Runtime")
+    add("args_line", "Arguments", "Runtime", help="Fixed argv. Available substitutions: {node_dir}, {node}, {door32}, {door_sys}, {install_dir}.")
+    add("install_dir", "Persistent installation directory", "Files")
+    add("drop_files", "Drop formats (JSON array)", "Files")
+    add("drop_subdir", "Node drop subdirectory", "Files")
+    add("filename_case", "Filename case", "Files", choice_field("filename_case", ["upper", "lower"]))
+    add("encoding", "Door encoding", "Terminal", choice_field("encoding", ["utf-8", "cp437", "raw"]))
+    add("width", "Columns (0=caller)", "Terminal")
+    add("height", "Rows (0=caller)", "Terminal")
+    add("baud", "Nominal baud", "Terminal")
+    add("resize_signal", "Signal door on terminal resize", "Terminal", bool_field("resize_signal"),
         step=bool_step("resize_signal"),
         help="Native stdio/socket doors only, and only while columns and rows are 0. Rewrites door_info.json with "
              "the new size and sends SIGUSR1. Leave off unless the door documents that it handles SIGUSR1: the "
              "default action for that signal terminates a process. PTY doors are resized through their terminal.")
-    add("environment", "x", "Custom environment (JSON)", "Advanced")
-    add("runner", "r", "External runner argv (JSON)", "Advanced")
-    add("options", "q", "Adapter options (JSON)", "Advanced")
-    add("service", "4", "Companion service (JSON)", "Advanced",
+    add("security_level", "Game security level", "Limits")
+    add("time_limit", "Time limit (seconds, 0=none)", "Limits",
+        help="Wall-clock ceiling for one caller's run. 0 removes it: the door then ends only when it exits, "
+             "the caller disconnects, or the node stops.")
+    add("cpu_seconds", "CPU seconds (0=none)", "Limits",
+        help="RLIMIT_CPU for this door's caller processes. Raise it for a door which renders continuously; "
+             "0 removes it and leaves only the wall-clock limit.")
+    add("max_sessions", "Maximum simultaneous callers", "Limits")
+    add("memory_mb", "Memory ceiling (MiB)", "Limits")
+    add("stop_grace_seconds", "Stop grace (seconds)", "Limits",
+        help="How long this door gets to exit after SIGTERM before it is killed, on a caller disconnect, "
+             "a timeout or node shutdown. A door which exits promptly never waits this long; raise it for one which writes game data on the way out.")
+    add("multinode_certified", "Multi-node certified by SysOp", "Limits", bool_field("multinode_certified"),
+        step=bool_step("multinode_certified"))
+    add("environment", "Custom environment (JSON)", "Advanced")
+    add("runner", "External runner argv (JSON)", "Advanced")
+    add("options", "Adapter options (JSON)", "Advanced")
+    add("service", "Companion service (JSON)", "Advanced",
         help="Optional long-lived process for this door: argv, start (with_node/on_first_caller), "
              "stop_grace_seconds, service_memory_mb and health. Empty for doors which need none.")
-    add("preflight", "k", "Check setup", "Validation", check_prompt)
-    add("test", "t", "Test as SysOp", "Validation", test_prompt)
-    add("probe", "0", "Emulator capability probe", "Validation", probe_prompt)
+    add("preflight", "Check setup", "Validation", check_prompt)
+    add("test", "Test as SysOp", "Validation", test_prompt)
+    add("probe", "Emulator capability probe", "Validation", probe_prompt)
 
     async def save(draft):
         candidate = _candidate(door, draft)

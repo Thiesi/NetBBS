@@ -46,7 +46,8 @@ _LINES = [
     "they are on: [F]ollow: on.",
     "",
     "Rows in a list are numbered 01, 02 and so on: type both digits,",
-    "or one digit and Enter.",
+    "or one digit and Enter. Settings in Profile are numbered the",
+    "same way, in place of their letters.",
 ]
 
 

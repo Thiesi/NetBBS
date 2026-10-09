@@ -400,7 +400,7 @@ def test_the_sysop_establishes_a_refused_sender_node_from_the_refusal(db, lane, 
     session = FakeSession([
         "o", "m", "r", "o", "0", "1",  # Operations, Mail, Refused Link mail, open the only one
         "n",  # its node's trust
-        "e", "r", "we know them", "s", "y",  # Establish: reason, save, confirm the deviation
+        "e", "0", "3", "we know them", "s", "y",  # Establish: reason (03), save, confirm the deviation
         "b", "b", "b", "b", "b", "b",
     ])
     session.terminal_height = 60
@@ -437,9 +437,9 @@ def test_a_peer_screen_establishes_blocks_and_clears(db, lane, sysop):
 
     session = FakeSession([
         "o", "l", "p", "0", "1",  # Operations, Link status, Peers, the only node
-        "d", "r", "spam", "s",  # Deny (a block): reason, save
+        "d", "0", "3", "spam", "s",  # Deny (a block): reason (03), save
         "c", "0", "1",  # Clear override: all three at once
-        "e", "r", "reviewed", "s", "y",  # Establish
+        "e", "0", "3", "reviewed", "s", "y",  # Establish
         "b", "b", "b", "b", "b", "b",
     ])
     session.terminal_height = 60
