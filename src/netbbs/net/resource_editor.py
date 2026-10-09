@@ -1081,7 +1081,7 @@ async def edit_resource_draft(
                 (a for a in detail_state.actions if a.hotkey.lower() == choice), None
             )
             if action is None:
-                await session.write(reject_unhandled_key(choice))
+                await session.write(reject_unhandled_key(choice) if echoed else "\a")
                 continue
             await session.write_line("")
             if await action.run(session, lane):
@@ -1093,7 +1093,7 @@ async def edit_resource_draft(
             continue
 
         if field_index is None:
-            await session.write(reject_unhandled_key(choice))
+            await session.write(reject_unhandled_key(choice) if echoed else "\a")
             continue
         selected = field_index
         if fields[field_index].section is not None and fields[field_index].section != current_page:

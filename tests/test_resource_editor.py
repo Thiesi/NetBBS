@@ -454,6 +454,27 @@ def test_an_unrecognized_key_is_rejected_and_the_menu_stays_active():
     assert "\a" in _written_text(session)
 
 
+def test_an_unrecognized_key_read_unechoed_rings_the_bell_without_erasing():
+    """`read_editor_key` echoes nothing, so a rejected letter has nothing of
+    its own on screen to erase: a backspace would eat the prompt instead."""
+    async def save(draft):
+        return draft["name"]
+
+    session = NavigableFakeSession(["z", "s"])
+    result = asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=[_name_field()], draft={"name": "lobby"},
+            save=save, error_type=FieldError,
+            save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    assert result == "lobby"
+    text = _written_text(session)
+    assert "\a" in text
+    assert "\b" not in text
+
+
 def test_bool_field_flips_on_one_keystroke_without_a_prompt():
     async def save(draft):
         return draft["pinned"]

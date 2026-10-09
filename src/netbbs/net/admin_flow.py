@@ -7837,7 +7837,7 @@ async def _user_history_screen(session: Session, lane: DatabaseLane, actor: User
     )
 
 
-async def _read_user_detail_key(session: Session) -> EditorKey:
+async def _read_user_detail_key(session: Session) -> tuple[EditorKey, bool]:
     """`netbbs.net.resource_editor._read_navigable_key`'s own fallback
     shape, duplicated here rather than imported -- this project's own
     "duplicate rather than reach into another module's private helper"
@@ -7856,15 +7856,18 @@ async def _read_user_detail_key(session: Session) -> EditorKey:
     collapses into `BACKSPACE`, unreachable as help the same way
     `edit_resource_draft`'s own Ctrl-H was before that bug was found and
     fixed (see that module's `_read_navigable_key` docstring). This
-    screen never needs a real Backspace at its own top level either."""
+    screen never needs a real Backspace at its own top level either.
+
+    The flag says whether the key was echoed (only `read_key` echoes), so
+    a rejected key erases only a character that is really on screen."""
     read_editor_key = getattr(session, "read_editor_key", None)
     if read_editor_key is not None:
         try:
-            return await read_editor_key(distinguish_ctrl_h=True)
+            return await read_editor_key(distinguish_ctrl_h=True), False
         except NotImplementedError:
             pass
     raw = await session.read_key()
-    return EditorKey(EditorKeyKind.CHAR, char=raw)
+    return EditorKey(EditorKeyKind.CHAR, char=raw), True
 
 
 # Ctrl-H's own content for the five arrow-selectable fields
@@ -8176,7 +8179,7 @@ async def _user_detail_screen(
     field_order: tuple[str, ...] = _USER_DETAIL_FIELD_ORDER
     blocked = await _redraw()
     while True:
-        key = await _read_user_detail_key(session)
+        key, echoed = await _read_user_detail_key(session)
 
         if key.kind == EditorKeyKind.UP:
             if not field_order:
@@ -8233,7 +8236,7 @@ async def _user_detail_screen(
             # Design doc §5.6: a staff member sees the account, but only the
             # actions their permissions cover, and none on a SysOp or
             # another staff member.
-            await session.write(reject_unhandled_key(choice))
+            await session.write(reject_unhandled_key(choice) if echoed else "\a")
         elif choice == "a" and target.pending_approval:
             await session.write_line("")
             if await prompt_yes_no(session, "Approve this account so it can log in?", default=False):
@@ -8390,7 +8393,7 @@ async def _user_detail_screen(
                 return
             blocked = await _redraw()
         else:
-            await session.write(reject_unhandled_key(choice))
+            await session.write(reject_unhandled_key(choice) if echoed else "\a")
 
 
 _STAFF_TOGGLE_KEYS: dict[str, StaffPermission] = {
