@@ -26,8 +26,9 @@ rest at once, which cut a slow piece off mid-draw and looked broken.
 - **Preview** plays the art with its speed and time limit, as callers see it.
 
 **If you set a speed on a large piece**, it now takes as long as that speed
-needs: a full 80x24 ANSI screen at 2400 bps takes half a minute or more. Set
-a time limit if you'd rather callers not wait for it.
+needs. At 2400 bps a line carries 240 characters a second, so a full 80x24
+ANSI screen, with its colour codes, takes from about 10 to 30 seconds or
+more. Set a time limit if you'd rather callers not wait for it.
 
 ## The web-page setting stays reachable after a name lapses (#1177, PR #1178)
 
