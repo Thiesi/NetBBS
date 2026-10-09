@@ -21,6 +21,10 @@ web/** text eol=lf
 # check: the padding inside a frame and the SGR resets that end a row are
 # the capture, not sloppiness.
 web/shots/raw-*.txt binary
+# ...and an image: `text` above would rewrite the CR LF a PNG's own signature
+# carries, and the icon would no longer open.
+web/*.png binary
+web/*.ico binary
 
 # Guest-side scripts run inside a Linux VM; a CR would break their shebang.
 examples/doors/vm/* text eol=lf
