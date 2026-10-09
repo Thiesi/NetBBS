@@ -5,15 +5,22 @@ The icon is one 16x16 pixel grid below, drawn for the size a browser tab
 shows it at. Every file is made from that grid, so the tab, a bookmark and a
 phone's home screen show the same picture:
 
-    web/favicon.svg           the grid as squares; browsers that take SVG
-    web/favicon.ico           16, 32 and 48 px, each a whole-pixel scale
-    web/apple-touch-icon.png  180 px on the site's background colour
+    favicon.svg           the grid as squares; browsers that take SVG
+    favicon.ico           16, 32 and 48 px, each a whole-pixel scale
+    apple-touch-icon.png  180 px on the site's background colour
+
+They are written twice, to the website (`web/`) and to the browser
+terminal every node serves (`src/netbbs/web/static/`, issue #1199), so the
+project's site and a board's terminal show the same icon and cannot drift
+apart; a test checks the two copies are the same bytes.
 
 Whole-pixel scaling keeps every edge sharp; a smooth resize of a 16 px
 drawing blurs it. Standard library only (zlib, struct), like the rest of
 the site tooling.
 
-    python scripts/website_favicon.py [web-directory]
+    python scripts/website_favicon.py [directory]
+
+With a directory, only that one is written.
 """
 
 from __future__ import annotations
@@ -115,15 +122,32 @@ def svg() -> str:
     )
 
 
-def main(argv: list[str]) -> int:
-    web = Path(argv[1]) if len(argv) > 1 else Path(__file__).resolve().parent.parent / "web"
+#: Where the icons are written by default (see the module docstring).
+TARGETS = ("web", "src/netbbs/web/static")
+
+#: The file names, in both places.
+FILES = ("favicon.svg", "favicon.ico", "apple-touch-icon.png")
+
+
+def icon_files() -> dict[str, bytes]:
+    """Every icon file, by name."""
     sizes = [16, 32, 48]
-    (web / "favicon.svg").write_bytes(svg().encode("ascii"))
-    (web / "favicon.ico").write_bytes(ico([png(pixels(size // SIZE)) for size in sizes], sizes))
-    # 180 px: ten pixels per grid pixel and a ten-pixel border of background.
-    (web / "apple-touch-icon.png").write_bytes(png(pixels(10, margin=10, background=BACKGROUND)))
-    for name in ("favicon.svg", "favicon.ico", "apple-touch-icon.png"):
-        print(f"{web / name}: {(web / name).stat().st_size} bytes")
+    return {
+        "favicon.svg": svg().encode("ascii"),
+        "favicon.ico": ico([png(pixels(size // SIZE)) for size in sizes], sizes),
+        # 180 px: ten pixels per grid pixel and a ten-pixel border of background.
+        "apple-touch-icon.png": png(pixels(10, margin=10, background=BACKGROUND)),
+    }
+
+
+def main(argv: list[str]) -> int:
+    root = Path(__file__).resolve().parent.parent
+    targets = [Path(argv[1])] if len(argv) > 1 else [root / target for target in TARGETS]
+    files = icon_files()
+    for target in targets:
+        for name in FILES:
+            (target / name).write_bytes(files[name])
+            print(f"{target / name}: {(target / name).stat().st_size} bytes")
     return 0
 
 
