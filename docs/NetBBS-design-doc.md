@@ -11535,8 +11535,8 @@ page is not publicly reachable:
   `HELP`), shown to them alone and written nowhere, which pays that
   caller's own 300-line burst / 10 lines/s allowance instead and says so
   when it cuts (a `/BBSES` listing of every connected board stopped,
-  silently, after 39 boards); a local line is split into at most three 140-character
-  wire chunks. An `OLDVERSION` rejection from the hub is fatal until a
+  silently, after 39 boards); a local line is split into at most three
+  140-character wire chunks. An `OLDVERSION` rejection from the hub is fatal until a
   SysOp changes settings, since every retry would start a fresh
   rejected session. Bridge warnings land in the same bounded
   diagnostic log Link already uses.

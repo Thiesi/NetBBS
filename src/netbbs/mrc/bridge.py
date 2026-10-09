@@ -960,8 +960,9 @@ class MrcBridge:
         directory, whose one write waits for the listing's footer and
         answers one request. A command the bridge acts on by name
         (`_SERVER_COMMANDS_HANDLED_BY_NAME`: a room topic, a roster, a room
-        or nick correction) never reaches that allowance, so it stays under
-        the node-wide one like room traffic, whoever it names."""
+        or nick correction) mostly never reaches that allowance, so it stays
+        under the node-wide one like room traffic, whoever it names; the few
+        that do reach it (an addressed `STATS` or `BANNER`) pay both."""
         if not packet.is_server or self._caller_for_nick(packet.to_user) is None:
             return False
         command, _params = protocol.parse_server_command(packet.body)
