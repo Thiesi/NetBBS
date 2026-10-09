@@ -537,8 +537,10 @@ off, 2400, 9600 or 38400 bps, off by default, set with **Speed** on its console
 screen. NetBBS paces the bytes itself, in small chunks, and checks for a
 waiting key between them (`Session.take_waiting_key`); any key ends the effect
 and writes the rest at once, and it is consumed with anything typed behind it,
-so Enter cannot submit an empty prompt that follows. One draw is paced for at
-most 5 seconds; past that the rest goes out at once. Each piece of art plays
+so Enter cannot submit an empty prompt that follows. A paced draw plays to the
+end at its speed. Each banner also has a **Time limit**, off by default, or 10,
+30 or 60 seconds: past it the rest goes out at once (`ART_TIME_LIMITS`). Each
+piece of art plays
 once per connection: the welcome banner when a caller connects, the main
 menu's art on the first main menu, and a list's art (slot art or the
 masthead above the generated list) on the first visit to that list in a
@@ -15262,9 +15264,18 @@ can emulate a line speed itself (`CSI Ps1 ; Ps2 * r`), but bytes already sent
 cannot be skipped, it works only in SyncTERM, and turning it off again queues
 behind the art. Server-side pacing works on every terminal and stops at once
 on a key. The skipping key is swallowed, not passed on as Voidrunner passes
-its interrupting key, because a prompt follows the art. At the 5-second cap the
-rest is sent at once; a cap that sped the art up instead was rejected, since
-the speed is part of how the art was meant to look.
+its interrupting key, because a prompt follows the art. A time limit, when the
+SysOp sets one, sends the rest at once; a limit that sped the art up instead
+was rejected, since the speed is part of how the art was meant to look.
+
+**Decision 11 — a chosen speed plays to the end; a time limit is the SysOp's
+choice.** Until v7.18.1 every paced draw stopped after a fixed 5 seconds and
+dumped the rest, which the maintainer found looked broken: a SysOp who picks
+2400 bps wants the art drawn at 2400 bps. A per-banner **Time limit** (off, 10,
+30 or 60 seconds) now does what the cap did, and is off by default, so a speed
+is obeyed unless the SysOp asks otherwise. A caller can still skip with any
+key. Rejected: keeping a fixed cap, and a longer fixed cap, both of which cut
+off a slow piece the SysOp chose the speed for.
 
 ### Issue #1004 — the access map — decided
 

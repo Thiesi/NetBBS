@@ -31,26 +31,35 @@ class PacedSession(SlotSession):
         return False
 
 
+class _Calls(list):
+    """The paced draws' texts, and the time limit each was given."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.limits: list[float] = []
+
+
 @pytest.fixture
 def paced(monkeypatch):
     """Record each paced draw instead of sending it at a line speed."""
-    calls: list[str] = []
+    calls = _Calls()
 
-    async def fake_pace(session, text, *, speed, write, clock=None):
+    async def fake_pace(session, text, *, speed, write, limit=0, clock=None):
         calls.append(text)
+        calls.limits.append(limit)
         await write(text)
 
     monkeypatch.setattr(art_pacing, "pace", fake_pace)
     return calls
 
 
-def _pick(session, *, speed=2400, once=BOARD_LIST, art_text=LIST_ART, masthead=""):
+def _pick(session, *, speed=2400, once=BOARD_LIST, art_text=LIST_ART, masthead="", limit=0):
     art = parse_slot_art(art_text, require_menu=False, require_list=True) if art_text else None
     return asyncio.run(pick_item(
         session, BOARDS, name_of=lambda item: item, stable_id_of=BOARDS.index,
         title="Message boards", empty_message="No boards.",
         slot_art=art, slot_column_of=lambda item: f"{len(item)} new",
-        masthead=masthead, art_speed=speed, art_once=once,
+        masthead=masthead, art_speed=speed, art_limit=limit, art_once=once,
     ))
 
 
@@ -111,6 +120,12 @@ def test_a_masthead_above_the_list_plays_once_too(paced):
     _pick(session, art_text="", masthead="== THE NIB & QUILL BOARDS ==")
     assert len(paced) == 1
     assert "THE NIB & QUILL" in paced[0]
+
+
+@pytest.mark.parametrize("art", [{}, {"art_text": "", "masthead": "== THE NIB & QUILL BOARDS =="}])
+def test_the_lists_time_limit_reaches_the_pacing(paced, art):
+    _pick(PacedSession(["b"]), limit=30, **art)
+    assert paced.limits == [30]
 
 
 def test_paced_list_art_still_arrives_whole(paced):

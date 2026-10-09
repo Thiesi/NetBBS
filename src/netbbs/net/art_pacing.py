@@ -15,8 +15,10 @@ The rules, all here:
 - any key ends the animation and the rest of the art is drawn at once. The
   key is swallowed (`Session.take_waiting_key`), so an Enter pressed to
   skip the welcome art doesn't submit an empty username;
-- a draw never takes longer than `MAX_PACED_SECONDS`; past that, the rest
-  goes out at once;
+- a draw plays to the end at its speed. The SysOp may give the art a time
+  limit as well (`ART_TIME_LIMITS`, off by default): past it, the rest goes
+  out at once. Until v7.18.1 every draw stopped after a fixed five seconds,
+  which cut a slow piece off mid-draw;
 - each art plays once per connection (`once`): never again on a redraw,
   after a notice, or when a break-in hands the screen back;
 - no pacing for a session without a live terminal (`Session.paces_art`),
@@ -43,8 +45,9 @@ MAIN_MENU_ART = "main_menu"
 #: The speeds a SysOp can choose, in bits per second; 0 is off, the default.
 ART_SPEEDS: tuple[int, ...] = (0, 2400, 9600, 38400)
 
-#: The longest one paced draw may take. Past it, the rest goes out at once.
-MAX_PACED_SECONDS = 5.0
+#: The time limits a SysOp can give paced art, in seconds; 0 is off, the
+#: default: the art plays to the end at its speed (a key still skips it).
+ART_TIME_LIMITS: tuple[int, ...] = (0, 10, 30, 60)
 
 #: How often a chunk goes out. Small enough to look smooth, large enough not
 #: to send a packet per character.
@@ -79,6 +82,28 @@ def set_art_speed(db: Database, kind: str, speed: int) -> None:
     set_config(db, _speed_key(kind), str(speed))
 
 
+def _time_limit_key(kind: str) -> str:
+    return f"{kind}_art_time_limit"
+
+
+def art_time_limit(db: Database, kind: str) -> int:
+    """The time limit set for the `kind` art's paced draw, in seconds; 0,
+    off (it plays to the end), unless the SysOp chose one of
+    `ART_TIME_LIMITS`."""
+    value = get_config(db, _time_limit_key(kind))
+    try:
+        limit = int(value) if value is not None else 0
+    except ValueError:
+        return 0
+    return limit if limit in ART_TIME_LIMITS else 0
+
+
+def set_art_time_limit(db: Database, kind: str, limit: int) -> None:
+    if limit not in ART_TIME_LIMITS:
+        raise ValueError(f"unknown art time limit {limit!r}")
+    set_config(db, _time_limit_key(kind), str(limit))
+
+
 def will_pace(session: Session, speed: int, once: str | None) -> bool:
     """Whether art drawn now at `speed` plays as an animation. `once` is
     the play it counts as, once per session; `None` (a SysOp's preview)
@@ -102,34 +127,41 @@ def _played(session: Session) -> set[str]:
     return played
 
 
-async def write_paced_art(session: Session, text: str, *, speed: int, once: str) -> None:
+async def write_paced_art(session: Session, text: str, *, speed: int, once: str, limit: float = 0) -> None:
     """`write_preformatted_line` for art that may be paced: `text` is laid
-    out the same way, then sent at `speed` if `will_pace` says so."""
-    await write_paced_art_text(session, preformatted_rows(session, text), speed=speed, once=once)
+    out the same way, then sent at `speed` if `will_pace` says so, for at
+    most `limit` seconds when it is set."""
+    await write_paced_art_text(session, preformatted_rows(session, text), speed=speed, once=once, limit=limit)
 
 
-async def write_paced_art_text(session: Session, text: str, *, speed: int, once: str) -> None:
+async def write_paced_art_text(
+    session: Session, text: str, *, speed: int, once: str, limit: float = 0,
+) -> None:
     """`write_art_text` for laid-out art that may be paced, such as slot art
     drawn into cursor-positioned rows (`render_slot_art`), revealed top to
     bottom. The whole art is prepared once (`prepare_art_text`: iCE colours,
     CTerm's bright backgrounds), so no chunk loses a colour state an earlier
     chunk set."""
     prepared = prepare_art_text(session, text)
-    await _write_paced(session, prepared, speed=speed, once=once, write=lambda part: send_art_text(session, part))
+    await _write_paced(
+        session, prepared, speed=speed, once=once, limit=limit, write=lambda part: send_art_text(session, part),
+    )
 
 
-async def write_preview_art(session: Session, text: str, *, speed: int) -> None:
+async def write_preview_art(session: Session, text: str, *, speed: int, limit: float = 0) -> None:
     """A SysOp's `[P]review` of art (issue #1083 finding 9): laid out as
     `write_paced_art` lays it out, and played at `speed` every time, so the
     preview shows the animation callers will see. The skip key and the
-    five-second cap apply as for callers."""
-    await write_preview_art_text(session, preformatted_rows(session, text), speed=speed)
+    art's time limit apply as for callers."""
+    await write_preview_art_text(session, preformatted_rows(session, text), speed=speed, limit=limit)
 
 
-async def write_preview_art_text(session: Session, text: str, *, speed: int) -> None:
+async def write_preview_art_text(session: Session, text: str, *, speed: int, limit: float = 0) -> None:
     """`write_preview_art` for laid-out art, such as slot art."""
     prepared = prepare_art_text(session, text)
-    await _write_paced(session, prepared, speed=speed, once=None, write=lambda part: send_art_text(session, part))
+    await _write_paced(
+        session, prepared, speed=speed, once=None, limit=limit, write=lambda part: send_art_text(session, part),
+    )
 
 
 async def _write_paced(
@@ -139,6 +171,7 @@ async def _write_paced(
     speed: int,
     once: str | None,
     write: Callable[[str], Awaitable[None]],
+    limit: float = 0,
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
     if not will_pace(session, speed, once):
@@ -146,7 +179,7 @@ async def _write_paced(
         return
     if once is not None:
         _played(session).add(once)
-    await pace(session, text, speed=speed, write=write, clock=clock)
+    await pace(session, text, speed=speed, write=write, limit=limit, clock=clock)
 
 
 async def pace(
@@ -155,11 +188,13 @@ async def pace(
     *,
     speed: int,
     write: Callable[[str], Awaitable[None]],
+    limit: float = 0,
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """Send `text` through `write` at `speed` bps, checking for a key
-    between chunks. A key, a break-in, or `MAX_PACED_SECONDS` sends the
-    rest at once. `clock` is injectable so tests never sleep."""
+    between chunks. A key, a break-in, or `limit` seconds when it is set
+    (`ART_TIME_LIMITS`) sends the rest at once; with no limit the art plays
+    to the end. `clock` is injectable so tests never sleep."""
     atoms = _ATOM.findall(text)
     per_second = speed / _BITS_PER_CHARACTER
     per_chunk = max(1, math.ceil(per_second / _CHUNKS_PER_SECOND))
@@ -181,10 +216,11 @@ async def pace(
         if index >= len(atoms):
             return
         elapsed = clock() - start
-        if elapsed >= MAX_PACED_SECONDS:
+        if limit and elapsed >= limit:
             await write("".join(atoms[index:]))
             return
-        wait = min(sent / per_second, MAX_PACED_SECONDS) - elapsed
+        due = sent / per_second
+        wait = (min(due, limit) if limit else due) - elapsed
         if wait > 0 and await session.take_waiting_key(wait):
             await write("".join(atoms[index:]))
             return

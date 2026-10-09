@@ -11,10 +11,12 @@ import pytest
 
 from netbbs.net import art_pacing, char_input
 from netbbs.net.art_pacing import (
-    MAX_PACED_SECONDS,
+    ART_TIME_LIMITS,
     art_speed,
+    art_time_limit,
     pace,
     set_art_speed,
+    set_art_time_limit,
     will_pace,
     write_paced_art,
     write_paced_art_text,
@@ -91,14 +93,62 @@ def test_a_key_draws_the_rest_at_once() -> None:
     assert len(session.waits) == 2
 
 
-def test_a_draw_never_takes_longer_than_the_cap() -> None:
+def test_with_no_time_limit_a_long_draw_plays_to_the_end() -> None:
+    """Until v7.18.1 every draw stopped after five seconds and dumped the
+    rest, cutting a slow piece off mid-draw."""
     session = _Stub()
     text = "z" * 4000  # 16.7 seconds at 2400 bps
     _run(pace(session, text, speed=2400, write=session.write, clock=session.clock))
     assert "".join(session.writes) == text
-    assert session.clock.now <= MAX_PACED_SECONDS + 1e-9
-    # The rest goes out in one piece once the cap is reached.
-    assert len(session.writes[-1]) > 8
+    # Every chunk went out paced; nothing was sent early in one piece.
+    assert session.writes == ["z" * 8] * 500
+    assert session.clock.now == pytest.approx(3992 / 240)
+
+
+def test_a_time_limit_draws_the_rest_at_once() -> None:
+    session = _Stub()
+    text = "z" * 4000
+    _run(pace(session, text, speed=2400, write=session.write, limit=10, clock=session.clock))
+    assert "".join(session.writes) == text
+    assert session.clock.now == pytest.approx(10)
+    # Paced up to the limit (240 characters a second), then the rest in one piece.
+    assert all(part == "z" * 8 for part in session.writes[:-1])
+    assert len(session.writes[-1]) == 4000 - 8 * (len(session.writes) - 1)
+    assert len(session.writes[-1]) > 4000 - 10 * 240 - 16
+
+
+def test_a_time_limit_longer_than_the_draw_changes_nothing() -> None:
+    session = _Stub()
+    text = "z" * 400  # under two seconds at 2400 bps
+    _run(pace(session, text, speed=2400, write=session.write, limit=10, clock=session.clock))
+    assert session.writes == ["z" * 8] * 50
+
+
+def test_a_key_still_skips_under_a_time_limit() -> None:
+    session = _Stub(keys_at=(2,))
+    text = "y" * 4000
+    _run(pace(session, text, speed=2400, write=session.write, limit=30, clock=session.clock))
+    assert session.writes == ["y" * 8, "y" * 8, "y" * 3984]
+    assert len(session.waits) == 2
+
+
+@pytest.mark.parametrize("limit", [0, 10, 60])
+def test_every_paced_writer_passes_its_time_limit_on(monkeypatch, limit) -> None:
+    from netbbs.net.art_pacing import write_preview_art, write_preview_art_text
+
+    seen: list[float] = []
+
+    async def fake_pace(session, text, *, speed, write, limit=0, clock=None):
+        seen.append(limit)
+        await write(text)
+
+    monkeypatch.setattr(art_pacing, "pace", fake_pace)
+    session = _Stub()
+    _run(write_paced_art(session, "q" * 100, speed=2400, once="welcome", limit=limit))
+    _run(write_paced_art_text(session, "q" * 100, speed=2400, once="main_menu", limit=limit))
+    _run(write_preview_art(session, "q" * 100, speed=2400, limit=limit))
+    _run(write_preview_art_text(session, "q" * 100, speed=2400, limit=limit))
+    assert seen == [limit] * 4
 
 
 def test_an_escape_sequence_is_never_split() -> None:
@@ -168,6 +218,29 @@ def test_the_speed_setting_accepts_only_the_offered_speeds(tmp_path) -> None:
         assert art_speed(db, "main_menu") == 0
         with pytest.raises(ValueError):
             set_art_speed(db, "welcome", 1200)
+    finally:
+        db.close()
+
+
+def test_the_time_limit_setting_defaults_to_off_and_round_trips(tmp_path) -> None:
+    from netbbs.config import set_config
+    from netbbs.storage.database import Database
+
+    db = Database(tmp_path / "node.db")
+    try:
+        assert ART_TIME_LIMITS[0] == 0
+        assert art_time_limit(db, "welcome") == 0
+        for limit in ART_TIME_LIMITS:
+            set_art_time_limit(db, "welcome", limit)
+            assert art_time_limit(db, "welcome") == limit
+        set_art_time_limit(db, "welcome", 30)
+        assert art_time_limit(db, "main_menu") == 0
+        with pytest.raises(ValueError):
+            set_art_time_limit(db, "welcome", 5)
+        # A hand-edited value that is not one of the offered limits is off.
+        for garbage in ("soon", "5", "-10", ""):
+            set_config(db, "welcome_art_time_limit", garbage)
+            assert art_time_limit(db, "welcome") == 0
     finally:
         db.close()
 
