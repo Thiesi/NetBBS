@@ -53,7 +53,10 @@ def check_profile_authority(db: Database, actor: User, target: User) -> User:
     if current.id == actor.id:
         raise UserManagementError("change your own Profile from the main menu")
     if is_guest_account(db, current):
-        if not is_usable_sysop(actor):
+        # Read fresh, as `require_account_authority` reads its actor: a SysOp
+        # demoted or disabled while this screen is open is refused here too.
+        fresh_actor = get_user_by_id(db, actor.id)
+        if fresh_actor is None or not is_usable_sysop(fresh_actor):
             raise UserManagementError("only a SysOp can set the guest defaults")
         return current
     require_account_authority(db, actor, current, StaffPermission.MANAGE_ACCOUNTS)

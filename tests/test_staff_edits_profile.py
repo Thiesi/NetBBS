@@ -159,6 +159,19 @@ def test_only_a_sysop_writes_the_guest_defaults(db, sysop, alice):
     assert [entry.actor_user_id for entry in _profile_edits(db, alice)] == [sysop.id]
 
 
+def test_a_sysop_disabled_while_the_screen_is_open_no_longer_writes_the_guest_defaults(db, sysop, alice):
+    """The SysOp is read fresh, as every other authority check reads its
+    actor: the account object the open screen holds still says 255."""
+    from netbbs.auth.users import set_user_disabled
+
+    other = create_user(db, "ops", password="correct horse", user_level=SYSOP_LEVEL)
+    set_guest_user(db, alice)
+    set_user_disabled(db, other, True, changed_by=sysop)
+    with pytest.raises(UserManagementError, match="only a SysOp"):
+        write_as_staff(db, other, alice, _write_nothing)
+    assert _profile_edits(db, alice) == []
+
+
 def test_a_sysop_editing_their_own_account_here_is_refused(db, sysop):
     with pytest.raises(UserManagementError):
         write_as_staff(db, sysop, sysop, _write_nothing)
