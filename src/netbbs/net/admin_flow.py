@@ -1497,13 +1497,24 @@ async def _show_report(
     )
 
 
-async def _write_sections(session: Session, sections: Sequence[Section], *, unicode_style: bool) -> int:
+async def _write_sections(
+    session: Session, sections: Sequence[Section], *, unicode_style: bool, joined: int = 0
+) -> int:
     """Write a grouped label/value panel for a screen that keeps its own menu
     and key loop below it, a blank row between groups. Returns the rows
     written, so the caller can budget its menu against what is left of the
-    terminal instead of pushing the panel's top off it."""
+    terminal instead of pushing the panel's top off it.
+
+    The first `joined` sections after the first continue it: no blank row
+    before them. Give them no title, or they read as a group of their own."""
     rows = 0
-    for block in render_sections(sections, width=session.terminal_width, unicode_style=unicode_style):
+    blocks = render_sections(sections, width=session.terminal_width, unicode_style=unicode_style)
+    for index, block in enumerate(blocks):
+        if 0 < index <= joined:
+            for line in block.lines:
+                await session.write_line(line)
+            rows += len(block.lines)
+            continue
         # Led by a blank row, the first group included: what sits above a
         # panel is a title rule or a status line, and the panel is a new
         # paragraph either way.
@@ -7613,10 +7624,13 @@ async def _draw_user_detail(
     name_verified = await lane.run(get_attestation, target, "name") is not None
     # Issue #1119: every field the cursor walks is in one block, top to
     # bottom in `_USER_DETAIL_FIELD_ORDER`, and what can't be changed here
-    # is grouped below it. Pairing the account's fields side by side made
-    # the cursor zigzag between columns, stepping over read-only rows. One
-    # section, not three: their headings cost the rows that let the screen
-    # still fit 24 now that the fields are one to a row.
+    # follows it. Pairing the account's fields side by side made the cursor
+    # zigzag between columns, stepping over read-only rows. One section, not
+    # three: their headings cost the rows that let the screen still fit 24
+    # now that the fields are one to a row. The account's record continues
+    # the block, in its own muted colors, with no heading or blank row of its
+    # own: those two rows are what let the key bar line its hotkeys up at
+    # 80x24 (maintainer request, 2026-10-09).
     sections = [
         Section("Account", [
             _editable("l", "Level", level_label(target.user_level, await lane.run(get_level_names))),
@@ -7659,6 +7673,17 @@ async def _draw_user_detail(
             _editable("u", "Auto promotion", _auto_promotion_label(target, await lane.run(kept_from_rules, target))),
         ]),
     ]
+    # The account's record: nothing here is changed on this screen. The
+    # admin-action list itself is a screen of its own (`[H]istory`); ten
+    # rows of it here pushed the account's fields off a 24-row terminal.
+    sections.append(Section(None, [
+        Field("Member since", member_since, color=METADATA_COLOR),
+        Field(
+            "Admin actions", f"{len(entries)} recorded" if entries else "none recorded",
+            color=VALUE_COLOR if entries else MUTED_COLOR,
+        ),
+        _grants_field(await lane.run(_grant_summaries, target)),
+    ], paired=True))
     # Issue #835 (F072): what the caller said when signing up, for whoever
     # decides on the account. Typed by an unauthenticated caller, so
     # sanitized like any other remote text. Read-only, so below the fields.
@@ -7668,18 +7693,7 @@ async def _draw_user_detail(
             Note(f"Asked: {sanitize_text(signup_answer.question)}"),
             Note(f"Answer: {sanitize_text(signup_answer.answer)}"),
         ]))
-    # The account's record: nothing here is changed on this screen. The
-    # admin-action list itself is a screen of its own (`[H]istory`); ten
-    # rows of it here pushed the account's fields off a 24-row terminal.
-    sections.append(Section("Record", [
-        Field("Member since", member_since, color=METADATA_COLOR),
-        Field(
-            "Admin actions", f"{len(entries)} recorded" if entries else "none recorded",
-            color=VALUE_COLOR if entries else MUTED_COLOR,
-        ),
-        _grants_field(await lane.run(_grant_summaries, target)),
-    ], paired=True))
-    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style)
+    panel_rows = await _write_sections(session, sections, unicode_style=unicode_style, joined=1)
     offered = allowed if allowed is not None else _ALL_USER_DETAIL_KEYS
     options = []
     if target.pending_approval and "a" in offered:
@@ -7717,8 +7731,12 @@ async def _draw_user_detail(
     elif "d" in offered:
         options.append(MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this user"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the picker"))
+    # Above the panel: the title and its rule, and -- unless the screen was
+    # cleared, which takes it -- the blank row the title is written after.
+    # Below it: the blank row before the menu and the help hint.
+    chrome_rows = 4 if redraw_in_place else 5
     await session.write_line(
-        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + 5)
+        "\r\n" + _fitted_menu(options, description_level, session=session, used_rows=panel_rows + chrome_rows)
     )
     await session.write_line(colored(f"({help_key_label(session)} for help on these fields)", fg_color=MUTED_COLOR))
     await _choice_prompt(session)
