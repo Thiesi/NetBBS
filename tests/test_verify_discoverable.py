@@ -63,13 +63,13 @@ def test_the_co_sysop_question_says_verifying_is_separate():
 def test_the_age_refusal_says_where_a_birthdate_goes_and_who_to_ask():
     text = age_verification_refusal("This message board")
     assert "Your profile › Name & details" in text
-    assert "Staff list" in text
+    assert "Operators on the main menu" in text
 
 
 def test_the_name_refusal_says_who_to_ask():
     text = name_verification_refusal("This channel")
     assert text.startswith("This channel needs a verified real name.")
-    assert "Staff list" in text
+    assert "Operators on the main menu" in text
 
 
 def test_the_editor_help_says_where_callers_go_and_who_verifies():

@@ -285,7 +285,7 @@ def test_the_grant_screen_offers_everything_at_once(db, lane, sysop):
     asyncio.run(_grant_moderator_screen(session, lane, sysop))
     carol = get_user_by_username(db, "carol")
     assert sorted(g.object_type for g in list_grants_for_user(db, carol)) == ["board", "channel", "file_area"]
-    assert "Members see moderators on the Staff list." in _visible("".join(pending_notices(session)))
+    assert "Members see moderators under Operators." in _visible("".join(pending_notices(session)))
 
 
 @pytest.mark.parametrize(("preset_steps", "moderates"), [(0, True), (2, False), (3, False)])
@@ -303,4 +303,4 @@ def test_only_a_moderating_grant_mentions_the_staff_list(db, lane, sysop, monkey
     # The outcome is queued for the next screen, not written here.
     text = _visible("".join(pending_notices(session)))
     assert "Granted" in text
-    assert ("Members see moderators on the Staff list." in text) is moderates
+    assert ("Members see moderators under Operators." in text) is moderates

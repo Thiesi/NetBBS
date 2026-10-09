@@ -171,7 +171,7 @@ def test_the_door_outbound_screen_has_help(db, lane, sysop):
 
 def test_the_away_screen_has_help(db, lane, sysop):
     text = _console(FakeSession(["t", H, " ", "s", "At a pen show", "", "b"]), lane, sysop)
-    _assert_help_then_redraw(text, "Away notice help", "Staff list", "Away notice")
+    _assert_help_then_redraw(text, "Away notice help", "under Operators", "Away notice")
     assert "You are marked away." in text
 
 

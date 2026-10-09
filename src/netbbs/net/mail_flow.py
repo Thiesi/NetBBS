@@ -2446,7 +2446,7 @@ async def open_letter(
 
 # -- mail from where callers meet (issue #821) --------------------------------
 #
-# Directory, Who's online, Previous callers and the board reader each offer a
+# Directory, Who's online, Recent callers and the board reader each offer a
 # Mail action. They all come through here, so every one of them makes the same
 # checks the mailbox's own To prompt makes, and lands on the same compose
 # screen with the recipient already filled in.

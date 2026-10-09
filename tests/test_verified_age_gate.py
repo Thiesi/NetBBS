@@ -258,7 +258,7 @@ def test_opening_the_board_refuses_with_what_to_do(db, sysop, adult):
     asyncio.run(board_flow._show_board(session, db, board, adult))
     notice = "".join(take_notices(session))
     assert "needs a verified age" in notice
-    assert "Staff list" in notice
+    assert "Operators on the main menu" in notice
 
 
 def test_entering_the_channel_refuses_with_what_to_do(db, sysop, adult, minor, verified):

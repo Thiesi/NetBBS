@@ -76,12 +76,12 @@ def age_verification_refusal(what: str) -> str:
     """What a caller is told when `what` ("This message board", ...) needs
     a verified age they have not got: the gate, and how to get past it on
     this node. Verifying is done by the SysOp, or by staff they allow to
-    verify identity; the main menu's Staff list names who to ask. Where a
+    verify identity; the main menu's Operators screen names who to ask. Where a
     caller sets the birthdate to be verified is said too (issue #1103):
     the pre-release re-check couldn't find it."""
     return (
         f"{what} needs a verified age. Set your birthdate in Your profile › Name & details, "
-        "then ask the SysOp to verify it (the Staff list on the main menu shows who to ask)."
+        "then ask the SysOp to verify it (Operators on the main menu shows who to ask)."
     )
 
 
@@ -91,7 +91,7 @@ def name_verification_refusal(what: str) -> str:
     node (issue #1103) -- the same shape as `age_verification_refusal`."""
     return (
         f"{what} needs a verified real name. Ask the SysOp to verify yours "
-        "(the Staff list on the main menu shows who to ask)."
+        "(Operators on the main menu shows who to ask)."
     )
 
 
