@@ -19490,7 +19490,7 @@ async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> 
             await show_menu_help(
                 session, "Communities help", _COMMUNITY_MENU,
                 about="A Community is a topic with its own boards, chat channels, file areas and games. "
-                      "Callers reach them under Communities on the main menu.",
+                      "Callers reach them under Topics on the main menu.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)

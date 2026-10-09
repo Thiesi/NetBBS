@@ -16,8 +16,17 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent.parent / "src" / "netbbs"
 
-#: Old main-menu names, as screen text would have written them.
-OLD_NAMES = ("Staff list", "Previous callers")
+#: Old main-menu names, as screen text would have written them. "Communities"
+#: and "Moderation" are ordinary words elsewhere (the screens keep the word
+#: Communities), so for those two only a phrase that sends someone to the main
+#: menu's item counts.
+OLD_NAMES = (
+    "Staff list",
+    "Previous callers",
+    "Communities on the main menu",
+    "Moderation on the main menu",
+    "Moderation is not available",
+)
 
 #: Where an old name is the point: the notice that explains the renames.
 ALLOWED = {"net/keys_notice.py"}
@@ -57,5 +66,7 @@ def test_screen_text_uses_the_current_main_menu_names():
 def test_the_check_catches_screen_text_and_spares_docstrings():
     assert _offending("x.py", ast.parse('announce(s, "Members see it on the Staff list.")'))
     assert _offending("x.py", ast.parse('x = "Previous callers"'))
+    assert _offending("x.py", ast.parse('x = "Callers reach them under Communities on the main menu."'))
+    assert not _offending("x.py", ast.parse('x = "Communities group boards, areas and channels."'))
     assert not _offending("x.py", ast.parse('def f():\n    """The Staff list was renamed."""'))
     assert not _offending("x.py", ast.parse('x = "Members see it under Operators."'))
