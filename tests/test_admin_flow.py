@@ -1109,6 +1109,23 @@ def test_user_detail_escape_clears_the_cursor_highlight_without_leaving(db, lane
     assert updated.disabled_at is None
 
 
+def test_user_detail_edit_profile_opens_the_members_profile(db, lane, sysop):
+    """`[E]dit profile`: the member's own Profile, acting on their account,
+    the change recorded in its history (design doc §5.6)."""
+    from netbbs.moderation.log import list_actions_for_target_user
+    from netbbs.net.menu_description_preference import menu_description_level
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    before = menu_description_level(db, alice)
+    # 14 is Profile's "Menu descriptions"; Back from Profile, then out.
+    session = FakeSession(["u", "u", "/", "alice", "e", "1", "4", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert "[E]dit profile" in _visible(_written_text(session))
+    assert "alice's profile. Every change is logged." in _visible(_written_text(session))
+    assert menu_description_level(db, alice) != before
+    assert [e.action for e in list_actions_for_target_user(db, alice.id)] == ["edit_profile"]
+
+
 def test_user_detail_rejects_an_unknown_key_without_erasing(db, lane, sysop):
     """A key this screen does not use rings the bell and nothing else.
     `read_editor_key` echoes nothing, so the old erase-then-bell backspaced

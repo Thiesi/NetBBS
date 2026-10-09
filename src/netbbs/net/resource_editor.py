@@ -494,6 +494,7 @@ async def edit_resource_draft(
     *,
     title: str,
     subtitle: str | None = None,
+    breadcrumb: Sequence[str] = (),
     fields: list[FieldSpec],
     draft: Draft,
     save: Callable[[Draft], Awaitable[Any]] | None = None,
@@ -598,7 +599,9 @@ async def edit_resource_draft(
 
     `subtitle`, if given, is passed straight through to `screen_title`'s
     own `subtitle` parameter -- one line under the title, above the
-    underline.
+    underline. `breadcrumb` is the path between the node's name and the
+    title, for a screen reached from another (a member's Profile, from the
+    user editor).
 
     `unicode_style` (issue #160's own breadcrumb-arrow rollout, Stage 2)
     is passed straight through to `screen_title` too -- fetched once by
@@ -674,7 +677,7 @@ async def edit_resource_draft(
         width, height = session.terminal_width, session.terminal_height
         title_text = screen_title(
             detail_state.title if detail_state is not None and detail_state.title is not None else title,
-            breadcrumb=(session.node_display_name,), subtitle=subtitle, width=width,
+            breadcrumb=(session.node_display_name, *breadcrumb), subtitle=subtitle, width=width,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient,
         )
