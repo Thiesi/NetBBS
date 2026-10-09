@@ -149,6 +149,15 @@ def test_a_banners_speed_is_shown_in_its_panel(node):
     assert any(row.strip().startswith("Speed:") for row in rows), "\n".join(rows)
 
 
+@pytest.mark.parametrize("width", [40, 64, 80])
+def test_a_banners_time_limit_shows_its_state_in_its_label(node, width):
+    """[T]ime limit names its state in its label, which a fitted menu keeps
+    when it packs the descriptions away, so it needs no status row."""
+    rows, _styled = _screen(node, _PANELS["settings > board list masthead"], width=width)
+    text = "\n".join(rows)
+    assert "[T]ime limit: off" in text, text
+
+
 def test_no_menu_description_is_long_enough_to_be_cut_mid_word():
     """`menu_grid` cuts a description at its column -- 34 characters in two
     columns at 80 -- rather than wrapping it (`_entry_block_lines`). Forty-nine

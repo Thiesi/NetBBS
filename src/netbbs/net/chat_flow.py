@@ -185,7 +185,7 @@ from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LineViewport, LiveInputBuffer, reject_unhandled_key
 from netbbs.net.char_input import move_cursor as relative_move_cursor
 from netbbs.net.chat_channel_picker_banner import load_chat_channel_picker_banner, load_chat_channel_picker_slot_art
-from netbbs.net.art_pacing import art_speed
+from netbbs.net.art_pacing import art_speed, art_time_limit
 from netbbs.net.list_art import CHAT_CHANNEL_PICKER, list_slot_fields
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
@@ -640,6 +640,7 @@ async def _pick_channel(
     channel_slot_art = await lane.run(load_chat_channel_picker_slot_art)
     # The list's art plays at its speed on the first visit (issue #929).
     channel_art_speed = await lane.run(art_speed, CHAT_CHANNEL_PICKER)
+    channel_art_limit = await lane.run(art_time_limit, CHAT_CHANNEL_PICKER)
     channel_slot_fields = (
         await lane.run(lambda db: list_slot_fields(session, db, user)) if channel_slot_art is not None else None
     )
@@ -705,6 +706,7 @@ async def _pick_channel(
             slot_column_of=_slot_column_of,
             slot_fields=channel_slot_fields,
             art_speed=channel_art_speed,
+            art_limit=channel_art_limit,
             art_once=CHAT_CHANNEL_PICKER,
             linked_of=_linked,
         )
@@ -773,6 +775,7 @@ async def _pick_channel(
             slot_column_of=_slot_column_of,
             slot_fields=channel_slot_fields,
             art_speed=channel_art_speed,
+            art_limit=channel_art_limit,
             art_once=CHAT_CHANNEL_PICKER,
             linked_of=_linked,
         )

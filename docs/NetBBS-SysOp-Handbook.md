@@ -1814,8 +1814,11 @@ The welcome banner, the main-menu masthead and the three list mastheads
 2400, 9600 and 38400 bps: NetBBS then draws the art at that speed, the way a
 modem of the day would have, so ANSI art made as an animation plays as one and
 still art builds up from the top. Any key draws the rest at once, and that key
-is used up, so it doesn't also act at the prompt that follows. A draw stops
-being paced after 5 seconds. Each piece plays once per connection: the welcome
+is used up, so it doesn't also act at the prompt that follows. A paced draw
+plays to the end. If you'd rather a slow piece not hold callers up, **Time
+limit** next to **Speed** steps through off (the default), 10, 30 and 60
+seconds: after that long the rest is drawn at once. Each piece plays once per
+connection: the welcome
 banner when a caller connects, the masthead on their first main menu, a list's
 art on the first visit to that list, never on a redraw, a page change or a
 cursor move. Callers who read plain ASCII, and callers who set **Profile → Banner

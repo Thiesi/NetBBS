@@ -723,10 +723,13 @@ from netbbs.update_apply import (
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.art_pacing import (
     ART_SPEEDS,
+    ART_TIME_LIMITS,
     MAIN_MENU_ART,
     WELCOME_ART,
     art_speed,
+    art_time_limit,
     set_art_speed,
+    set_art_time_limit,
     write_preview_art,
     write_preview_art_text,
 )
@@ -1630,7 +1633,9 @@ def _banner_status_section(
     banner's caller-facing credit setting, shown when given. `speed` is the
     art's playback speed (issue #929), shown when the screen has a `[S]peed`
     entry: its description alone could be packed away by a fitted menu
-    (issue #662), and a SysOp who pressed it would not see what it is now."""
+    (issue #662), and a SysOp who pressed it would not see what it is now.
+    The `[T]ime limit` beside it needs no row here: its label, which a
+    fitted menu keeps, shows its state."""
     fields = [
         Field(
             "Shown to callers",
@@ -14874,6 +14879,10 @@ async def _welcome_banner_menu(
             await session.write_line("")
             await _cycle_art_speed(lane, actor, WELCOME_ART)
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "t":
+            await session.write_line("")
+            await _cycle_art_time_limit(lane, actor, WELCOME_ART)
+            await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "e":
             await session.write_line("")
             await _enable_welcome_banner_screen(session, lane, actor)
@@ -14941,6 +14950,28 @@ async def _cycle_art_speed(lane: DatabaseLane, actor: User, kind: str) -> None:
     await lane.run(apply)
 
 
+def _art_time_limit_entry(limit: int) -> MenuEntry:
+    """The `[T]ime limit` toggle on an art screen with a `[S]peed`: it
+    names its setting and shows its state, so a fitted menu that packs the
+    descriptions away (issue #662) still shows it."""
+    state = f"{limit} s" if limit else "off"
+    return MenuEntry(label=menu_key("T", f"ime limit: {state}"), brief="Skip the rest after a while")
+
+
+async def _cycle_art_time_limit(lane: DatabaseLane, actor: User, kind: str) -> None:
+    """`[T]ime limit`: the next of `ART_TIME_LIMITS` for this art -- off,
+    10, 30, 60 seconds, then off again. Past it, the rest of a paced draw
+    goes out at once; off, the art plays to the end."""
+    current = await lane.run(art_time_limit, kind)
+    following = ART_TIME_LIMITS[(ART_TIME_LIMITS.index(current) + 1) % len(ART_TIME_LIMITS)]
+
+    def apply(db: Database) -> None:
+        set_art_time_limit(db, kind, following)
+        record_action(db, actor=actor, action="set_art_time_limit", detail=f"{kind}={following}")
+
+    await lane.run(apply)
+
+
 async def _draw_welcome_banner_menu(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool,
@@ -14952,6 +14983,7 @@ async def _draw_welcome_banner_menu(
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     credit_line = await lane.run(is_welcome_banner_credit_enabled)
     speed = await lane.run(art_speed, WELCOME_ART)
+    time_limit = await lane.run(art_time_limit, WELCOME_ART)
     rows += await _write_sections(
         session,
         [_banner_status_section(
@@ -14965,6 +14997,7 @@ async def _draw_welcome_banner_menu(
         [
             MenuEntry(label=menu_key("P", "review"), brief="Show the banner as callers see it"),
             MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            _art_time_limit_entry(time_limit),
             MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
             MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
             MenuEntry(label=menu_key("O", "pen editor"), brief="Edit the banner text"),
@@ -15068,13 +15101,14 @@ async def _preview_welcome_banner_screen(
     await session.write_line(colored("\r\nPreviewing the welcome banner callers see when they connect:", fg_color=MUTED_COLOR))
     # At the speed callers get it (issue #1083 finding 9).
     speed = await lane.run(art_speed, WELCOME_ART)
+    limit = await lane.run(art_time_limit, WELCOME_ART)
     if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
-        await write_preview_art(session, banner_text, speed=speed)
+        await write_preview_art(session, banner_text, speed=speed, limit=limit)
         await session.write_line(colored("(Your banner, as callers see it.)", fg_color=MUTED_COLOR))
         await _write_banner_slot_notes(session, raw_text)
     elif not await _write_banner_not_live(session, status, callers_see="the default NetBBS banner"):
         # Nothing of the SysOp's own to show: show what callers do see.
-        await write_preview_art(session, banner_text, speed=speed)
+        await write_preview_art(session, banner_text, speed=speed, limit=limit)
     # Dogfood report: this screen used to fall straight through to the
     # menu's own immediate redraw, which -- with redraw_in_place on
     # (the default for new accounts, issue #160's own follow-up)
@@ -15659,6 +15693,10 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
             await session.write_line("")
             await _cycle_art_speed(lane, actor, MAIN_MENU_ART)
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == "t":
+            await session.write_line("")
+            await _cycle_art_time_limit(lane, actor, MAIN_MENU_ART)
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         elif choice == "e":
             await session.write_line("")
             await _enable_main_menu_banner_screen(session, lane, actor)
@@ -15722,6 +15760,7 @@ async def _draw_main_menu_banner_menu(
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     sauce = await asyncio.to_thread(_banner_sauce, status)
     speed = await lane.run(art_speed, MAIN_MENU_ART)
+    time_limit = await lane.run(art_time_limit, MAIN_MENU_ART)
     rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce, speed=speed)], unicode_style=unicode_style)
     await session.write_line("")
     rows += 1
@@ -15737,6 +15776,7 @@ async def _draw_main_menu_banner_menu(
         [
             MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
             MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            _art_time_limit_entry(time_limit),
             MenuEntry(
                 label=menu_key("M", "ode"),
                 brief="Make the art the menu itself" if mode == MASTHEAD_MODE else "Show the art above the menu",
@@ -15782,7 +15822,9 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     if not masthead:
         await _write_banner_not_live(session, status, callers_see="no masthead")
     else:
-        await write_preview_art(session, masthead, speed=await lane.run(art_speed, MAIN_MENU_ART))
+        await write_preview_art(
+            session, masthead, speed=await lane.run(art_speed, MAIN_MENU_ART), limit=await lane.run(art_time_limit, MAIN_MENU_ART),
+        )
         await session.write_line(
             colored("(the main menu itself renders live, unchanged, immediately below this)", fg_color=MUTED_COLOR)
         )
@@ -15913,7 +15955,10 @@ async def _write_slot_art_preview(
             colored(f"Callers like this get the generated menu instead: {plan.reason}.", fg_color=WARNING_COLOR)
         )
         return
-    await write_preview_art_text(session, plan.text, speed=await lane.run(art_speed, MAIN_MENU_ART))
+    await write_preview_art_text(
+        session, plan.text,
+        speed=await lane.run(art_speed, MAIN_MENU_ART), limit=await lane.run(art_time_limit, MAIN_MENU_ART),
+    )
     await session.write(move_cursor(art.height + 1, 1))
 
 
@@ -17319,7 +17364,9 @@ async def _preview_list_slot_art(session: Session, lane: DatabaseLane, actor: Us
                 fg_color=WARNING_COLOR,
             ))
         else:
-            await write_preview_art_text(session, drawn, speed=await lane.run(art_speed, kind))
+            await write_preview_art_text(
+                session, drawn, speed=await lane.run(art_speed, kind), limit=await lane.run(art_time_limit, kind),
+            )
             await session.write(move_cursor(art.height + 1, 1))
             if kind == CHAT_CHANNEL_PICKER:
                 await session.write_line(colored("(people online are filled in on a running node)", fg_color=MUTED_COLOR))
@@ -17389,6 +17436,10 @@ async def _board_list_masthead_menu(session: Session, lane: DatabaseLane, actor:
             await session.write_line("")
             await _cycle_art_speed(lane, actor, BOARD_LIST)
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "t":
+            await session.write_line("")
+            await _cycle_art_time_limit(lane, actor, BOARD_LIST)
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _check_list_slot_art_screen(session, lane, actor, BOARD_LIST)
@@ -17421,6 +17472,7 @@ async def _draw_board_list_masthead_menu(
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
     speed = await lane.run(art_speed, BOARD_LIST)
+    time_limit = await lane.run(art_time_limit, BOARD_LIST)
     rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce, speed=speed)], unicode_style=unicode_style)
     await session.write_line("")
     rows += 1
@@ -17430,6 +17482,7 @@ async def _draw_board_list_masthead_menu(
         [
             MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
             MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            _art_time_limit_entry(time_limit),
             MenuEntry(
                 label=menu_key("M", "ode"),
                 brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
@@ -17455,7 +17508,9 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
     status, masthead_text = await lane.run(lambda db: (board_list_banner_status(db), load_board_list_banner(db)))
     await session.write_line(colored("\r\nPreviewing board list masthead as shown above the board list:", fg_color=MUTED_COLOR))
     if masthead_text:
-        await write_preview_art(session, masthead_text, speed=await lane.run(art_speed, BOARD_LIST))
+        await write_preview_art(
+            session, masthead_text, speed=await lane.run(art_speed, BOARD_LIST), limit=await lane.run(art_time_limit, BOARD_LIST),
+        )
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(continue_prompt())
@@ -17697,6 +17752,10 @@ async def _file_area_masthead_menu(session: Session, lane: DatabaseLane, actor: 
             await session.write_line("")
             await _cycle_art_speed(lane, actor, FILE_AREA)
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "t":
+            await session.write_line("")
+            await _cycle_art_time_limit(lane, actor, FILE_AREA)
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _check_list_slot_art_screen(session, lane, actor, FILE_AREA)
@@ -17729,6 +17788,7 @@ async def _draw_file_area_masthead_menu(
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
     speed = await lane.run(art_speed, FILE_AREA)
+    time_limit = await lane.run(art_time_limit, FILE_AREA)
     rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce, speed=speed)], unicode_style=unicode_style)
     await session.write_line("")
     rows += 1
@@ -17738,6 +17798,7 @@ async def _draw_file_area_masthead_menu(
         [
             MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
             MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            _art_time_limit_entry(time_limit),
             MenuEntry(
                 label=menu_key("M", "ode"),
                 brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
@@ -17763,7 +17824,9 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
     status, masthead_text = await lane.run(lambda db: (file_area_banner_status(db), load_file_area_banner(db)))
     await session.write_line(colored("\r\nPreviewing file area masthead as shown above the file-area list:", fg_color=MUTED_COLOR))
     if masthead_text:
-        await write_preview_art(session, masthead_text, speed=await lane.run(art_speed, FILE_AREA))
+        await write_preview_art(
+            session, masthead_text, speed=await lane.run(art_speed, FILE_AREA), limit=await lane.run(art_time_limit, FILE_AREA),
+        )
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(continue_prompt())
@@ -18003,6 +18066,10 @@ async def _chat_channel_picker_masthead_menu(session: Session, lane: DatabaseLan
             await session.write_line("")
             await _cycle_art_speed(lane, actor, CHAT_CHANNEL_PICKER)
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "t":
+            await session.write_line("")
+            await _cycle_art_time_limit(lane, actor, CHAT_CHANNEL_PICKER)
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _check_list_slot_art_screen(session, lane, actor, CHAT_CHANNEL_PICKER)
@@ -18035,6 +18102,7 @@ async def _draw_chat_channel_picker_masthead_menu(
     )
     sauce = await asyncio.to_thread(_banner_sauce, status)
     speed = await lane.run(art_speed, CHAT_CHANNEL_PICKER)
+    time_limit = await lane.run(art_time_limit, CHAT_CHANNEL_PICKER)
     rows += await _write_sections(session, [_banner_status_section(status, unicode_style=unicode_style, sauce=sauce, speed=speed)], unicode_style=unicode_style)
     await session.write_line("")
     rows += 1
@@ -18044,6 +18112,7 @@ async def _draw_chat_channel_picker_masthead_menu(
         [
             MenuEntry(label=menu_key("P", "review"), brief="Show it as callers see it"),
             MenuEntry(label=menu_key("S", "peed"), brief=_art_speed_brief(speed)),
+            _art_time_limit_entry(time_limit),
             MenuEntry(
                 label=menu_key("M", "ode"),
                 brief="Make the art the list itself" if mode == LIST_MASTHEAD_MODE else "Show the art above the list",
@@ -18073,7 +18142,9 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
         colored("\r\nPreviewing chat channel picker masthead as shown above the channel picker:", fg_color=MUTED_COLOR)
     )
     if masthead_text:
-        await write_preview_art(session, masthead_text, speed=await lane.run(art_speed, CHAT_CHANNEL_PICKER))
+        await write_preview_art(
+            session, masthead_text, speed=await lane.run(art_speed, CHAT_CHANNEL_PICKER), limit=await lane.run(art_time_limit, CHAT_CHANNEL_PICKER),
+        )
     else:
         await _write_banner_not_live(session, status, callers_see="no masthead")
     await session.write_line(continue_prompt())
