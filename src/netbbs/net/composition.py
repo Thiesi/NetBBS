@@ -606,7 +606,7 @@ def _review_field_line(
     return prefix + colored(value, fg_color=accent, bold=bold_value)
 
 
-async def _read_review_key(session: Session) -> EditorKey:
+async def _read_review_key(session: Session) -> tuple[EditorKey, bool]:
     """`netbbs.net.resource_editor._read_navigable_key`'s own fallback
     shape, duplicated per this project's "duplicate rather than reach
     into another module's private helper" convention (see
@@ -615,15 +615,18 @@ async def _read_review_key(session: Session) -> EditorKey:
     `distinguish_ctrl_h=True` (dogfood feature request: this screen had
     no on-demand help at all until now) -- without it, real byte 0x08
     collapses into `BACKSPACE`, unreachable as help. This screen never
-    needs a real Backspace at its own top level either."""
+    needs a real Backspace at its own top level either.
+
+    The flag says whether the key was echoed (only `read_key` echoes), so
+    a rejected key erases only a character that is really on screen."""
     read_editor_key = getattr(session, "read_editor_key", None)
     if read_editor_key is not None:
         try:
-            return await read_editor_key(distinguish_ctrl_h=True)
+            return await read_editor_key(distinguish_ctrl_h=True), False
         except NotImplementedError:
             pass
     raw = await session.read_key()
-    return EditorKey(EditorKeyKind.CHAR, char=raw)
+    return EditorKey(EditorKeyKind.CHAR, char=raw), True
 
 
 # Ctrl-H's own content for the arrow-selectable fields -- dogfood
@@ -867,7 +870,7 @@ async def review_composition(
 
     await draw()
     while True:
-        key = await _read_review_key(session)
+        key, echoed = await _read_review_key(session)
 
         char = key.char.lower() if key.kind == EditorKeyKind.CHAR and key.char else ""
         step = page_step(key) if paged else None
@@ -942,4 +945,4 @@ async def review_composition(
         if choice in extra_keys:
             await session.write_line("")
             return choice
-        await session.write(reject_unhandled_key(choice))
+        await session.write(reject_unhandled_key(choice) if echoed else "\a")

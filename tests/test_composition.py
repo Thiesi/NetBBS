@@ -211,6 +211,21 @@ def test_review_renders_all_fields_and_returns_explicit_actions():
     assert "\b" in text  # unsupported key was visibly rejected
 
 
+def test_review_rejects_an_unechoed_key_without_erasing():
+    """`read_editor_key` echoes nothing, so a rejected letter has nothing of
+    its own on screen to erase: a backspace would eat the prompt instead."""
+    session = NavigableFakeSession(keys=("x", "p"))
+    action = asyncio.run(
+        review_composition(
+            session, recipient=None, subject="Subject", body="Body", commit_key="p", commit_label="ost",
+        )
+    )
+    text = _text(session)
+    assert action is ReviewAction.COMMIT
+    assert "\a" in text
+    assert "\b" not in text
+
+
 def test_review_ctrl_h_shows_real_help_text_for_every_field():
     # Dogfood feature request: this bespoke cursor-nav screen (built
     # this same session, alongside the SysOp user-detail screen) had no
