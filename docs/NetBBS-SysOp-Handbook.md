@@ -582,13 +582,27 @@ requires its exact name. Existing content retains its recorded author label.
 
 A caller sets their own display name and birthdate under **Your profile → Name
 & details**. If one needs correcting, a typo or a display name that has to go,
-open the account under **Users** and use **Display [n]ame** or **Birthdat[e]**.
+open the account under **Users** and use **[N]ame** or **[W]hen born**.
 The value opens in the line to edit; a blank line clears it, Esc keeps it. The
 same rules apply as for the caller's own change. The account's **History**
 records each edit with your name, the old and new display name, and for a
 birthdate only that it changed. A verified age or real name is a separate
 record that these never change, and the screen says so when one is on record.
 Staff with **Manage accounts** can do the same for accounts within their reach.
+
+Everything else a member sets for themselves is under **[E]dit profile** on the
+same screen. It opens their own **Profile**, acting on their account: bio,
+signature, location, who they block, and their display, mail and chat
+settings, with the same help they see. Your own screen settings stay as they
+are while you work there, and a character set you pick is theirs, not yours.
+Each change goes into the account's **History** with your name: a setting with
+its new value, and their bio, signature, location or blocks only as changed,
+never what they say. Whether a verified age or name is shared over Link stays
+their own choice, and only you, not staff, can change an account's SSH keys.
+The username can't be changed. A member who is signed in sees some display
+changes only when they next sign in. Staff with **Manage accounts** get
+**[E]dit profile** too, for accounts within their reach; nobody gets it on
+their own account or on the guest account.
 
 To take a verification back, use **[V]erification: revoke** on the same
 screen; it appears only while the account has a verified age or real name.

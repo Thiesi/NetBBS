@@ -12,6 +12,7 @@ calls nothing else in `login_flow`.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -23,6 +24,8 @@ from netbbs.attestation import (
     ProfileFieldError,
     attest_age,
     attest_name,
+    change_birthdate,
+    change_display_name,
     compute_age,
     clear_own_profile_field,
     get_attestation,
@@ -43,7 +46,9 @@ from netbbs.attestation import (
     set_location_visible,
     set_verified_badge_visible,
 )
-from netbbs.auth.users import SYSOP_LEVEL, User, get_user_by_id, has_password, list_ssh_keys, list_users
+from netbbs.auth.users import (
+    SYSOP_LEVEL, User, get_user_by_id, has_password, is_usable_sysop, list_ssh_keys, list_users,
+)
 from netbbs.boards.categories import get_category_by_id as get_board_category_by_id
 from netbbs.chat.categories import get_category_by_id as get_channel_category_by_id
 from netbbs.communities import Community, get_community
@@ -99,6 +104,7 @@ from netbbs.net.resource_editor import (
 )
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.shared_account import shared_account_refusal, signed_in_without_credential
+from netbbs.net.staff_edit import StaffEditRefused, as_staff, refusable, write_member
 from netbbs.digits import is_ascii_number
 from netbbs.net.sort_ui import SORT_MODE_LABELS
 from netbbs.net.password_screen import manage_password_screen
@@ -972,7 +978,9 @@ def _sort_preference_scope_label(db: Database, pref: SortPreference) -> str:
     return "Global default"
 
 
-async def _sort_preferences_screen(session: Session, lane: DatabaseLane, user: User) -> None:
+async def _sort_preferences_screen(
+    session: Session, lane: DatabaseLane, user: User, *, actor: User | None = None
+) -> None:
     """
     Review/clear your saved sort-mode overrides (design doc, dogfood
     feature request) -- the discoverability half of the `[O]rder`
@@ -992,13 +1000,19 @@ async def _sort_preferences_screen(session: Session, lane: DatabaseLane, user: U
     `lane.run` into a `pref.id`-keyed dict before entering the picker,
     not lazily per item inside the lambda the way the pre-lane version
     could when it held a bare `db` directly.
+
+    `actor` clears a member's from their Profile (design doc §5.6), each
+    clear recorded in the account's admin history.
     """
+    viewer = actor or user
+    none_saved = (
+        "You have no saved sort preferences yet." if actor is None
+        else f"{sanitize_text(user.username)} has no saved sort preferences."
+    )
     while True:
         prefs = await lane.run(list_sort_preferences, user)
         if not prefs:
-            await session.write_line(
-                colored("\r\nYou have no saved sort preferences yet.", fg_color=MUTED_COLOR)
-            )
+            await session.write_line(colored(f"\r\n{none_saved}", fg_color=MUTED_COLOR))
             await session.write_line(
                 colored(
                     "Set one from any chat channel/message board/file-area picker's [O]rder command.",
@@ -1017,11 +1031,11 @@ async def _sort_preferences_screen(session: Session, lane: DatabaseLane, user: U
             name_of=lambda p: f"{_SORT_PREFERENCE_KIND_LABELS[p.resource_kind]} — {labels[p.id]}",
             stable_id_of=lambda p: p.id,
             description_of=lambda p: SORT_MODE_LABELS[p.sort_mode],
-            title="Your sort preferences",
-            empty_message="You have no saved sort preferences yet.",
-            redraw_in_place=await lane.run(redraw_in_place_enabled, user),
-            unicode_style=await lane.run(unicode_style_enabled, user),
-            collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+            title="Your sort preferences" if actor is None else f"{_possessive(user)} sort preferences",
+            empty_message=none_saved,
+            redraw_in_place=await lane.run(redraw_in_place_enabled, viewer),
+            unicode_style=await lane.run(unicode_style_enabled, viewer),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, viewer),
             accent_color=await lane.run(effective_accent_color_256),
             header_color=await lane.run(effective_header_color_256),
         )
@@ -1034,7 +1048,19 @@ async def _sort_preferences_screen(session: Session, lane: DatabaseLane, user: U
             f"{SORT_MODE_LABELS[selected.sort_mode]})?",
             default=False,
         )
-        if clear:
+        if clear and actor is not None:
+            chosen = selected
+
+            def write(db: Database, target: User) -> tuple[None, str]:
+                clear_sort_preference(
+                    db, target, chosen.resource_kind,
+                    community_id=chosen.community_id, category_id=chosen.category_id,
+                )
+                return None, f"Sort preference cleared: {labels[chosen.id]}"
+
+            await write_member(lane, actor, user, write)
+            announce_line(session, "Cleared.")
+        elif clear:
             await lane.run(
                 clear_sort_preference,
                 user, selected.resource_kind,
@@ -1076,6 +1102,12 @@ def _unless_signed_in_without_credential(what: str, prompt):
     return guarded
 
 
+_STAFF_PROFILE_NOTE = (
+    "Changes are recorded in the account's admin history. A member signed in now sees "
+    "some display changes only when they next sign in."
+)
+
+
 _SHARED_ACCOUNT_NOTE = (
     "You signed in as a guest, on an account every guest shares. What other callers see of it "
     "can't be changed here; display settings you change last for this call only."
@@ -1098,23 +1130,61 @@ _MAX_BIO_PREVIEW_LINES = 3
 _CHARSET_NAMES = {"utf-8": "Unicode", "cp437": "CP437", "ascii": "ASCII"}
 
 
-def _charset_label(preference: str, session: Session) -> str:
+def _charset_label(preference: str, session: Session | None) -> str:
+    """`session` is the caller's own, to say what Auto chose for it; `None`
+    on a member's Profile, where this session is the SysOp's."""
+    if preference == "auto" and session is None:
+        return "Auto"
     if preference == "auto":
         return f"Auto (now {_CHARSET_NAMES.get(getattr(session, 'output_charset', 'utf-8'), 'Unicode')})"
     return {"unicode": "Unicode", "cp437": "CP437", "ascii": "ASCII"}[preference]
 
 
-async def _persist_animations(session: Session, lane: DatabaseLane, user: User, enabled: bool) -> None:
-    await lane.run(set_animations_enabled, user, enabled)
-    session.animations_enabled = enabled
+def _member_persist(
+    user: User, actor: User | None, key: str, setter: Callable[[Database, User, Any], None],
+    *, describe: Callable[[str], str], apply: Callable[[Any], None] | None = None,
+) -> Callable[[DatabaseLane, Any], Awaitable[None]]:
+    """`live_choice_field`'s `persist` for one of `user`'s settings.
+
+    On your own Profile, `setter` writes it and `apply` carries it into this
+    session (a character set, say). On a member's Profile, opened by `actor`
+    from the user editor (design doc §5.6), the write is checked and recorded
+    in the account's admin history as `describe(key)` -- the field and its
+    new value -- and this session, the SysOp's, is left alone."""
+
+    async def persist(lane: DatabaseLane, value: Any) -> None:
+        if actor is None:
+            await lane.run(setter, user, value)
+            if apply is not None:
+                apply(value)
+            return
+        detail = describe(key)
+
+        def write(db: Database, target: User) -> tuple[None, str]:
+            setter(db, target, value)
+            return None, detail
+
+        await write_member(lane, actor, user, write)
+
+    return persist
 
 
-async def _persist_charset(session: Session, lane: DatabaseLane, user: User, preference: str) -> None:
-    await lane.run(set_charset_preference, user, preference)
-    apply_charset_preference(session, preference)
+def _field_describer(fields: list[FieldSpec], draft: Draft) -> Callable[[str], str]:
+    """`_member_persist`'s `describe`: a field's label and its value as the
+    screen shows it, after the toggle has moved it."""
+
+    def describe(key: str) -> str:
+        field = next(f for f in fields if f.key == key)
+        return f"{field.label}: {field.render(draft)}"
+
+    return describe
 
 
-async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> None:
+def _possessive(user: User) -> str:
+    return f"{sanitize_text(user.username)}'s"
+
+
+async def _edit_profile(session: Session, lane: DatabaseLane, user: User, *, actor: User | None = None) -> None:
     """
     Edit your own vCard and caller preferences (design doc) --
     `edit_resource_draft` in immediate mode (issue #160's cursor-nav
@@ -1134,11 +1204,18 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
     is entered, not mid-visit -- every other `edit_resource_draft`
     caller doesn't expose this preference as one of its own fields, so
     this self-referential case doesn't come up for them.
+
+    `actor` opens a member's Profile from the user editor instead (design
+    doc §5.6): the same fields, sections and help, drawn the way `actor`'s
+    own screens are, with `user`'s values. Every change is checked and
+    recorded in the account's admin history, and nothing reaches `actor`'s
+    session: a character set chosen here is the member's, not the SysOp's.
     """
-    description_level = await lane.run(menu_description_level, user)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, user)
-    unicode_style = await lane.run(unicode_style_enabled, user)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
+    viewer = actor or user
+    description_level = await lane.run(menu_description_level, viewer)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, viewer)
+    unicode_style = await lane.run(unicode_style_enabled, viewer)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, viewer)
     accent_color = await lane.run(effective_accent_color_256)
     header_color = await lane.run(effective_header_color_256)
 
@@ -1154,38 +1231,38 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "mrc_lastseen": await lane.run(mrc_lastseen_recorded, user),
         "history_name_visible": await lane.run(session_history_name_visible, user),
         "color_depth": await lane.run(color_depth_override, user) or "auto",
-        "description_level": description_level,
-        "redraw_in_place": redraw_in_place,
+        "description_level": await lane.run(menu_description_level, user),
+        "redraw_in_place": await lane.run(redraw_in_place_enabled, user),
         "animations": await lane.run(animations_enabled, user),
-        "unicode_style": unicode_style,
+        "unicode_style": await lane.run(unicode_style_enabled, user),
         "charset": await lane.run(charset_preference, user),
         "mrc_colors": await lane.run(mrc_colors_enabled, user),
         "post_colors": await lane.run(post_colors_enabled, user),
         "mrc_nick_color": await lane.run(mrc_nick_color, user),
         "mrc_names": await lane.run(mrc_name_style, user),
-        "breadcrumb_collapsed": collapsed,
+        "breadcrumb_collapsed": await lane.run(breadcrumb_collapsed_enabled, user),
         "sort_preference_count": len(await lane.run(list_sort_preferences, user)),
         "ssh_key_count": len(await lane.run(list_ssh_keys, user)),
         "password_set": await lane.run(has_password, user),
     }
 
     async def _bio_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        await _edit_bio(session, lane, user)
+        await _edit_bio(session, lane, user, actor=actor)
         draft["bio"] = await lane.run(get_bio, user) or ""
 
     async def _signature_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        await _edit_signature(session, lane, user)
+        await _edit_signature(session, lane, user, actor=actor)
         draft["signature"] = await lane.run(get_signature, user) or ""
 
     async def _identity_details_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        await _identity_details_screen(session, lane, user)
+        await _identity_details_screen(session, lane, user, actor=actor)
 
     async def _blocked_senders_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        await blocked_senders_screen(session, lane, user)
+        await blocked_senders_screen(session, lane, user, actor=actor)
         draft["blocked_sender_count"] = len(await lane.run(list_mail_blocks, user))
 
     async def _sort_preferences_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        await _sort_preferences_screen(session, lane, user)
+        await _sort_preferences_screen(session, lane, user, actor=actor)
         draft["sort_preference_count"] = len(await lane.run(list_sort_preferences, user))
 
     async def _ssh_public_key_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
@@ -1210,8 +1287,12 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             # the reason survives Profile's in-place redraw (issue #1073).
             _refuse_shared_account(session, "this account's keys")
             return
+        if actor is not None and not is_usable_sysop(actor):
+            # As on the user editor, where `[K]ey` is a SysOp's alone: a key
+            # signs in without the password a manager may reset.
+            raise StaffEditRefused("only a SysOp can change an account's SSH keys")
         nonlocal user
-        user = await manage_ssh_keys_screen(session, lane, user, changed_by=user)
+        user = await manage_ssh_keys_screen(session, lane, user, changed_by=actor or user)
         draft["ssh_key_count"] = len(await lane.run(list_ssh_keys, user))
         draft["password_set"] = await lane.run(has_password, user)
 
@@ -1226,12 +1307,15 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             _refuse_shared_account(session, "this account's password")
             return
         nonlocal user
-        user = await manage_password_screen(session, lane, user, changed_by=user)
+        user = await manage_password_screen(session, lane, user, changed_by=actor or user)
         draft["password_set"] = await lane.run(has_password, user)
         draft["ssh_key_count"] = len(await lane.run(list_ssh_keys, user))
 
     def _color_depth_render(d: Draft) -> str:
         value = d["color_depth"]
+        if value == "auto" and actor is not None:
+            # What this session detected is the SysOp's terminal, not theirs.
+            return "auto"
         if value == "auto":
             detected = "truecolor" if session.supports_truecolor else "256-color"
             return f"auto (detected: {detected})"
@@ -1286,13 +1370,20 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 colored(line, fg_color=MUTED_COLOR)
                 for line in reflow(_SHARED_ACCOUNT_NOTE, width=session.terminal_width).split("\n")
             )
-        lines.append(
-            _profile_field(
-                "Transport report",
-                getattr(session, "truecolor_diagnostic", "capability report unavailable"),
-                value_color=METADATA_COLOR,
+        if actor is not None:
+            lines.extend(
+                colored(line, fg_color=MUTED_COLOR)
+                for line in reflow(_STAFF_PROFILE_NOTE, width=session.terminal_width).split("\n")
             )
-        )
+        if actor is None:
+            # About this connection, which on a member's Profile is the SysOp's.
+            lines.append(
+                _profile_field(
+                    "Transport report",
+                    getattr(session, "truecolor_diagnostic", "capability report unavailable"),
+                    value_color=METADATA_COLOR,
+                )
+            )
         return "\r\n".join(lines)
 
     # Dogfood report -- Thiesi's own observation that the main menu's
@@ -1313,6 +1404,9 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
     # place. Also normalizes five different "empty" spellings ("(no bio
     # set)", "(no signature set)", "none saved", "(none set)") down to
     # one, "(none)", consistently used wherever a field has nothing set.
+    def describe(key: str) -> str:
+        return _field_describer(fields, draft)(key)
+
     fields = [
         FieldSpec(
             key="bio", label="Bio",
@@ -1329,7 +1423,8 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             key="bio_visible", label="Visibility",
             render=lambda d: "public" if d["bio_visible"] else "private",
             prompt=_unless_signed_in_without_credential("who sees the bio", live_choice_field(
-                "bio_visible", [False, True], persist=lambda lane, v: lane.run(set_bio_visible, user, v)
+                "bio_visible", [False, True],
+                persist=_member_persist(user, actor, "bio_visible", set_bio_visible, describe=describe),
             )),
             brief="Toggle bio public/private",
             help=(
@@ -1368,7 +1463,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "on" if d["fullscreen_editor"] else "off",
             prompt=live_choice_field(
                 "fullscreen_editor", [False, True],
-                persist=lambda lane, v: lane.run(set_fullscreen_editor_enabled, user, v),
+                persist=_member_persist(user, actor, "fullscreen_editor", set_fullscreen_editor_enabled, describe=describe),
             ),
             brief="Toggle the fullscreen editor",
             help=(
@@ -1386,7 +1481,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "accepted" if d["accepts_dm"] else "not accepted",
             prompt=_unless_signed_in_without_credential("whether this account takes messages", live_choice_field(
                 "accepts_dm", [False, True],
-                persist=lambda lane, v: lane.run(set_accepts_direct_messages, user, v),
+                persist=_member_persist(user, actor, "accepts_dm", set_accepts_direct_messages, describe=describe),
             )),
             brief="Direct-message preferences",
             help=(
@@ -1421,7 +1516,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "yes" if d["read_receipts"] else "no",
             prompt=_unless_signed_in_without_credential("read receipts", live_choice_field(
                 "read_receipts", [False, True],
-                persist=lambda lane, v: lane.run(set_shares_read_receipts, user, v),
+                persist=_member_persist(user, actor, "read_receipts", set_shares_read_receipts, describe=describe),
             )),
             brief="Mail read receipts, both ways",
             help=(
@@ -1442,7 +1537,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "accepted" if d["mrc_private"] else "not accepted",
             prompt=_unless_signed_in_without_credential("private MRC messages", live_choice_field(
                 "mrc_private", [False, True],
-                persist=lambda lane, v: lane.run(set_mrc_private_messages_enabled, user, v),
+                persist=_member_persist(user, actor, "mrc_private", set_mrc_private_messages_enabled, describe=describe),
             )),
             brief="Off by default; also needed to send",
             help=(
@@ -1459,7 +1554,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "yes" if d["mrc_lastseen"] else "no",
             prompt=_unless_signed_in_without_credential("what MRC remembers", live_choice_field(
                 "mrc_lastseen", [False, True],
-                persist=lambda lane, v: lane.run(set_mrc_lastseen_recorded, user, v),
+                persist=_member_persist(user, actor, "mrc_lastseen", set_mrc_lastseen_recorded, describe=describe),
             )),
             brief="The hub's LASTSEEN record; on is the hub's default",
             help=(
@@ -1475,7 +1570,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: _MRC_NAME_STYLE_LABELS[d["mrc_names"]],
             prompt=live_choice_field(
                 "mrc_names", list(MRC_NAME_STYLES),
-                persist=lambda lane, v: lane.run(set_mrc_name_style, user, v),
+                persist=_member_persist(user, actor, "mrc_names", set_mrc_name_style, describe=describe),
             ),
             brief="How a styled MRC name such as +Nick+[TAG] is shown",
             help=(
@@ -1494,7 +1589,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "yes" if d["history_name_visible"] else "no (hidden)",
             prompt=_unless_signed_in_without_credential("whether the name is shown", live_choice_field(
                 "history_name_visible", [False, True],
-                persist=lambda lane, v: lane.run(set_session_history_name_visible, user, v),
+                persist=_member_persist(user, actor, "history_name_visible", set_session_history_name_visible, describe=describe),
             )),
             brief="Show your name to other callers",
             help=(
@@ -1510,7 +1605,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=_color_depth_render,
             prompt=live_choice_field(
                 "color_depth", ["auto", "truecolor", "256"],
-                persist=lambda lane, v: lane.run(set_color_depth_override, user, v),
+                persist=_member_persist(user, actor, "color_depth", set_color_depth_override, describe=describe),
             ),
             brief="Force a terminal color depth",
             help=(
@@ -1526,7 +1621,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: d["description_level"],
             prompt=live_choice_field(
                 "description_level", ["off", "brief", "detailed"],
-                persist=lambda lane, v: lane.run(set_menu_description_level, user, v),
+                persist=_member_persist(user, actor, "description_level", set_menu_description_level, describe=describe),
             ),
             brief="Off/brief/detailed menu text",
             help=(
@@ -1541,7 +1636,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "on" if d["redraw_in_place"] else "off",
             prompt=live_choice_field(
                 "redraw_in_place", [False, True],
-                persist=lambda lane, v: lane.run(set_redraw_in_place_enabled, user, v),
+                persist=_member_persist(user, actor, "redraw_in_place", set_redraw_in_place_enabled, describe=describe),
             ),
             brief="Clear screen instead of scrolling",
             help=(
@@ -1558,7 +1653,10 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "animated" if d["animations"] else "quick",
             prompt=live_choice_field(
                 "animations", [True, False],
-                persist=lambda lane, v: _persist_animations(session, lane, user, v),
+                persist=_member_persist(
+                    user, actor, "animations", set_animations_enabled, describe=describe,
+                    apply=lambda v: setattr(session, "animations_enabled", v),
+                ),
             ),
             brief="Play banners at their modem speed, or draw them at once",
             help=(
@@ -1572,10 +1670,13 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         FieldSpec(
             key="charset",
             label="Character set",
-            render=lambda d: _charset_label(d["charset"], session),
+            render=lambda d: _charset_label(d["charset"], session if actor is None else None),
             prompt=live_choice_field(
                 "charset", list(CHARSET_PREFERENCES),
-                persist=lambda lane, v: _persist_charset(session, lane, user, v),
+                persist=_member_persist(
+                    user, actor, "charset", set_charset_preference, describe=describe,
+                    apply=lambda v: apply_charset_preference(session, v),
+                ),
             ),
             brief="What your terminal shows: Auto, Unicode, CP437 or ASCII",
             help=(
@@ -1592,7 +1693,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "on" if d["post_colors"] else "off",
             prompt=live_choice_field(
                 "post_colors", [False, True],
-                persist=lambda lane, v: lane.run(set_post_colors_enabled, user, v),
+                persist=_member_persist(user, actor, "post_colors", set_post_colors_enabled, describe=describe),
             ),
             brief="Show authors' colors in posts and mail",
             help=(
@@ -1609,7 +1710,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "on" if d["mrc_colors"] else "off",
             prompt=live_choice_field(
                 "mrc_colors", [False, True],
-                persist=lambda lane, v: lane.run(set_mrc_colors_enabled, user, v),
+                persist=_member_persist(user, actor, "mrc_colors", set_mrc_colors_enabled, describe=describe),
             ),
             brief="Show the colors MRC users put in their lines",
             help=(
@@ -1625,7 +1726,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: f"{CGA_COLOR_NAMES[d['mrc_nick_color']]} (|{d['mrc_nick_color']:02d})",
             prompt=_unless_signed_in_without_credential("the MRC nick color", live_choice_field(
                 "mrc_nick_color", list(range(16)),
-                persist=lambda lane, v: lane.run(set_mrc_nick_color, user, v),
+                persist=_member_persist(user, actor, "mrc_nick_color", set_mrc_nick_color, describe=describe),
             )),
             brief="The color your handle wears on MRC",
             help=(
@@ -1641,7 +1742,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             render=lambda d: "always collapsed" if d["breadcrumb_collapsed"] else "auto",
             prompt=live_choice_field(
                 "breadcrumb_collapsed", [False, True],
-                persist=lambda lane, v: lane.run(set_breadcrumb_collapsed_enabled, user, v),
+                persist=_member_persist(user, actor, "breadcrumb_collapsed", set_breadcrumb_collapsed_enabled, describe=describe),
             ),
             brief="Always show only the current location, not the full path",
             help=(
@@ -1701,10 +1802,19 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         ),
     ]
 
+    title, subtitle, breadcrumb = "Your profile", "Your public identity and caller preferences.", ()
+    if actor is not None:
+        # Every field, refusable: a permission taken away while this screen
+        # is open stops the next change and says so.
+        fields = [dataclasses.replace(field, prompt=refusable(field.prompt)) for field in fields]
+        title, breadcrumb = "Profile", (sanitize_text(user.username),)
+        # Short enough for one row: a subtitle is cut, not wrapped.
+        subtitle = f"{_possessive(user)} profile. Every change is logged."
     await edit_resource_draft(
         session, lane,
-        title="Your profile",
-        subtitle="Your public identity and caller preferences.",
+        title=title,
+        subtitle=subtitle,
+        breadcrumb=breadcrumb,
         fields=fields,
         draft=draft,
         back_menu_text=menu_key("B", "ack"),
@@ -1721,7 +1831,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
     )
 
 
-async def _edit_bio(session: Session, lane: DatabaseLane, user: User) -> None:
+async def _edit_bio(session: Session, lane: DatabaseLane, user: User, *, actor: User | None = None) -> None:
     """
     Edits the bio via the fullscreen prose editor if `user` has opted
     in (`netbbs.net.editor_preference`), otherwise `netbbs.net.
@@ -1753,21 +1863,38 @@ async def _edit_bio(session: Session, lane: DatabaseLane, user: User) -> None:
     if signed_in_without_credential(session):
         _refuse_shared_account(session, "the bio")
         return
-    if await lane.run(fullscreen_editor_enabled, user):
+    viewer = actor or user
+    whose = "Your" if actor is None else _possessive(user)
+
+    async def _save(text: str) -> None:
+        if actor is None:
+            await lane.run(set_bio, user, text)
+            return
+
+        def write(db: Database, target: User) -> tuple[None, str]:
+            set_bio(db, target, text)
+            return None, "Bio " + ("cleared" if not text else "changed")
+
+        await write_member(lane, actor, user, write)
+
+    # The editor is the one the person typing chose.
+    if await lane.run(fullscreen_editor_enabled, viewer):
         current = await lane.run(get_bio, user) or ""
         result = await edit_prose(
-            session, initial_text=current, draft_path=await lane.run(_bio_draft_path, user), max_bytes=MAX_BIO_BYTES,
-            unicode_style=await lane.run(unicode_style_enabled, user),
+            session, initial_text=current, draft_path=await lane.run(_bio_draft_path, user, actor), max_bytes=MAX_BIO_BYTES,
+            unicode_style=await lane.run(unicode_style_enabled, viewer),
             # What is being written, above the text (issue #813).
-            header=EditorHeader("Your bio", color=await lane.run(effective_header_color_256)),
+            header=EditorHeader(f"{whose} bio", color=await lane.run(effective_header_color_256)),
         )
         if result is None:
             return
         text = result
     else:
         current = await lane.run(get_bio, user)
-        if current and await prompt_yes_no(session, "Clear your bio instead of editing it?", default=False):
-            await lane.run(set_bio, user, "")
+        if current and await prompt_yes_no(
+            session, f"Clear {whose.lower() if actor is None else whose} bio instead of editing it?", default=False
+        ):
+            await _save("")
             announce_line(session, "Bio cleared.")
             return
         result = await edit_line_body(
@@ -1775,25 +1902,29 @@ async def _edit_bio(session: Session, lane: DatabaseLane, user: User) -> None:
             initial_text=current,
             max_bytes=MAX_BIO_BYTES,
             max_lines=MAX_BIO_LINES,
-            draft_path=await lane.run(_bio_draft_path, user),
+            draft_path=await lane.run(_bio_draft_path, user, actor),
         )
         if result is None:
             return
         text = result
 
     try:
-        await lane.run(set_bio, user, text)
+        await _save(text)
     except BioError as exc:
         announce_line(session, f"Could not save bio: {exc}")
         return
     announce_line(session, "Bio updated.")
 
 
-def _bio_draft_path(db: Database, user: User) -> Path:
+def _bio_draft_path(db: Database, user: User, actor: User | None = None) -> Path:
+    """A member's own draft, or -- for a SysOp writing it for them -- one of
+    the SysOp's, so neither recovers the other's unsaved text."""
+    if actor is not None:
+        return drafts_directory(db) / f"bio_{user.id}_by_{actor.id}.draft"
     return drafts_directory(db) / f"bio_{user.id}.draft"
 
 
-async def _edit_signature(session: Session, lane: DatabaseLane, user: User) -> None:
+async def _edit_signature(session: Session, lane: DatabaseLane, user: User, *, actor: User | None = None) -> None:
     """Edits the signature auto-appended to mail/board posts
     (`netbbs.signature.append_signature`) -- same shape as `_edit_bio`
     immediately above (fullscreen prose editor or `edit_line_body`
@@ -1808,21 +1939,38 @@ async def _edit_signature(session: Session, lane: DatabaseLane, user: User) -> N
     if signed_in_without_credential(session):
         _refuse_shared_account(session, "the signature")
         return
-    if await lane.run(fullscreen_editor_enabled, user):
+    viewer = actor or user
+    whose = "Your" if actor is None else _possessive(user)
+
+    async def _save(text: str) -> None:
+        if actor is None:
+            await lane.run(set_signature, user, text)
+            return
+
+        def write(db: Database, target: User) -> tuple[None, str]:
+            set_signature(db, target, text)
+            return None, "Signature " + ("cleared" if not text else "changed")
+
+        await write_member(lane, actor, user, write)
+
+    # The editor is the one the person typing chose.
+    if await lane.run(fullscreen_editor_enabled, viewer):
         current = await lane.run(get_signature, user) or ""
         result = await edit_prose(
-            session, initial_text=current, draft_path=await lane.run(_signature_draft_path, user),
+            session, initial_text=current, draft_path=await lane.run(_signature_draft_path, user, actor),
             max_bytes=MAX_SIGNATURE_BYTES,
-            unicode_style=await lane.run(unicode_style_enabled, user),
-            header=EditorHeader("Your signature", color=await lane.run(effective_header_color_256)),
+            unicode_style=await lane.run(unicode_style_enabled, viewer),
+            header=EditorHeader(f"{whose} signature", color=await lane.run(effective_header_color_256)),
         )
         if result is None:
             return
         text = result
     else:
         current = await lane.run(get_signature, user)
-        if current and await prompt_yes_no(session, "Clear your signature instead of editing it?", default=False):
-            await lane.run(set_signature, user, "")
+        if current and await prompt_yes_no(
+            session, f"Clear {whose.lower() if actor is None else whose} signature instead of editing it?", default=False
+        ):
+            await _save("")
             announce_line(session, "Signature cleared.")
             return
         result = await edit_line_body(
@@ -1830,28 +1978,34 @@ async def _edit_signature(session: Session, lane: DatabaseLane, user: User) -> N
             initial_text=current,
             max_bytes=MAX_SIGNATURE_BYTES,
             max_lines=MAX_SIGNATURE_LINES,
-            draft_path=await lane.run(_signature_draft_path, user),
+            draft_path=await lane.run(_signature_draft_path, user, actor),
         )
         if result is None:
             return
         text = result
 
     try:
-        await lane.run(set_signature, user, text)
+        await _save(text)
     except SignatureError as exc:
         announce_line(session, f"Could not save signature: {exc}")
         return
     announce_line(session, "Signature updated.")
 
 
-def _signature_draft_path(db: Database, user: User) -> Path:
+def _signature_draft_path(db: Database, user: User, actor: User | None = None) -> Path:
+    """A member's own draft, or -- for a SysOp writing it for them -- one of
+    the SysOp's, so neither recovers the other's unsaved text."""
+    if actor is not None:
+        return drafts_directory(db) / f"signature_{user.id}_by_{actor.id}.draft"
     return drafts_directory(db) / f"signature_{user.id}.draft"
 
 
 # -- identity attestation: self-reported profile fields (design doc §18) --
 
 
-async def _identity_details_screen(session: Session, lane: DatabaseLane, user: User) -> None:
+async def _identity_details_screen(
+    session: Session, lane: DatabaseLane, user: User, *, actor: User | None = None
+) -> None:
     """
     Self-reported `display_name`/`location`/`birthdate`, each with its
     own visibility toggle, plus the SysOp-verified side: the general
@@ -1874,14 +2028,21 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
     verified yet simply reports that instead of offering anything.
     Sections group the self-reported and verified halves so the screen
     paginates cleanly on a 24-row terminal.
+
+    `actor` edits a member's details from their Profile (design doc §5.6):
+    the display name and birthdate through the staff path the user editor
+    uses (`change_display_name`, `change_birthdate`), everything else checked
+    and recorded. Whether a verification is shared over Link stays the
+    member's choice.
     """
     if signed_in_without_credential(session):
         _refuse_shared_account(session, "the name and details")
         return
-    description_level = await lane.run(menu_description_level, user)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, user)
-    unicode_style = await lane.run(unicode_style_enabled, user)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
+    viewer = actor or user
+    description_level = await lane.run(menu_description_level, viewer)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, viewer)
+    unicode_style = await lane.run(unicode_style_enabled, viewer)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, viewer)
     accent = await lane.run(effective_accent_color_256)
     header = await lane.run(effective_header_color_256)
 
@@ -1928,7 +2089,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             if raw == current:
                 return
             if not raw:
-                await lane.run(clear_own_profile_field, user, key)
+                await _store(key, name, None, save)
                 draft[key] = None
                 announce_line(session, f"{name} cleared.")
                 return
@@ -1938,7 +2099,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 announce_line(session, colored(f"{invalid} -- unchanged.", fg_color=MUTED_COLOR))
                 return
             try:
-                await lane.run(save, user, value)
+                await _store(key, name, value, save)
             except ProfileFieldError as exc:
                 announce_line(session, colored(f"Could not save {name.lower()}: {exc}", fg_color=MUTED_COLOR))
                 return
@@ -1946,6 +2107,31 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             announce_line(session, f"{name} updated.")
 
         return prompt
+
+    async def _store(key: str, name: str, value: Any, save: Callable[..., Any]) -> None:
+        """Write (or, with `None`, clear) one self-reported value."""
+        if actor is None:
+            if value is None:
+                await lane.run(clear_own_profile_field, user, key)
+            else:
+                await lane.run(save, user, value)
+            return
+        if key == "display_name":
+            await as_staff(lane.run(change_display_name, user, value, changed_by=actor))
+            return
+        if key == "birthdate":
+            await as_staff(lane.run(change_birthdate, user, value, changed_by=actor))
+            return
+
+        def write(db: Database, target: User) -> tuple[None, str]:
+            if value is None:
+                clear_own_profile_field(db, target, key)
+            else:
+                save(db, target, value)
+            # What they typed may be private: the record says only that it changed.
+            return None, f"{name} {'cleared' if value is None else 'changed'}"
+
+        await write_member(lane, actor, user, write)
 
     _display_name_prompt = _self_reported_prompt(
         "display_name", "Display name", as_text=sanitize_text, parse=str, save=set_display_name,
@@ -1984,6 +2170,10 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 return False, get_attestation(db, user, attribute)
 
         async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
+            if actor is not None:
+                # Sharing a verified date of birth or name with other nodes is
+                # an opt-in only its owner gives (design doc §18).
+                raise StaffEditRefused(f"only {sanitize_text(user.username)} can choose to share a verification over Link")
             shown = draft.get(key)
             toggled, attestation = await lane.run(_toggle_if_unchanged, shown)
             draft[key] = attestation
@@ -2068,6 +2258,10 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         "Whether other callers can see this value at all. Private hides it everywhere "
         "except from a SysOp. The value itself is kept either way."
     )
+
+    def describe(key: str) -> str:
+        return _field_describer(fields, draft)(key)
+
     fields = [
         FieldSpec(
             key="display_name", label="Display name",
@@ -2087,7 +2281,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             render=_visibility_render("display_name_visible"),
             prompt=live_choice_field(
                 "display_name_visible", [False, True],
-                persist=lambda lane, v: lane.run(set_display_name_visible, user, v),
+                persist=_member_persist(user, actor, "display_name_visible", set_display_name_visible, describe=describe),
             ),
             brief="Toggle display name public/private",
             help=visibility_help,
@@ -2111,7 +2305,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             render=_visibility_render("location_visible"),
             prompt=live_choice_field(
                 "location_visible", [False, True],
-                persist=lambda lane, v: lane.run(set_location_visible, user, v),
+                persist=_member_persist(user, actor, "location_visible", set_location_visible, describe=describe),
             ),
             brief="Toggle location public/private",
             help=visibility_help,
@@ -2136,7 +2330,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             render=_visibility_render("birthdate_visible"),
             prompt=live_choice_field(
                 "birthdate_visible", [False, True],
-                persist=lambda lane, v: lane.run(set_birthdate_visible, user, v),
+                persist=_member_persist(user, actor, "birthdate_visible", set_birthdate_visible, describe=describe),
             ),
             brief="Toggle birthdate/age public/private",
             help=visibility_help,
@@ -2148,7 +2342,7 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             render=_visibility_render("verified_badge_visible"),
             prompt=live_choice_field(
                 "verified_badge_visible", [False, True],
-                persist=lambda lane, v: lane.run(set_verified_badge_visible, user, v),
+                persist=_member_persist(user, actor, "verified_badge_visible", set_verified_badge_visible, describe=describe),
             ),
             brief="Show/hide your verified badge",
             help=(
@@ -2203,9 +2397,14 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         ),
     ]
 
+    breadcrumb: tuple[str, ...] = ()
+    if actor is not None:
+        fields = [dataclasses.replace(field, prompt=refusable(field.prompt)) for field in fields]
+        breadcrumb = (sanitize_text(user.username), "Profile")
     await edit_resource_draft(
         session, lane,
         title="Name & details",
+        breadcrumb=breadcrumb,
         fields=fields,
         draft=draft,
         back_menu_text=menu_key("B", "ack"),

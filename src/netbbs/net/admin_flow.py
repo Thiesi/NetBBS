@@ -654,6 +654,7 @@ from netbbs.net.shutdown import (
 )
 from netbbs.net.sysop_monitor import monitor_screen
 from netbbs.net.password_screen import manage_password_screen
+from netbbs.net.profile_flow import _edit_profile
 from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.auth.signup_answers import (
     MAX_REGISTRATION_QUESTION_LENGTH,
@@ -903,6 +904,7 @@ from netbbs.rendering.sauce import Sauce, split_sauce
 from netbbs.net import notices as _notices
 from netbbs.guest import (
     guest_privileges,
+    is_guest_account,
     guest_user,
     pre_login_notice,
     set_guest_user,
@@ -7692,6 +7694,8 @@ async def _draw_user_detail(
         options.append(MenuEntry(label=menu_key("N", "ame"), brief="Correct or clear the display name"))
     if "w" in offered:
         options.append(MenuEntry(label=menu_key("W", "hen born"), brief="Correct or clear the birthdate"))
+    if "e" in offered:
+        options.append(MenuEntry(label=menu_key("E", "dit profile"), brief="Their bio, blocks and settings"))
     if "s" in offered:
         options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
     if "i" in offered:
@@ -7724,7 +7728,7 @@ async def _draw_user_detail(
 _USER_DETAIL_FIELD_ORDER = ("l", "t", "r", "n", "w", "k", "p", "s", "i", "u")
 
 #: Every action key on the account detail -- what a SysOp gets.
-_ALL_USER_DETAIL_KEYS = frozenset("alutrnwkpsihdv")
+_ALL_USER_DETAIL_KEYS = frozenset("alutrnwkpsihdve")
 
 
 def _auto_promotion_label(target: User, kept: str | None) -> str:
@@ -7737,25 +7741,30 @@ def _auto_promotion_label(target: User, kept: str | None) -> str:
     return "on" if kept is None else f"on, but skipped ({kept})"
 
 
-def _user_detail_keys(actor: User, target: User) -> frozenset[str]:
+def _user_detail_keys(actor: User, target: User, *, guest: bool = False) -> frozenset[str]:
     """
     The account-detail actions `actor` is offered on `target` (design doc
     §5.6). A SysOp gets all of them. A staff member gets `[H]istory`, and
     -- only on an account below 255 holding no staff permission -- level,
-    enable/disable, password, display name and birthdate (issue #1110)
-    with manage accounts, approve and decline
+    enable/disable, password, display name, birthdate (issue #1110) and the
+    account's Profile with manage accounts, approve and decline
     with approve accounts. Never keys, the blocklist, staff, identity
     verification, or deleting an account.
+
+    `[E]dit profile` is never offered on your own account, whose Profile is
+    on the main menu, nor on the guest account (`guest`): each guest's
+    preferences last for their own call (`netbbs.user_preferences`).
 
     Presentation only: the mutators check again against the database, so
     a permission revoked while this screen is open refuses the action.
     """
+    profile = set() if guest or actor.id == target.id else {"e"}
     if is_usable_sysop(actor):
-        return _ALL_USER_DETAIL_KEYS
+        return _ALL_USER_DETAIL_KEYS - ({"e"} - profile)
     keys = {"h"}
     within_reach = target.user_level < SYSOP_LEVEL and not target.staff_permissions
     if within_reach and actor.has_staff(StaffPermission.MANAGE_ACCOUNTS):
-        keys |= {"l", "u", "t", "p", "n", "w"}
+        keys |= {"l", "u", "t", "p", "n", "w"} | profile
     if within_reach and target.pending_approval and actor.has_staff(StaffPermission.APPROVE_ACCOUNTS):
         keys |= {"a", "d"}
     return frozenset(keys)
@@ -7944,6 +7953,14 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
         "The local blocklist -- a separate, fingerprint-based mechanism from Status/"
         "disable, designed to extend to remote nodes/traffic later. Unlike disabling, a "
         "block also survives the account being re-enabled.",
+    ),
+    "e": (
+        "Edit profile",
+        "Opens this member's own Profile screen, acting on their account: bio, "
+        "signature, location, who they block, and their display, mail and chat "
+        "settings. Each change is recorded in the account's history; private text such "
+        "as the bio, and who they block, is recorded as changed, never quoted. Whether a "
+        "verification is shared over Link stays their own choice.",
     ),
 }
 
@@ -8169,12 +8186,13 @@ async def _user_detail_screen(
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     selected: str | None = None
+    target_is_guest = await lane.run(is_guest_account, target)
 
     async def _redraw() -> bool:
         # Recomputed on every draw: an approval or a level change can move
         # the account in or out of a staff member's reach.
         nonlocal allowed, field_order
-        allowed = _user_detail_keys(actor, target)
+        allowed = _user_detail_keys(actor, target, guest=target_is_guest)
         field_order = tuple(key for key in _USER_DETAIL_FIELD_ORDER if key in allowed)
         return await _draw_user_detail(
             session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
@@ -8333,6 +8351,12 @@ async def _user_detail_screen(
                         f"{'yes' if target.can_verify_identity else 'no'}."
                     )
                     _request_live_access_recheck(node_controls, target)
+            blocked = await _redraw()
+        elif choice == "e":
+            # The member's own Profile, acting on their account (design doc
+            # §5.6): its writes check this actor again and are recorded.
+            await _edit_profile(session, lane, target, actor=actor)
+            target = await lane.run(get_user_by_id, target.id) or target
             blocked = await _redraw()
         elif choice == "s":
             target = await _staff_permissions_screen(

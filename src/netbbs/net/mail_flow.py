@@ -189,6 +189,7 @@ from netbbs.net.notices import announce, announce_styled, pending_notice_rows, t
 from netbbs.net.row_numbers import ROW_NUMBER_WIDTH, read_row_number, row_number_label, row_range_label
 from netbbs.net.session import Session, write_prompt
 from netbbs.net.shared_account import shared_account_refusal, signed_in_without_credential
+from netbbs.net.staff_edit import write_member
 from netbbs.rendering.detail import Section, Styled
 from netbbs.quoting import forward_body, forward_subject, quote_body, reply_subject, sign_forward
 from netbbs.signature import append_signature, get_signature
@@ -2163,15 +2164,35 @@ def _unblock_row(db: Database, user: User, row: _BlockedRow) -> tuple[str, str]:
     return _UNBLOCKED_NOTICE.format(name=row.name), "success"
 
 
-async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: User) -> None:
+async def blocked_senders_screen(
+    session: Session, lane: DatabaseLane, user: User, *, actor: User | None = None
+) -> None:
     """Profile > Blocked people (issues #817, #925): everyone `user` refuses
     mail and live messages from, newest first. `[A]dd` blocks someone by name -- a local user, or
     `name@TheirBBS` for someone on a linked BBS -- and `[U]nblock`, or
-    picking a row, unblocks it. Each outcome is carried into the redraw."""
+    picking a row, unblocks it. Each outcome is carried into the redraw.
+
+    `actor` changes a member's blocks from their Profile (design doc §5.6):
+    each block and unblock is recorded in the account's admin history, without
+    the name -- who someone blocks is theirs to know."""
     if signed_in_without_credential(session):
         # Issue #1073: who the shared guest account blocks is every guest's.
         announce(session, shared_account_refusal("who this account blocks"), tone="error")
         return
+    viewer = actor or user
+
+    async def _change(
+        change: Callable[[Database, User], tuple[str, str]], recorded: str
+    ) -> tuple[str, str]:
+        if actor is None:
+            return await lane.run(change, user)
+
+        def write(db: Database, target: User) -> tuple[tuple[str, str], str | None]:
+            outcome, tone = change(db, target)
+            # A refusal ("already blocked", no such user) changed nothing.
+            return (outcome, tone), recorded if tone == "success" else None
+
+        return await write_member(lane, actor, user, write)
 
     async def _reload() -> list[_BlockedRow]:
         return await lane.run(_load_blocked_rows, user)
@@ -2185,12 +2206,12 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
             text = ""
         if not text:
             return None
-        outcome, tone = await lane.run(_block_by_name, user, text)
+        outcome, tone = await _change(lambda db, target: _block_by_name(db, target, text), "Blocked someone")
         announce(session, outcome, tone=tone)
         return await _reload()
 
     async def _unblock(row: _BlockedRow) -> list[_BlockedRow]:
-        outcome, tone = await lane.run(_unblock_row, user, row)
+        outcome, tone = await _change(lambda db, target: _unblock_row(db, target, row), "Unblocked someone")
         announce(session, outcome, tone=tone)
         return await _reload()
 
@@ -2202,8 +2223,11 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
             stable_id_of=lambda row: row.block.id,
             description_of=lambda row: row.where,
             title="Blocked people",
-            breadcrumb=("Profile",),
-            empty_message="You block no one. Mail and live messages from anyone reach you.",
+            breadcrumb=("Profile",) if actor is None else (sanitize_text(user.username), "Profile"),
+            empty_message=(
+                "You block no one. Mail and live messages from anyone reach you." if actor is None
+                else f"{sanitize_text(user.username)} blocks no one."
+            ),
             refresh=_reload,
             live_keys={"a": _add},
             item_keys={"u": _unblock},
@@ -2211,10 +2235,10 @@ async def blocked_senders_screen(session: Session, lane: DatabaseLane, user: Use
                 MenuEntry(label=menu_key("A", "dd"), brief="Block someone by name"),
                 MenuEntry(label=menu_key("U", "nblock"), brief="Accept their mail and messages again"),
             ],
-            description_level=await lane.run(menu_description_level, user),
-            redraw_in_place=await lane.run(redraw_in_place_enabled, user),
-            unicode_style=await lane.run(unicode_style_enabled, user),
-            collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
+            description_level=await lane.run(menu_description_level, viewer),
+            redraw_in_place=await lane.run(redraw_in_place_enabled, viewer),
+            unicode_style=await lane.run(unicode_style_enabled, viewer),
+            collapsed=await lane.run(breadcrumb_collapsed_enabled, viewer),
             accent_color=await lane.run(effective_accent_color_256),
             header_color=await lane.run(effective_header_color_256),
         )

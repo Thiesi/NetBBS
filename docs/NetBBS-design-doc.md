@@ -2444,8 +2444,8 @@ below level 255, independent of its level:
 - **Approve accounts:** approve or decline registrations waiting under
   `approval_required` (§4.2).
 - **Manage accounts:** disable an account and enable it again, reset its
-  password, correct or clear its display name and birthdate, and set its
-  level anywhere from 0 to 254. Raising an account to
+  password, correct or clear its display name and birthdate, edit the rest of
+  its Profile, and set its level anywhere from 0 to 254. Raising an account to
   255, and deleting an account and so retiring its name (§4.3), stay with the
   SysOp.
 - **Moderate everything:** act as moderator on every board, file area and
@@ -2465,6 +2465,25 @@ account's moderator grants in its read-only Record group, so a SysOp sees
 everything an account may do in one place. The editable fields are one column
 in the cursor's order and the read-only facts sit below them (issue #1119): a
 two-column layout made the cursor zigzag and step over read-only rows.
+
+**`[E]dit profile`** on the account detail opens the member's own Profile
+screen, acting on their account: the same fields, sections and help they see,
+from the bio, signature, location and blocked people to their display, mail
+and chat settings. It is offered to whoever may manage the account (a SysOp,
+or a staff member with manage accounts within reach), never on your own
+account, whose Profile is on the main menu, and never on the guest account,
+whose settings each guest chooses for their own call. The screen is drawn the
+way the SysOp's own screens are, with the member's values, and nothing on it
+reaches the SysOp's session: a character set chosen there is the member's.
+Every write checks the actor's authority again (`netbbs.profile_admin`) and is
+recorded in the account's admin history as `edit_profile`: a setting with its
+new value, private text only as changed ("Bio changed", "Blocked someone",
+"Location changed"). The display name, birthdate, password and SSH keys keep
+their own staff paths and records, and the keys stay a SysOp's alone, as on
+the account detail. Whether a verification is shared over Link stays the
+member's own choice (§5.5). The username is not editable. A member who is
+signed in sees some display changes, such as the character set, only when
+they next sign in.
 
 **What staff can never do.** A staff member acts only on accounts below level
 255 that hold no staff permission; a moderator-only account is within reach.
@@ -15963,6 +15982,33 @@ otherwise still publish them network-wide for nobody's benefit.
 different local name on each node (§9.3, issue #671); the page lists the
 board by the name its origin gave it, so the same board reads the same on
 every page.
+
+### Staff edit a member's Profile — decided
+
+The maintainer asked (2026-10-09) that whoever may edit user accounts can edit
+every field of one through NetBBS itself. The account detail showed a few of
+an account's settings; the rest -- bio, signature, location, blocks, display,
+mail and chat settings -- only the member could change. Normative
+description: §5.6.
+
+**Decision 1 — their Profile, not more rows.** `[E]dit profile` opens the
+member's own Profile screen acting on their account. Rejected: a row per
+setting on the account detail, which would run to several pages at 80x24 and
+repeat Profile's fields and help in a second place.
+
+**Decision 2 — the reach of the display name and birthdate (issue #1110).** A
+SysOp, or a staff member with manage accounts on an account below 255 that
+holds no staff permission; never your own account, and never the guest
+account. Each write is checked again in the database. The SSH keys stay a
+SysOp's, and sharing a verification over Link stays the member's opt-in.
+
+**Decision 3 — the username stays read-only.** It names the account to other
+nodes: password-only Link identity, mail addressed by name, post authors, and
+retired names. A rename is its own design if it is ever wanted.
+
+**Decision 4 — recorded, without private text.** Every change is in the
+account's admin history; a setting with its new value, text the member wrote
+or names they block only as changed.
 
 ### SFTP over the SSH transport — declined
 
