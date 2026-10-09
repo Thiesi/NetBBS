@@ -493,6 +493,8 @@ def build_endpoint_descriptor(
     capabilities: tuple[str, ...] = LINK_CAPABILITIES,
     dial_in: list[str] | tuple[str, ...] | None = None,
     node_page: str | None = None,
+    software_version: str | None = None,
+    public_boards: list[dict] | tuple[dict, ...] | None = None,
 ) -> EndpointDescriptor:
     """
     Build and sign one `endpoint_descriptor` event, per design doc §12
@@ -563,6 +565,14 @@ def build_endpoint_descriptor(
         # Omitted for the default, so it is present only as "indexed" or
         # "off".
         payload["node_page"] = node_page
+    if software_version:
+        # Issue #1171: this node's release as major.minor, for its page.
+        payload["software_version"] = software_version
+    if public_boards:
+        # Issue #1171: the Linked boards its guest account may read, as
+        # `{"board_id", "name"}`, for its page. Both read by
+        # `netbbs.link.node_page`, which validates them.
+        payload["public_boards"] = [dict(board) for board in public_boards]
 
     envelope = build_envelope(ENDPOINT_DESCRIPTOR_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))

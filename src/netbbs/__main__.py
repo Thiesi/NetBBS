@@ -45,6 +45,7 @@ from netbbs.link.onboarding import participation_accepted
 from netbbs.link.key_rotation import KeyRotator, resign_own_content
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
+from netbbs.link.node_page import NodePageFacts
 from netbbs.doors.runtime import migrate_voidrunner_saves, record_voidrunner_save_dir
 from netbbs.link.onboarding import (
     mark_link_has_run, record_link_reachability, resolve_link_enabled, set_configured_link_enabled,
@@ -159,25 +160,26 @@ def _build_link_throttle(link_config: LinkConfig) -> LinkRequestThrottle:
 def _load_own_identity_claims(
     db: Database,
     advertised_host: str | None,
-    previous_claims: tuple[str, str | None, tuple[str, ...], str | None] | None,
-) -> tuple[str, str | None, tuple[str, ...], str | None]:
+    previous_claims: tuple[str, str | None, tuple[str, ...], NodePageFacts] | None,
+) -> tuple[str, str | None, tuple[str, ...], NodePageFacts]:
     """Load and, when changed, persist the local human-facing identity.
 
     The third element is the `dial_in` list the next descriptor carries
     (issue #777, design doc §8.2): the SysOp's saved statement, or the
-    `[web] public_url` fallback. The fourth is the `node_page` field
-    (issue #1165, §8.13), `None` for the default. Neither is part of the
-    remembered identity-claim history, which is about names."""
+    `[web] public_url` fallback. The fourth is what it says for this
+    node's page on www.netbbs.org (issues #1165 and #1171, §8.13). Neither
+    is part of the remembered identity-claim history, which is about
+    names."""
     from netbbs.config import get_node_display_name
     from netbbs.link.dial_in import published_dial_in
-    from netbbs.link.node_page import descriptor_node_page, get_node_page
+    from netbbs.link.node_page import own_node_page_facts
     from netbbs.link.node_profiles import own_canonical_dns_name, remember_own_identity_claims
 
     claims = (
         get_node_display_name(db),
         own_canonical_dns_name(db, advertised_host),
         published_dial_in(db),
-        descriptor_node_page(get_node_page(db)),
+        own_node_page_facts(db),
     )
     if previous_claims is None or claims[:2] != previous_claims[:2]:
         remember_own_identity_claims(db, canonical_dns_name=claims[1])
@@ -191,21 +193,21 @@ class _OwnHelloProvider:
         self,
         link_node: LinkNode,
         link_config: LinkConfig,
-        claims: tuple[str, str | None, tuple[str, ...], str | None],
+        claims: tuple[str, str | None, tuple[str, ...], NodePageFacts],
         live_relays_provider=None,
     ) -> None:
         self._link_node = link_node
         self._link_config = link_config
-        self._friendly_name, self._canonical_dns_name, self._dial_in, self._node_page = claims
+        self._friendly_name, self._canonical_dns_name, self._dial_in, self._page_facts = claims
         self._live_relays_provider = live_relays_provider
 
     async def refresh(self, lane: DatabaseLane) -> None:
         claims = await lane.run(
             _load_own_identity_claims,
             self._link_config.advertised_host,
-            (self._friendly_name, self._canonical_dns_name, self._dial_in, self._node_page),
+            (self._friendly_name, self._canonical_dns_name, self._dial_in, self._page_facts),
         )
-        self._friendly_name, self._canonical_dns_name, self._dial_in, self._node_page = claims
+        self._friendly_name, self._canonical_dns_name, self._dial_in, self._page_facts = claims
 
     def __call__(self) -> HelloMessage:
         addresses = None
@@ -246,7 +248,9 @@ class _OwnHelloProvider:
             friendly_name=self._friendly_name,
             canonical_dns_name=self._canonical_dns_name,
             dial_in=self._dial_in,
-            node_page=self._node_page,
+            node_page=self._page_facts.node_page,
+            software_version=self._page_facts.software_version,
+            public_boards=self._page_facts.public_boards,
         )
 
 

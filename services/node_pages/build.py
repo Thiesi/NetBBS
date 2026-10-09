@@ -48,6 +48,10 @@ MAX_FRIENDLY_NAME = 64
 MAX_DIAL_IN = 4
 MAX_DIAL_IN_BYTES = 300
 _DIAL_IN_SCHEMES = ("telnet", "ssh", "https")
+MAX_BOARDS = 24
+MAX_BOARD_NAME = 64
+_VERSION_RE = re.compile(r"^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$")
+_BOARD_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 SITE = "https://www.netbbs.org"
 
@@ -75,6 +79,10 @@ class NodePage:
     last_heard: datetime | None
     state: str
     indexed: bool
+    # Issue #1171: major.minor, and the names of the Linked boards a guest
+    # there may read.
+    software_version: str | None = None
+    boards: tuple[str, ...] = ()
 
     @property
     def member_since(self) -> datetime | None:
@@ -172,6 +180,33 @@ def _friendly_name(value: object, fallback: str) -> str:
     return cleaned[:MAX_FRIENDLY_NAME] or fallback
 
 
+def _software_version(value: object) -> str | None:
+    return value if isinstance(value, str) and _VERSION_RE.fullmatch(value) else None
+
+
+def _boards(values: object) -> tuple[str, ...]:
+    """The board names to list: entries with a well-formed board id and a
+    printable name of at most 64 characters, each board once, at most 24.
+    The export already validated them; this is the page's own guard."""
+    if not isinstance(values, list):
+        return ()
+    seen: set[str] = set()
+    names: list[str] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        board_id, name = value.get("board_id"), value.get("name")
+        if not isinstance(board_id, str) or not _BOARD_ID_RE.fullmatch(board_id) or board_id in seen:
+            continue
+        if not isinstance(name, str) or not name.strip() or len(name) > MAX_BOARD_NAME or not name.isprintable():
+            continue
+        seen.add(board_id)
+        names.append(name.strip())
+        if len(names) == MAX_BOARDS:
+            break
+    return tuple(names)
+
+
 def _state(status: str, last_heard: datetime | None, now: datetime) -> str:
     if status == "released" or last_heard is None:
         return LEFT
@@ -223,6 +258,8 @@ def select_pages(registrations: list[Registration], nodes: list[dict], now: date
             last_heard=last_heard,
             state=_state(chosen.status, last_heard, now),
             indexed=setting == INDEXED,
+            software_version=_software_version(node.get("software_version")),
+            boards=_boards(node.get("public_boards")),
         ))
     pages.sort(key=lambda page: (page.friendly_name.casefold(), page.name))
     return pages
@@ -265,6 +302,8 @@ h2{font-size:1rem;color:var(--sub);font-weight:600;margin:1.5rem 0 .6rem;}
 ul.dial{list-style:none;margin:0;padding:0;display:grid;gap:.4rem;}
 ul.dial a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line);overflow-wrap:anywhere;}
 ul.dial a:hover{border-color:var(--coral);}
+ul.boards{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:.4rem;}
+ul.boards li{border:1px solid var(--line);border-radius:8px;padding:.2rem .65rem;overflow-wrap:anywhere;}
 dl.facts{display:grid;grid-template-columns:max-content 1fr;gap:.55rem 1.25rem;margin:1.5rem 0 0;}
 dl.facts dt{color:var(--sub);}
 dl.facts dd{margin:0;overflow-wrap:anywhere;}
@@ -335,13 +374,24 @@ def render_node_page(page: NodePage, now: datetime) -> str:
     heard = (
         f"{_date(page.last_heard)} ({_ago(page.last_heard, now)})" if page.last_heard is not None else "unknown"
     )
+    version = (
+        f"<dt>Runs</dt><dd>NetBBS {_E(page.software_version)}</dd>\n" if page.software_version else ""
+    )
+    boards = (
+        "<h2>Linked boards open to guests</h2>\n<ul class=\"boards\">"
+        + "".join(f"<li>{_E(name)}</li>" for name in page.boards)
+        + "</ul>\n"
+        if page.boards else ""
+    )
     body = (
         "<section class=\"card\">\n"
         f"<div class=\"head\"><h1>{_E(page.friendly_name)}</h1>"
         f"<span class=\"state state-{page.state}\">{_STATE_TEXT[page.state]}</span></div>\n"
         f"<p class=\"host mono\">{_E(page.name)}.netbbs.org</p>\n"
         f"<h2>Call in</h2>\n{dial}\n"
+        f"{boards}"
         "<dl class=\"facts\">\n"
+        f"{version}"
         f"<dt>Name registered</dt><dd>{_date(page.registered_at)}</dd>\n"
         f"<dt>Known to Reliable Link since</dt><dd>{_date(page.known_since)}</dd>\n"
         f"<dt>Last heard</dt><dd>{heard}</dd>\n"
