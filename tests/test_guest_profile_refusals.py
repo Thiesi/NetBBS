@@ -107,29 +107,29 @@ def _account_state(db: Database, user) -> dict:
     }
 
 
-# Profile hotkey, then what the entry would type if it opened.
+# Profile field number, then what the entry would type if it opened.
 _SHARED_ENTRIES = {
-    "bio": ("e", ["Defaced.", ""]),
-    "bio visibility": ("v", []),
-    "signature": ("g", ["Defaced.", ""]),
-    "name and details": ("n", []),
-    "direct messages": ("m", []),
-    "blocked people": ("o", []),
-    "read receipts": ("x", []),
-    "MRC private messages": ("p", []),
-    "MRC last seen": ("w", []),
-    "name in the callers roll": ("h", []),
-    "MRC nick color": ("y", []),
-    "SSH keys": ("k", []),
-    "password": ("a", []),
+    "bio": ("01", ["Defaced.", ""]),
+    "bio visibility": ("02", []),
+    "signature": ("03", ["Defaced.", ""]),
+    "name and details": ("04", []),
+    "direct messages": ("06", []),
+    "blocked people": ("07", []),
+    "read receipts": ("08", []),
+    "MRC private messages": ("09", []),
+    "MRC last seen": ("10", []),
+    "name in the callers roll": ("12", []),
+    "MRC nick color": ("20", []),
+    "SSH keys": ("23", []),
+    "password": ("24", []),
 }
 
 
 @pytest.mark.parametrize("entry", sorted(_SHARED_ENTRIES))
 def test_a_guest_session_cannot_change_a_shared_profile_entry(db, lane, guest, entry):
-    hotkey, lines = _SHARED_ENTRIES[entry]
+    number, lines = _SHARED_ENTRIES[entry]
     before = _account_state(db, guest)
-    session = FakeSession(keys=[hotkey, "b"], lines=lines, guest=True)
+    session = FakeSession(keys=[*number, "b"], lines=lines, guest=True)
 
     asyncio.run(profile_flow._edit_profile(session, lane, guest))
 
@@ -149,7 +149,7 @@ def test_the_profile_says_what_a_guest_can_and_cannot_change(db, lane, guest):
 
 def test_an_ordinary_session_sees_no_guest_note_and_edits_the_bio(db, lane, guest):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["e", "b"], lines=["Hello.", "", "", ""], guest=False)
+    session = FakeSession(keys=["0", "1", "b"], lines=["Hello.", "", "", ""], guest=False)
 
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
@@ -159,7 +159,7 @@ def test_an_ordinary_session_sees_no_guest_note_and_edits_the_bio(db, lane, gues
 
 
 def test_an_ordinary_session_still_toggles_bio_visibility(db, lane, guest):
-    session = FakeSession(keys=["v", "b"], guest=False)
+    session = FakeSession(keys=["0", "2", "b"], guest=False)
 
     asyncio.run(profile_flow._edit_profile(session, lane, guest))
 
@@ -175,8 +175,8 @@ def test_an_ordinary_session_still_toggles_bio_visibility(db, lane, guest):
     ids=["display name", "location", "birthdate"],
 )
 def test_the_name_and_details_screen_refuses_a_guest_session(db, lane, guest, lines):
-    hotkey = {"Mallory": "d", "Nowhere": "l", "2001-01-01": "a"}[lines[0]]
-    session = FakeSession(keys=[hotkey, "b"], lines=lines, guest=True)
+    number = {"Mallory": "01", "Nowhere": "03", "2001-01-01": "05"}[lines[0]]
+    session = FakeSession(keys=[*number, "b"], lines=lines, guest=True)
     before = _account_state(db, guest)
 
     asyncio.run(profile_flow._identity_details_screen(session, lane, guest))

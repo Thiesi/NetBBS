@@ -258,8 +258,8 @@ def test_help_tells_a_guest_why_there_is_no_mail(db, sysop, guest):
 
 
 def test_the_mail_level_is_a_limits_setting(db, lane, sysop):
-    # s: Settings, l: Limits & retention, m: mail level, 20, s: save.
-    session = AdminSession(["s", "l", "m", "20", "s", "b", "b", "b"])
+    # s: Settings, l: Limits & retention, 06: mail level, 20, s: save.
+    session = AdminSession(["s", "l", "0", "6", "20", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     assert get_mail_min_level(db) == 20

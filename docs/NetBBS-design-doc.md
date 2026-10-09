@@ -1096,7 +1096,9 @@ belong to its actions: `[S]ave`, `[B]ack`, and a resource's `[U]p`,
 `[R]emove` or `[L]ink`. The action bar offers the range, `[01-24] change`,
 where a row of field letters used to be, which also makes a form shorter.
 With menu descriptions on, the highlighted field's description is shown under
-the list, where the field letters' descriptions used to be. A handbook names
+the list, where the field letters' descriptions used to be. A resource's own
+screen names the range in the key hint it already has (`01-12 or ↑↓ choose`)
+instead, and shows no description row, so it is no taller than before. A handbook names
 a field by its label, not its number, because a number moves when a field is
 added.
 

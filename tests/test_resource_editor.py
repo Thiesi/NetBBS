@@ -321,7 +321,7 @@ def test_back_on_an_unmodified_draft_needs_no_confirmation():
 
 
 def test_back_on_a_changed_draft_asks_before_discarding():
-    session = FakeSession(["n", "Renamed", "b", "y"])
+    session = FakeSession(["0", "1", "Renamed", "b", "y"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -344,7 +344,7 @@ def test_declining_the_discard_confirmation_returns_to_the_same_draft():
         save_calls.append(dict(draft))
         return "saved"
 
-    session = FakeSession(["n", "Renamed", "b", "n", "s"])
+    session = FakeSession(["0", "1", "Renamed", "b", "n", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -357,13 +357,13 @@ def test_declining_the_discard_confirmation_returns_to_the_same_draft():
     assert save_calls == [{"name": "Renamed"}]
 
 
-def test_selecting_a_field_hotkey_runs_its_prompt_and_updates_the_draft():
+def test_typing_a_fields_number_runs_its_prompt_and_updates_the_draft():
     async def save(draft):
         return draft["name"]
 
-    # "n" selects the Name field; "Renamed" types the new value;
-    # "s" saves.
-    session = FakeSession(["n", "Renamed", "s"])
+    # "0" "1" selects the Name field (issue #1158); "Renamed" types the
+    # new value; "s" saves.
+    session = FakeSession(["0", "1", "Renamed", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -387,7 +387,7 @@ def test_a_blank_text_entry_now_clears_the_value():
     async def save(draft):
         return draft["name"]
 
-    session = FakeSession(["n", "", "s"])  # emptied line clears "lobby"
+    session = FakeSession(["0", "1", "", "s"])  # emptied line clears "lobby"
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -458,9 +458,9 @@ def test_bool_field_flips_on_one_keystroke_without_a_prompt():
     async def save(draft):
         return draft["pinned"]
 
-    # Issue #751: "p" alone turns Pinned on -- no "Pinned?" question,
-    # so the next key is already the menu's own "s".
-    session = FakeSession(["p", "s"])
+    # Issue #751: Pinned's number alone turns it on -- no "Pinned?"
+    # question, so the next key is already the menu's own "s".
+    session = FakeSession(["0", "1", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -480,7 +480,7 @@ def test_bool_field_toggles_back_and_treats_missing_as_off(start, presses, expec
     async def save(draft):
         return draft["pinned"]
 
-    session = FakeSession(["p"] * presses + ["s"])
+    session = FakeSession(["0", "1"] * presses + ["s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -507,13 +507,13 @@ def test_bool_step_flips_on_either_arrow(arrows, expected):
     assert result["pinned"] is expected
 
 
-def test_choice_field_cycles_one_step_per_hotkey_press_without_typing():
+def test_choice_field_cycles_one_step_per_number_typed_without_typing_a_value():
     async def save(draft):
         return draft["name_requirement"]
 
-    # "q" presses cycle none -> verified -> verified_and_displayed, no
-    # typed input at all (dogfood feature request, issue #153).
-    session = FakeSession(["q", "q", "s"])
+    # Each "01" cycles none -> verified -> verified_and_displayed, no
+    # typed value at all (dogfood feature request, issue #153).
+    session = FakeSession(["0", "1", "0", "1", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -529,7 +529,7 @@ def test_choice_field_wraps_back_to_the_first_value():
     async def save(draft):
         return draft["name_requirement"]
 
-    session = FakeSession(["q", "s"])  # one press past the last value wraps to none
+    session = FakeSession(["0", "1", "s"])  # one step past the last value wraps to none
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -549,7 +549,7 @@ def test_multiple_fields_render_together_and_can_be_edited_in_any_order():
 
     # Edits Pinned first, then Name, then saves -- proves fields are
     # addressable independently, not in a fixed sequential order.
-    session = FakeSession(["p", "n", "general", "s"])
+    session = FakeSession(["0", "2", "0", "1", "general", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -680,8 +680,8 @@ def test_up_from_unselected_highlights_the_last_field():
     text = _written_text(session)
     # "> " only appears once the marker is drawn on the (second, last)
     # Pinned field -- not on Name.
-    assert "> Pinned" in text
-    assert "> Name" not in text
+    assert "> 02 Pinned" in text
+    assert "> 01 Name" not in text
 
 
 def test_down_from_unselected_highlights_the_first_field():
@@ -697,8 +697,8 @@ def test_down_from_unselected_highlights_the_first_field():
         )
     )
     text = _written_text(session)
-    assert "> Name" in text
-    assert "> Pinned" not in text
+    assert "> 01 Name" in text
+    assert "> 02 Pinned" not in text
 
 
 def test_navigation_wraps_at_both_ends():
@@ -717,7 +717,7 @@ def test_navigation_wraps_at_both_ends():
     )
     assert result == "saved"
     # Three Downs from unselected: Name -> Pinned -> Name again.
-    assert "> Name" in _written_text(session)
+    assert "> 01 Name" in _written_text(session)
 
 
 def test_space_activates_the_highlighted_field():
@@ -785,11 +785,11 @@ def test_selection_persists_after_activating_a_field():
     # From Pinned (selected via two Downs, then toggled with Space),
     # one Up must land back on Name -- proving the cursor was still on
     # Pinned right before that Up, not reset to "nothing selected".
-    assert "> Name" in _written_text(session)
+    assert "> 01 Name" in _written_text(session)
 
 
-def test_hotkey_still_works_and_syncs_the_selection_marker():
-    session = NavigableFakeSession(["p", "s"])
+def test_a_fields_number_syncs_the_selection_marker():
+    session = NavigableFakeSession(["0", "2", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -801,7 +801,7 @@ def test_hotkey_still_works_and_syncs_the_selection_marker():
         )
     )
     assert result["pinned"] is True
-    assert "> Pinned" in _written_text(session)
+    assert "> 02 Pinned" in _written_text(session)
 
 
 def test_right_arrow_steps_a_choice_field_forward():
@@ -1052,11 +1052,13 @@ def test_description_level_off_hides_brief_text_by_default():
     assert "Shown at the top of listings" not in _written_text(session)
 
 
-def test_description_level_brief_shows_field_brief_text():
+def test_description_level_brief_shows_the_highlighted_fields_brief_text():
     async def save(draft):
         return draft["name"]
 
-    session = FakeSession(["x", "s"])
+    # UP highlights the last field, Pinned (issue #1158: the description
+    # row shows the highlighted field's).
+    session = NavigableFakeSession(["UP", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -1070,7 +1072,10 @@ def test_description_level_brief_shows_field_brief_text():
     assert "Shown at the top of listings" in _written_text(session)
 
 
-def test_description_level_detailed_prefers_help_over_brief():
+def test_description_level_detailed_shows_the_brief_and_leaves_help_to_ctrl_h():
+    """The row under the fields (issue #1158) is one line: the
+    highlighted field's `brief` at either level, its `help` only when
+    it has no brief. The full help stays on Ctrl-H."""
     async def save(draft):
         return draft["name"]
 
@@ -1086,7 +1091,7 @@ def test_description_level_detailed_prefers_help_over_brief():
         # available description width well below a full 80-column line.
         help="Keeps this item at the very top.",
     )
-    session = FakeSession(["x", "s"])
+    session = NavigableFakeSession(["UP", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -1098,15 +1103,15 @@ def test_description_level_detailed_prefers_help_over_brief():
     )
     assert result == "lobby"
     text = _written_text(session)
-    assert "Keeps this item at the very top." in text
-    assert "Shown at the top of listings" not in text
+    assert "Shown at the top of listings" in text
+    assert "Keeps this item at the very top." not in text
 
 
 def test_description_level_detailed_falls_back_to_brief_without_help():
     async def save(draft):
         return draft["name"]
 
-    session = FakeSession(["x", "s"])
+    session = NavigableFakeSession(["UP", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -1140,7 +1145,7 @@ def test_description_level_brief_also_describes_save_and_back():
     assert "Discard the draft, nothing saved" in text
 
 
-def _brief_field(key: str, letter: str, label: str) -> FieldSpec:
+def _brief_field(key: str, label: str) -> FieldSpec:
     return FieldSpec(
         key=key, label=label,
         render=lambda draft: draft.get(key) or "(blank)", prompt=text_field(key),
@@ -1151,15 +1156,15 @@ def _brief_field(key: str, letter: str, label: str) -> FieldSpec:
 def test_description_level_brief_falls_back_to_compact_menu_row_when_the_screen_would_overflow():
     """Dogfood-reported regression: a real board/area/channel editor
     (10+ fields) with the real "brief" default renders far taller than
-    a standard 24-row terminal once every field's hotkey gets its own
-    description line -- the top of the field list scrolls off. Below
+    a standard 24-row terminal once the action bar's entries each get
+    a description line -- the top of the field list scrolls off. Below
     the floor, the menu row falls back to the compact form regardless
     of preference, the same judgment call already applied to
     picker.py's own page-size floor."""
     async def save(draft):
         return "saved"
 
-    many_fields = [_brief_field(f"f{i}", _letter(i).upper(), f"Field{i}") for i in range(10)]
+    many_fields = [_brief_field(f"f{i}", f"Field{i}") for i in range(17)]
     session = FakeSession(["s"])
     result = asyncio.run(
         edit_resource_draft(
@@ -1172,7 +1177,8 @@ def test_description_level_brief_falls_back_to_compact_menu_row_when_the_screen_
     )
     assert result == "saved"
     text = _written_text(session)
-    assert "Description of Field0" not in text
+    assert "Change a field by its number" not in text
+    assert "[01-17] change" in _visible(text)
 
 
 def test_description_level_brief_still_shows_when_it_fits():
@@ -1182,7 +1188,7 @@ def test_description_level_brief_still_shows_when_it_fits():
     async def save(draft):
         return "saved"
 
-    session = FakeSession(["s"])
+    session = NavigableFakeSession(["DOWN", "s"])
     result = asyncio.run(
         edit_resource_draft(
             session, None,
@@ -1193,7 +1199,9 @@ def test_description_level_brief_still_shows_when_it_fits():
         )
     )
     assert result == "saved"
-    assert "Shown at the top of listings" in _written_text(session)
+    text = _written_text(session)
+    assert "Shown at the top of listings" in text
+    assert "Change a field by its number" in text
 
 
 # -- long field values are wrapped, not printed as one raw line (dogfood
@@ -1418,14 +1426,10 @@ def test_sectioned_fields_show_bold_uppercase_headers_in_order():
     assert identity_index < text.index("Name:   lobby") < display_index < text.index("Pinned: yes")
 
 
-def test_sectioned_fields_group_the_compact_fallback_menu_row_too():
-    # At the real default (description_level "off"), the menu row never
-    # reaches the descriptive menu_grid branch at all -- it's built
-    # straight from the compact fallback below. Confirms that fallback
-    # groups by section too instead of silently losing the grouping the
-    # value list above it still has (the exact "chaos" reported against
-    # the Profile screen once its value list got sectioned but its
-    # hotkey row hadn't caught up yet).
+def test_sectioned_fields_keep_one_action_bar_naming_the_number_range():
+    # Fields have numbers, not letters (issue #1158): the bar under a
+    # sectioned list no longer repeats the sections as groups of field
+    # letters, it names the number range once, then Back.
     session = FakeSession(["b"])
     asyncio.run(
         edit_resource_draft(
@@ -1435,19 +1439,11 @@ def test_sectioned_fields_group_the_compact_fallback_menu_row_too():
         )
     )
     text = _visible(_written_text(session))
-    # Once in the value list above, once as the compact menu row's own heading.
-    assert text.count("IDENTITY") == 2
-    assert text.count("DISPLAY") == 2
-    identity_menu_index = text.rindex("IDENTITY")
-    display_menu_index = text.rindex("DISPLAY")
-    assert identity_menu_index < text.index("[N]ame") < display_menu_index < text.index("[P]inned")
-
-
-def _letter(index: int) -> str:
-    """A field's hotkey by position: a, c, d... -- `b` is Back on every screen
-    (issue #1158) and FieldSpec refuses it, so its place goes to `y`."""
-    letter = chr(ord("a") + index)
-    return "y" if letter == "b" else letter
+    # Only the value list's own headings; the bar has none.
+    assert text.count("IDENTITY") == 1
+    assert text.count("DISPLAY") == 1
+    assert text.index("DISPLAY") < text.index("02 Pinned") < text.index("[01-02] change") < text.index("[B]ack")
+    assert "[N]ame" not in text and "[P]inned" not in text
 
 
 def _many_sectioned_fields() -> list[FieldSpec]:
@@ -1456,7 +1452,6 @@ def _many_sectioned_fields() -> list[FieldSpec]:
         section = f"Group{i}"
         for j in range(2):
             key = f"f{i}_{j}"
-            hotkey = _letter(i * 2 + j)
             fields.append(
                 FieldSpec(
                     key=key,
@@ -1481,7 +1476,6 @@ def _many_single_field_sections() -> list[FieldSpec]:
     fields = []
     for i in range(6):
         key = f"f{i}"
-        hotkey = _letter(i)
         fields.append(
             FieldSpec(
                 key=key,
@@ -1532,14 +1526,14 @@ def test_sectioned_compact_menu_row_falls_back_to_flat_when_it_would_not_fit():
     assert text.count("GROUP0") == 1
 
 
-def test_sectioned_fields_group_the_descriptive_menu_row_too():
-    # The hotkey menu row already routed through menu_grid before this
-    # feature existed -- confirms a sectioned screen gets real per-
-    # section columns there too, not just a heading above the field
-    # list. A tall terminal here (the screen's own docstring: the whole
-    # field list plus this row must fit, or the descriptive form falls
-    # back to the plain compact one) so the descriptive form is actually
-    # exercised, not silently skipped.
+def test_sectioned_fields_keep_one_descriptive_action_bar():
+    # With descriptions on, the bar goes through menu_grid -- as one
+    # group (issue #1158): the number range, then Back, without the
+    # per-section columns of field letters it used to have. A tall
+    # terminal here (the screen's own docstring: the whole field list
+    # plus this row must fit, or the descriptive form falls back to the
+    # plain compact one) so the descriptive form is actually exercised,
+    # not silently skipped.
     session = FakeSession(["b"])
     session.terminal_height = 60
     asyncio.run(
@@ -1551,9 +1545,10 @@ def test_sectioned_fields_group_the_descriptive_menu_row_too():
         )
     )
     text = _visible(_written_text(session))
-    # Once in the value list above, once as the menu row's own heading.
-    assert text.count("IDENTITY") == 2
-    assert text.count("DISPLAY") == 2
+    # Only the value list's own headings; the bar has none.
+    assert text.count("IDENTITY") == 1
+    assert text.count("DISPLAY") == 1
+    assert "Change a field by its number" in text
 
 
 # -- pagination (a sectioned screen dense enough it doesn't fit at all) -----
@@ -1563,7 +1558,7 @@ def test_mixed_sectioned_and_unsectioned_fields_never_paginate_or_crash():
     # Codex review (PR #236): pagination filters pages by exact section-
     # name match, and `None` was never added to `section_names` -- a
     # field left unsectioned has no page it could ever belong to. Jumping
-    # to it via its own hotkey (every hotkey works regardless of current
+    # to it via its own number (every number works regardless of current
     # page, by design) used to set `current_page = None` and crash the
     # *next* redraw at `section_names.index(None)`. No real caller mixes
     # sectioned and unsectioned fields today (Board/Area/Channel/Profile
@@ -1579,7 +1574,7 @@ def test_mixed_sectioned_and_unsectioned_fields_never_paginate_or_crash():
             section=None,
         )
     )
-    session = FakeSession(["z", "typed", "b"])
+    session = FakeSession(["1", "3", "typed", "b"])  # 13: the unsectioned field
     session.terminal_height = 15
     draft = {f.key: "" for f in fields}
     asyncio.run(
@@ -1594,8 +1589,8 @@ def test_mixed_sectioned_and_unsectioned_fields_never_paginate_or_crash():
     assert draft["unsectioned"] == "typed"
 
 
-def test_hotkey_jump_primes_current_page_even_when_not_yet_paginated():
-    # Codex review (PR #236): the page-jump on hotkey activation used to
+def test_number_jump_primes_current_page_even_when_not_yet_paginated():
+    # Codex review (PR #236): the page-jump on a field's activation used to
     # be gated on *this redraw's own* `paginated` value -- if the screen
     # currently fit (nothing to jump to a page for, yet), `current_page`
     # was left at its stale default. If the terminal then shrinks while
@@ -1603,7 +1598,7 @@ def test_hotkey_jump_primes_current_page_even_when_not_yet_paginated():
     # interaction), the *next* redraw newly needs to paginate but shows
     # the stale section instead of the one the caller just edited --
     # hiding both the selected field and the change just made. Fixed by
-    # priming `current_page` unconditionally on every hotkey activation,
+    # priming `current_page` unconditionally on every number activation,
     # not just while already paginated.
     fields = _many_sectioned_fields()
 
@@ -1620,9 +1615,9 @@ def test_hotkey_jump_primes_current_page_even_when_not_yet_paginated():
             self.terminal_height = 15
             return await super().read_line(echo=echo, history=history, completer=completer, **kwargs)
 
-    # "g" = Group3's first field (f3_0, see _many_sectioned_fields's own
-    # a-through-l hotkey layout) -- pressed while everything still fits.
-    session = ShrinkingSession(["g", "typed", "b"])
+    # 07 = Group3's first field (f3_0, the seventh of
+    # _many_sectioned_fields) -- typed while everything still fits.
+    session = ShrinkingSession(["0", "7", "typed", "b"])
     draft = {f.key: "" for f in fields}
     asyncio.run(
         edit_resource_draft(
@@ -1718,12 +1713,12 @@ def test_pagination_page_down_from_the_last_page_wraps_to_the_first():
     assert "Section 1 of 6" in text
 
 
-def test_hotkey_for_a_field_on_another_page_jumps_there():
-    # Every hotkey keeps working regardless of which page is currently
-    # shown -- typing a field's own letter jumps straight to it *and*
+def test_number_for_a_field_on_another_page_jumps_there():
+    # Every number keeps working regardless of which page is currently
+    # shown -- typing a field's own number jumps straight to it *and*
     # switches to its page, so the caller sees what they just changed
     # rather than a screen that silently looks unchanged.
-    session = FakeSession(["h", "typed value", "b"])  # "h" = Group3's second field (f3_1)
+    session = FakeSession(["0", "8", "typed value", "b"])  # 08 = Group3's second field (f3_1)
     session.terminal_height = 15
     fields = _many_sectioned_fields()
     draft = {f.key: "" for f in fields}
@@ -1861,7 +1856,7 @@ def _inline_fields():
 @pytest.mark.parametrize("width", [40, 80, 120])
 @pytest.mark.parametrize("redraw", [False, True])
 def test_real_line_editor_edits_after_a_wrapped_value_at_the_correct_row(width, redraw):
-    session = InlineSession(["n", "s"], width=width, height=40)
+    session = InlineSession(["0", "2", "s"], width=width, height=40)
     draft = {"description": "A wrapped description with several words. " * 3, "name": "lobby"}
     result = asyncio.run(edit_resource_draft(
         session, None, title="Edit thing", subtitle="Subtitle", preamble="Context " * 12,
@@ -1872,8 +1867,8 @@ def test_real_line_editor_edits_after_a_wrapped_value_at_the_correct_row(width, 
     row, col, before = session.before[0]
     assert session.read_options[0]["initial"] == "lobby"
     if redraw:
-        assert before[row].strip().startswith("> Name")
-        assert col == len("  Description: ")
+        assert before[row].strip().startswith("> 02 Name")
+        assert col == len("  01 Description: ")
         assert "lobby" in session.during[0][row]
         assert not any("Edit (Enter" in line for line in session.during[0])
         assert before[row - 1] == session.during[0][row - 1]
@@ -1885,7 +1880,7 @@ def test_real_line_editor_edits_after_a_wrapped_value_at_the_correct_row(width, 
 
 @pytest.mark.parametrize("script, expected", [(b"\x1b[H!\r", "!"), (b"\x1b", "")])
 def test_editing_a_wrapped_value_clears_old_continuations_and_preserves_neighbors(script, expected):
-    session = InlineSession(["d", "s"], script=script, width=40)
+    session = InlineSession(["0", "1", "s"], script=script, width=40)
     value = "A long description that wraps across several rows and remains fully editable."
     result = asyncio.run(edit_resource_draft(
         session, None, title="Edit thing", fields=_inline_fields(),
@@ -1900,8 +1895,8 @@ def test_editing_a_wrapped_value_clears_old_continuations_and_preserves_neighbor
     assert "neighbor" in "\n".join(session.terminal.rows())
 
 
-@pytest.mark.parametrize("activate", [["n"], ["DOWN", "DOWN", "ENTER"], ["DOWN", "DOWN", " "]])
-def test_hotkey_enter_and_space_use_the_same_field_position(activate):
+@pytest.mark.parametrize("activate", [["0", "2"], ["2", "ENTER"], ["DOWN", "DOWN", "ENTER"], ["DOWN", "DOWN", " "]])
+def test_number_enter_and_space_use_the_same_field_position(activate):
     session = InlineSession(activate + ["s"])
     result = asyncio.run(edit_resource_draft(
         session, None, title="Edit", fields=_inline_fields(),
@@ -1910,8 +1905,8 @@ def test_hotkey_enter_and_space_use_the_same_field_position(activate):
     ))
     assert result["name"] == "lobby!"
     row, col, screen = session.before[0]
-    assert "> Name" in screen[row]
-    assert col == 15
+    assert "> 02 Name" in screen[row]
+    assert col == len("  01 Description: ")
 
 
 @pytest.mark.parametrize("kind", ["age", "level", "integer", "float", "optional_text"])
@@ -1920,20 +1915,20 @@ def test_numeric_and_optional_fields_use_their_displayed_row(kind):
     prompts = {"age": _min_age_field("value"), "level": _optional_int_field("value", "Level"),
                "integer": _int_field("value", "Number"), "float": _float_field("value", label="Weight"),
                "optional_text": _optional_text_field("value")}
-    session = InlineSession(["v", "s"], script=b"\x7f\x7f\r")
+    session = InlineSession(["0", "1", "s"], script=b"\x7f\x7f\r")
     value = "21" if kind == "optional_text" else 21
     result = asyncio.run(edit_resource_draft(
         session, None, title="Edit", fields=[FieldSpec("value", "Value", lambda d: str(d["value"]), prompts[kind])],
         draft={"value": value}, save=_save_dict, save_menu_text="Save", back_menu_text="Back", redraw_in_place=True,
     ))
     row, col, screen = session.before[0]
-    assert "> Value" in screen[row]
-    assert col == 9
+    assert "> 01 Value" in screen[row]
+    assert col == len("  01 Value: ")
     assert result["value"] == (None if kind in ("age", "level") else "" if kind == "optional_text" else 21)
 
 
 def test_resize_during_in_place_edit_keeps_the_draft_and_redraws():
-    session = InlineSession(["n", "s"])
+    session = InlineSession(["0", "2", "s"])
     session.resize_on_read = True
     result = asyncio.run(edit_resource_draft(
         session, None, title="Edit", fields=_inline_fields(),
@@ -1959,8 +1954,8 @@ def test_labels_and_wrapped_values_share_a_column_across_sections(width):
 
 
 @pytest.mark.parametrize("long_value", [False, True])
-def test_off_page_hotkey_draws_its_field_before_reading_even_when_the_form_overflows(long_value):
-    session = InlineSession(["z", "s"], width=40, height=12)
+def test_off_page_number_draws_its_field_before_reading_even_when_the_form_overflows(long_value):
+    session = InlineSession(["1", "1", "s"], width=40, height=12)
     fields = [FieldSpec(str(i), "Long label", lambda d: "x", text_field(str(i)),
                         section="First") for i in range(10)]
     fields.append(FieldSpec("target", "Target", lambda d: d["target"], text_field("target"), section="Second"))
@@ -1970,14 +1965,14 @@ def test_off_page_hotkey_draws_its_field_before_reading_even_when_the_form_overf
         save=_save_dict, save_menu_text="Save", back_menu_text="Back", redraw_in_place=True,
     ))
     row, col, before = session.before[0]
-    assert "> Target:" in before[row]
+    assert "> 11 Target:" in before[row]
     assert 0 <= row < session.terminal_height - 1
     assert result["target"] == value + "!"
 
 
 def test_invalid_inline_age_remains_visible_after_redraw_and_does_not_change_the_draft():
     from netbbs.net.admin_flow import _min_age_field
-    session = InlineSession(["v", "s"], script=b"\x7f\x7f999\r")
+    session = InlineSession(["0", "1", "s"], script=b"\x7f\x7f999\r")
     result = asyncio.run(edit_resource_draft(
         session, None, title="Edit", fields=[FieldSpec("value", "Value", lambda d: str(d["value"]), _min_age_field("value"))],
         draft={"value": 21}, save=_save_dict, save_menu_text="Save", back_menu_text="Back", redraw_in_place=True,
@@ -1993,7 +1988,7 @@ def test_position_is_cleared_after_a_field_raises():
     async def broken(session, lane, draft):
         raise RuntimeError("disconnected")
 
-    session = InlineSession(["n"])
+    session = InlineSession(["0", "1"])
     async def run():
         with pytest.raises(RuntimeError, match="disconnected"):
             await edit_resource_draft(

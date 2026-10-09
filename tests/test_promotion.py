@@ -257,7 +257,7 @@ def test_the_rules_screen_lists_rules_with_needs_and_what_they_open(db, lane, sy
 
 
 def test_creating_a_rule_from_the_console(db, lane, sysop):
-    _screen(lane, sysop, ["u", "a", "c", "f", "20", "t", "30", "s"])
+    _screen(lane, sysop, ["u", "a", "c", "0", "1", "20", "0", "2", "30", "s"])
 
     assert get_promotion_rules(db) == [PromotionRule(20, 30, min_age_hours=24, min_logins=2)]
 

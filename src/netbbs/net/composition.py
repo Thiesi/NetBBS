@@ -257,7 +257,7 @@ async def _show_line_editor_help(session: Session, *, can_save_draft: bool) -> N
 
 # Where the other editor is (issue #837): the line editor is the default,
 # and nothing in it said a cursor-addressed one exists.
-FULLSCREEN_EDITOR_HINT = "Prefer arrow keys? Profile > [F]ullscreen editor switches to a fullscreen editor."
+FULLSCREEN_EDITOR_HINT = "Prefer arrow keys? Profile > Fullscreen editor switches to a fullscreen editor."
 
 
 def _quoted_lines(lines: list[str]) -> set[int]:

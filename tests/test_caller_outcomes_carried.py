@@ -69,7 +69,7 @@ def sysop(db):
 
 def test_clearing_a_display_name_is_confirmed_on_the_redrawn_screen(db, lane, carol):
     set_display_name(db, carol, "Caro")
-    session = FakeSession(["d", "", "b"])
+    session = FakeSession(["0", "1", "", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, carol))
     # The redraw after the field drew it; [B]ack leaves without another one.
     shown = _after_last_clear(session)
@@ -77,14 +77,14 @@ def test_clearing_a_display_name_is_confirmed_on_the_redrawn_screen(db, lane, ca
 
 
 def test_a_date_that_is_not_one_is_refused_on_the_redrawn_screen(db, lane, carol):
-    session = FakeSession(["a", "31.12.1980", "b"])
+    session = FakeSession(["0", "5", "31.12.1980", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, carol))
     shown = _after_last_clear(session)
     assert "Not a valid date (expected YYYY-MM-DD) -- unchanged." in shown
 
 
 def test_a_saved_birthdate_is_confirmed_on_the_redrawn_screen(db, lane, carol):
-    session = FakeSession(["a", "1980-01-01", "b"])
+    session = FakeSession(["0", "5", "1980-01-01", "b"])
     asyncio.run(profile_flow._identity_details_screen(session, lane, carol))
     assert "Birthdate updated." in _after_last_clear(session)
 

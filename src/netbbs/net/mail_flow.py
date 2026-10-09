@@ -1720,7 +1720,7 @@ def _mail_body_mode(db: Database, user: User) -> str:
     board that allows color -- pipe codes and SGR filtered by
     `netbbs.rendering.post_body`, the same for local mail and mail
     carried from another node -- in color, or plain with the codes
-    removed when the reader turned "Pos[t] colors" off. Mail has no
+    removed when the reader turned "Colors in posts and mail" off. Mail has no
     SysOp setting of its own: a letter is between its writer and its
     reader, and the filter already keeps a body from moving the cursor
     or clearing the screen."""

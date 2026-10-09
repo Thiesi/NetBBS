@@ -218,7 +218,7 @@ def test_edit_profile_shows_current_state(tmp_path):
     asyncio.run(_edit_profile(session, lane, user))
 
     assert "no bio set" in session.output
-    assert colored("  Visibility:", fg_color=LABEL_COLOR) in session.output
+    assert colored("  02 Visibility:", fg_color=LABEL_COLOR) in session.output
     assert colored("private", fg_color=MUTED_COLOR) in session.output
     lane.close()
     db.close()
@@ -228,7 +228,7 @@ def test_edit_profile_bio_updates_stored_bio(tmp_path):
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["e", "b"], lines=["Hi, I'm Alice.", "I collect old modems.", ""])
+    session = FakeSession(keys=["0", "1", "b"], lines=["Hi, I'm Alice.", "I collect old modems.", ""])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -246,7 +246,7 @@ def test_edit_profile_bio_confirming_the_clear_prompt_clears_it(tmp_path):
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
     set_bio(db, user, "Old bio")
-    session = FakeSession(keys=["e", "b"], lines=["y"])
+    session = FakeSession(keys=["0", "1", "b"], lines=["y"])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -264,7 +264,7 @@ def test_edit_profile_bio_declining_the_clear_prompt_proceeds_to_edit(tmp_path):
     # `prompt_yes_no(..., default=False)`) and falls through into
     # edit_line_body, which then needs its own blank line to finish
     # (unchanged) -- keeping the existing bio, not clearing it.
-    session = FakeSession(keys=["e", "b"], lines=["", ""])
+    session = FakeSession(keys=["0", "1", "b"], lines=["", ""])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -300,7 +300,7 @@ def test_edit_profile_signature_updates_stored_signature(tmp_path):
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["g", "b"], lines=["Alice", ""])
+    session = FakeSession(keys=["0", "3", "b"], lines=["Alice", ""])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -316,7 +316,7 @@ def test_edit_profile_signature_confirming_the_clear_prompt_clears_it(tmp_path):
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
     set_signature(db, user, "Old signature")
-    session = FakeSession(keys=["g", "b"], lines=["y"])
+    session = FakeSession(keys=["0", "3", "b"], lines=["y"])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -332,7 +332,7 @@ def test_edit_profile_signature_declining_the_clear_prompt_proceeds_to_edit(tmp_
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
     set_signature(db, user, "Old signature")
-    session = FakeSession(keys=["g", "b"], lines=["", ""])
+    session = FakeSession(keys=["0", "3", "b"], lines=["", ""])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -354,7 +354,7 @@ def test_edit_profile_bio_keeps_accepted_lines_when_a_later_one_exceeds_the_byte
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
     too_long = "B" * MAX_BIO_BYTES
-    session = FakeSession(keys=["e", "b"], lines=["A short first line.", too_long, ""])
+    session = FakeSession(keys=["0", "1", "b"], lines=["A short first line.", too_long, ""])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -367,7 +367,7 @@ def test_edit_profile_visibility_toggles_from_private_to_public(tmp_path):
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["v", "b"])
+    session = FakeSession(keys=["0", "2", "b"])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -380,7 +380,7 @@ def test_edit_profile_visibility_toggles_from_public_to_private(tmp_path):
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
     set_bio_visible(db, user, True)
-    session = FakeSession(keys=["v", "b"])
+    session = FakeSession(keys=["0", "2", "b"])
 
     asyncio.run(_edit_profile(session, lane, user))
 
@@ -401,7 +401,7 @@ def test_edit_profile_invalid_key_is_rejected_and_the_screen_stays_functional(tm
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["%", "v", "b"])  # no screen binds %
+    session = FakeSession(keys=["%", "0", "2", "b"])  # no screen binds %
 
     asyncio.run(_edit_profile(session, lane, user))
 

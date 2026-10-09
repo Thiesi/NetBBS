@@ -111,7 +111,7 @@ def test_a_field_prompts_refusal_is_shown_by_the_editor_it_returns_to(db, lane, 
         session_registry=ActiveSessionRegistry(), maintenance=MaintenanceMode(),
         shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0, backup_identity_dir=None,
     )
-    session = ScriptedSession(["n", "d", "d", "soon"])
+    session = ScriptedSession(["n", "d", "0", "1", "soon"])
     with pytest.raises(_Exhausted):
         asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
     rows = session.on_terminal()

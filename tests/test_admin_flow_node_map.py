@@ -126,7 +126,7 @@ def test_the_sysop_sees_an_origin_only_node_with_unknown_fields(db, lane, sysop)
 
 def test_the_node_map_level_is_a_limits_setting(db, lane, sysop):
     # s: Settings, l: Limits & retention, n: node map level, 30, s: save.
-    session = FakeSession(["s", "l", "n", "30", "s", "b", "b", "b"])
+    session = FakeSession(["s", "l", "0", "5", "30", "s", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     assert get_node_map_min_level(db) == 30
@@ -137,7 +137,7 @@ def test_the_node_map_level_is_a_limits_setting(db, lane, sysop):
 
 
 def test_the_node_map_level_refuses_a_level_above_sysop(db, lane, sysop):
-    session = FakeSession(["s", "l", "n", "300", "s", "b", "y", "b", "b"])
+    session = FakeSession(["s", "l", "0", "5", "300", "s", "b", "y", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
 
     assert "Node map level must be 0-255." in _visible(_written_text(session))

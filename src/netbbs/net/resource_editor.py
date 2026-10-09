@@ -324,14 +324,18 @@ _SAVE_BRIEF_DETAIL = "Store the changed fields"
 _DISCARD_BRIEF_DETAIL = "Leave, discarding the changes"
 
 
-def _detail_hint(unicode_style: bool, *, with_help: bool, help_key: str = "Ctrl-H") -> str:
+def _detail_hint(unicode_style: bool, *, with_help: bool, help_key: str = "Ctrl-H", field_count: int = 0) -> str:
     """The keys of a resource's own screen, on one row. It takes the place
     of the "(Ctrl-H for help on these fields)" row, so a resource's screen
-    is no taller than the editor it replaced."""
+    is no taller than the editor it replaced. It names the field numbers
+    too (issue #1158), so the action bar needs no entry for them."""
+    numbers = row_range_label(field_count) if field_count else ""
     if unicode_style:
-        hint = "↑↓ choose · Enter change · ←→ step"
+        hint = f"{numbers} or ↑↓ choose" if numbers else "↑↓ choose"
+        hint += " · Enter change · ←→ step"
         return hint + f" · {help_key} help" if with_help else hint
-    hint = "Up/Down choose, Enter change, Left/Right step"
+    hint = f"{numbers} or Up/Down choose" if numbers else "Up/Down choose"
+    hint += ", Enter change, Left/Right step"
     return hint + f", {help_key} help" if with_help else hint
 
 
@@ -454,7 +458,8 @@ def _build_menu_line(
     (issue #1158), then the screen's actions, `[S]ave` and `[B]ack`.
 
     Fields are chosen by number, so the bar names the range rather than
-    a key per field. `fixed_lines` is everything else already committed
+    a key per field; `field_count=0` leaves the range off, for a screen
+    whose key hint already names it. `fixed_lines` is everything else already committed
     to on screen; the descriptive `menu_grid` form is used only when the
     caller's preference asks for it and it fits what is left of the
     height, and the one-row `action_bar` otherwise."""
@@ -719,7 +724,12 @@ async def edit_resource_draft(
         hint_lines = 1 if detail_state is not None and fields else 0
         # With descriptions on, a row under the fields for the highlighted
         # one's (issue #1158), kept even while none is highlighted.
-        description_row = 1 if description_level != "off" and any(f.brief or f.help for f in fields) else 0
+        # A resource's own screen has neither: its key hint names the
+        # numbers, and it keeps the height it had before numbers.
+        description_row = 1 if (
+            detail_state is None and description_level != "off" and any(f.brief or f.help for f in fields)
+        ) else 0
+        bar_fields = 0 if detail_state is not None else len(fields)
         # On a resource's own screen the key hint carries Ctrl-H too.
         help_row = 0 if hint_lines else (1 if any(f.help for f in fields) else 0)
         # Everything on screen except the field values and the menu row
@@ -773,7 +783,7 @@ async def edit_resource_draft(
             positions=positions,
         )
         full_menu_line = _build_menu_line(
-            len(fields), save=menu_save, save_menu_text=save_menu_text, back_menu_text=back_menu_text,
+            bar_fields, save=menu_save, save_menu_text=save_menu_text, back_menu_text=back_menu_text,
             back_brief=back_brief, description_level=description_level, session=session,
             fixed_lines=base_fixed_lines + len(full_lines) + after_lines,
             extra_entries=extra_entries, save_brief=save_brief,
@@ -808,7 +818,7 @@ async def edit_resource_draft(
             # every page keeps its rows for its own fields.
             shown_after = after_text if current_page == section_names[-1] else ""
             menu_line = _build_menu_line(
-                len(fields), save=menu_save, save_menu_text=save_menu_text,
+                bar_fields, save=menu_save, save_menu_text=save_menu_text,
                 back_menu_text=back_menu_text, back_brief=back_brief, description_level=description_level,
                 session=session,
                 fixed_lines=(
@@ -827,6 +837,7 @@ async def edit_resource_draft(
             tail_blocks.append(colored(
                 _detail_hint(
                     unicode_style, with_help=any(f.help for f in fields), help_key=help_key_label(session),
+                    field_count=len(fields),
                 ), fg_color=MUTED_COLOR,
             ))
         if shown_message:

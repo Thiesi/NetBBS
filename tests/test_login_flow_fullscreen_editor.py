@@ -201,7 +201,7 @@ def test_profile_fits_a_real_80x24_terminal_with_a_max_length_bio(db, lane, alic
         f"rendered {len(real_rows)} rows with a max-length bio, terminal only has {session.terminal_height}"
     )
     assert "more line" in text  # the truncation indicator fired
-    assert "[E]dit bio to see the rest" in text
+    assert "open Bio to see the rest" in text
 
 
 def test_profile_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
@@ -219,9 +219,9 @@ def test_profile_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
 
 
 def test_profile_toggle_switches_the_preference_on_and_off(db, lane, alice):
-    session = FakeSession(["f", "f", "b"])
+    session = FakeSession(["0", "5", "0", "5", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
-    # First "f" turns it on, second turns it back off.
+    # First "05" turns it on, second turns it back off.
     assert fullscreen_editor_enabled(db, alice) is False
     text = _visible(session)
     assert "Fullscreen editor (all writing): on" in squeezed(text)
@@ -231,7 +231,7 @@ def test_profile_toggle_switches_the_preference_on_and_off(db, lane, alice):
 def test_profile_color_depth_toggle_cycles_auto_truecolor_256(db, lane, alice):
     from netbbs.net.color_depth_preference import color_depth_override
 
-    session = FakeSession(["c", "c", "c", "b"])
+    session = FakeSession(["1", "3", "1", "3", "1", "3", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
     assert "Color depth: truecolor (forced)" in squeezed(text)
@@ -245,7 +245,7 @@ def test_profile_menu_descriptions_toggle_cycles_off_brief_detailed(db, lane, al
     from netbbs.net.menu_description_preference import menu_description_level
 
     assert menu_description_level(db, alice) == "brief"  # default
-    session = FakeSession(["d", "d", "d", "b"])
+    session = FakeSession(["1", "4", "1", "4", "1", "4", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
     assert "Menu descriptions: detailed" in squeezed(text)
@@ -259,9 +259,9 @@ def test_profile_redraw_in_place_toggle_switches_on_and_off(db, lane, alice):
     from netbbs.net.redraw_preference import redraw_in_place_enabled
 
     assert redraw_in_place_enabled(db, alice) is False  # default
-    session = FakeSession(["r", "r", "b"])
+    session = FakeSession(["1", "5", "1", "5", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
-    # First "r" turns it on, second turns it back off.
+    # First "15" turns it on, second turns it back off.
     assert redraw_in_place_enabled(db, alice) is False
     text = _visible(session)
     assert "In-place redraw: on" in squeezed(text)
@@ -273,7 +273,7 @@ def test_profile_banner_animations_toggle_applies_at_once(db, lane, alice):
     from netbbs.net.animation_preference import animations_enabled
 
     assert animations_enabled(db, alice) is True  # default
-    session = FakeSession(["q", "b"])
+    session = FakeSession(["1", "6", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert animations_enabled(db, alice) is False
     assert session.animations_enabled is False
@@ -286,7 +286,7 @@ def test_profile_character_set_cycles_and_applies_at_once(db, lane, alice):
     from netbbs.net.unicode_style_preference import charset_preference
 
     assert charset_preference(db, alice) == "auto"  # default
-    session = FakeSession(["u", "u", "u", "b"])
+    session = FakeSession(["1", "7", "1", "7", "1", "7", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert charset_preference(db, alice) == "ascii"
     assert session.output_charset == "ascii"
@@ -322,7 +322,7 @@ def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["k", "a", raw_b64, "phone", "b", "b"])
+    session = FakeSession(["2", "3", "a", raw_b64, "phone", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -331,7 +331,7 @@ def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
 
 
 def test_profile_ssh_public_key_self_service_rejects_an_unparseable_key(db, lane, alice):
-    session = FakeSession(["k", "a", "not a real key", "b", "b"])
+    session = FakeSession(["2", "3", "a", "not a real key", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -350,7 +350,7 @@ def test_profile_ssh_public_key_self_service_refuses_a_key_already_in_use(db, la
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
     create_user(db, "bob", verify_key=verify_key, user_level=10)
 
-    session = FakeSession(["k", "a", raw_b64, "phone", "b", "b"])
+    session = FakeSession(["2", "3", "a", raw_b64, "phone", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -362,7 +362,7 @@ def test_profile_ssh_public_key_remove_not_offered_with_no_key_set(db, lane, ali
     # The [R]emove option only makes sense once a key actually exists --
     # shouldn't be advertised on an account with none.
     assert alice.fingerprint is None
-    session = FakeSession(["k", "b", "b"])
+    session = FakeSession(["2", "3", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert "emove a key" not in _written_text(session)
 
@@ -380,7 +380,7 @@ def test_profile_ssh_public_key_self_service_removes_the_key(db, lane, alice):
     alice = login_flow.get_user_by_username(db, "alice")
     assert alice.fingerprint is not None
 
-    session = FakeSession(["k", "r", "1", "y", "b", "b"])
+    session = FakeSession(["2", "3", "r", "1", "y", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -397,7 +397,7 @@ def test_profile_ssh_public_key_self_service_remove_declined_keeps_the_key(db, l
     add_ssh_key(db, alice, verify_key, label="phone", changed_by=alice)
     alice = login_flow.get_user_by_username(db, "alice")
 
-    session = FakeSession(["k", "r", "1", "n", "b", "b"])
+    session = FakeSession(["2", "3", "r", "1", "n", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -422,7 +422,7 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
     # pages by section -- SSH public key(s) lives on ACCOUNT, the 4th
     # page, not visible on either visit's initial (Identity) render.
     # `PAGE_DOWN` x3 reaches it explicitly, same as a real caller would;
-    # `k` itself would also jump straight there (every hotkey works
+    # `23` itself would also jump straight there (every field number works
     # regardless of current page), but that launches the key-management
     # sub-screen directly rather than re-rendering Profile's own value
     # list first -- paging there deliberately, instead, is what actually
@@ -437,7 +437,7 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
 
     session = FakeSession(
         [
-            "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "k", "a", raw_b64, "phone", "b", "b",
+            "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "2", "3", "a", raw_b64, "phone", "b", "b",
             "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "l", "y",
         ]
     )
@@ -704,7 +704,7 @@ def test_tombstone_existing_post_cancelled_leaves_it_unchanged(db, alice):
 
 def test_edit_bio_uses_fullscreen_editor_once_opted_in(db, lane, alice):
     set_fullscreen_editor_enabled(db, alice, True)
-    session = FakeSession(["e"] + _type("My new bio") + ["CTRL+O", "b"])
+    session = FakeSession(["0", "1"] + _type("My new bio") + ["CTRL+O", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_bio(db, alice) == "My new bio"
     assert "Bio updated" in _written_text(session)
@@ -715,7 +715,7 @@ def test_edit_bio_prefills_the_fullscreen_editor_with_the_current_bio(db, lane, 
 
     set_bio(db, alice, "Original bio")
     set_fullscreen_editor_enabled(db, alice, True)
-    session = FakeSession(["e", "END"] + _type(" - updated") + ["CTRL+O", "b"])
+    session = FakeSession(["0", "1", "END"] + _type(" - updated") + ["CTRL+O", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_bio(db, alice) == "Original bio - updated"
 
@@ -724,7 +724,7 @@ def test_edit_signature_uses_fullscreen_editor_once_opted_in(db, lane, alice):
     from netbbs.signature import get_signature
 
     set_fullscreen_editor_enabled(db, alice, True)
-    session = FakeSession(["g"] + _type("Alice") + ["CTRL+O", "b"])
+    session = FakeSession(["0", "3"] + _type("Alice") + ["CTRL+O", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_signature(db, alice) == "Alice"
     assert "Signature updated" in _written_text(session)
@@ -735,7 +735,7 @@ def test_edit_signature_prefills_the_fullscreen_editor_with_the_current_signatur
 
     set_signature(db, alice, "Original signature")
     set_fullscreen_editor_enabled(db, alice, True)
-    session = FakeSession(["g", "END"] + _type(" - updated") + ["CTRL+O", "b"])
+    session = FakeSession(["0", "3", "END"] + _type(" - updated") + ["CTRL+O", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_signature(db, alice) == "Original signature - updated"
 

@@ -5427,15 +5427,15 @@ async def _set_trust_override_screen(
     """
     Issue #820: `state` and `all_dimensions` open the editor already filled
     in, which is all `[E]stablish` and `[D]eny` are -- the same editor, the
-    same reason, the same confirmations, the same audit. `S[t]ate` and
-    `[D]imension` stay editable, so a preset is a starting point, not a
+    same reason, the same confirmations, the same audit. State and
+    Dimension stay editable, so a preset is a starting point, not a
     different path.
 
 
     Issue #282: was a fixed five-step chain (dimension, state, reason,
     then up to two confirmations) with no way back -- an invalid key
-    anywhere cancelled everything. Now a draft editor: `[D]imension`
-    and `S[t]ate` open their own small action bars, `[R]eason` is the
+    anywhere cancelled everything. Now a draft editor: the Dimension
+    and State fields open their own small action bars, Reason is the
     mandatory free text, and `[S]ave` runs the two safety
     confirmations exactly as before (the audited-deviation question for
     ESTABLISHED, and the changed-identity re-check loop) before
@@ -5514,7 +5514,7 @@ async def _set_trust_override_screen(
     async def save(draft: dict) -> bool | None:
         dimension, state, reason = draft["dimension"], draft["state"], draft["reason"]
         if dimension is None or state is None:
-            raise ValueError("choose a dimension ([D]) and a state ([T]) first")
+            raise ValueError("choose a Dimension and a State first")
         if not reason:
             raise ValueError("a reason is required")
         if state == TrustState.ESTABLISHED:
@@ -5942,7 +5942,7 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["reason"]:
-                raise ValueError("choose a [N]ode and give a [R]eason first")
+                raise ValueError("choose a Node and give a Reason first")
             await lane.run(
                 configure_trust_anchor, draft["node"], reason=draft["reason"], actor_user_id=actor.id,
             )
@@ -6108,7 +6108,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["domain_id"] or not draft["scopes"]:
-                raise ValueError("choose a [N]ode and fill in the domain ID ([D]) and scopes ([C]) first")
+                raise ValueError("choose a Node and fill in the Domain ID and Scopes first")
             scopes = _parse_reporter_scopes(draft["scopes"])
             await lane.run(
                 configure_trusted_reporter, draft["node"], domain_id=draft["domain_id"], scopes=scopes,
@@ -6244,7 +6244,7 @@ async def _attestation_authorities_screen(
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["reason"]:
-                raise ValueError("choose a [N]ode and give a [R]eason first")
+                raise ValueError("choose a Node and give a Reason first")
             await lane.run(
                 configure_attestation_authority, draft["node"],
                 attributes=[part.strip() for part in draft["attributes"].split(",")],
@@ -6369,7 +6369,7 @@ async def _attestation_recipients_screen(
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or not draft["reason"]:
-                raise ValueError("choose a [N]ode and give a [R]eason first")
+                raise ValueError("choose a Node and give a Reason first")
             await lane.run(
                 configure_attestation_recipient, draft["node"],
                 reason=draft["reason"], actor_user_id=actor.id,
@@ -6912,7 +6912,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
 
         async def save(draft: dict) -> bool | None:
             if draft["node"] is None or draft["dimension"] is None or not draft["category"] or not draft["reason"]:
-                raise ValueError("fill in [N]ode, [D]imension, [C]ategory, and [J]ustification first")
+                raise ValueError("fill in Node, Dimension, Category and Justification first")
             confirmed = await prompt_yes_no(
                 session,
                 "DANGER: one reporter will bypass the two-domain rule for this category. Continue?",
@@ -11127,7 +11127,7 @@ def _mrc_unreachable_note(db: Database) -> str | None:
     if load_open_room_settings(db).enabled or any(mapping.active for mapping in list_mrc_mappings(db)):
         return None
     return (
-        "No caller can reach MRC yet: turn on [O]pen rooms here so Chat shows the network's rooms, "
+        "No caller can reach MRC yet: turn on \"Callers may open any room\" here so Chat shows the network's rooms, "
         "or bridge a channel to a room from that channel's own screen."
     )
 
@@ -25464,7 +25464,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         if draft["object_type"] is None or draft["object_id"] is not None:
             _announce_line(session,
                 colored(
-                    "Community scoping applies to blanket grants only -- choose a blanket scope under [O]n first.",
+                    "Community scoping applies to blanket grants only -- choose a blanket scope under On first.",
                     fg_color=MUTED_COLOR,
                 )
             )
@@ -25541,7 +25541,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
         if draft["user"] is None or draft["object_type"] is None:
             # Raised so the editor redraws with the draft intact (Codex
             # review on #289) rather than closing on a bare `return None`.
-            raise ModeratorGrantError("choose a [U]ser and a scope under [O]n first")
+            raise ModeratorGrantError("choose a User and a scope under On first")
         community = draft["community"]
         label = draft["label"]
         if community is not None:

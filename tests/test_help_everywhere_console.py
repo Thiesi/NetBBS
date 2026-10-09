@@ -223,7 +223,10 @@ def _override_session(*keys_after_subject: str) -> FakeSession:
 def test_the_trust_override_dimension_and_state_choices_have_help(db, lane, sysop):
     subject = TrustSubject.node("remote-node")
     register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
-    session = _override_session("o", "d", H, " ", "r", "t", H, " ", "d", "r", "resource abuse reviewed", "s")
+    # Dimension is 01, State 02, Reason 03.
+    session = _override_session(
+        "o", "0", "1", H, " ", "r", "0", "2", H, " ", "d", "0", "3", "resource abuse reviewed", "s",
+    )
     text = _console(session, lane, sysop)
     _assert_help_then_redraw(text, "Trust dimension help", "three areas", "Dimension:")
     _assert_help_then_redraw(text, "Trust state help", "override forces", "State:")
@@ -294,7 +297,7 @@ def test_the_moderator_scope_choice_has_help(db, lane, sysop):
     from netbbs.moderation.roles import list_grants_for_user
 
     create_user(db, "carol", password="hunter2")
-    session = FakeSession(["u", "0", "1", "o", H, " ", "e", "s"])
+    session = FakeSession(["0", "1", "0", "1", "0", "2", H, " ", "e", "s"])
     asyncio.run(admin_flow._grant_moderator_screen(session, lane, sysop))
     text = _visible(_written_text(session))
     _assert_help_then_redraw(text, "Moderator scope help", "all of one kind", "Scope:")

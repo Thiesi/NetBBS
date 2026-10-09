@@ -1253,7 +1253,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             # screen, everything else being short, fixed-shape status
             # strings. Capped here to a fixed preview instead; the full
             # bio is never touched, still fully readable (and editable)
-            # via [E]dit bio.
+            # via the Bio field.
             bio_lines = reflow(sanitize_text(d["bio"], allow_newlines=True), width=session.terminal_width).split("\n")
             # Codex review (PR #238): resource_editor.py's height budget
             # counts `preamble_text.count("\r\n")` -- entries joined at
@@ -1272,7 +1272,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 hidden = len(bio_lines) - _MAX_BIO_PREVIEW_LINES
                 lines.extend(bio_lines[:_MAX_BIO_PREVIEW_LINES])
                 marker_lines = reflow(
-                    f"...({hidden} more line{'' if hidden == 1 else 's'} -- [E]dit bio to see the rest)",
+                    f"...({hidden} more line{'' if hidden == 1 else 's'} -- open Bio to see the rest)",
                     width=session.terminal_width,
                 ).split("\n")
                 lines.extend(colored(line, fg_color=MUTED_COLOR) for line in marker_lines)

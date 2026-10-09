@@ -406,7 +406,7 @@ def test_operations_console_wraps_actions_on_a_narrow_terminal(db, lane, sysop):
 
 def test_sysop_menu_reaches_trust_domain_configuration(db, lane, sysop):
     session = FakeSession(
-        ["s", "p", "d", "a", "i", "friends", "n", "Known independent operators", "w", "0.75", "s", "b", "b", "b", "b"]
+        ["s", "p", "d", "a", "0", "1", "friends", "0", "2", "Known independent operators", "0", "3", "0.75", "s", "b", "b", "b", "b"]
     )
     _run(session, lane, sysop)
 
@@ -425,7 +425,7 @@ def test_trust_domains_screen_writes_a_newline_before_the_next_prompt(db, lane, 
     true of all five trust-config screens; this is the one the capture
     actually showed."""
     session = FakeSession(
-        ["s", "p", "d", "a", "i", "friends", "n", "Known independent operators", "w", "0.75", "s", "b", "b", "b", "b"]
+        ["s", "p", "d", "a", "0", "1", "friends", "0", "2", "Known independent operators", "0", "3", "0.75", "s", "b", "b", "b", "b"]
     )
     _run(session, lane, sysop)
 
@@ -470,7 +470,7 @@ def test_trust_domains_screen_gives_a_friendly_message_for_a_non_numeric_weight(
     float: ''") straight to the SysOp, instead of a message matching
     the rest of the admin UI's numeric-input convention (_read_int's
     "Not a number -- cancelled.")."""
-    session = FakeSession(["s", "p", "d", "a", "w", "abc", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "p", "d", "a", "0", "3", "abc", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _written_text(session)
@@ -523,7 +523,7 @@ def test_sysop_can_apply_reasoned_override_through_real_menu_path(db, lane, syso
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",  # choose the only subject
-            "o", "d", "r", "t", "d", "r", "resource abuse reviewed", "s",
+            "o", "0", "1", "r", "0", "2", "d", "0", "3", "resource abuse reviewed", "s",
             "b", "b", "b", "b",
         ]
     )
@@ -560,7 +560,7 @@ def test_warned_node_requires_technical_identity_confirmation_for_trust_override
     register_subject(db, subject, first_accepted_at="2026-09-04T09:01:00.000000Z")
     session = FakeSession([
         "s", "p", "s", "0", "1",
-        "o", "d", "r", "t", "d", "r", "reviewed but identity changed", "s", "n",
+        "o", "0", "1", "r", "0", "2", "d", "0", "3", "reviewed but identity changed", "s", "n",
         "b", "y",  # leave the editor, confirming the discard of the unsaved draft
         "b", "b", "b", "b",
     ])
@@ -613,9 +613,9 @@ def test_trust_override_reconfirms_when_identity_warning_changes_during_prompt(
         return False
 
     monkeypatch.setattr(admin_flow, "prompt_yes_no", confirm)
-    # [D]imension -> resource, S[t]ate -> blocked, [R]eason, [S]ave; the
+    # Dimension (01) -> resource, State (02) -> blocked, Reason (03), [S]ave; the
     # declined re-confirmation leaves the draft, so [B]ack + "y" discards.
-    session = FakeSession(["d", "r", "t", "d", "r", "identity changed again", "s", "b", "y"])
+    session = FakeSession(["0", "1", "r", "0", "2", "d", "0", "3", "identity changed again", "s", "b", "y"])
 
     asyncio.run(admin_flow._set_trust_override_screen(session, lane, sysop, subject))
 
@@ -688,9 +688,9 @@ def test_reporter_scopes_expand_a_star_and_name_unknown_categories(db, lane, sys
     session = FakeSession(
         [
             "s", "p",
-            "d", "a", "i", "emergency", "n", "Emergency operator", "w", "1.0", "s", "b",
-            "r", "a", "n", "0", "1", reporter, "d", "emergency",
-            "c", "identity_integrity:*, content_conduct:spamm", "s", "b",
+            "d", "a", "0", "1", "emergency", "0", "2", "Emergency operator", "0", "3", "1.0", "s", "b",
+            "r", "a", "0", "1", "0", "1", reporter, "0", "2", "emergency",
+            "0", "3", "identity_integrity:*, content_conduct:spamm", "s", "b",
             "b", "b", "b",
         ]
     )
@@ -709,12 +709,12 @@ def test_declined_sole_authority_confirmation_leaves_policy_safe(db, lane, sysop
         [
             "s", "p",
             # Trust domains: [A]dd -> editor -> save -> back to the listing -> [B]ack.
-            "d", "a", "i", "emergency", "n", "Emergency operator", "w", "1.0", "s", "b",
-            # Trusted reporters: [N]ode -> "(type it)" entry -> the fingerprint, then domain/scopes, save.
-            "r", "a", "n", "0", "1", reporter, "d", "emergency", "c", "identity_integrity:signed_equivocation", "s", "b",
-            # Safety deviations: node, [D]imension -> [I]dentity, category, justification, save -> DANGER: n,
+            "d", "a", "0", "1", "emergency", "0", "2", "Emergency operator", "0", "3", "1.0", "s", "b",
+            # Trusted reporters: Node (01) -> "(type it)" entry -> the fingerprint, then domain/scopes, save.
+            "r", "a", "0", "1", "0", "1", reporter, "0", "2", "emergency", "0", "3", "identity_integrity:signed_equivocation", "s", "b",
+            # Safety deviations: node (01), Dimension (02) -> [I]dentity, category, justification, save -> DANGER: n,
             # then leave the editor discarding the draft.
-            "e", "a", "n", "0", "1", reporter, "d", "i", "c", "signed_equivocation", "j", "because", "s", "n",
+            "e", "a", "0", "1", "0", "1", reporter, "0", "2", "i", "0", "3", "signed_equivocation", "0", "4", "because", "s", "n",
             "b", "y", "b",
             "b", "b", "b",
         ]
@@ -730,8 +730,8 @@ def test_sysop_menu_reaches_separate_attestation_authority_configuration(
     identity_node = "abcdefghijklmnopqrstuvwxyz234567"
     session = FakeSession(
         [
-            "s", "p", "i", "a", "n", "0", "1", identity_node,
-            "r", "verified identity contractor", "s", "b", "b", "b", "b",
+            "s", "p", "i", "a", "0", "1", "0", "1", identity_node,
+            "0", "3", "verified identity contractor", "s", "b", "b", "b", "b",
         ]
     )
     _run(session, lane, sysop)
@@ -783,7 +783,7 @@ def test_trust_configuration_requires_confirmation_for_a_reused_familiar_name(
         created_at="2026-09-04T08:02:00+00:00",
     )
     session = FakeSession(
-        ["s", "p", "i", "a", "n", "0", "1", "Familiar Node", "n", "b", "b", "b", "b", "b"]
+        ["s", "p", "i", "a", "0", "1", "0", "1", "Familiar Node", "n", "b", "b", "b", "b", "b"]
     )
 
     _run(session, lane, sysop)
@@ -821,7 +821,7 @@ def test_sysop_menu_can_reject_remote_attestation_for_one_user(db, lane, sysop):
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",
-            "i", "o", "a", "r", "local document review", "s",
+            "i", "o", "0", "1", "0", "3", "local document review", "s",
             "b", "b", "b", "b",
         ]
     )
@@ -847,8 +847,8 @@ def test_trust_anchor_editor_picks_a_stored_peer_and_remove_uses_a_picker(db, la
         friendly_name="Anchor Peer",
     )))
 
-    # [A]dd -> [N]ode -> the stored peer is entry 02 (01 is "type it") -> [R]eason -> [S]ave.
-    session = FakeSession(["s", "p", "a", "a", "n", "0", "2", "r", "runs the seed", "s", "b", "b", "b", "b"])
+    # [A]dd -> Node (01) -> the stored peer is entry 02 (01 is "type it") -> Reason (02) -> [S]ave.
+    session = FakeSession(["s", "p", "a", "a", "0", "1", "0", "2", "0", "2", "runs the seed", "s", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     anchors = list_trust_anchors(db)
     assert [a.fingerprint for a in anchors] == [peer.identity.fingerprint]
@@ -888,13 +888,13 @@ def test_trust_override_rejected_save_keeps_the_draft(db, lane, sysop):
     register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
     session = FakeSession([
         "s", "p", "s", "0", "1",
-        "o", "r", "resource abuse reviewed", "s",  # reason only -> rejected
-        "d", "r", "t", "d", "s",                    # add dimension + state, save
+        "o", "0", "3", "resource abuse reviewed", "s",  # reason only -> rejected
+        "0", "1", "r", "0", "2", "d", "s",          # add dimension + state, save
         "b", "b", "b", "b",
     ])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "Could not save: choose a dimension ([D]) and a state ([T]) first" in text
+    assert "Could not save: choose a Dimension and a State first" in text
     assert "Trust override applied and audited." in text
     state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
     assert state.state == TrustState.BLOCKED
@@ -936,8 +936,8 @@ def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(
     save_profile(original, friendly_name="Renamed Original", created_at="2026-09-04T08:01:00+00:00")
     save_profile(replacement, friendly_name="Familiar Node", created_at="2026-09-04T08:02:00+00:00")
 
-    # [A]dd -> [N]ode -> pick the replacement (most recently contacted, entry 02) -> warning -> "n".
-    session = FakeSession(["s", "p", "a", "a", "n", "0", "2", "n", "b", "b", "b", "b", "b"])
+    # [A]dd -> Node (01) -> pick the replacement (most recently contacted, entry 02) -> warning -> "n".
+    session = FakeSession(["s", "p", "a", "a", "0", "1", "0", "2", "n", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "different cryptographic identity" in text
@@ -954,8 +954,8 @@ def test_attestation_authority_update_keeps_its_existing_scope(db, lane, sysop):
     configure_attestation_authority(
         db, identity_node, attributes=["age"], reason="age only", now_iso="2026-09-04T12:00:00.000000Z",
     )
-    # [A]dd/update -> [N]ode -> "(type it)" -> the fingerprint -> [R]eason -> [S]ave.
-    session = FakeSession(["s", "p", "i", "a", "n", "0", "1", identity_node, "r", "re-reviewed", "s", "b", "b", "b", "b"])
+    # [A]dd/update -> Node (01) -> "(type it)" -> the fingerprint -> Reason (03) -> [S]ave.
+    session = FakeSession(["s", "p", "i", "a", "0", "1", "0", "1", identity_node, "0", "3", "re-reviewed", "s", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     authority = list_attestation_authorities(db)[0]
     assert authority.attributes == ("age",)
@@ -969,7 +969,7 @@ def test_trust_domain_update_keeps_the_stored_weight(db, lane, sysop):
     from netbbs.link.trust import configure_trust_domain
 
     configure_trust_domain(db, "friends", display_name="Friends", weight=0.25, actor_user_id=sysop.id)
-    session = FakeSession(["s", "p", "d", "a", "i", "friends", "n", "Close friends", "s", "b", "b", "b", "b"])
+    session = FakeSession(["s", "p", "d", "a", "0", "1", "friends", "0", "2", "Close friends", "s", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     domains = list_trust_domains(db)
     assert [(d.domain_id, d.display_name, d.weight) for d in domains] == [("friends", "Close friends", 0.25)]
@@ -999,7 +999,7 @@ def test_trust_anchor_removal_picker_shows_the_technical_identity(db, lane, syso
 
 
 def test_create_user_with_password_only(db, lane, sysop):
-    session = FakeSession(["u", "c", "u", "alice", "p", "y", "hunter2", "hunter2", "l", "10", "c", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "alice", "0", "2", "y", "hunter2", "hunter2", "0", "4", "10", "c", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "alice")
     assert created.user_level == 10
@@ -1009,7 +1009,7 @@ def test_create_user_with_password_only(db, lane, sysop):
 def test_create_user_with_pubkey_only_raw_base64(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
-    session = FakeSession(["u", "c", "u", "bob", "k", "y", raw_b64, "c", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "bob", "0", "3", "y", raw_b64, "c", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "bob")
     assert created.fingerprint is not None
@@ -1017,7 +1017,7 @@ def test_create_user_with_pubkey_only_raw_base64(db, lane, sysop):
 
 def test_create_user_with_pubkey_only_openssh_line(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
-    session = FakeSession(["u", "c", "u", "carol", "k", "y", _openssh_line(verify_key), "c", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "carol", "0", "3", "y", _openssh_line(verify_key), "c", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "carol")
     assert created.fingerprint is not None
@@ -1026,7 +1026,7 @@ def test_create_user_with_pubkey_only_openssh_line(db, lane, sysop):
 def test_create_user_with_both_password_and_pubkey(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
-    session = FakeSession(["u", "c", "u", "dave", "p", "y", "hunter2", "hunter2", "k", "y", raw_b64, "c", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "dave", "0", "2", "y", "hunter2", "hunter2", "0", "3", "y", raw_b64, "c", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "dave")
     assert created.fingerprint is not None
@@ -1047,7 +1047,7 @@ def test_create_user_with_blank_username_is_cancelled(db, lane, sysop):
     # create_user checks "has a password or key" before it validates the
     # username, so a password is set here to actually reach (and prove)
     # the username-grammar rejection on the still-blank username field.
-    session = FakeSession(["u", "c", "p", "y", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
+    session = FakeSession(["u", "c", "0", "2", "y", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
     _run(session, lane, sysop)
     assert "usernames may only contain" in _written_text(session)
 
@@ -1859,9 +1859,9 @@ def test_who_screen_delivers_a_custom_message_to_the_target_before_disconnecting
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        # pick the session, [M]essage, then [D]isconnect + confirm.
+        # pick the session, Message (01), then [D]isconnect + confirm.
         admin_session = FakeSession(
-            ["n", "w", "0", "1", "m", "Reconnect in a few minutes.", "d", "y", "b", "b", "b"]
+            ["n", "w", "0", "1", "0", "1", "Reconnect in a few minutes.", "d", "y", "b", "b", "b"]
         )
         registry.enter(admin_session)
         try:
@@ -1971,10 +1971,10 @@ def test_shutdown_screen_triggers_the_sequence_as_a_background_task(db, lane, sy
         # afterward -- "does disconnect_all() reach a still-mid-read
         # session" is already covered thoroughly in tests/test_shutdown.py
         # (via a session that genuinely blocks), not re-proven here.
-        # "m" toggles the Mode field to immediate, "s" saves (confirming
-        # with "y") -- the draft-editor field screen's own hotkeys, not
+        # 01 toggles the Mode field to immediate, "s" saves (confirming
+        # with "y") -- the draft-editor field screen's own numbers, not
         # the old fixed prompt chain.
-        admin_session = FakeSession(["n", "s", "m", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "0", "1", "s", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -1999,7 +1999,7 @@ def test_shutdown_screen_with_custom_message_replaces_the_default(db, lane, syso
         await asyncio.sleep(0)
 
         admin_session = FakeSession(
-            ["n", "s", "m", "c", "Emergency patch, back shortly.", "s", "y", "b", "b", "b"]
+            ["n", "s", "0", "1", "0", "3", "Emergency patch, back shortly.", "s", "y", "b", "b", "b"]
         )
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
@@ -2115,7 +2115,7 @@ def test_drain_screen_triggers_the_sequence_as_a_background_task(db, lane, sysop
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        admin_session = FakeSession(["n", "d", "d", "0", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "0", "1", "0", "s", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -2133,7 +2133,7 @@ def test_drain_screen_never_disconnects_the_issuing_sysop(db, lane, sysop):
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["n", "d", "d", "0", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "0", "1", "0", "s", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -2155,7 +2155,7 @@ def test_drain_screen_with_custom_message_replaces_the_default(db, lane, sysop):
         await asyncio.sleep(0)
 
         admin_session = FakeSession(
-            ["n", "d", "d", "0", "c", "Reconnect after the upgrade.", "s", "y", "b", "b", "b"]
+            ["n", "d", "0", "1", "0", "0", "2", "Reconnect after the upgrade.", "s", "y", "b", "b", "b"]
         )
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
@@ -2173,13 +2173,13 @@ def test_drain_screen_rejects_a_negative_delay(db, lane, sysop):
     # aborts the whole screen -- it just leaves the Delay field
     # unchanged and redraws, so this needs one more "b" than a
     # successful run to actually leave the draft screen afterward.
-    session = FakeSession(["n", "d", "d", "-5", "b", "b", "b", "b"])
+    session = FakeSession(["n", "d", "0", "1", "-5", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
     assert "cannot be negative" in _written_text(session)
 
 
 def test_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
-    session = FakeSession(["n", "d", "d", "soon", "b", "b", "b", "b"])
+    session = FakeSession(["n", "d", "0", "1", "soon", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
     assert "Not a number" in _written_text(session)
 
@@ -2250,9 +2250,9 @@ def test_drain_screen_declining_the_cancel_offer_replaces_the_existing_schedule(
         node_controls.drain_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message="old message")
 
         # "d" -> already-scheduled notice -> "r" ([R]eplace it)
-        # -> the draft field screen for a new one: "d"/"0" sets Delay,
+        # -> the draft field screen for a new one: "01"/"0" sets Delay,
         # "s"/"y" saves and confirms.
-        admin_session = FakeSession(["n", "d", "r", "d", "0", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "r", "0", "1", "0", "s", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -2279,7 +2279,7 @@ def test_shutdown_screen_now_prompts_for_a_delay_like_drain_does(db, lane, sysop
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["n", "s", "d", "0.2", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "0", "2", "0.2", "s", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -2434,7 +2434,7 @@ def test_lock_and_drain_screen_engages_lockdown_and_schedules_drain(db, lane, sy
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        admin_session = FakeSession(["n", "l", "d", "0", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "l", "0", "1", "0", "s", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -2450,7 +2450,7 @@ def test_lock_and_drain_screen_engages_lockdown_and_schedules_drain(db, lane, sy
 
 def test_lock_and_drain_screen_rejects_a_negative_delay(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["n", "l", "d", "-5", "b", "b", "b", "b"])
+    session = FakeSession(["n", "l", "0", "1", "-5", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "cannot be negative" in _written_text(session)
     assert node_controls.maintenance.is_lockdown_active() is False
@@ -2458,7 +2458,7 @@ def test_lock_and_drain_screen_rejects_a_negative_delay(db, lane, sysop):
 
 def test_lock_and_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["n", "l", "d", "soon", "b", "b", "b", "b"])
+    session = FakeSession(["n", "l", "0", "1", "soon", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "Not a number" in _written_text(session)
     assert node_controls.maintenance.is_lockdown_active() is False
@@ -2570,7 +2570,7 @@ def test_lock_and_drain_screen_still_starts_a_drain_when_maintenance_was_enabled
         node_controls = _node_controls()
         node_controls.maintenance.enable_lockdown()  # plain [M], default source="maintenance"
 
-        session = FakeSession(["n", "l", "d", "0", "s", "y", "b", "b", "b"])
+        session = FakeSession(["n", "l", "0", "1", "0", "s", "y", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -2976,8 +2976,8 @@ def test_link_this_board_screen_keeps_the_draft_after_a_bad_field_entry(db, lane
     inputs = [
         "m", "m", "l", "0", "1",  # navigate to board detail
         "l",  # [L]ink this board
-        "m",  # toggle Moderated -- no recommendation -> yes
-        "x", "not-a-number",  # bad entry on a later, unrelated field
+        "0", "3",  # toggle Moderated (03) -- no recommendation -> yes
+        "0", "4", "not-a-number",  # bad entry (04) on a later, unrelated field
         "s",  # save anyway
         "b", "b", "b", "b","b"]
     session = FakeSession(inputs)
@@ -3854,9 +3854,9 @@ def test_grant_and_revoke_moderator_flow(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "General", creator=sysop)
 
-    # [U]ser -> alice, [O]n -> message board General, [P]reset once -> the
+    # User (01) -> alice, On (02) -> message board General, Preset (04) once -> the
     # limited (approver-only) preset, [S]ave.
-    grant_inputs = ["m", "g", "u", "0", "1", "o", "m", "0", "1", "p", "s", "b", "b"]  # sc[o]pe: [m]essage board
+    grant_inputs = ["m", "g", "0", "1", "0", "1", "0", "2", "m", "0", "1", "0", "4", "s", "b", "b"]  # On: [m]essage board
     session = FakeSession(grant_inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -3879,10 +3879,10 @@ def test_grant_blanket_across_all_boards(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "General", creator=sysop)
 
-    # scope [A]ll of one kind, [M]essage boards = blanket across all boards,
+    # User (01), On (02): [A]ll of one kind, [M]essage boards = blanket across all boards,
     # no board picker needed; the default preset is full, [C]ommunity left
     # at "(whole node)".
-    inputs = ["m", "g", "u", "0", "1", "o", "a", "m", "s", "b", "b"]
+    inputs = ["m", "g", "0", "1", "0", "1", "0", "2", "a", "m", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -3933,8 +3933,8 @@ def test_grant_moderator_back_discards_a_half_built_grant(db, lane, sysop):
     from netbbs.moderation.roles import list_grants_for_user
 
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    # [U]ser chosen, then [B]ack (a changed draft asks first: confirm with "y").
-    session = FakeSession(["m", "g", "u", "0", "1", "b", "y", "b", "b"])
+    # User (01) chosen, then [B]ack (a changed draft asks first: confirm with "y").
+    session = FakeSession(["m", "g", "0", "1", "0", "1", "b", "y", "b", "b"])
     _run(session, lane, sysop)
     assert "Granted" not in _written_text(session)
     assert list_grants_for_user(db, alice) == []
@@ -3946,10 +3946,10 @@ def test_grant_moderator_save_without_a_scope_keeps_the_draft(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     # The rejected [S]ave keeps the editor open with the user still
     # chosen (Codex review on #289): adding the scope and saving works.
-    session = FakeSession(["m", "g", "u", "0", "1", "s", "o", "a", "m", "s", "b", "b"])
+    session = FakeSession(["m", "g", "0", "1", "0", "1", "s", "0", "2", "a", "m", "s", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "Could not save: choose a [U]ser and a scope under [O]n first" in text
+    assert "Could not save: choose a User and a scope under On first" in text
     assert "Granted" in text
     assert [g.object_type for g in list_grants_for_user(db, alice)] == ["board"]
 
@@ -3960,8 +3960,8 @@ def test_grant_blanket_scoped_to_a_community_via_the_community_field(db, lane, s
 
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     retro = create_community(db, "Retro", creator=sysop)
-    # [O]n -> blanket boards, [C]ommunity picker: "(whole node)" first, Retro second.
-    session = FakeSession(["m", "g", "u", "0", "1", "o", "a", "m", "c", "0", "2", "s", "b", "b"])
+    # On (02) -> blanket boards, Community (03) picker: "(whole node)" first, Retro second.
+    session = FakeSession(["m", "g", "0", "1", "0", "1", "0", "2", "a", "m", "0", "3", "0", "2", "s", "b", "b"])
     _run(session, lane, sysop)
     assert "scoped to Community 'Retro'" in _written_text(session)
     grants = list_grants_for_user(db, alice)
@@ -4209,7 +4209,7 @@ def test_grant_and_revoke_moderator_flow_for_channel(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     channel = create_channel(db, "Lobby", creator=sysop)
 
-    grant_inputs = ["m", "g", "u", "0", "1", "o", "c", "0", "1", "s", "b", "b"]
+    grant_inputs = ["m", "g", "0", "1", "0", "1", "0", "2", "c", "0", "1", "s", "b", "b"]
     session = FakeSession(grant_inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -4233,10 +4233,10 @@ def test_grant_blanket_across_all_channels(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     channel = create_channel(db, "Lobby", creator=sysop)
 
-    # scope [A]ll of one kind, [C]hat channels = blanket across all channels,
+    # User (01), On (02): [A]ll of one kind, [C]hat channels = blanket across all channels,
     # no channel picker needed; the default preset is full, [C]ommunity left
     # at "(whole node)".
-    inputs = ["m", "g", "u", "0", "1", "o", "a", "c", "s", "b", "b"]
+    inputs = ["m", "g", "0", "1", "0", "1", "0", "2", "a", "c", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -4437,10 +4437,10 @@ def test_grant_blanket_scoped_to_a_community(db, lane, sysop):
     board = create_board(db, "Elections", community_id=community.id, creator=sysop)
     other_board = create_board(db, "General", creator=sysop)  # not in the Community
 
-    # [O]n -> [A]ll of one kind, [M]essage boards = blanket across all
-    # boards; [C]ommunity picker lists "(whole node)" first, Politics second;
+    # User (01), On (02) -> [A]ll of one kind, [M]essage boards = blanket across all
+    # boards; Community (03) picker lists "(whole node)" first, Politics second;
     # full preset is the default.
-    inputs = ["m", "g", "u", "0", "1", "o", "a", "m", "c", "0", "2", "s", "b", "b"]
+    inputs = ["m", "g", "0", "1", "0", "1", "0", "2", "a", "m", "0", "3", "0", "2", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -6606,7 +6606,7 @@ def test_setting_a_color_previews_both_depths_before_asking_to_apply(db, lane, s
 
     # Set the accent field, then [S]ave; the editor's own preamble shows the
     # candidate at both depths before anything is written.
-    session = FakeSession(["s", "c", "a", "255,0,0", "s", "b", "b"])
+    session = FakeSession(["s", "c", "0", "1", "255,0,0", "s", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Truecolor: " in text
@@ -6635,7 +6635,7 @@ def test_backing_out_of_a_changed_color_leaves_the_override_unset(db, lane, syso
 def test_a_non_triple_rgb_input_is_rejected_with_no_change(db, lane, sysop):
     from netbbs.net.node_theme import header_color_override
 
-    session = FakeSession(["s", "c", "h", "not-a-color", "b", "b", "b"])
+    session = FakeSession(["s", "c", "0", "2", "not-a-color", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Not a valid R,G,B triple" in _written_text(session)
     assert header_color_override(db) is None
@@ -6644,7 +6644,7 @@ def test_a_non_triple_rgb_input_is_rejected_with_no_change(db, lane, sysop):
 def test_an_out_of_range_rgb_component_is_rejected_with_no_change(db, lane, sysop):
     from netbbs.net.node_theme import header_color_override
 
-    session = FakeSession(["s", "c", "h", "300,0,0", "b", "b", "b"])
+    session = FakeSession(["s", "c", "0", "2", "300,0,0", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Not a valid R,G,B triple" in _written_text(session)
     assert header_color_override(db) is None
@@ -6663,7 +6663,7 @@ def test_clearing_an_existing_override_reverts_to_the_default(db, lane, sysop):
     from netbbs.net.node_theme import clock_color_override, set_clock_color_override
 
     set_clock_color_override(db, (10, 20, 30))
-    session = FakeSession(["s", "c", "c", "default", "s", "b", "b"])
+    session = FakeSession(["s", "c", "0", "3", "default", "s", "b", "b"])
     _run(session, lane, sysop)
     assert "reverted to the default" in _written_text(session)
     assert clock_color_override(db) is None
@@ -6686,7 +6686,7 @@ def test_backing_out_of_a_clear_leaves_the_override_in_place(db, lane, sysop):
 
 
 def test_clearing_when_already_default_makes_no_change(db, lane, sysop):
-    session = FakeSession(["s", "c", "a", "default", "b", "b", "b"])
+    session = FakeSession(["s", "c", "0", "1", "default", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Already using the default" in _written_text(session)
 
@@ -7348,7 +7348,7 @@ def test_timestamp_settings_screen_can_set_a_new_timezone(db, lane, sysop):
     # other pick_item screen in this module already has.
     from netbbs.timeutil import resolve_display_preferences
 
-    session = FakeSession(["s", "t", "z", "/", "Europe/Berlin", "b", "b", "b"])
+    session = FakeSession(["s", "t", "0", "2", "/", "Europe/Berlin", "b", "b", "b"])
     _run(session, lane, sysop)
     _, tz = resolve_display_preferences(db)
     assert tz == "Europe/Berlin"
@@ -7358,7 +7358,7 @@ def test_timestamp_settings_screen_can_set_a_new_timezone(db, lane, sysop):
 def test_timestamp_settings_screen_can_set_a_new_format(db, lane, sysop):
     from netbbs.timeutil import resolve_display_preferences
 
-    session = FakeSession(["s", "t", "f", "%Y-%m-%d %H:%M", "b", "b", "b"])
+    session = FakeSession(["s", "t", "0", "1", "%Y-%m-%d %H:%M", "b", "b", "b"])
     _run(session, lane, sysop)
     fmt, _ = resolve_display_preferences(db)
     assert fmt == "%Y-%m-%d %H:%M"
@@ -7386,7 +7386,7 @@ def test_timestamp_settings_screen_timezone_search_with_no_matches_leaves_it_unc
     from netbbs.timeutil import resolve_display_preferences
 
     before = resolve_display_preferences(db)
-    session = FakeSession(["s", "t", "z", "/", "Not/A/Real/Zone", "b", "b", "b", "b"])
+    session = FakeSession(["s", "t", "0", "2", "/", "Not/A/Real/Zone", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert resolve_display_preferences(db) == before  # cancelled -- nothing changed
     assert "No matches." in _written_text(session)
@@ -7396,7 +7396,7 @@ def test_timestamp_settings_screen_rejects_an_invalid_format(db, lane, sysop):
     from netbbs.timeutil import resolve_display_preferences
 
     before = resolve_display_preferences(db)
-    session = FakeSession(["s", "t", "f", "%Q nonsense", "b", "b", "b"])
+    session = FakeSession(["s", "t", "0", "1", "%Q nonsense", "b", "b", "b"])
     _run(session, lane, sysop)
     assert resolve_display_preferences(db) == before
     assert "invalid" in _written_text(session).lower()
@@ -7413,7 +7413,7 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
     from netbbs.net.chat_flow import _render_chat_status_line
     from netbbs.timeutil import format_for_display, utc_now_iso
 
-    session = FakeSession(["s", "t", "z", "/", "Europe/Berlin", "b", "b", "b"])
+    session = FakeSession(["s", "t", "0", "2", "/", "Europe/Berlin", "b", "b", "b"])
     _run(session, lane, sysop)
 
     channel = create_channel(db, "lobby", creator=sysop)
@@ -8108,7 +8108,7 @@ def test_managed_dns_status_register_hotkey_registers_end_to_end(db, lane, sysop
             # own asyncio.run) -- the server above needs to keep running
             # in *this* coroutine's own event loop while the admin
             # screen dials it.
-            session = FakeSession(["d", "r", "n", "myboard", "d", "r", "b", "b"])
+            session = FakeSession(["d", "r", "0", "1", "myboard", "0", "2", "r", "b", "b"])
             await admin_menu(session, lane, sysop)
         finally:
             await server.stop()
@@ -8132,7 +8132,7 @@ def test_managed_dns_status_release_hotkey_releases_end_to_end(db, lane, sysop):
             set_node_fingerprint(db, "fp-1")
             # Register first (outside the admin screen, to set up state),
             # then exercise the screen's own [G]ive up name hotkey.
-            await admin_menu(FakeSession(["d", "r", "n", "myboard", "d", "r", "b", "b"]), lane, sysop)
+            await admin_menu(FakeSession(["d", "r", "0", "1", "myboard", "0", "2", "r", "b", "b"]), lane, sysop)
             await admin_menu(FakeSession(["d", "g", "y", "b", "b"]), lane, sysop)
         finally:
             await server.stop()
@@ -10223,12 +10223,12 @@ def test_published_identity_screen_counts_its_recipients(db, lane, sysop):
 
 def test_sysop_can_name_an_attestation_recipient(db, lane, sysop):
     recipient_node = "abcdefghijklmnopqrstuvwxyz234567"
-    # Published identity -> [R]ecipients -> [A]dd/update -> [N]ode -> "(type
-    # it)" -> the fingerprint -> [R]eason -> [S]ave.
+    # Published identity -> [R]ecipients -> [A]dd/update -> Node (01) -> "(type
+    # it)" -> the fingerprint -> Reason (02) -> [S]ave.
     session = FakeSession(
         [
-            "s", "p", "p", "r", "a", "n", "0", "1", recipient_node,
-            "r", "their SysOp asked at the meet", "s", "b", "b", "b", "b", "b",
+            "s", "p", "p", "r", "a", "0", "1", "0", "1", recipient_node,
+            "0", "2", "their SysOp asked at the meet", "s", "b", "b", "b", "b", "b",
         ]
     )
 
@@ -10338,9 +10338,9 @@ def test_delete_warning_says_nothing_about_retirement_on_a_standalone_node(db, l
 
 def test_creating_a_retired_name_tells_the_sysop_why_and_keeps_the_draft(db, lane, sysop):
     _retire(db, sysop)
-    # [U]sers -> [C]reate -> [U]sername alice -> [P]assword -> [C]reate is
+    # [U]sers -> [C]reate -> Username (01) alice -> Password (02) -> [C]reate is
     # refused; the draft survives, so [B]ack asks before discarding it.
-    session = FakeSession(["u", "c", "u", "alice", "p", "y", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
+    session = FakeSession(["u", "c", "0", "1", "alice", "0", "2", "y", "hunter2", "hunter2", "c", "b", "y", "b", "b"])
 
     _run(session, lane, sysop)
 
@@ -10725,7 +10725,7 @@ def test_a_trust_decision_about_a_node_stops_holding_back_what_it_sent(db, lane,
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",
-            "o", "d", "r", "t", "e", "r", "known operator", "s", "y",
+            "o", "0", "1", "r", "0", "2", "e", "0", "3", "known operator", "s", "y",
             "b", "b", "b", "b",
         ]
     )
@@ -11270,7 +11270,7 @@ def test_naming_a_trusted_reporter_retries_everything_set_aside(db, lane, sysop)
     reporter = "abcdefghijklmnopqrstuvwxyz234567"
     session = FakeSession([
         "s", "p",
-        "r", "a", "n", "0", "1", reporter, "d", "emergency", "c", "identity_integrity:signed_equivocation", "s", "b",
+        "r", "a", "0", "1", "0", "1", reporter, "0", "2", "emergency", "0", "3", "identity_integrity:signed_equivocation", "s", "b",
         "b", "b", "b",
     ])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
@@ -11294,7 +11294,7 @@ def test_a_trust_decision_about_a_node_starts_a_pass_at_once(db, lane, sysop):
     link_context = _link_context()
     session = FakeSession([
         "s", "p", "s", "0", "1",
-        "o", "d", "r", "t", "e", "r", "known operator", "s", "y",
+        "o", "0", "1", "r", "0", "2", "e", "0", "3", "known operator", "s", "y",
         "b", "b", "b", "b",
     ])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))

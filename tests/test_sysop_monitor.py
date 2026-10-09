@@ -370,8 +370,8 @@ def test_kick_disconnects_logs_and_says_so(db, lane, sysop):
                  await _connect(controls.session_registry, alice, "alice")]
         monitor = asyncio.create_task(_monitor(viewer, lane, sysop, controls))
         _select(viewer, controls, "alice")
-        # Who's disconnect draft: [M]essage, then [D]isconnect and confirm.
-        for key in ("k", "m", "maintenance", "d", "y"):
+        # Who's disconnect draft: Message (01), then [D]isconnect and confirm.
+        for key in ("k", "0", "1", "maintenance", "d", "y"):
             viewer.inputs.put_nowait(key)
         await _until(lambda: "'alice' disconnected." in viewer.text())
         assert tasks[1].done()

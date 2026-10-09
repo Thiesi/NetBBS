@@ -280,8 +280,8 @@ def test_grant_everywhere_writes_three_blanket_grants(db, sysop):
 
 def test_the_grant_screen_offers_everything_at_once(db, lane, sysop):
     create_user(db, "carol", password="hunter2")
-    # The editor directly: user carol (01), scope everything, save.
-    session = FakeSession(["u", "0", "1", "o", "e", "s"])
+    # The editor directly: User (01): carol (01); On (02): everything, save.
+    session = FakeSession(["0", "1", "0", "1", "0", "2", "e", "s"])
     asyncio.run(_grant_moderator_screen(session, lane, sysop))
     carol = get_user_by_username(db, "carol")
     assert sorted(g.object_type for g in list_grants_for_user(db, carol)) == ["board", "channel", "file_area"]
@@ -297,8 +297,8 @@ def test_only_a_moderating_grant_mentions_the_staff_list(db, lane, sysop, monkey
         return "board", board.id, "board 'Announcements'"
 
     monkeypatch.setattr("netbbs.net.admin_flow._pick_moderator_scope", _one_board)
-    # User carol (01), the one board, the preset cycled from full, save.
-    session = FakeSession(["u", "0", "1", "o", *["p"] * preset_steps, "s"])
+    # User (01): carol (01); On (02): the one board; Preset (04) cycled from full; save.
+    session = FakeSession(["0", "1", "0", "1", "0", "2", *["0", "4"] * preset_steps, "s"])
     asyncio.run(_grant_moderator_screen(session, lane, sysop))
     # The outcome is queued for the next screen, not written here.
     text = _visible("".join(pending_notices(session)))
