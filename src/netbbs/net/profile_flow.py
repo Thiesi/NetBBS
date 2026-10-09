@@ -1118,8 +1118,9 @@ _GUEST_DEFAULTS_NOTE = (
 
 # Not on the guest defaults (design doc §5.6): the guest account signs in
 # without a credential and has no identity of its own, it has no mailbox, so
-# read receipts mean nothing, and nothing ever stores a sort order for it
-# (a guest's choices last only for their call), so there is none to clear.
+# read receipts mean nothing, and sort preferences can only be cleared here
+# while a guest's own sort choices last only for their call, so there is
+# nothing to set.
 _NOT_GUEST_DEFAULTS = frozenset({"identity_details", "read_receipts", "sort_preferences", "ssh_public_key", "password"})
 
 

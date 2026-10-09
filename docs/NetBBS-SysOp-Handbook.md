@@ -1557,8 +1557,8 @@ press **[E]dit profile**: the screen is titled **Guest defaults**. It offers the
 guest account's bio and signature, whether it takes messages, who it blocks
 (their live messages to guests are refused), its MRC settings, whether its name
 is shown to other callers, and the display settings. Each guest can still
-change the display settings, the fullscreen editor and stylized MRC names for
-their own call; the rest is the same for every guest. Name and details, read
+change the display settings (except the MRC nick colour), the fullscreen editor
+and stylized MRC names for their own call; the rest is the same for every guest. Name and details, read
 receipts, sort preferences, keys and password are not on it. Only a SysOp can
 set the guest defaults, and each change goes into the account's **History**.
 
