@@ -115,7 +115,7 @@ def _stays_on_screen_until_the_next_prompt(session, marker):
 def test_a_board_outcome_is_shown_on_the_redrawn_page(db, alice):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["1", "e", "", "/edit 1", "Revised", "/done", "s", "b", "b"])
+    session = FakeSession(["0", "1", "e", "", "/edit 1", "Revised", "/done", "s", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -168,7 +168,7 @@ def test_the_remove_action_uses_one_verb_throughout(db, alice):
         db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice
     )
     create_post(db, board, alice, "Subject", "Body")
-    session = FakeSession(["1", "t", "y", "b", "b"])
+    session = FakeSession(["0", "1", "t", "y", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 

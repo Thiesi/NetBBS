@@ -492,7 +492,7 @@ def test_removing_a_carried_post_on_a_non_origin_node_says_it_stays_local(db, re
     board = _carried_board(db, remote)
     _carry(db, remote, subject="Carried subject")
 
-    session = _Session(["1", "t", "y", "b", "b"])
+    session = _Session(["0", "1", "t", "y", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, sysop))
 
     text = session.visible()
@@ -508,7 +508,7 @@ def test_removing_a_post_on_the_origin_node_is_not_called_local(db, sysop, alice
     create_post(db, board, alice, "Local subject", "Body")
     link_context = LinkContext(link_node=LinkNode(identity=node_identity))
 
-    session = _Session(["1", "t", "y", "b", "b"])
+    session = _Session(["0", "1", "t", "y", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, sysop, link_context=link_context))
 
     text = session.visible()

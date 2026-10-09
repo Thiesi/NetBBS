@@ -339,7 +339,7 @@ def test_attach_a_file_on_review_send_and_the_reader_downloads_it(db, lane, monk
         return False
 
     monkeypatch.setattr("netbbs.net.file_ref_view.send_file_to_caller", fake_send)
-    reader = FakeSession(keys=["1", "g", "b", "b"])
+    reader = FakeSession(keys=["0", "1", "g", "b", "b"])
     reader.terminal_width = 120
     asyncio.run(browse_mail(reader, lane, bob))
 
@@ -357,7 +357,7 @@ def test_the_sent_view_lists_the_files_of_a_letter_to_several_people(db, lane):
         group_id=new_mail_group_id(), files=[ref],
     )
 
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     session.terminal_width = 120
     asyncio.run(browse_mail(session, lane, alice))
 
@@ -371,7 +371,7 @@ def test_a_reader_who_lost_access_is_not_told_the_files_name(db, lane):
     send_mail(db, alice, bob, "Look", "x", files=[ref])
     _set_area(db, area, min_read_level=50)
 
-    reader = FakeSession(keys=["1", "g", "b", "b"])
+    reader = FakeSession(keys=["0", "1", "g", "b", "b"])
     reader.terminal_width = 120
     asyncio.run(browse_mail(reader, lane, bob))
 
@@ -405,7 +405,7 @@ def test_a_forward_carries_the_files_of_the_letter(db, lane):
     _area, _entry, ref = _file(db, alice)
     send_mail(db, alice, bob, "Look", "x", files=[ref])
 
-    session = FakeSession(keys=["1", "f", "s", "b", "b"], lines=["carol", "", "/done"])
+    session = FakeSession(keys=["0", "1", "f", "s", "b", "b"], lines=["carol", "", "/done"])
     session.terminal_width = 120
     asyncio.run(browse_mail(session, lane, bob))
 

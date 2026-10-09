@@ -88,7 +88,7 @@ def test_reply_from_sent_writes_to_the_recipient_quoting_the_letter(people):
     send_mail(db, alice, bob, "Plans", "Saturday?")
     # Sent, the letter, Reply; Enter keeps "Re: Plans"; a line; Send; then
     # back on the Sent list, Back twice.
-    session = FakeSession(keys=["s", "1", "r", "s", "b", "b"], lines=["", "Did you get this?", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "r", "s", "b", "b"], lines=["", "Did you get this?", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -112,7 +112,7 @@ def test_reply_to_a_letter_whose_recipient_was_deleted_is_refused_plainly(people
     sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
     send_mail(db, alice, bob, "Plans", "Saturday?")
     delete_user(db, bob, deleted_by=sysop)
-    session = FakeSession(keys=["s", "1", "r", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "r", "b", "b", "b"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -128,7 +128,7 @@ def test_reply_from_sent_is_refused_when_the_recipient_blocked_the_caller(people
     db_path, db, alice, bob = people
     send_mail(db, alice, bob, "Plans", "Saturday?")
     block_local_sender(db, bob, alice)
-    session = FakeSession(keys=["s", "1", "r", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "r", "b", "b", "b"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -140,7 +140,7 @@ def test_a_cancelled_reply_comes_back_to_the_letter(people):
     db_path, db, alice, bob = people
     send_mail(db, alice, bob, "Plans", "Saturday?")
     # Back on review, discarding it: back on the letter's view, then Back, Back, Back.
-    session = FakeSession(keys=["s", "1", "r", "b", "b", "b", "b"], lines=["", "/done", "y"])
+    session = FakeSession(keys=["s", "0", "1", "r", "b", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -151,7 +151,7 @@ def test_a_cancelled_reply_comes_back_to_the_letter(people):
 
 def test_reply_from_sent_link_mail_goes_back_over_link(linked):
     db_path, db, alice, link_context, _message, address, _remote = linked
-    session = FakeSession(keys=["s", "1", "r", "s", "b", "b"], lines=["", "Well?", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "r", "s", "b", "b"], lines=["", "Well?", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -178,7 +178,7 @@ def test_resend_sends_the_same_letter_again_and_leaves_the_old_row(linked, statu
     # A signature changed since is not added a second time.
     set_signature(db, alice, "Alice, again")
     _set_delivery(db, message, status, reason, notice=1)
-    session = FakeSession(keys=["s", "1", "s", "s", "b", "b"], lines=["", "/done"])
+    session = FakeSession(keys=["s", "0", "1", "s", "s", "b", "b"], lines=["", "/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -200,7 +200,7 @@ def test_resend_is_not_offered_for_mail_that_arrived_or_may_yet(linked, status):
     db_path, db, alice, link_context, message, _address, _remote = linked
     _set_delivery(db, message, status)
     # "s" is not a key here: it is rejected, and Back leaves.
-    session = FakeSession(keys=["s", "1", "s", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "s", "b", "b", "b"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -220,7 +220,7 @@ def test_resend_still_refused_says_why_before_anything_is_written(linked):
         db, TrustSubject.node(remote.fingerprint), TrustDimension.RESOURCE_BEHAVIOR, TrustState.QUARANTINED,
         reason="test", now_iso="2026-01-01T00:00:00+00:00",
     )
-    session = FakeSession(keys=["s", "1", "s", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "s", "b", "b", "b"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -246,7 +246,7 @@ def test_resend_checks_the_recipient_again_at_send(linked, monkeypatch):
 
     monkeypatch.setattr(mail_flow, "_check_link_reply_address", check)
     # Send is refused and review is shown again; Back, and discard it.
-    session = FakeSession(keys=["s", "1", "s", "s", "b", "b", "b", "b"], lines=["", "/done", "y"])
+    session = FakeSession(keys=["s", "0", "1", "s", "s", "b", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
 
@@ -261,7 +261,7 @@ def test_resend_checks_the_recipient_again_at_send(linked, monkeypatch):
 def test_resend_without_link_says_so(linked):
     db_path, db, alice, _link_context, message, _address, _remote = linked
     _set_delivery(db, message, "expired", "no_answer")
-    session = FakeSession(keys=["s", "1", "s", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "s", "b", "b", "b"])
     session.terminal_width = 200
     _run(db_path, session, alice)
 
@@ -275,17 +275,17 @@ def test_a_kept_resend_has_its_own_draft_slot(linked):
     db_path, db, alice, link_context, message, _address, _remote = linked
     _set_delivery(db, message, "bounced", "mailbox_full")
     # Kept with /exit...
-    session = FakeSession(keys=["s", "1", "s", "b", "b", "b"], lines=["", "/exit"])
+    session = FakeSession(keys=["s", "0", "1", "s", "b", "b", "b"], lines=["", "/exit"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
     assert "you'll be offered it when you resend this message again" in _visible_text(session)
     # ...not offered to a reply to the same letter...
-    session = FakeSession(keys=["s", "1", "r", "b", "b", "b", "b"], lines=["", "/done", "y"])
+    session = FakeSession(keys=["s", "0", "1", "r", "b", "b", "b", "b"], lines=["", "/done", "y"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
     assert "unfinished letter" not in _visible_text(session)
     # ...and offered, resumed and sent when resending again.
-    session = FakeSession(keys=["s", "1", "s", "r", "s", "b", "b"], lines=["/done"])
+    session = FakeSession(keys=["s", "0", "1", "s", "r", "s", "b", "b"], lines=["/done"])
     session.terminal_width = 200
     _run(db_path, session, alice, link_context=link_context)
     assert f"You have an unfinished letter to bob@{_FARPOINT}: Plans" in " ".join(_visible_text(session).split())
@@ -309,7 +309,7 @@ def test_sent_view_bar_fits_and_clashes_with_nothing(linked, monkeypatch, width,
         return await real_show_detail(session, **kwargs)
 
     monkeypatch.setattr(mail_flow, "show_detail", recording_show_detail)
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     session.terminal_width, session.terminal_height = width, height
     _run(db_path, session, alice, link_context=link_context)
 

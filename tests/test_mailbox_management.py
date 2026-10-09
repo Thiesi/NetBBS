@@ -236,9 +236,9 @@ def test_marked_letters_are_deleted_with_one_confirmation(node):
     _run(session, lane, bob)
 
     marked = session.screens()[2]
-    assert re.search(r"^ \*1 +new +alice +Three", marked, re.MULTILINE)
-    assert re.search(r"^>\*2", marked, re.MULTILINE) is None
-    assert re.search(r"^ \*2 +new +alice +Two", marked, re.MULTILINE)
+    assert re.search(r"^ \*01 +new +alice +Three", marked, re.MULTILINE)
+    assert re.search(r"^>\*02", marked, re.MULTILINE) is None
+    assert re.search(r"^ \*02 +new +alice +Two", marked, re.MULTILINE)
     assert "2 marked" in marked
     assert "Delete the 2 marked messages?" in session.visible()
     assert [m.subject for m in list_inbox(db, bob)] == ["One"]
@@ -293,7 +293,7 @@ def test_keep_moves_letters_to_kept_and_back(node):
     assert "1 unread in Kept" in screens[1]
     kept_screen = screens[2]
     assert "NetBBS › Mail › Kept" in kept_screen
-    assert re.search(r"> 1 +new +alice +Precious", kept_screen)
+    assert re.search(r"> 01 +new +alice +Precious", kept_screen)
     assert "[K]ept: yes" in kept_screen
     # Each folder counts against its own limit (issue #921).
     assert "1 of 100" in kept_screen and "of 500" not in kept_screen
@@ -306,7 +306,7 @@ def test_a_kept_letter_opens_with_kept_yes(node):
     db, lane, bob, alice, _carol = node
     letter = send_mail(db, alice, bob, "Precious", "body")
     set_kept(db, bob, [letter.id], kept=True)
-    session = FakeSession(["v", "1", "k", "b", "b"])
+    session = FakeSession(["v", "0", "1", "k", "b", "b"])
 
     _run(session, lane, bob)
 
@@ -318,7 +318,7 @@ def test_a_kept_letter_opens_with_kept_yes(node):
 def test_the_inbox_view_keeps_a_letter(node):
     db, lane, bob, alice, _carol = node
     letter = send_mail(db, alice, bob, "Precious", "body")
-    session = FakeSession(["1", "k", "b"])
+    session = FakeSession(["0", "1", "k", "b"])
 
     _run(session, lane, bob)
 
@@ -341,7 +341,7 @@ def test_order_lists_by_conversation(node):
     listed = re.findall(r"^[> ][ *] ?(\d+) +new +(\w+)  (.*?) +\d\d\.", threaded, re.MULTILINE)
     # Alice's conversation first (it has the newest letter), its later
     # letter indented under it; then Carol's, though it arrived in between.
-    assert listed == [("1", "alice", "Re: Lunch?"), ("2", "alice", "  Lunch?"), ("3", "carol", "Party")]
+    assert listed == [("01", "alice", "Re: Lunch?"), ("02", "alice", "  Lunch?"), ("03", "carol", "Party")]
     assert mail_flow._mail_order(db, bob) == "threads"
 
 
@@ -469,7 +469,7 @@ def test_keeping_from_a_letter_is_refused_and_the_letter_stays_open(node, monkey
     db, lane, bob, alice, _carol = node
     _full_kept(db, bob, alice, monkeypatch)
     letter = send_mail(db, alice, bob, "Precious", "body")
-    session = FakeSession(["1", "k", "b", "b"])
+    session = FakeSession(["0", "1", "k", "b", "b"])
 
     _run(session, lane, bob)
 

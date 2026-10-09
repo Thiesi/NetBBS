@@ -144,7 +144,7 @@ def test_a_caller_replies_from_the_reader(db, alice, bob):
     original = create_post(db, board, alice, "Lunch?", "Anyone for lunch?\n-- \nAlice")
     # Open post 1, [R]eply, keep the subject (Enter), write one line and
     # finish, [P]ost from review, then back out of the list.
-    session = FakeSession(["1", "r", "", "Count me in.", "/done", "p", "b"])
+    session = FakeSession(["0", "1", "r", "", "Count me in.", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
 
     posts = list_posts_page(db, board, bob).posts
@@ -165,7 +165,7 @@ def test_a_cancelled_reply_stays_on_the_post(db, alice, bob):
     create_post(db, board, alice, "Lunch?", "Anyone for lunch?")
     # [R]eply, then /cancel in the line editor: back on the same post, whose
     # [B]ack returns to the list, and [B]ack again leaves.
-    session = FakeSession(["1", "r", "", "/cancel", "b", "b"])
+    session = FakeSession(["0", "1", "r", "", "/cancel", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
     assert "Reply cancelled." in session.visible()
     assert len(list_posts_page(db, board, bob).posts) == 1
@@ -174,7 +174,7 @@ def test_a_cancelled_reply_stays_on_the_post(db, alice, bob):
 def test_reply_is_not_offered_where_the_caller_cannot_post(db, alice):
     board = create_board(db, "general", creator=alice, min_write_level=50)
     create_post(db, board, create_user(db, "sysop", password="hunter2", user_level=100), "News", "Read this.")
-    session = FakeSession(["1", "b", "b"])
+    session = FakeSession(["0", "1", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "[R]eply" not in session.visible()
 
@@ -182,7 +182,7 @@ def test_reply_is_not_offered_where_the_caller_cannot_post(db, alice):
 def test_an_art_post_is_answered_without_a_quote(db, alice, bob):
     board = create_board(db, "art", creator=alice, allow_color=True)
     create_post(db, board, alice, "Sunset", "\x1b[33m###\x1b[0m", layout="art")
-    session = FakeSession(["1", "r", "", "Lovely.", "/done", "p", "b"])
+    session = FakeSession(["0", "1", "r", "", "Lovely.", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
     reply = next(p for p in list_posts_page(db, board, bob).posts if p.subject.startswith("Re:"))
     assert reply.body == "Lovely."
@@ -191,7 +191,7 @@ def test_an_art_post_is_answered_without_a_quote(db, alice, bob):
 def test_a_color_board_quotes_the_text_without_its_codes(db, alice, bob):
     board = create_board(db, "general", creator=alice, allow_color=True)
     create_post(db, board, alice, "Hi", "|12red\x1b[1m bold")
-    session = FakeSession(["1", "r", "", "ok", "/done", "p", "b"])
+    session = FakeSession(["0", "1", "r", "", "ok", "/done", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
     reply = next(p for p in list_posts_page(db, board, bob).posts if p.subject.startswith("Re:"))
     assert reply.body.startswith("alice wrote:\n> red bold\n")
@@ -211,7 +211,7 @@ def test_mail_reply_quotes_the_message(tmp_path):
     alice = create_user(db, "alice", password="hunter2pw", user_level=10)
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "How are you?\n-- \nAlice")
-    session = MailSession(keys=["1", "r", "s", "b", "b"], lines=["", "Fine, thanks.", "/done"])
+    session = MailSession(keys=["0", "1", "r", "s", "b", "b"], lines=["", "Fine, thanks.", "/done"])
     lane = DatabaseLane(path)
     try:
         asyncio.run(browse_mail(session, lane, bob))
@@ -244,7 +244,7 @@ def test_the_fullscreen_editor_writes_a_reply_like_the_line_editor(db, alice, bo
     set_fullscreen_editor_enabled(db, bob, True)
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Lunch?", "Anyone for lunch?")
-    session = FakeSession(["1", "r", "", *"Count me in.", "CTRL+O", "p", "b"])
+    session = FakeSession(["0", "1", "r", "", *"Count me in.", "CTRL+O", "p", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
     reply = next(p for p in list_posts_page(db, board, bob).posts if p.subject.startswith("Re:"))
     assert reply.body == "alice wrote:\n> Anyone for lunch?\n\nCount me in."
@@ -283,7 +283,7 @@ def test_a_post_removed_while_it_was_read_cannot_be_replied_to(db, alice, bob):
             return key
 
     # [R]eply is refused and the reader goes back to the list; [B]ack leaves.
-    session = RemovingSession(["1", "r", "b"])
+    session = RemovingSession(["0", "1", "r", "b"])
     asyncio.run(board_flow._show_board(session, db, board, bob))
     assert "no longer available to reply to" in session.visible()
     assert not any(p.subject.startswith("Re:") for p in list_posts_page(db, board, bob).posts)

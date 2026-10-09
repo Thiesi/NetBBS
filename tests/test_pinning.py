@@ -353,7 +353,7 @@ def test_a_moderator_pins_from_the_reader_and_the_list_says_so(db, mod, monkeypa
     board = _board(db, mod)
     _posts(db, board, mod, 3, monkeypatch)
     # Open post 1, pin it, back to the list, leave.
-    session = BoardSession(["1", "o", "b", "b"])
+    session = BoardSession(["0", "1", "o", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, mod))
     text = session.visible()
     assert "[O]n top: no" in text
@@ -365,7 +365,7 @@ def test_a_moderator_pins_from_the_reader_and_the_list_says_so(db, mod, monkeypa
 def test_keep_is_offered_only_where_posts_expire(db, mod, monkeypatch):
     board = _board(db, mod)
     _posts(db, board, mod, 1, monkeypatch)
-    session = BoardSession(["1", "b", "b"])
+    session = BoardSession(["0", "1", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, mod))
     assert "[K]ept" not in session.visible()
 
@@ -374,7 +374,7 @@ def test_keep_is_offered_only_where_posts_expire(db, mod, monkeypatch):
         db, mod, object_type="board", object_id=expiring.id, permissions=BoardPermission.EDIT, granted_by=mod
     )
     create_post(db, expiring, mod, "Headline", "Body")
-    session = BoardSession(["1", "k", "b", "b"])
+    session = BoardSession(["0", "1", "k", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, expiring, mod))
     assert "[K]ept: no" in session.visible()
     assert "Post kept: it will not expire." in session.visible()
@@ -383,7 +383,7 @@ def test_keep_is_offered_only_where_posts_expire(db, mod, monkeypatch):
 def test_a_caller_without_edit_permission_cannot_pin(db, mod, alice, monkeypatch):
     board = _board(db, mod)
     _posts(db, board, mod, 1, monkeypatch)
-    session = BoardSession(["1", "o", "b", "b"])
+    session = BoardSession(["0", "1", "o", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     assert "[O]n top" not in session.visible()
     assert list_pinned_posts(db, board, requesting_user=alice) == []
@@ -516,7 +516,7 @@ def test_unpinning_an_old_post_returns_to_the_list(db, mod, monkeypatch):
     set_post_pinned(db, made[0], True, changed_by=mod)
     # Open the pinned row, unpin it, and one [B]ack leaves the board: the
     # unpin already went back to the list.
-    session = BoardSession(["1", "o", "b"])
+    session = BoardSession(["0", "1", "o", "b"])
     asyncio.run(board_flow._show_board(session, db, board, mod))
     assert "Post unpinned" in session.visible()
     assert list_pinned_posts(db, board, requesting_user=mod) == []

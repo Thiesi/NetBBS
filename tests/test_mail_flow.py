@@ -223,7 +223,7 @@ def test_inbox_shows_unread_marker_and_opening_marks_read(tmp_path):
 
     # Open inbox, select item 01 (marks read), back out of message, back
     # out of inbox, back out of mail menu.
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -251,7 +251,7 @@ def test_inbox_delete_removes_message(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "body")
 
-    session = FakeSession(keys=["1", "e", "b"], lines=["y"])
+    session = FakeSession(keys=["0", "1", "e", "b"], lines=["y"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -273,7 +273,7 @@ def test_inbox_delete_declined_at_the_confirmation_keeps_the_message(tmp_path):
     # Bare Enter at the confirmation selects its default (No, per
     # `prompt_yes_no(..., default=False)`) -- back to the message view,
     # then "b"/"b" out entirely.
-    session = FakeSession(keys=["1", "e", "b", "b"], lines=[""])
+    session = FakeSession(keys=["0", "1", "e", "b", "b"], lines=[""])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -291,7 +291,7 @@ def test_inbox_reply_sends_a_new_message(tmp_path):
     send_mail(db, alice, bob, "Hello", "body")
 
     session = FakeSession(
-        keys=["1", "r", "s", "b", "b"],
+        keys=["0", "1", "r", "s", "b", "b"],
         lines=["", "Sure thing, blank line to finish"],
     )
     lane = DatabaseLane(db_path)
@@ -330,7 +330,7 @@ def test_sent_lists_recipient_and_delete_removes_it(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "body")
 
-    session = FakeSession(keys=["s", "1", "e", "b", "b"], lines=["y"])
+    session = FakeSession(keys=["s", "0", "1", "e", "b", "b"], lines=["y"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
 
@@ -1124,7 +1124,7 @@ def test_a_node_name_with_an_at_sign_is_quoted_on_the_from_line_and_can_be_typed
     shown = '"Cats @ Night · farpoint.example.org"'
 
     session = FakeSession(
-        keys=["1", "b", "c", "s", "b"],
+        keys=["0", "1", "b", "c", "s", "b"],
         lines=[f"BobCase@{shown}", "Re: Hi", "Back at you", "/done"],
     )
     session.terminal_width = 200
@@ -1208,7 +1208,7 @@ def test_reply_to_link_mail_goes_back_over_link_with_quote_and_subject(tmp_path)
     _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
 
     session = FakeSession(
-        keys=["1", "r", "s", "b", "b"], lines=["", "Back at you", ""]
+        keys=["0", "1", "r", "s", "b", "b"], lines=["", "Back at you", ""]
     )
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
@@ -1237,7 +1237,7 @@ def test_reply_to_link_mail_from_a_peer_now_on_probation_is_refused_as_at_the_to
     link_context = _link_context_with_known_peer(db, node_identity, remote_identity, established=False)
     _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
 
-    session = FakeSession(keys=["1", "r", "b", "b"])
+    session = FakeSession(keys=["0", "1", "r", "b", "b"])
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
@@ -1272,7 +1272,7 @@ def test_reply_to_link_mail_refused_when_the_peer_changes_while_it_is_written(tm
 
     monkeypatch.setattr(mail_flow, "_link_mail_refusal", refusal_after_the_first_check)
     session = FakeSession(
-        keys=["1", "r", "s", "b", "b", "b"], lines=["", "Back at you", "", "", "y"]
+        keys=["0", "1", "r", "s", "b", "b", "b"], lines=["", "Back at you", "", "", "y"]
     )
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
@@ -1296,7 +1296,7 @@ def test_reply_to_link_mail_from_a_node_no_longer_linked_says_so(tmp_path):
     link_context = LinkContext(link_node=LinkNode(identity=node_identity))
     _receive_link_mail(db, alice, f"bob@{gone.fingerprint}")
 
-    session = FakeSession(keys=["1", "r", "b", "b"])
+    session = FakeSession(keys=["0", "1", "r", "b", "b"])
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
@@ -1316,7 +1316,7 @@ def test_reply_to_link_mail_with_link_off_says_so(tmp_path):
     remote_identity = bootstrap_node_identity("farpoint")
     _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
 
-    session = FakeSession(keys=["1", "r", "b", "b"])
+    session = FakeSession(keys=["0", "1", "r", "b", "b"])
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))  # no link_context
@@ -1339,7 +1339,7 @@ def test_reply_to_link_mail_can_be_readdressed_from_the_review_screen(tmp_path):
     _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}")
 
     session = FakeSession(
-        keys=["1", "r", "t", "s", "b", "b"], lines=["", "Forwarding", "/done", "carol"]
+        keys=["0", "1", "r", "t", "s", "b", "b"], lines=["", "Forwarding", "/done", "carol"]
     )
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
@@ -1359,7 +1359,7 @@ def test_system_mail_shows_as_system_and_offers_no_reply(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_system_mail(db, bob, "Your post was rejected", "Reason: off topic")
 
-    session = FakeSession(keys=["1", "r", "b", "b"])
+    session = FakeSession(keys=["0", "1", "r", "b", "b"])
     session.node_display_name = "Nib & Quill"
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
@@ -1384,7 +1384,7 @@ def test_an_account_named_system_is_still_a_person_to_reply_to(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, impostor, bob, "Hello", "body")
 
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -1407,7 +1407,7 @@ def test_reply_to_a_deleted_local_sender_still_says_the_account_is_gone(tmp_path
     node_identity = bootstrap_node_identity("roanoke")
     link_context = LinkContext(link_node=LinkNode(identity=node_identity))
 
-    session = FakeSession(keys=["1", "r", "b", "b"])
+    session = FakeSession(keys=["0", "1", "r", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob, link_context=link_context))
 
@@ -1430,7 +1430,7 @@ def test_sent_shows_the_remote_address_of_link_mail_in_the_list_and_the_view(tmp
         db, alice, f"Bob@{remote_identity.fingerprint}", "Hello", "Over there", node_identity=node_identity,
     )
 
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
@@ -1534,7 +1534,7 @@ def test_reply_opens_on_a_reply_screen_that_names_the_recipient(tmp_path):
     alice = create_user(db, "Alice", password="hunter2pw", user_level=10)
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "body")
-    session = FakeSession(keys=["1", "r", "b", "b", "b"], lines=["", "Reply text", "", "", "y"])
+    session = FakeSession(keys=["0", "1", "r", "b", "b", "b"], lines=["", "Reply text", "", "", "y"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -1679,7 +1679,7 @@ def test_sent_shows_the_delivery_state_in_the_list_and_the_view(tmp_path, status
     message, _remote = _sent_link_mail(db, alice)
     _set_delivery(db, message, status, reason)
 
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
@@ -1707,7 +1707,7 @@ def test_sent_shows_mail_left_at_a_relay_as_with_a_relay(tmp_path):
     )
     db.connection.commit()
 
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     session.terminal_width = 200
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
@@ -1745,7 +1745,7 @@ def test_sent_shows_no_delivery_state_for_local_mail(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "body")
 
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
 
@@ -1796,7 +1796,7 @@ def test_opening_a_bounced_message_in_sent_counts_as_being_told(tmp_path):
     message, _remote = _sent_link_mail(db, alice, subject="Lunch")
     _set_delivery(db, message, "bounced", "mailbox_full", notice=1)
 
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
     lane.close()
@@ -1829,7 +1829,7 @@ def test_the_reader_keeps_the_authors_line_breaks(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Meeting", _LETTER)
 
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
     lane.close()
@@ -1845,7 +1845,7 @@ def test_sent_view_keeps_the_authors_line_breaks(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Meeting", _LETTER)
 
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
     lane.close()
@@ -1885,7 +1885,7 @@ def test_pipe_codes_in_mail_show_as_color(tmp_path):
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     send_mail(db, alice, bob, "Hello", "|12pipe color|07 and plain")
 
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
     lane.close()
@@ -1907,7 +1907,7 @@ def test_a_reader_with_post_colors_off_sees_mail_plain(tmp_path):
     set_post_colors_enabled(db, bob, False)
     send_mail(db, alice, bob, "Hello", "|12pipe color|07 and plain")
 
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
     lane.close()
@@ -1930,7 +1930,7 @@ def test_link_mail_goes_through_the_same_filter(tmp_path):
     )
     _receive_link_mail(db, alice, f"bob@{remote_identity.fingerprint}", body=hostile)
 
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice))
     lane.close()
@@ -1953,7 +1953,7 @@ def test_a_mail_reply_quotes_the_text_without_its_codes(tmp_path):
     esc = chr(27)
     send_mail(db, alice, bob, "Hello", f"|12red|07 line\n{esc}[31mescaped{esc}[0m line")
 
-    session = FakeSession(keys=["1", "r", "s", "b", "b"], lines=["", "Answer", ""])
+    session = FakeSession(keys=["0", "1", "r", "s", "b", "b"], lines=["", "Answer", ""])
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, bob))
     lane.close()

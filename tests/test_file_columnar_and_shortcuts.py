@@ -158,9 +158,9 @@ def test_columnar_headers_and_dividers_rendered(tmp_path, monkeypatch):
     # Divider row present with rules
     assert "----" in session.output or "────" in session.output
 
-    # File rows formatted with brackets [ 1], [ 2]
-    assert "[ 1]" in session.output
-    assert "[ 2]" in session.output
+    # File rows formatted with brackets [01], [02]
+    assert "[01]" in session.output
+    assert "[02]" in session.output
     assert "pkg0.tar.gz" in session.output
     assert "pkg1.tar.gz" in session.output
 
@@ -251,7 +251,7 @@ def test_the_highlighted_row_is_a_reverse_video_bar(tmp_path, monkeypatch):
     output = session.output
     reverse = "\x1b[7m"
 
-    rows = [line for line in output.split(chr(10)) if ">[ 1]" in line]
+    rows = [line for line in output.split(chr(10)) if ">[01]" in line]
     assert rows, "the highlighted row was never drawn"
     bar = rows[-1]
     assert bar.startswith(reverse), bar
@@ -264,7 +264,7 @@ def test_the_highlighted_row_is_a_reverse_video_bar(tmp_path, monkeypatch):
 
     # The rows either side of it are untouched, so the bar reads as one
     # row rather than a change of theme.
-    others = [line for line in output.split(chr(10)) if " [ 2]" in line]
+    others = [line for line in output.split(chr(10)) if " [02]" in line]
     assert others and reverse not in others[-1], others
 
     lane.close()
@@ -293,7 +293,7 @@ def test_a_verified_uploader_does_not_stripe_the_highlighted_bar(tmp_path, monke
     lane.close()
     db.close()
 
-    rows = [line for line in session.output.split(chr(10)) if ">[ 1]" in line]
+    rows = [line for line in session.output.split(chr(10)) if ">[01]" in line]
     assert rows, "the highlighted row was never drawn"
     bar = rows[-1]
     # One inverted run, opened once and closed once: no color of any
@@ -320,8 +320,8 @@ def test_download_via_direct_number_shortcut(tmp_path, monkeypatch):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # Pressing '1' downloads the 1st file on the page (pkg0.tar.gz)
-    session = FakeSession(keys=["1", "b"])
+    # Typing '01' downloads the 1st file on the page (pkg0.tar.gz)
+    session = FakeSession(keys=["0", "1", "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -336,8 +336,27 @@ def test_download_via_second_number_shortcut(tmp_path, monkeypatch):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # Pressing '2' downloads the 2nd file on the page (pkg1.tar.gz)
-    session = FakeSession(keys=["2", "b"])
+    # Typing '02' downloads the 2nd file on the page (pkg1.tar.gz)
+    session = FakeSession(keys=["0", "2", "b"])
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+
+    assert "Starting Zmodem send of 'pkg1.tar.gz'" in session.output
+
+    lane.close()
+    db.close()
+
+
+def test_download_via_one_digit_and_enter(tmp_path, monkeypatch):
+    """One digit and Enter names that row too (issue #1158). Enter
+    arrives through `read_editor_key`: a plain `read_key` skips it."""
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
+    session = FakeInteractiveSession(editor_keys=[
+        EditorKey(EditorKeyKind.CHAR, char="2"), EditorKey(EditorKeyKind.ENTER),
+    ])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -402,12 +421,14 @@ def test_download_key_backed_out_of_the_picker_downloads_nothing(tmp_path, monke
     db.close()
 
 
-def test_download_out_of_range_number_beeps_and_stays(tmp_path, monkeypatch):
+@pytest.mark.parametrize("number_keys", [["0", "9"], ["0", "\x08"], ["0", "0"], ["1", "x"]])
+def test_download_out_of_range_number_beeps_and_stays(tmp_path, monkeypatch, number_keys):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
-    # '9' is out of range for a two-file page; then 'b' to back out
-    session = FakeSession(keys=["9", "b"])
+    # '09' (or '9' Enter, or '00') is out of range for a two-file page,
+    # and a digit then a letter is no number at all; then 'b' to back out
+    session = FakeSession(keys=[*number_keys, "b"])
     lane = DatabaseLane(db_path)
 
     asyncio.run(_show_area(session, lane, area, user))
@@ -430,7 +451,7 @@ def test_a_non_ascii_digit_key_is_refused_rather_than_crashing(tmp_path, monkeyp
       catches -- it left the screen through `_show_area`.
     - `'٣'` (Arabic-Indic three): `int()` accepts it as `3`, so the
       screen would have started a transfer of the third file for a key
-      its own `1-3` hint never offered.
+      its own `01-03` hint never offered.
 
     Both arrive as an `EditorKeyKind.CHAR`, the path a real terminal
     takes, and both must land on the same bell every other unhandled
@@ -464,9 +485,9 @@ def test_download_hints_reflect_page_count(tmp_path, monkeypatch):
 
     asyncio.run(_show_area(session, lane, area, user))
 
-    # Shows the "1-3" number range plus the [D]ownload key that
+    # Shows the "01-03" number range plus the [D]ownload key that
     # replaced the typed `/download` form.
-    assert "1-3" in session.visible_output
+    assert "01-03" in session.visible_output
     assert "[D]ownload" in session.visible_output
     assert "/download" not in session.visible_output
 
@@ -497,8 +518,8 @@ def test_interactive_arrow_highlight_and_enter_download(tmp_path, monkeypatch):
     asyncio.run(_show_area(session, lane, area, user))
 
     # Highlight marker appears
-    assert ">[ 1]" in session.output
-    assert ">[ 2]" in session.output
+    assert ">[01]" in session.output
+    assert ">[02]" in session.output
     assert "Starting Zmodem send of 'pkg1.tar.gz'" in session.output
 
     lane.close()
@@ -548,7 +569,7 @@ def test_interactive_escape_cancels_highlight(tmp_path, monkeypatch):
 
     asyncio.run(_show_area(session, lane, area, user))
 
-    assert ">[ 1]" in session.output
+    assert ">[01]" in session.output
     # Did not download anything
     assert "Starting Zmodem send" not in session.output
 
@@ -556,15 +577,21 @@ def test_interactive_escape_cancels_highlight(tmp_path, monkeypatch):
     db.close()
 
 
-def test_interactive_single_digit_direct_download(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "keys",
+    [
+        # '01' downloads file 1
+        [EditorKey(EditorKeyKind.CHAR, char="0"), EditorKey(EditorKeyKind.CHAR, char="1")],
+        # so does '1' and Enter
+        [EditorKey(EditorKeyKind.CHAR, char="1"), EditorKey(EditorKeyKind.ENTER)],
+    ],
+    ids=["two-digits", "digit-enter"],
+)
+def test_interactive_row_number_direct_download(tmp_path, monkeypatch, keys):
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, count=2, monkeypatch=monkeypatch)
 
-    # Pressing character '1' directly downloads file 1
-    keys = [
-        EditorKey(EditorKeyKind.CHAR, char="1"),
-    ]
     session = FakeInteractiveSession(editor_keys=keys)
     lane = DatabaseLane(db_path)
 

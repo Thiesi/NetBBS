@@ -359,7 +359,7 @@ def _group_letter(db, sender, recipients, subject="Lunch"):
 def test_a_received_copy_shows_everyone_and_reply_all_writes_to_them(db, lane):
     alice, bob, carol = _user(db, "alice"), _user(db, "bob"), _user(db, "carol")
     _group_letter(db, alice, [bob, carol])
-    session = FakeSession(keys=["1", "a", "s", "b", "b"], lines=["", "Count me in", ""])
+    session = FakeSession(keys=["0", "1", "a", "s", "b", "b"], lines=["", "Count me in", ""])
 
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -375,7 +375,7 @@ def test_a_received_copy_shows_everyone_and_reply_all_writes_to_them(db, lane):
 def test_a_letter_to_one_person_offers_no_reply_all(db, lane):
     alice, bob = _user(db, "alice"), _user(db, "bob")
     send_mail(db, alice, bob, "Hi", "x")
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
 
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -385,7 +385,7 @@ def test_a_letter_to_one_person_offers_no_reply_all(db, lane):
 def test_sent_lists_a_letter_to_several_people_once_and_delete_removes_every_copy(db, lane):
     alice, bob, carol = _user(db, "alice"), _user(db, "bob"), _user(db, "carol")
     _group_letter(db, alice, [bob, carol])
-    session = FakeSession(keys=["s", "1", "e", "b", "b"], lines=["y"])
+    session = FakeSession(keys=["s", "0", "1", "e", "b", "b"], lines=["y"])
 
     asyncio.run(browse_mail(session, lane, alice))
 
@@ -519,7 +519,7 @@ def test_sent_shows_each_link_copys_delivery_and_offers_resend_for_a_bounce(db, 
         "WHERE recipient_remote_address IS NOT NULL"
     )
     db.connection.commit()
-    session = FakeSession(keys=["s", "1", "b", "b", "b"])
+    session = FakeSession(keys=["s", "0", "1", "b", "b", "b"])
     session.terminal_width = 200
 
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))

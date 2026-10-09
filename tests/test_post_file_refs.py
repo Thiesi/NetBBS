@@ -257,7 +257,7 @@ def test_the_reader_lists_the_files_and_get_file_downloads_one(db, monkeypatch):
         return False
 
     monkeypatch.setattr("netbbs.net.file_ref_view.send_file_to_caller", fake_send)
-    session = FakeSession(["1", "g", "b", "b"], width=120)
+    session = FakeSession(["0", "1", "g", "b", "b"], width=120)
 
     asyncio.run(board_flow._show_board(session, db, board, bob))
 
@@ -273,7 +273,7 @@ def test_a_reader_who_cannot_open_the_area_is_not_told_the_files_name(db):
     _area, _entry, ref = _file(db, root, area_name="Members lounge", filename="secret-plans.png", min_read_level=50)
     create_post(db, board, alice, "Look", "x", files=[ref])
 
-    session = FakeSession(["1", "g", "b", "b"], width=120)
+    session = FakeSession(["0", "1", "g", "b", "b"], width=120)
     asyncio.run(board_flow._show_board(session, db, board, bob))
 
     text = _screens(session)
@@ -324,7 +324,7 @@ def test_a_moderators_edit_offers_no_file_keys_and_keeps_the_files(db):
     post = create_post(db, board, alice, "My page", "v1", files=[ref])
     _file(db, mod, area_name="Staff", filename="staff.png", min_read_level=200)
     # Open the post, [E]dit, keep the subject, a new body, then [S]ave.
-    session = FakeSession(["1", "e", "", "Fixed a typo.", "/done", "s", "b", "b"], width=120)
+    session = FakeSession(["0", "1", "e", "", "Fixed a typo.", "/done", "s", "b", "b"], width=120)
 
     asyncio.run(board_flow._show_board(session, db, board, mod))
 

@@ -238,7 +238,7 @@ def test_a_narrow_list_falls_back_to_prose_rows(tmp_path):
         board = create_board(db, "general", creator=user)
         create_post(db, board, user, "Hello", "x")
         _page, rows = _list_rows(db, board, user, width=40)
-        assert _visible(rows[0]) == "1 Hello -- alice"
+        assert _visible(rows[0]) == "01 Hello -- alice"
     finally:
         db.close()
 

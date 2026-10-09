@@ -343,7 +343,7 @@ def test_only_a_board_that_allows_color_keeps_pasted_color(db, allow_color):
     create_post(db, board, alice, "Existing", "Existing body")
     # A new post (subject, body), then an edit of the existing one
     # (subject kept, body), each left as a draft.
-    session = ScriptedSession(["p", "Subject", "new body", "/exit", "1", "e", "", "edited body", "/exit", "b", "b"])
+    session = ScriptedSession(["p", "Subject", "new body", "/exit", "0", "1", "e", "", "edited body", "/exit", "b", "b"])
     asyncio.run(board_flow._show_board(session, db, board, alice))
     asked = dict(session.asked)
     assert asked["Subject"] is False  # a subject has no use for pipe codes

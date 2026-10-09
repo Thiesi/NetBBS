@@ -240,7 +240,7 @@ def test_send_refuses_a_recipient_who_blocked_you_while_you_wrote(node, monkeypa
 def test_s_on_a_letter_blocks_its_sender_and_again_unblocks(node):
     db, lane, bob, alice = node
     send_mail(db, alice, bob, "Hello", "body")
-    session = FakeSession(["1", "s", "s", "b", "b"])
+    session = FakeSession(["0", "1", "s", "s", "b", "b"])
 
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -256,7 +256,7 @@ def test_s_on_link_mail_blocks_the_senders_address(node, identities):
     db, lane, bob, _ = node
     home, remote = identities
     deliver_link_message(db, _incoming_message(home, remote, recipient="bob", sender="dave").to_dict(), node_identity=home)
-    session = FakeSession(["1", "s", "b", "b"])
+    session = FakeSession(["0", "1", "s", "b", "b"])
 
     asyncio.run(browse_mail(session, lane, bob))
 
@@ -268,7 +268,7 @@ def test_system_mail_and_sysop_mail_offer_no_block(node):
     sysop = create_user(db, "sysop", password="hunter2pw", user_level=SYSOP_LEVEL)
     send_system_mail(db, bob, "Notice", "from the BBS")
     send_mail(db, sysop, bob, "Welcome", "from your SysOp")
-    session = FakeSession(["1", "b", "2", "b", "b"])
+    session = FakeSession(["0", "1", "b", "0", "2", "b", "b"])
 
     asyncio.run(browse_mail(session, lane, bob))
 

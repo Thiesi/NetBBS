@@ -436,7 +436,7 @@ def test_previous_callers_mail_row_fits_the_40x12_floor(db, lane, alice, bob):
 def test_the_board_reader_mails_the_author_with_subject_and_quote(db, alice, bob):
     board = create_board(db, "general", creator=bob)
     create_post(db, board, bob, "Modems", "Who still has a 2400 baud modem?")
-    session = FakeSession(keys=["1", "m", "s", "b", "b"], lines=["", "Me! In a box somewhere.", "", ""])
+    session = FakeSession(keys=["0", "1", "m", "s", "b", "b"], lines=["", "Me! In a box somewhere.", "", ""])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -452,7 +452,7 @@ def test_the_board_reader_mails_the_author_with_subject_and_quote(db, alice, bob
 def test_the_board_reader_offers_no_mail_on_your_own_post_or_with_mail_closed(db, alice, bob):
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "Mine", "My own post")
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -460,7 +460,7 @@ def test_the_board_reader_offers_no_mail_on_your_own_post_or_with_mail_closed(db
 
     create_post(db, board, bob, "Theirs", "Bob's post")
     set_mail_min_level(db, 50)
-    session = FakeSession(keys=["2", "b", "b"])
+    session = FakeSession(keys=["0", "2", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -474,7 +474,7 @@ def test_the_board_reader_offers_no_mail_to_an_author_who_blocked_you(db, alice,
     board = create_board(db, "general", creator=bob)
     create_post(db, board, bob, "Modems", "Who still has a 2400 baud modem?")
     block_local_sender(db, bob, alice)
-    session = FakeSession(keys=["1", "m", "b", "b"])
+    session = FakeSession(keys=["0", "1", "m", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -489,7 +489,7 @@ def test_the_board_reader_offers_a_sysop_mail_to_an_author_who_blocked_them(db, 
     sysop = _promoted_after_block(db, bob, create_user(db, "carrier", password="hunter2pw", user_level=10))
     board = create_board(db, "general", creator=bob)
     create_post(db, board, bob, "Modems", "Who still has a 2400 baud modem?")
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, sysop))
 
@@ -509,7 +509,7 @@ def test_the_board_reader_mails_a_carried_posts_author_over_link(db, alice, bob)
         (f"erin@{remote.fingerprint}", post.id),
     )
     db.connection.commit()
-    session = FakeSession(keys=["1", "m", "s", "b", "b"], lines=["", "Hi Erin", "", ""])
+    session = FakeSession(keys=["0", "1", "m", "s", "b", "b"], lines=["", "Hi Erin", "", ""])
 
     asyncio.run(board_flow._show_board(session, db, board, alice, link_context=link_context))
 
@@ -529,7 +529,7 @@ def test_a_carried_posts_author_has_no_mail_with_link_off(db, alice, bob):
         (f"erin@{remote.fingerprint}", post.id),
     )
     db.connection.commit()
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
 
@@ -541,7 +541,7 @@ def test_a_carried_posts_author_has_no_mail_with_link_off(db, alice, bob):
 def test_the_reader_with_mail_author_fits_the_terminal(db, alice, bob, width, height):
     board = create_board(db, "general", creator=bob)
     create_post(db, board, bob, "Modems", "Who still has a 2400 baud modem?")
-    session = FakeSession(keys=["1", "b", "b"])
+    session = FakeSession(keys=["0", "1", "b", "b"])
     session.terminal_width, session.terminal_height = width, height
 
     asyncio.run(board_flow._show_board(session, db, board, alice))
