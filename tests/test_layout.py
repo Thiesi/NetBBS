@@ -423,6 +423,74 @@ def test_action_bar_wraps_only_between_complete_actions():
     assert result.split("\r\n") == ["[O]lder  [N]ewer", "[B]ack"]
 
 
+# The SysOp user editor's bar for an ordinary member: the screen the
+# alignment was asked for.
+_USER_EDITOR_KEYS = [
+    menu_key("L", "evel"), menu_key("U", "se promotion rules"), menu_key("T", "oggle enable/disabled"),
+    menu_key("N", "ame"), menu_key("W", "hen born"), menu_key("S", "taff"),
+    menu_key("I", "dentity verification"), menu_key("V", "erification: revoke"), menu_key("K", "ey"),
+    menu_key("P", "assword"), menu_key("R", "estrict login"), menu_key("H", "istory"),
+    menu_key("D", "elete"), menu_key("B", "ack"),
+]
+
+
+def test_a_wrapping_action_bar_aligns_its_hotkeys_in_reading_order():
+    rows = visible(action_bar(_USER_EDITOR_KEYS, width=80, height=24)).split("\r\n")
+    assert rows == [
+        "[L]evel                  [U]se promotion rules   [T]oggle enable/disabled",
+        "[N]ame                   [W]hen born             [S]taff",
+        "[I]dentity verification  [V]erification: revoke  [K]ey",
+        "[P]assword               [R]estrict login        [H]istory",
+        "[D]elete                 [B]ack",
+    ]
+
+
+def test_an_aligned_action_bar_gives_way_past_a_quarter_of_the_screen():
+    # Aligned, this bar needs 7 rows at 60 columns: more than 24 // 4.
+    rows = visible(action_bar(_USER_EDITOR_KEYS, width=60, height=24)).split("\r\n")
+    assert len(rows) == 4
+    assert rows[0] == "[L]evel  [U]se promotion rules  [T]oggle enable/disabled"
+    # A taller terminal has the room.
+    rows = visible(action_bar(_USER_EDITOR_KEYS, width=60, height=40)).split("\r\n")
+    assert len(rows) == 7
+    assert rows[0] == "[L]evel                   [U]se promotion rules"
+
+
+def test_an_action_bar_without_a_height_or_on_one_row_stays_packed():
+    assert visible(action_bar(_USER_EDITOR_KEYS, width=80)).split("\r\n")[0] == (
+        "[L]evel  [U]se promotion rules  [T]oggle enable/disabled  [N]ame  [W]hen born"
+    )
+    one_row = [menu_key("O", "lder"), menu_key("N", "ewer"), menu_key("B", "ack")]
+    assert visible(action_bar(one_row, width=80, height=24)) == "[O]lder  [N]ewer  [B]ack"
+
+
+def test_an_aligned_action_bar_never_overflows_and_measures_wide_characters():
+    keys = [menu_key("A", "nnonces"), menu_key("F", "ichiers 你好"), menu_key("B", "ack"), menu_key("Q", "uit")]
+    for width in range(15, 40):  # the widest entry is 15 columns
+        for row in visible(action_bar(keys, width=width, height=48)).split("\r\n"):
+            assert visible_width(row) <= width
+            assert row == row.rstrip()
+
+
+def test_every_action_bar_caller_passes_the_terminal_height():
+    """Without a height a bar stays packed, so a caller that forgot it
+    would quietly keep the unaligned rows."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "src" / "netbbs"
+    missing = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call) and getattr(node.func, "id", None) == "action_bar"
+                and not any(keyword.arg == "height" for keyword in node.keywords)
+            ):
+                missing.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert missing == []
+
+
 def test_empty_state_and_badge_use_compact_ascii_safe_copy():
     assert visible(empty_state("No posts yet", detail="Start the conversation.")) == (
         "No posts yet\r\nStart the conversation."

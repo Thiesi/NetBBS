@@ -125,7 +125,7 @@ async def manage_password_screen(session: Session, lane: DatabaseLane, target: U
             options.insert(1, menu_key("R", "emove password (key-only login)"))
         await session.write_line("")
         await write_notices(session)
-        await write_prompt(session, f"{action_bar(options, width=session.terminal_width)}: ")
+        await write_prompt(session, f"{action_bar(options, width=session.terminal_width, height=session.terminal_height)}: ")
         choice = (await session.read_key()).lower()
 
         if choice == "b":

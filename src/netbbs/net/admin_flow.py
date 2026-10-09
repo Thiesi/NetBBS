@@ -959,7 +959,7 @@ def _menu_row(
     (PR #197 review). Append the equivalent notice ourselves, styled the
     same way `menu_grid` styles its own."""
     if description_level == "off":
-        result = action_bar([e.label for e in entries], width=width)
+        result = action_bar([e.label for e in entries], width=width, height=height)
         if degraded:
             notice_lines = [
                 colored(wrapped, fg_color=MUTED_COLOR)
@@ -1529,7 +1529,7 @@ def _fitted_menu(options: list[MenuEntry], description_level: str, *, session: S
         )
         if used_rows + _pending_notice_rows(session) + described.count("\r\n") + 2 <= session.terminal_height:
             return described
-    return action_bar([entry.label for entry in options], width=session.terminal_width)
+    return action_bar([entry.label for entry in options], width=session.terminal_width, height=session.terminal_height)
 
 
 async def _write_counted(session: Session, text: str) -> int:
@@ -2083,7 +2083,7 @@ async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None
         if notice is not None:
             options.append(menu_key("E", "nd it"))
         options.append(menu_key("B", "ack"))
-        await write_prompt(session, f"\r\n{action_bar(options, width=session.terminal_width)}: ")
+        await write_prompt(session, f"\r\n{action_bar(options, width=session.terminal_width, height=session.terminal_height)}: ")
         choice = (await session.read_key()).lower()
         await session.write_line("")
         if choice == "b":
@@ -4324,7 +4324,7 @@ async def _set_node_name_gradient_screen(
             marker = colored(" (current)", fg_color=MUTED_COLOR) if choice == current else ""
             await session.write_line(colored(f"  {i}. {label:<8}", fg_color=LABEL_COLOR) + preview + marker)
         await session.write_line(
-            action_bar([menu_key(f"0-{len(choices) - 1}", ""), menu_key("B", "ack")], width=session.terminal_width)
+            action_bar([menu_key(f"0-{len(choices) - 1}", ""), menu_key("B", "ack")], width=session.terminal_width, height=session.terminal_height)
         )
         await _choice_prompt(session)
 
@@ -5175,7 +5175,7 @@ async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) ->
     entries.append(menu_key("B", "ack"))
     while True:
         await session.write_line("Dimension:")
-        await session.write_line(action_bar(entries, width=session.terminal_width))
+        await session.write_line(action_bar(entries, width=session.terminal_width, height=session.terminal_height))
         await _choice_prompt(session)
         choice = (await session.read_key()).lower()
         if choice != HELP_KEY:
@@ -5467,7 +5467,7 @@ async def _set_trust_override_screen(
                         menu_key("D", "enied"),
                         menu_key("B", "ack"),
                     ],
-                    width=session.terminal_width,
+                    width=session.terminal_width, height=session.terminal_height,
                 )
             )
             await _choice_prompt(session)
@@ -6679,7 +6679,7 @@ async def _remote_attestation_override_screen(
         await session.write_line(
             action_bar(
                 [menu_key("O", "verride"), menu_key("C", "lear override"), menu_key("B", "ack")],
-                width=session.terminal_width,
+                width=session.terminal_width, height=session.terminal_height,
             )
         )
         await _choice_prompt(session)
@@ -8834,7 +8834,7 @@ async def _draw_update_status(
         menu_key("A", "uto-check off" if auto_enabled else "uto-check on"),
         menu_key("B", "ack"),
     ])
-    await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
+    await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width, height=session.terminal_height))
     await _choice_prompt(session)
     return _UpdateStatus(
         auto_enabled=auto_enabled, masked_token=masked_token, unicode_style=unicode_style,
@@ -9964,7 +9964,7 @@ async def _draw_managed_dns_status(
         # runs the service gets the service's own table here.
         actions.append(menu_key("A", "dminister service"))
     actions.append(menu_key("B", "ack"))
-    await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
+    await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width, height=session.terminal_height))
     await _choice_prompt(session)
     return status
 
@@ -14268,7 +14268,7 @@ async def _scheduled_action_prelude(
     if replace_label is not None:
         options.append(menu_key("R", replace_label))
     options.append(menu_key("B", "ack"))
-    await session.write_line(action_bar(options, width=session.terminal_width))
+    await session.write_line(action_bar(options, width=session.terminal_width, height=session.terminal_height))
     await _choice_prompt(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -14289,7 +14289,7 @@ async def _scheduled_action_prelude(
                 about="Something is already scheduled. Back leaves it exactly as it is.",
             )
             await _write_wrapped_subtitle(session, status_text, color=ALERT_COLOR, bold=True)
-            await session.write_line(action_bar(options, width=session.terminal_width))
+            await session.write_line(action_bar(options, width=session.terminal_width, height=session.terminal_height))
             await _choice_prompt(session)
             continue
         await session.write(reject_unhandled_key(choice))
@@ -15196,7 +15196,7 @@ async def _preview_apply_choice(session: Session, label: str) -> bool:
     while shopping through a gallery. Returns whether to apply."""
     async def _ask() -> None:
         await session.write_line(
-            "\r\n" + action_bar([menu_key("A", "pply"), menu_key("B", "ack to the list")], width=session.terminal_width)
+            "\r\n" + action_bar([menu_key("A", "pply"), menu_key("B", "ack to the list")], width=session.terminal_width, height=session.terminal_height)
         )
         await write_prompt(session, f"{label}? ")
 
@@ -22941,7 +22941,7 @@ async def _resolve_door_name_collision(
                     # `[C]ancel`, which they could not reach.
                     menu_key("B", "ack"),
                 ],
-                width=session.terminal_width,
+                width=session.terminal_width, height=session.terminal_height,
             )
         )
         await _choice_prompt(session)
@@ -25438,7 +25438,7 @@ async def _ask_moderator_scope_key(
     help on `?`."""
     while True:
         await session.write_line(question)
-        await write_prompt(session, f"{action_bar(options, width=session.terminal_width)}: ")
+        await write_prompt(session, f"{action_bar(options, width=session.terminal_width, height=session.terminal_height)}: ")
         key = (await session.read_key()).lower()
         await session.write_line("")
         if key != HELP_KEY:

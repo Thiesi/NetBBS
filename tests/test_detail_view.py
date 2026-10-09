@@ -117,6 +117,26 @@ def test_no_page_is_ever_taller_than_the_terminal(height):
         assert len(render.split("\r\n")) <= height
 
 
+_MANY_ACTIONS = [
+    (letter, menu_key(letter.upper(), rest))
+    for letter, rest in (
+        ("a", "pprove signup"), ("c", "hange level"), ("d", "isable account"), ("e", "dit details"),
+        ("h", "istory of actions"), ("k", "ey management"), ("r", "estrict login"), ("s", "taff permissions"),
+    )
+] + [_BACK]
+
+
+@pytest.mark.parametrize("width", [40, 60, 80])
+@pytest.mark.parametrize("height", [16, 24])
+def test_a_wrapping_bar_never_pushes_a_page_off_the_terminal(width, height):
+    """The bar lines its hotkeys up in columns only while that leaves a
+    page its rows: where it would not, the bar stays packed."""
+    session = ScriptedSession(["PAGE_DOWN", "b"], width=width, height=height)
+    _show(session, sections=_sections(8), actions=_MANY_ACTIONS, message="Saved the change.")
+    for render in "".join(session.written).split(_CLEAR)[1:]:
+        assert len(render.removesuffix("\r\n").split("\r\n")) <= height
+
+
 def test_paging_reaches_every_group_and_wraps_around():
     session = ScriptedSession(["PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b"], height=14)
     _key, page = _show(session, sections=_sections(3))

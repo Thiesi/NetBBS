@@ -260,10 +260,56 @@ def empty_state(
     return "\r\n".join(lines)
 
 
-def action_bar(options: Sequence[str], *, width: int = 80) -> str:
-    """Wrap already-styled actions as whole units at the terminal edge."""
+def action_bar(options: Sequence[str], *, width: int = 80, height: int | None = None) -> str:
+    """Wrap already-styled actions as whole units at the terminal edge.
+
+    A bar that needs more than one row is laid out in aligned columns,
+    filled in reading order, so every row's hotkeys start under the row
+    above's: wrapped rows that each started wherever the last word ended
+    were hard to scan. Each column is as wide as its widest entry, and the
+    bar takes the most columns that fit `width`.
+
+    Aligning costs rows, so it gives way to the packed rows when the
+    aligned bar would take more than a quarter of `height`
+    (`_ALIGNED_BAR_HEIGHT_SHARE`): a narrow or short screen keeps its room
+    for content. Without a `height` the bar stays packed."""
     if width < 1:
         raise ValueError("width must be >= 1")
+    packed = _packed_action_rows(options, width)
+    if len(packed) > 1 and height is not None:
+        aligned = _aligned_action_rows(options, width)
+        if aligned is not None and len(aligned) <= max(1, height // _ALIGNED_BAR_HEIGHT_SHARE):
+            return "\r\n".join(aligned)
+    return "\r\n".join(packed)
+
+
+# An aligned bar may take up to 1/N of the terminal's rows (see `action_bar`).
+_ALIGNED_BAR_HEIGHT_SHARE = 4
+
+
+def _aligned_action_rows(options: Sequence[str], width: int) -> list[str] | None:
+    """`options` in the most columns that fit `width`, row by row, each
+    column padded to its widest entry; `None` when even one column is too
+    narrow for an entry (the packed rows cut nothing either)."""
+    count = len(options)
+    widths = [visible_width(option) for option in options]
+    for columns in range(count, 0, -1):
+        column_widths = [max(widths[index] for index in range(column, count, columns)) for column in range(columns)]
+        if sum(column_widths) + 2 * (columns - 1) > width:
+            continue
+        rows = []
+        for start in range(0, count, columns):
+            cells = []
+            for column, option in enumerate(options[start : start + columns]):
+                last = column == columns - 1 or start + column == count - 1
+                cells.append(option if last else option + " " * (column_widths[column] - widths[start + column]))
+            rows.append("  ".join(cells))
+        return rows
+    return None
+
+
+def _packed_action_rows(options: Sequence[str], width: int) -> list[str]:
+    """Today's packing: as many whole entries per row as fit."""
     lines: list[str] = []
     current: list[str] = []
     current_width = 0
@@ -279,7 +325,7 @@ def action_bar(options: Sequence[str], *, width: int = 80) -> str:
         current_width += separator_width + option_width
     if current:
         lines.append("  ".join(current))
-    return "\r\n".join(lines)
+    return lines
 
 
 def _node_name_renderer(gradient: str, *, bold: bool) -> Callable[[str], str]:
@@ -732,5 +778,5 @@ def menu_row(entries: list[MenuEntry], *, width: int, height: int, description_l
     happened to define it first.
     """
     if description_level == "off":
-        return action_bar([e.label for e in entries], width=width)
+        return action_bar([e.label for e in entries], width=width, height=height)
     return menu_grid([("", entries)], width=width, height=height, description_level=description_level)

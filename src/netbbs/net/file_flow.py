@@ -188,7 +188,7 @@ def _menu_row(entries: list[MenuEntry], *, width: int, height: int, description_
     edit_resource_draft`'s identical branch for why `menu_grid` alone isn't a
     byte-for-byte substitute for `action_bar`'s packed row at the off level."""
     if description_level == "off":
-        return action_bar([e.label for e in entries], width=width)
+        return action_bar([e.label for e in entries], width=width, height=height)
     return menu_grid([("", entries)], width=width, height=height, description_level=description_level)
 
 

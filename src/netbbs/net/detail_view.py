@@ -94,19 +94,30 @@ async def show_detail(
             # actions keep every letter.
             paging = [menu_key("<", " Prev"), menu_key(">", " Next")]
             labels = [*labels[:-1], *paging, *labels[-1:]]
-        return action_bar(labels, width=width).split("\r\n")
+        # Packed, not aligned in columns, once there is no row to spare.
+        height = session.terminal_height if aligned else None
+        return action_bar(labels, width=width, height=height).split("\r\n")
 
-    def _budget(paged: bool) -> int:
+    def _room(paged: bool) -> int:
         fixed = (
             (0 if redraw_in_place else 1) + len(title_rows) + len(preamble_rows) + 2
             + len(message_rows) + len(_bar(paged)) + (1 if paged else 0) + 1
         )
-        return max(_MIN_PAGE_ROWS, session.terminal_height - fixed)
+        return session.terminal_height - fixed
 
+    def _budget(paged: bool) -> int:
+        return max(_MIN_PAGE_ROWS, _room(paged))
+
+    aligned = True
     pages = paginate(blocks, budget=_budget(False))
     if len(pages) > 1:
         pages = paginate(blocks, budget=_budget(True))
     paged = len(pages) > 1
+    if paged and _room(paged) < _MIN_PAGE_ROWS:
+        # Last, the bar's aligned columns give their rows back: a page held
+        # at the floor would run off the bottom of the screen.
+        aligned = False
+        pages = paginate(blocks, budget=_budget(paged))
     page = max(0, min(page, len(pages) - 1))
 
     while True:

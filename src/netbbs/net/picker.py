@@ -2163,7 +2163,7 @@ def _render_nav(
             ),
             key=len,
         )
-    return action_bar([e.label for e in entries], width=width)
+    return action_bar([e.label for e in entries], width=width, height=height)
 
 
 def _trailer_text(sort_label_text: str, has_refresh: bool, help_key: str = "Ctrl-H") -> str:
