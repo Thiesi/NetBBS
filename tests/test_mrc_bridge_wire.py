@@ -260,6 +260,48 @@ def test_hub_replies_reach_only_the_asker_and_are_bounded_per_caller(db, lane, l
     asyncio.run(scenario())
 
 
+def test_a_long_hub_reply_reaches_the_asker_whole(db, lane, lobby, alice):
+    """`/BBSES` lists every board connected to the hub, one line each, in one
+    burst. Each line paid the node-wide inbound allowance (40 lines), so the
+    listing stopped after its first 39 boards with nothing said. A reply to
+    one caller pays that caller's own allowance instead; room traffic still
+    pays the node-wide one."""
+    from netbbs.mrc.bridge import INBOUND_BURST
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        alice_queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        clock = _FreezableClock()
+        bridge = await _connected_bridge(db, lane, hub, fake, clock=clock)
+        try:
+            await _wait_until(lambda: len(fake.packets(body_prefix="NEWROOM:")) >= 1)
+            # Frozen, neither allowance refills: what arrives is what the
+            # allowances admit, not who won a race against the refill.
+            clock.freeze()
+            boards = 150
+            for i in range(boards):
+                await fake.send_line(f"SERVER~~~alice~~~{i + 1}  Board number {i + 1}~")
+            got = []
+            while len(got) < boards:
+                got.append(await asyncio.wait_for(alice_queue.get(), timeout=5))
+            assert [n.text for n in got] == [f"{i + 1}  Board number {i + 1}" for i in range(boards)]
+            assert all(n.kind == "reply" for n in got)
+
+            # A room flood is still cut at the node-wide allowance.
+            for i in range(INBOUND_BURST + 30):
+                await fake.send_line(f"bob~Other~lobby~~~lobby~flood {i}~")
+            await _wait_until(lambda: bridge.status().dropped_inbound >= 30)
+            clock.thaw()
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
 def test_hub_moves_renames_and_termination_are_handled(db, lane, lobby, alice):
     async def scenario():
         fake = FakeMrcHub()

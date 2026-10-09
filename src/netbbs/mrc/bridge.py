@@ -155,10 +155,12 @@ def _sender_fields(body: str, from_user: str, sender: str, message: str) -> dict
 
 
 # How many reply lines the hub may push at one caller in a burst (a
-# `LIST` or `HELP` reply is dozens of lines) and how fast the allowance
-# refills; past it, lines are counted and dropped and the caller told
-# once per burst.
-REPLY_BURST = 60
+# `LIST` or `HELP` reply is dozens of lines, `/BBSES` well over a hundred:
+# one per connected board) and how fast the allowance refills; past it,
+# lines are counted and dropped and the caller told once per burst. These
+# lines pass this allowance instead of the node-wide inbound one
+# (`_is_caller_reply`), so the caller's own bound is the one that applies.
+REPLY_BURST = 300
 REPLY_RATE_PER_SECOND = 10.0
 # CTCP: every request costs one reply, so a remote sender is bounded on
 # its own -- three quick ones, then one every two seconds.
@@ -922,14 +924,35 @@ class MrcBridge:
 
     async def _handle_raw_line(self, raw: bytes) -> None:
         # Every non-empty line pays, well-formed or not: a hub streaming
-        # garbage is bounded by the same bucket as one streaming packets.
+        # garbage is bounded by the same bucket as one streaming packets --
+        # except the hub's reply to one of this node's callers, which pays
+        # that caller's own allowance instead (`_is_caller_reply`).
         if not raw.strip():
+            return
+        packet = self._parse_raw_line(raw)
+        if packet is not None and self._is_caller_reply(packet):
+            await self._handle_packet(packet)
             return
         if not self._admit_packet():
             return
-        packet = self._parse_raw_line(raw)
         if packet is not None:
             await self._handle_packet(packet)
+
+    def _is_caller_reply(self, packet: MrcPacket) -> bool:
+        """Whether `packet` is a line of the hub's reply to something one
+        of this node's callers asked (`/BBSES`, `LIST`, `HELP` ...).
+
+        Such a reply comes as one fast burst, and the node-wide inbound
+        allowance (40 lines) cut a `/BBSES` listing of every connected
+        board off after its first 39 entries, silently. It is shown to that
+        caller alone and written nowhere, so `_deliver_reply`'s per-caller
+        allowance bounds it and says so when it cuts. A room or nick
+        correction (`USERROOM`, `USERNICK`) changes this node's state, so
+        it stays under the node-wide allowance like room traffic."""
+        if not packet.is_server or self._caller_for_nick(packet.to_user) is None:
+            return False
+        command, _params = protocol.parse_server_command(packet.body)
+        return command not in ("USERROOM", "USERNICK")
 
     async def _writer_loop(self, writer: asyncio.StreamWriter) -> None:
         while True:

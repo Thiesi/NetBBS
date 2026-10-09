@@ -11531,7 +11531,11 @@ page is not publicly reachable:
   LASTSEEN and HELP arguments 20), and the handshake names the client
   as `NETBBS/<Os.arch>/<NetBBS version>` (issue #376);
   inbound 40-line burst / 20 lines/s ahead of any database write, 4 KiB
-  line cap; a local line is split into at most three 140-character
+  line cap -- except the hub's reply to one caller (`/BBSES`, `LIST`,
+  `HELP`), shown to them alone and written nowhere, which pays that
+  caller's own 300-line burst / 10 lines/s allowance instead and says so
+  when it cuts (a `/BBSES` listing of every connected board stopped,
+  silently, after 39 boards); a local line is split into at most three 140-character
   wire chunks. An `OLDVERSION` rejection from the hub is fatal until a
   SysOp changes settings, since every retry would start a fresh
   rejected session. Bridge warnings land in the same bounded
