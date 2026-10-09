@@ -4259,24 +4259,4 @@ MIGRATIONS = [
         );
         """,
     ),
-    Migration(
-        description=(
-            "Issue #1181: migration 123's backfill used times that move on every contact, so "
-            "a peer this node had known for weeks got roughly the upgrade time as its "
-            "`first_contact_at`, which nothing moves again. The node's first verified hello "
-            "(`link_trust_subjects.first_verified_hello_at`) is when it first heard from the "
-            "peer itself: take it wherever it is earlier. Only ever lowers the value."
-        ),
-        sql="""
-        UPDATE link_peers SET first_contact_at = (
-            SELECT MIN(s.first_verified_hello_at) FROM link_trust_subjects AS s
-            WHERE s.subject_kind = 'node' AND s.node_fingerprint = link_peers.fingerprint
-        )
-        WHERE EXISTS (
-            SELECT 1 FROM link_trust_subjects AS s
-            WHERE s.subject_kind = 'node' AND s.node_fingerprint = link_peers.fingerprint
-              AND (link_peers.first_contact_at IS NULL OR s.first_verified_hello_at < link_peers.first_contact_at)
-        );
-        """,
-    ),
 ]
