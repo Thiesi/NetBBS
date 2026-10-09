@@ -222,8 +222,8 @@ async def shot_sysop_area(node: Node) -> str:
 
 
 async def shot_sysop_expired(node: Node) -> str:
-    """The same screen's E[x]pired files: what a file area's age limit took."""
-    return await _console(node, ["c", "f", "l", "0", "3", "x", "0", "1"])
+    """The same screen's [E]xpired files: what a file area's age limit took."""
+    return await _console(node, ["c", "f", "l", "0", "3", "e", "0", "1"])
 
 
 async def shot_sysop_pending(node: Node) -> str:

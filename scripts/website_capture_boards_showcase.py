@@ -327,7 +327,7 @@ async def shot_post(node: Node) -> str:
     """Reading a thread: the post, its replies, and the actions on it."""
     from netbbs.net.board_flow import _show_board
 
-    session = Walker(["2"])
+    session = Walker(["0", "2"])
     return await snapshot(session, _show_board(session, node.db, node.boards["Retro Computing"],
                                                node.people["alice"], breadcrumb=("Message boards", "Hobbies")),
                           "ail author")
@@ -375,7 +375,7 @@ async def shot_history(node: Node) -> str:
     """A moderator reading an edited post's revisions."""
     from netbbs.net.board_flow import _show_board
 
-    session = Walker(["4", "h"])
+    session = Walker(["0", "4", "h"])
     return await snapshot(session, _show_board(session, node.db, node.boards["Retro Computing"],
                                                node.people["keeper"], breadcrumb=("Message boards", "Hobbies")),
                           "Teac")
@@ -387,7 +387,7 @@ async def shot_settings(node: Node) -> str:
 
     from netbbs.net.admin_flow import admin_menu
 
-    session = Walker(["c", "m", "l", *ROW_AFTER_HOURS])
+    session = Walker(["c", "m", "l", *ROW_AFTER_HOURS, ">"])
     return await snapshot(session, admin_menu(session, node.lane, node.people["keeper"],
                                               node_controls=node_controls(node.tmp), link_context=link_context()),
                           "Name requirement")
@@ -405,7 +405,7 @@ async def shot_editor(node: Node) -> str:
     set_fullscreen_editor_enabled(node.db, node.people["alice"], True)
 
     typed = "Mine is the same Teac. Check the HD jumper: 720K needs it open."
-    session = Walker(["4", "r", "", *typed])
+    session = Walker(["0", "4", "r", "", *typed])
     return await snapshot(session, _show_board(session, node.db, node.boards["Retro Computing"],
                                                node.people["alice"], breadcrumb=("Message boards", "Hobbies")),
                           "wrote")

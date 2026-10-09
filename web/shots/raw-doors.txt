@@ -10,7 +10,7 @@
 [38;5;46m  06. [0m[38;5;220mTradeWars 2002[0m[38;5;248m - DOS 3.09, persistent galaxy.[0m
 [38;5;46m  07. [0m[38;5;220mVoidrunner[0m[38;5;248m - Native bundled space game.[0m
 
-  [[1m[38;5;46mS[0m]earch                                 [[1m[38;5;46mB[0m]ack
-[38;5;248m    Search by name[0m                       [38;5;248m    Return without picking[0m
+  [[1m[38;5;46m/[0m] Find                                 [[1m[38;5;46mB[0m]ack
+[38;5;248m    Find by name[0m                         [38;5;248m    Return without picking[0m
 or type a number to select; Ctrl-L: redraw, Ctrl-H: help
 Choice: 

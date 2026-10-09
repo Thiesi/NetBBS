@@ -296,7 +296,7 @@ async def shot_bridged(node: Node) -> str:
     node.hub.join(mapping.channel.name, ParticipantId("carrier", 902))
     await node.bridge.local_join(mapping.channel, "carrier")
     await asyncio.sleep(1.0)
-    return await _console(node, ["n", "c", "n"], "Page 2 of 2")
+    return await _console(node, ["n", "c", ">"], "Page 2 of 2")
 
 
 async def shot_settings(node: Node) -> str:

@@ -9,6 +9,6 @@
 [38;5;46m  06. [0m[38;5;220msysops[0m[38;5;248m - 9 on MRC | Running a board? Ask here[0m
 [38;5;46m  07. [0m[38;5;220mtrivia[0m[38;5;248m - 2 on MRC | Daily quiz at 20:00 UTC[0m
 
-[[1m[38;5;46mS[0m]earch  [[1m[38;5;46mB[0m]ack
+[[1m[38;5;46m/[0m] Find  [[1m[38;5;46mB[0m]ack
 or type a number to select; Ctrl-L: redraw, Ctrl-R: refresh, Ctrl-H: help
 Choice: 

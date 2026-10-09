@@ -9,5 +9,5 @@
 [38;5;46m  06. [0m[38;5;220mVoidrunner[0m[38;5;248m - Bundled: trade, fight and explore a living galaxy[0m
 [38;5;46m  07. [0m[38;5;220mWar Dialer[0m[38;5;248m - Bundled: build a phreaker crew, raid your rivals[0m
 
-[[1m[38;5;46mS[0m]earch  [[1m[38;5;46mB[0m]ack — or type a number to select; Ctrl-L: redraw, Ctrl-H: help
+[[1m[38;5;46m/[0m] Find  [[1m[38;5;46mB[0m]ack — or type a number to select; Ctrl-L: redraw, Ctrl-H: help
 Choice: 

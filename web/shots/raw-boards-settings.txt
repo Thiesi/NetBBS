@@ -1,22 +1,20 @@
 [2J[H[38;5;246mHarbor Lights[0m[38;5;246m › [0m[38;5;51mAfter Hours[0m
 [38;5;240m───────────────────────────[0m
-
-[1m[38;5;246mMESSAGE BOARD[0m
-[38;5;75m  Description:[0m      [38;5;252mGrown-up talk, verified names only[0m
-[38;5;75m  Posts:[0m            [38;5;252m0 (no posts yet)[0m
-[38;5;75m  Community:[0m        [38;5;252m(none)[0m
-
+[38;5;248m0 posts (no posts yet) · place 3 of 4 · not Linked[0m
 [1m[38;5;246mACCESS[0m
-[38;5;75m  Read level:[0m       [38;5;252m0[0m                   [38;5;75m  Write level:[0m      [38;5;252m0[0m
-[38;5;75m  Minimum age:[0m      [38;5;208m18[0m                  [38;5;75m  Name requirement:[0m [38;5;208mverified[0m
+[1m[38;5;220m> 03 Min read level:[0m      [38;5;252m0 · 5 users[0m
+[38;5;75m  04 Min write level:[0m     [38;5;248m0 · 5 users[0m
+[38;5;75m  05 Min age:[0m             [38;5;248m18[0m
+[38;5;75m  06 Name requirement:[0m    [38;5;248mverified[0m
 
-[1m[38;5;246mBEHAVIOR[0m
-[38;5;75m  Place:[0m            [38;5;252m3 of 4[0m              [38;5;75m  Moderated:[0m        [38;5;252mno[0m
-[38;5;75m  Max post age:[0m     [38;5;252munlimited[0m           [38;5;75m  Color in posts:[0m   [38;5;252mnot allowed[0m
-
-[1m[38;5;246mNETBBS LINK[0m
-[38;5;75m  Linked:[0m           [38;5;252mno[0m
-
-[[1m[38;5;46mE[0m]dit  [[1m[38;5;46mU[0m]p  [[1m[38;5;46mD[0m]own  [[1m[38;5;46mR[0m]emove  [[1m[38;5;46mP[0m]ending posts  [[1m[38;5;46mH[0m]istory
-[[1m[38;5;46mL[0m]ink this message board  [[1m[38;5;46mB[0m]ack
+  [[1m[38;5;46mU[0m]p                                     [[1m[38;5;46mH[0m]istory
+[38;5;248m    Earlier in the callers' list[0m         [38;5;248m    Its moderators and what they did[0m
+  [[1m[38;5;46mD[0m]own                                   [[1m[38;5;46mL[0m]ink this message board
+[38;5;248m    Later in the callers' list[0m           [38;5;248m    Share it via NetBBS Link[0m
+  [[1m[38;5;46mR[0m]emove                                 [[1m[38;5;46mB[0m]ack
+[38;5;248m    Permanently remove this board[0m        [38;5;248m    Return to the list[0m
+  [[1m[38;5;46mP[0m]ending posts
+[38;5;248m    Review posts awaiting approval[0m
+[38;5;248m01-12 or ↑↓ choose · Enter change · ←→ step · Ctrl-H help[0m
+[38;5;248m(Section 2 of 4: < > switches)[0m
 Choice: 
