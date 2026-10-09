@@ -1481,8 +1481,8 @@ Netmail is personal mail to an address written as `Name (zone:net/node)`.
   leaves under this BBS's address.
 - **Who receives it:** every account. Netmail for a name with no account here
   comes to you.
-- **Direct delivery:** import the network's nodelist, either from **Node → FTN
-  mail** with [N]odelist import, or with
+- **Direct delivery:** import the network's nodelist, either from **Node →
+  Echomail & netmail (FTN)** with [N]odelist import, or with
   `python -m netbbs.admin ftn-import-nodelist fsxNet FSXNET.280`. Netmail to a
   node whose nodelist entry gives a BinkP host then goes to it directly.
 - **Via the hub:** the rest goes through the hub, and so does anything a direct
