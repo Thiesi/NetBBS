@@ -370,7 +370,7 @@ def render_node_page(page: NodePage, now: datetime) -> str:
             f"<li><a class=\"mono\" href=\"{_E(url)}\" rel=\"nofollow\">{_E(url)}</a></li>" for url in page.dial_in
         ) + "</ul>"
     else:
-        dial = "<p class=\"muted\">This board publishes no dial-in address.</p>"
+        dial = "<p class=\"muted\">This node publishes no dial-in address.</p>"
     heard = (
         f"{_date(page.last_heard)} ({_ago(page.last_heard, now)})" if page.last_heard is not None else "unknown"
     )
@@ -397,16 +397,16 @@ def render_node_page(page: NodePage, now: datetime) -> str:
         f"<dt>Last heard</dt><dd>{heard}</dd>\n"
         f"<dt>Technical identity</dt><dd class=\"mono\">{_E(_grouped(page.fingerprint))}</dd>\n"
         "</dl>\n"
-        "<p class=\"note\">The technical identity is this board's permanent key. If its SysOp shows you the "
-        "same one, you are talking to the same board.</p>\n"
+        "<p class=\"note\">The technical identity is this node's permanent key. If its SysOp shows you the "
+        "same one, you are talking to the same node.</p>\n"
         "</section>\n"
-        "<section class=\"card badge\">\n<h2>For this board's own website</h2>\n"
+        "<section class=\"card badge\">\n<h2>For this node's own website</h2>\n"
         f"<p><img src=\"/~{_E(page.name)}/badge.svg\" alt=\"NetBBS Link: {_E(_badge_text(page))}\"></p>\n"
         f"<pre class=\"mono\">{_E(_badge_snippet(page))}</pre>\n"
         "</section>\n"
-        "<p class=\"about\">This board runs <a href=\"/\">NetBBS</a> and is part of NetBBS Link, the network "
+        "<p class=\"about\">This node runs <a href=\"/\">NetBBS</a> and is part of NetBBS Link, the network "
         "that carries boards, mail and chat between NetBBS systems. The facts above are what Reliable Link, "
-        "the project's own node, knows about it; the name and dial-in addresses are the board's own signed "
+        "the project's own node, knows about it; the name and dial-in addresses are the node's own signed "
         f"statement. Its SysOp chooses whether this page is shown. Updated {_date(now)} at "
         f"{now:%H:%M} UTC.</p>\n"
     )
@@ -430,7 +430,7 @@ def _badge_text(page: NodePage) -> str:
 
 def render_badge(page: NodePage) -> str:
     """A small SVG for the SysOp's own website: "NetBBS Link", since when
-    the board has been a member, and its state. It holds no text the node
+    the node has been a member, and its state. It holds no text the node
     supplied, only dates and fixed words."""
     left_text = "NetBBS Link"
     right_text = f"{_badge_text(page)} · {page.state}"
@@ -475,17 +475,17 @@ def render_index(pages: list[NodePage], now: datetime) -> str:
         )
         listing = f"<ul class=\"nodes\">{rows}</ul>\n"
     else:
-        listing = "<p class=\"muted\">No board has a page yet.</p>\n"
+        listing = "<p class=\"muted\">No node has a page yet.</p>\n"
     body = (
-        "<h1>Boards on NetBBS Link</h1>\n"
-        "<p class=\"about\">Every board with a netbbs.org name that Reliable Link, the project's own node, "
-        "has met, unless its SysOp turned its page off. It is not the whole network: boards without a "
+        "<h1>Nodes on NetBBS Link</h1>\n"
+        "<p class=\"about\">Every node with a netbbs.org name that Reliable Link, the project's own node, "
+        "has met, unless its SysOp turned its page off. It is not the whole network: nodes without a "
         f"netbbs.org name are not listed. Updated {_date(now)} at {now:%H:%M} UTC.</p>\n"
         f"{listing}"
     )
-    # The list itself stays out of search results, so a board whose SysOp
+    # The list itself stays out of search results, so a node whose SysOp
     # chose `noindex` is not indexed by its name here instead.
-    return _document("Boards on NetBBS Link", "noindex, follow", f"{SITE}/nodes/", body)
+    return _document("Nodes on NetBBS Link", "noindex, follow", f"{SITE}/nodes/", body)
 
 
 # -- writing ------------------------------------------------------------------------
