@@ -905,7 +905,7 @@ async def edit_resource_draft(
                 _field_position.reset(token)
             field_message = field_position.message if field_position else None
             continue
-        key, echoed = await _read_navigable_key_echoed(session)
+        key, echoed = await _read_navigable_key(session)
 
         if key.kind == EditorKeyKind.UP:
             if paginated:
@@ -1045,7 +1045,7 @@ async def edit_resource_draft(
             # A field's number (issue #1158): two digits, or one and Enter.
             number = await read_row_number(
                 session, choice, row_count=len(fields), first_echoed=echoed,
-                read=lambda: _read_navigable_key_echoed(session),
+                read=lambda: _read_navigable_key(session),
             )
             if number is None:
                 continue
@@ -1130,13 +1130,7 @@ async def edit_resource_draft(
             await fields[field_index].prompt(session, lane, draft)
 
 
-async def _read_navigable_key(session: Session) -> EditorKey:
-    """`_read_navigable_key_echoed` without the echo flag."""
-    key, _ = await _read_navigable_key_echoed(session)
-    return key
-
-
-async def _read_navigable_key_echoed(session: Session) -> tuple[EditorKey, bool]:
+async def _read_navigable_key(session: Session) -> tuple[EditorKey, bool]:
     """Best-effort structured key read for `edit_resource_draft`'s
     arrow navigation -- falls back to the plain single-keystroke
     reader, wrapped as an `EditorKeyKind.CHAR`, for lightweight
