@@ -5996,8 +5996,11 @@ states, and every node quarantined or blocked there. The friendly name and
 validating readers the node map uses, and are remote text, escaped where they
 are written. "Known to Reliable Link since" is the first direct contact
 Reliable Link has on record (`link_peers.first_contact_at`; for a peer met
-before that column existed, the earliest time its row already held, a date by
-which Reliable Link certainly knew it); "last heard" is the node map's
+before that column existed, its first verified hello,
+`link_trust_subjects.first_verified_hello_at`, or failing that the earliest
+time its row held. The row's own times move with every contact, so on their
+own they dated a long-known peer from the upgrade, issue #1181); "last heard"
+is the node map's
 (§8.12). Reliable Link writes the caller's map as JSON with `python -m
 netbbs.admin export-node-map`, which copies a fixed list of fields from each
 entry, so a field added to the map later stays off the pages until it is
