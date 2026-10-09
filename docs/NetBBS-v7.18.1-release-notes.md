@@ -1,10 +1,33 @@
 # NetBBS v7.18.1
 
-A patch release for v7.18.0 with one fix to the node page setting, found
-while v7.18.0 was being released. **Nothing migrates:** the node database
+A patch release for v7.18.0 with two changes: paced banner and menu art now
+plays to the end at the speed the SysOp chose, with an optional time limit;
+and the node page setting stays reachable after a managed name lapses.
+**Nothing migrates:** the node database
 stays at schema 123, and every protocol, door API, save and world version is
 unchanged. Upgrading is a wheel swap and a restart; rolling back to v7.18.0
 is the reverse.
+
+## Paced art plays to the end; the time limit is your choice (PR #1180)
+
+A banner, the main menu's art or a list's art can be given a **Speed** (2400,
+9600 or 38400 bps), and NetBBS then draws it the way a modem of the day would
+have. Until now every such draw stopped after a fixed 5 seconds and dumped the
+rest at once, which cut a slow piece off mid-draw and looked broken.
+
+- **No speed** (the default): the art is drawn at once, as before.
+- **A speed:** the art now plays to the end at that speed.
+- **New: `[T]ime limit`**, next to **`[S]peed`** on each art screen (welcome
+  banner, main menu, Boards, file areas and Chat lists). It steps through
+  **off** (the default), 10, 30 and 60 seconds; past the limit the rest is
+  drawn at once. The menu shows the current setting, `[T]ime limit: off`, and
+  each change is in the audit log (`set_art_time_limit`).
+- **Any key still skips** to the end, and the key is used up, as before.
+- **Preview** plays the art with its speed and time limit, as callers see it.
+
+**If you set a speed on a large piece**, it now takes as long as that speed
+needs: a full 80x24 ANSI screen at 2400 bps takes half a minute or more. Set
+a time limit if you'd rather callers not wait for it.
 
 ## The web-page setting stays reachable after a name lapses (#1177, PR #1178)
 
@@ -33,9 +56,11 @@ Reliable Link and other nodes should run when they go live.
 
 ## Upgrade and rollback
 
-Stop NetBBS, replace the wheel and start it. No migration runs. Rolling back
-to v7.18.0 is the reverse; a page set to off stays off, since the setting
-itself is unchanged.
+Stop NetBBS, replace the wheel and start it. No migration runs; the art time
+limits are stored as node settings and start off, so paced art plays to the
+end after the upgrade. Rolling back to v7.18.0 is the reverse: v7.18.0 ignores
+the time-limit settings and caps every paced draw at 5 seconds again, and a
+page set to off stays off, since that setting itself is unchanged.
 
 ## Verification boundaries
 
@@ -45,10 +70,12 @@ itself is unchanged.
   lists the key; a rename whose new name was abandoned shows no note on the
   live page; a revoked name shows neither row nor key. Each of these fails
   without the fix.
-- **The release gate:** the full suite (`pytest -n auto`) on PR #1178's
-  first commit: 14,705 passed, 139 skipped, none failed; the
-  `timing_sensitive` tests pass 5/5. The PR's second commit (the help
-  listing and the rename note) was covered by the node-page tests (37
-  passed), not a second full suite.
+- **Paced art** is tested with a simulated clock: with no limit a long piece
+  plays to the end, a limit sends the rest at that point, a key still skips,
+  and every writer and list passes the limit on. It has not been watched in a
+  real terminal at each speed for this release.
+- **The release gate:** the full suite (`pytest -n auto`) on PR #1180's tree,
+  which includes #1178: 14,724 passed, 139 skipped, none failed; the
+  `timing_sensitive` tests pass 5/5.
 - **The node pages themselves** have still not been built from Reliable Link's
   real node map or deployed; see the v7.18.0 notes.
