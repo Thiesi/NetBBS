@@ -1,5 +1,5 @@
 """The SysOp console's FTN screens and tools (design doc §6.8, issue #1135
-slice 8): Settings → FTN networks, Node → FTN mail, a board's [E]cho,
+slice 8): Settings → FTN networks, Node → Echomail & netmail (FTN), a board's [E]cho,
 AreaFix, held packets and the nodelist CLI -- driven through the real
 console with the scripted `FakeSession` of `tests.test_admin_flow`."""
 

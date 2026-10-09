@@ -51,7 +51,7 @@ WALKS: dict[str, tuple[list[str], str]] = {
     "backup, page 2": (["f", "PAGE_DOWN"], "Backup"),
     "managed dns": (["d"], "Managed DNS"),
     "node": (["n"], "Node management"),
-    "node > chat bridge": (["n", "c"], "Chat bridge (MRC)"),
+    "node > chat bridge": (["n", "i"], "Inter-BBS chat (MRC)"),
     "users": (["u"], "Users"),
     "users > registration": (["u", "r"], "Registration"),
     "users > held names": (["u", "h"], "Held names"),

@@ -140,7 +140,7 @@ def test_status_screen_reports_retained_open_rooms_with_mrc_switched_off(db, lan
         bridge = _bridge(lane)
         await bridge.start()  # MRC disabled: no connection, sweeper still runs
         try:
-            session = FakeSession(["n", "c", "b", "b", "b"])
+            session = FakeSession(["n", "i", "b", "b", "b"])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
             # The line wraps at the terminal width; compare with the
             # wrap-inserted breaks folded back into single spaces.
@@ -170,7 +170,7 @@ def test_status_screen_reports_open_rooms(db, lane, sysop, lobby):
             await bridge.open_room("garden", "alice")
             # Paged on a 24-row terminal: open rooms and the channel table
             # are on the second page.
-            session = FakeSession(["n", "c", "PAGE_DOWN", "b", "b", "b"])
+            session = FakeSession(["n", "i", "PAGE_DOWN", "b", "b", "b"])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
             text = " ".join(_visible(_written_text(session)).split())
             assert "Open rooms: 1 of 8 open, retired after 2 idle days" in text

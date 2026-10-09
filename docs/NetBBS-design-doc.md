@@ -11528,8 +11528,8 @@ page is not publicly reachable:
   bridge to reload and reconnect; a channel's own detail screen holds
   its `[M]RC room` mapping and a `[P]ause` that keeps the mapping while
   relaying nothing — the per-bridge disable asked for above; Node ›
-  Chat bridge (MRC) shows link state, hub, last error, attempt and drop
-  counters and every bridged channel with the hub's roster, with
+  Inter-BBS chat (MRC), named as under Settings, shows link state, hub,
+  last error, attempt and drop counters and every bridged channel with the hub's roster, with
   `[R]econnect now`. Inside a bridged channel, the status line carries
   an `[MRC]` badge, `/who` and `/names` list the room's MRC users, and
   `/mrc` shows room, hub, link state and roster.

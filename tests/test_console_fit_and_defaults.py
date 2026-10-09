@@ -50,6 +50,28 @@ def test_an_inline_description_sits_on_its_entrys_line():
     assert text.strip().splitlines() == ["[C]ontent  Boards, areas and channels"]
 
 
+def test_an_inline_description_too_long_for_its_column_ends_on_a_whole_word():
+    """At 80 columns two columns leave each inline hint about 35 characters:
+    "Banners and mastheads callers see" was cut to "Banners and m"."""
+    entries = [
+        MenuEntry(label=menu_key("M", "astheads & banners"), brief="Banners and mastheads callers see"),
+        MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
+        MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Supercalifragilisticexpialidocious"),
+    ] * 4
+    rows = _ANSI.sub("", menu_grid([("", entries)], width=80, description_level="inline")).splitlines()
+    words = {
+        word
+        for entry in entries
+        for word in (entry.brief + " " + _ANSI.sub("", entry.label)).split()
+    }
+    for row in rows:
+        for cell in re.split(r"\s{2,}", row.strip()):
+            for word in cell.split():
+                assert word in words, (word, row)
+    # A hint whose first word does not fit is left out, not cut.
+    assert not any("Supercal" in row and "Supercalifragilisticexpialidocious" not in row for row in rows)
+
+
 def test_a_short_screen_falls_back_to_inline_before_hiding_descriptions():
     level, _, degraded = _degrade_description_level(
         panel=["x"] * 12, unicode_style=True, description_level="brief",

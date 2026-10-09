@@ -548,6 +548,21 @@ def _column_padding(cell: str, column_width: int) -> int:
     return max(0, column_width - visible_width(cell))
 
 
+def _whole_words(text: str, width: int) -> str:
+    """The longest run of `text`'s leading words that fits `width` display
+    columns, trailing punctuation trimmed; empty when not even the first
+    word fits."""
+    if display_width(text) <= width:
+        return text
+    fitted = ""
+    for word in text.split():
+        candidate = f"{fitted} {word}" if fitted else word
+        if display_width(candidate) > width:
+            break
+        fitted = candidate
+    return fitted.rstrip(",;:-—")
+
+
 def _entry_block_lines(entry: MenuEntry, *, description_level: str, available_width: int) -> list[str]:
     """One entry's own line(s): just the label at `"off"`, plus one
     more line for its description text (`.detailed` at the `"detailed"`
@@ -562,9 +577,12 @@ def _entry_block_lines(entry: MenuEntry, *, description_level: str, available_wi
         if not entry.brief:
             return lines
         room = available_width - visible_width(lines[0]) - 2
-        if room < 8:
+        # Whole words only: a hint cut mid-word ("Banners and m") reads as
+        # broken, and the full text is in the screen's help anyway.
+        brief = _whole_words(entry.brief, room)
+        if room < 8 or not brief:
             return lines
-        return [f"{lines[0]}  " + colored(cut_to_width(entry.brief, room), fg_color=MUTED_COLOR)]
+        return [f"{lines[0]}  " + colored(brief, fg_color=MUTED_COLOR)]
     text = entry.detailed if description_level == "detailed" and entry.detailed else entry.brief
     if text:
         description_width = max(1, available_width - len(_DESCRIPTION_INDENT))

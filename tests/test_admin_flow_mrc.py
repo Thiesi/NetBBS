@@ -1,7 +1,7 @@
 """
 SysOp-facing MRC screens in `netbbs.net.admin_flow` (issue #275):
 Settings > Inter-BBS chat (MRC), the channel detail screen's `[M]RC
-room` / `[P]ause` actions, and Node > Chat bridge (MRC) status --
+room` / `[P]ause` actions, and Node > Inter-BBS chat (MRC) status --
 driven through the real `admin_menu` with the scripted `FakeSession`
 `tests.test_admin_flow` established, and a real `MrcBridge` against the
 loopback fake hub where a live reaction (reconnect, announce) is the
@@ -218,14 +218,14 @@ def test_channel_detail_mapping_announces_present_callers_live(db, lane, sysop, 
     asyncio.run(scenario())
 
 
-# --- Node > Chat bridge (MRC) ---------------------------------------------------
+# --- Node > Inter-BBS chat (MRC) ------------------------------------------------
 
 
 def test_node_menu_status_without_a_running_bridge_says_so(db, lane, sysop):
-    session = FakeSession(["n", "c", "b", "b", "b"])
+    session = FakeSession(["n", "i", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_controls(None)))
     text = _visible(_written_text(session))
-    assert "hat bridge (MRC)" in text
+    assert "nter-BBS chat (MRC)" in text
     assert "NOT AVAILABLE HERE" in text
     assert "this console runs outside the node and can't see it" in " ".join(text.split())
 
@@ -242,7 +242,7 @@ def test_node_status_screen_reports_live_state_rooms_and_reconnects(db, lane, sy
             await _wait_state(bridge, MrcState.CONNECTED)
             # The status panel is taller than the 24-row terminal, so it is
             # paged: the bridged-channel table is reached with PgDn.
-            session = FakeSession(["n", "c", "PAGE_DOWN", "r", "b", "b", "b"])
+            session = FakeSession(["n", "i", "PAGE_DOWN", "r", "b", "b", "b"])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
             text = _normalized_visible(_written_text(session))
             assert "CONNECTED" in text
@@ -263,7 +263,7 @@ def test_node_status_screen_when_mrc_is_off(db, lane, sysop):
         bridge = _bridge(lane)
         await bridge.start()
         try:
-            session = FakeSession(["n", "c", "b", "b", "b"])
+            session = FakeSession(["n", "i", "b", "b", "b"])
             await admin_menu(session, lane, sysop, node_controls=_controls(bridge))
             text = _visible(_written_text(session))
             assert "MRC IS OFF" in text

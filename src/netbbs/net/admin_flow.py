@@ -11414,7 +11414,7 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
     while True:
         chrome = await _load_chrome(lane, actor)
         title = _detail_title(
-            session, chrome, "Chat bridge (MRC)", breadcrumb=("Node",),
+            session, chrome, "Inter-BBS chat (MRC)", breadcrumb=("Node",),
             subtitle="This node's link to the Multi Relay Chat network, live.",
         )
         mrc_bridge = node_controls.mrc_bridge
@@ -14003,11 +14003,11 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await session.write_line("")
             await _lock_and_drain_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "f":
+        elif choice == "e":
             await session.write_line("")
             await ftn_status_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
-        elif choice == "c":
+        elif choice == "i":
             await session.write_line("")
             await _mrc_status_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -14087,8 +14087,8 @@ _NODE_MENU = (
     MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
     MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
     MenuEntry(label=menu_key("S", "hutdown"), brief="Schedule a node shutdown"),
-    MenuEntry(label=menu_key("C", "hat bridge (MRC)"), brief="Inter-BBS chat link status"),
-    MenuEntry(label=menu_key("F", "TN mail"), brief="Calls, AreaFix, held packets"),
+    MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Link state, hub, errors"),
+    MenuEntry(label=menu_key("E", "chomail & netmail (FTN)"), brief="Calls, AreaFix, held packets"),
     MenuEntry(label=menu_key("B", "ack"), brief="Return to Operations"),
 )
 

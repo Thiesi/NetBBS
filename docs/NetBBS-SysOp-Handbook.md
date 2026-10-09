@@ -1430,7 +1430,7 @@ caller's opt-in and are not confidential from the network. Do not type MRC
 passwords as ordinary chat; `/mrc register`, `/mrc identify`, and the related
 password commands ask separately without echo.
 
-Use **Node → Chat bridge (MRC)** for connection state, round-trip time, errors,
+Use **Node → Inter-BBS chat (MRC)** for connection state, round-trip time, errors,
 and reconnect. Pause one channel's bridge or disable the whole bridge without
 removing local chat. MRC moderation and room rules also depend on the remote hub.
 
@@ -1463,7 +1463,7 @@ arrives over FTN is trust-evaluated.
 3. On each board that should carry an echo, use [E]cho on the board's screen
    and enter the echo's tag, such as `FSX_GEN`. Each echo goes to one board,
    and a Linked board can't carry one.
-4. Ask the hub to send those echoes. Under **Node → FTN mail**, press
+4. Ask the hub to send those echoes. Under **Node → Echomail & netmail (FTN)**, press
    [A]reaFix and enter `+FSX_GEN`, or `%LIST` to see what the hub carries. The
    hub's answer arrives in your Mail.
 
@@ -1496,10 +1496,10 @@ Some packets are held instead of tossed:
 - a packet addressed to another address;
 - a message that couldn't be stored, for example because a mailbox was full.
 
-Look at them under **Node → FTN mail** with [H]eld packets, then [R]elease
+Look at them under **Node → Echomail & netmail (FTN)** with [H]eld packets, then [R]elease
 (toss) or [D]elete each one.
 
-**Node → FTN mail** also shows each network's last call, errors, waiting
+**Node → Echomail & netmail (FTN)** also shows each network's last call, errors, waiting
 messages and recently answered calls. [P]oll now calls the hub at once.
 
 ### Not supported
