@@ -7689,7 +7689,7 @@ async def _draw_user_detail(
     if "w" in offered:
         options.append(MenuEntry(label=menu_key("W", "hen born"), brief="Correct or clear the birthdate"))
     if "e" in offered:
-        options.append(MenuEntry(label=menu_key("E", "dit profile"), brief="Their Profile: bio, blocks, settings"))
+        options.append(MenuEntry(label=menu_key("E", "dit profile"), brief="Their bio, blocks and settings"))
     if "s" in offered:
         options.append(MenuEntry(label=menu_key("S", "taff"), brief="Staff permissions, Co-SysOp preset"))
     if "i" in offered:
