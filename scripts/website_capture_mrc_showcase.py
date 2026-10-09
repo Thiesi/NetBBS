@@ -278,14 +278,14 @@ async def _console(node: Node, keys: list[str], expect: str) -> str:
 
 
 async def shot_status(node: Node) -> str:
-    """SysOp console > Node > Chat bridge (MRC): the live link."""
+    """SysOp console > Node > Inter-BBS chat (MRC): the live link."""
     await node.seat_local("alice", 901)
     await node.seat_local("bob", 900)
     # The bridge asks STATS on its five-minute roster refresh; ask now, the
     # same request, rather than wait one out.
     node.bridge._request_stats(node.bridge.nick_for("alice"), "lobby")
     await until(lambda: node.bridge.status().network_bbses is not None, 10, "the hub's STATS reply")
-    return await _console(node, ["n", "c"], "Site name")
+    return await _console(node, ["n", "i"], "Site name")
 
 
 async def shot_bridged(node: Node) -> str:
@@ -296,7 +296,7 @@ async def shot_bridged(node: Node) -> str:
     node.hub.join(mapping.channel.name, ParticipantId("carrier", 902))
     await node.bridge.local_join(mapping.channel, "carrier")
     await asyncio.sleep(1.0)
-    return await _console(node, ["n", "c", ">"], "Page 2 of 2")
+    return await _console(node, ["n", "i", ">"], "Page 2 of 2")
 
 
 async def shot_settings(node: Node) -> str:
