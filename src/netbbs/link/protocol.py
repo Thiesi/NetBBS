@@ -2399,6 +2399,8 @@ class LinkNode:
         friendly_name: str | None = None, canonical_dns_name: str | None = None,
         dial_in: list[str] | tuple[str, ...] | None = None,
         node_page: str | None = None,
+        software_version: str | None = None,
+        public_boards: list[dict] | tuple[dict, ...] | None = None,
     ) -> HelloMessage:
         """Build this node's own hello bundle. `addresses`/
         `outgoing_only`/`created_at` are the caller's to supply (node
@@ -2423,6 +2425,8 @@ class LinkNode:
             canonical_dns_name=canonical_dns_name,
             dial_in=dial_in,
             node_page=node_page,
+            software_version=software_version,
+            public_boards=public_boards,
         )
         return HelloMessage(
             root_public_key=bytes(self.identity.root.verify_key),

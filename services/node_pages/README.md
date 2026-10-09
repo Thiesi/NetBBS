@@ -11,7 +11,7 @@ runs.
 | Source | What | How |
 | --- | --- | --- |
 | The managed-DNS service's database (`MANAGED_DNS_DB_PATH`) | which fingerprint holds which name, its status, when it was registered | opened read-only (`mode=ro`), never migrated |
-| Reliable Link's node map | the caller's view of every node: name, dial-in addresses, first contact, last heard, page setting | the JSON from `python -m netbbs.admin export-node-map --output FILE` |
+| Reliable Link's node map | the caller's view of every node: name, dial-in addresses, first contact, last heard, page setting, release (major.minor) and the Linked boards its guest may read | the JSON from `python -m netbbs.admin export-node-map --output FILE` |
 
 Nothing else. The export carries no field a caller on Reliable Link cannot
 see, and the generator reads no column of the registrations table beyond

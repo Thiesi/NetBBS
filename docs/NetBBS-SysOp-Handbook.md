@@ -1344,8 +1344,11 @@ configured listeners; the service cannot check it for you.
 A node with a managed name also gets a public page at
 `https://www.netbbs.org/~<name>` once Reliable Link has met it: its name, the
 dial-in addresses it publishes, when the name was registered, how long Reliable
-Link has known it and when it was last heard. Nothing on it is more than a
-caller on Reliable Link can see, and never the address the DNS service sees.
+Link has known it and when it was last heard. It also shows which NetBBS
+release you run, as major.minor (7.17, never the patch level), and the Linked
+boards your guest account may read; with guest login off, no boards are
+listed. Nothing on it is more than a caller on Reliable Link can see, and
+never the address the DNS service sees.
 The DNS screen's **[W]eb page** steps through the three settings: shown but
 hidden from search engines (the default), shown and indexed, or off. Your node
 signs the choice into what it sends Reliable Link, so a change takes effect at

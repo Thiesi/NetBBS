@@ -4800,6 +4800,15 @@ for the default, so every older descriptor reads as the default. A reader takes
 any other value as `"off"`, since a claim it does not understand is not consent
 to publish, and never refuses the hello over it.
 
+While the page is not `"off"`, a descriptor also carries what the page shows
+beyond the node map (issue #1171, §8.13): `software_version`, the NetBBS
+release as major.minor (`"7.17"`), and `public_boards`, the Linked boards its
+guest account may read, as `{"board_id", "name"}` with the name from the
+board's genesis, at most 24 and sorted by name. Both are omitted when empty.
+A reader drops a version that is not two small numbers and any board entry
+without a well-formed board id and a printable name of at most 64
+characters, keeps each board once, and never refuses the hello over either.
+
 The protocol logic remains transport-independent. The `aiohttp` adapter is the
 boundary translating protocol messages to real HTTP requests and responses.
 
@@ -5967,6 +5976,18 @@ which Reliable Link certainly knew it); "last heard" is the node map's
 netbbs.admin export-node-map`, which copies a fixed list of fields from each
 entry, so a field added to the map later stays off the pages until it is
 listed there.
+
+**Release and boards (issue #1171).** The page also says which NetBBS release
+the node runs, as major.minor only, and lists the Linked boards it carries
+that its guest account may read. The patch level stays off the page: it
+would tell the web which boards still run a release with a known hole. A
+board is listed only when the node's designated guest, if guest login is on
+and the account may sign in, passes the board's effective read and age gates,
+the same check a caller meets; hidden and closed boards are left out. A board
+behind a level, an age gate or an account is never named on the open web,
+and a node without guest login lists none. Both facts travel in the node's
+descriptor (§8.2) and only while its page is not off, so a SysOp who turned
+the page off publishes nothing more for it.
 
 **What it never shows.** The address the managed-DNS service last saw, which
 is where the node's operator lives as often as where the board does; the
@@ -15832,8 +15853,35 @@ another node, and the dates are about the node, not the name.
 
 **Not done, deliberately.** Free text such as a tagline, which would put remote
 prose under the project's domain; a reliability or uptime history, which reads
-as shaming for a hobbyist board that sleeps at night; software version and
-carried boards, until the descriptor publishes them.
+as shaming for a hobbyist board that sleeps at night. Software version and
+carried boards waited for the descriptor to publish them; issue #1171 below
+adds both.
+
+### Issue #1171 — release and guest-readable boards on node pages — decided
+
+Follow-up to issue #1165. Normative description: §8.13, and §8.2 for the
+fields.
+
+**Decision 1 — major.minor, never the patch level.** "Runs NetBBS 7.17" tells a
+visitor what the board can do. "7.17.1" would also tell anyone scanning the
+pages which boards have not taken a security fix. Rejected: the full version.
+
+**Decision 2 — only boards the node's guest may read.** A board's name can say
+more than its SysOp wants on the open web, and a board behind a level, an age
+gate or an account is not open to the public anyway. The guest account is the
+node's own statement of what a stranger may read (§4.6), so the check is the
+read and age gate a guest meets, not a new setting. Rejected: every carried
+board, and a per-board publish flag, which would be one more setting for the
+same answer.
+
+**Decision 3 — nothing extra while the page is off.** The two fields ride the
+descriptor, which every peer sees, so a SysOp who turned the page off would
+otherwise still publish them network-wide for nobody's benefit.
+
+**Decision 4 — the genesis name, not the local one.** A carried board can have a
+different local name on each node (§9.3, issue #671); the page lists the
+board by the name its origin gave it, so the same board reads the same on
+every page.
 
 ### SFTP over the SSH transport — declined
 

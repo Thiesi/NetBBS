@@ -173,6 +173,47 @@ def test_hostile_text_is_escaped_and_unsafe_links_dropped():
     assert 'href="ssh://bbs.example.org:22"' in text
 
 
+def test_the_version_and_guest_readable_boards_are_shown_escaped():
+    """Issue #1171: the release as major.minor and the Linked boards a guest
+    there may read, each name escaped, each board once, nothing malformed."""
+    node = _node()
+    node["software_version"] = "7.17"
+    node["public_boards"] = [
+        {"board_id": "ab" * 32, "name": "<i>Lounge</i> & Bar"},
+        {"board_id": "ab" * 32, "name": "Same board again"},
+        {"board_id": "cd" * 32, "name": "Right‮to left"},
+        {"board_id": "not hex", "name": "Bad id"},
+        "not a board",
+        {"board_id": "ef" * 32, "name": "Retro Games"},
+    ]
+    page = _one([_reg("nibandquill")], [node])
+    assert page.software_version == "7.17"
+    assert page.boards == ("<i>Lounge</i> & Bar", "Retro Games")
+    text = render_node_page(page, NOW)
+    assert "<dt>Runs</dt><dd>NetBBS 7.17</dd>" in text
+    assert "<li>&lt;i&gt;Lounge&lt;/i&gt; &amp; Bar</li><li>Retro Games</li>" in text
+    assert "<i>" not in text
+    assert "Same board again" not in text
+    assert "Bad id" not in text
+
+
+@pytest.mark.parametrize("version", ["7.17.1", "7", "<b>7.17</b>", 7.17, None])
+def test_a_malformed_version_is_left_out(version):
+    node = _node()
+    node["software_version"] = version
+    page = _one([_reg("nibandquill")], [node])
+    assert page.software_version is None
+    assert "<dt>Runs</dt>" not in render_node_page(page, NOW)
+
+
+def test_an_export_without_the_new_fields_still_builds():
+    """An export from before issue #1171 has neither field; the page shows
+    neither line."""
+    text = render_node_page(_one([_reg("nibandquill")], [_node()]), NOW)
+    assert "<dt>Runs</dt>" not in text
+    assert "Linked boards open to guests" not in text
+
+
 def test_control_characters_are_stripped_from_the_name():
     page = _one([_reg("ctl")], [_node(name="Bad\x1b[31mBoard‮")])
     assert page.friendly_name == "Bad[31mBoard"

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from netbbs.link.dial_in import advertised_dial_in
 from netbbs.link.node_map import NodeMapEntry, build_node_map
-from netbbs.link.node_page import advertised_node_page
+from netbbs.link.node_page import advertised_node_page, advertised_public_boards, advertised_software_version
 from netbbs.storage.database import Database
 
 # Bumped when a field changes meaning or goes away; a new field does not.
@@ -41,6 +41,9 @@ def _export_entry(entry: NodeMapEntry) -> dict:
         "last_heard_at": _iso(entry.last_heard),
         "dial_in": [address.url for address in advertised_dial_in(entry.descriptor_payload)],
         "node_page": advertised_node_page(entry.descriptor_payload),
+        # Issue #1171: null and [] when the descriptor says nothing.
+        "software_version": advertised_software_version(entry.descriptor_payload),
+        "public_boards": list(advertised_public_boards(entry.descriptor_payload)),
     }
 
 

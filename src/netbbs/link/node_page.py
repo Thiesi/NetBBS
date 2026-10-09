@@ -14,10 +14,26 @@ The descriptor carries the field only when it is not the default, the same
 "omitted when empty" convention as its other optional fields. The reader,
 `advertised_node_page`, never raises and reads any other value as `"off"`:
 a claim this code does not understand is not consent to publish.
+
+Issue #1171 adds two facts the page shows, both only while the page is not
+`"off"` (a SysOp who turned the page off publishes nothing extra for it):
+
+- `software_version`: the NetBBS release as major.minor ("7.17"), never the
+  patch level, which would tell the web which boards still run a release
+  with a known hole;
+- `public_boards`: the Linked boards this node carries that its guest
+  account may read, as `{"board_id", "name"}` with the board's Link name
+  from its genesis. A node with guest login off lists none, since no board
+  there is readable without an account.
 """
 
 from __future__ import annotations
 
+import json
+import re
+from dataclasses import dataclass
+
+from netbbs import __version__
 from netbbs.config import get_config, set_config_without_commit
 from netbbs.storage.database import Database
 
@@ -67,3 +83,115 @@ def advertised_node_page(payload: object) -> str:
     if value in (NODE_PAGE_INDEXED, NODE_PAGE_OFF):
         return value
     return NODE_PAGE_OFF
+
+
+# Issue #1171 -------------------------------------------------------------
+
+MAX_PUBLIC_BOARDS = 24
+MAX_PUBLIC_BOARD_NAME = 64
+
+_VERSION_RE = re.compile(r"^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$")
+_BOARD_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class NodePageFacts:
+    """What this node's next descriptor says for its page: the SysOp's
+    choice (`None` for the default) and the facts the page shows."""
+
+    node_page: str | None = None
+    software_version: str | None = None
+    public_boards: tuple[dict, ...] = ()
+
+
+def own_software_version(version: str = __version__) -> str | None:
+    """This release as major.minor, or `None` for a version string that
+    does not start with two numbers."""
+    parts = version.split(".")
+    if len(parts) < 2:
+        return None
+    candidate = f"{parts[0]}.{parts[1]}"
+    return candidate if _VERSION_RE.match(candidate) else None
+
+
+def _usable_board_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name or len(name) > MAX_PUBLIC_BOARD_NAME or not name.isprintable():
+        return None
+    return name
+
+
+def guest_readable_linked_boards(db: Database) -> tuple[dict, ...]:
+    """The Linked boards this node carries that its guest account may read
+    right now, by the same read and age gates a caller meets, sorted by
+    name and at most `MAX_PUBLIC_BOARDS`. Hidden and closed boards are not
+    carried any more and are left out. Empty when guest login is off."""
+    from netbbs.boards.boards import get_board_by_id
+    from netbbs.communities import meets_read_gate, meets_resource_age
+    from netbbs.guest import guest_is_eligible, guest_user
+
+    guest = guest_user(db)
+    if guest is None or not guest_is_eligible(db, guest):
+        return ()
+    boards = []
+    for row in db.connection.execute(
+        "SELECT id, link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL "
+        "AND link_hidden_at IS NULL AND link_closed_at IS NULL"
+    ):
+        board = get_board_by_id(db, row["id"])
+        if board is None or not meets_read_gate(db, guest, board) or not meets_resource_age(db, guest, board):
+            continue
+        payload = json.loads(row["link_genesis_json"])["envelope"]["payload"]
+        name = _usable_board_name(payload.get("name"))
+        if name is None or not _BOARD_ID_RE.match(str(payload.get("board_id"))):
+            continue
+        boards.append({"board_id": payload["board_id"], "name": name})
+    boards.sort(key=lambda board: (board["name"].casefold(), board["board_id"]))
+    return tuple(boards[:MAX_PUBLIC_BOARDS])
+
+
+def own_node_page_facts(db: Database) -> NodePageFacts:
+    """What this node's descriptor carries for its page (see the module
+    docstring): the choice, and the facts unless the page is off."""
+    choice = get_node_page(db)
+    if choice == NODE_PAGE_OFF:
+        return NodePageFacts(node_page=NODE_PAGE_OFF)
+    return NodePageFacts(
+        node_page=descriptor_node_page(choice),
+        software_version=own_software_version(),
+        public_boards=guest_readable_linked_boards(db),
+    )
+
+
+def advertised_software_version(payload: object) -> str | None:
+    """The major.minor release an endpoint descriptor's `payload` states,
+    or `None`. Never raises; anything but two small numbers is `None`."""
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("software_version")
+    return value if isinstance(value, str) and _VERSION_RE.match(value) else None
+
+
+def advertised_public_boards(payload: object) -> tuple[dict, ...]:
+    """The guest-readable Linked boards an endpoint descriptor's `payload`
+    lists. Never raises: an entry that is not a dict with a well-formed
+    board id and a printable name of at most `MAX_PUBLIC_BOARD_NAME`
+    characters is dropped, a board id seen before is dropped, and at most
+    `MAX_PUBLIC_BOARDS` are returned in the signer's order."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("public_boards"), list):
+        return ()
+    boards: list[dict] = []
+    seen: set[str] = set()
+    for entry in payload["public_boards"]:
+        if not isinstance(entry, dict):
+            continue
+        board_id, name = entry.get("board_id"), _usable_board_name(entry.get("name"))
+        if not isinstance(board_id, str) or not _BOARD_ID_RE.match(board_id) or name is None or board_id in seen:
+            continue
+        seen.add(board_id)
+        boards.append({"board_id": board_id, "name": name})
+        if len(boards) >= MAX_PUBLIC_BOARDS:
+            break
+    return tuple(boards)
