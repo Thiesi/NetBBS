@@ -53,7 +53,7 @@ import logging
 import weakref
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from netbbs.activity import follow, is_following, record_file_area_seen, unfollow
 from netbbs.attestation import format_name_for_resource, meets_name_requirement
@@ -738,11 +738,11 @@ def _area_page_menus(
 # The wrinkle specific to this screen is that not every rejection
 # happens with the prompt still intact. `read_editor_key` does not
 # echo, so an unhandled key leaves the cursor sitting right after the
-# prompt and there is nothing to reprint -- but the keys this screen
-# *does* recognize echo themselves with a trailing newline before
-# dispatching. Those have scrolled the prompt away by the time they
-# turn out to be refusable (`o` on a page with no older files, `e`
-# where nothing is describable), so they reprint it deliberately.
+# prompt and there is nothing to reprint. A key this screen knows but
+# does not offer right now (`<` on the oldest page, `e` where nothing is
+# describable) is refused the same way, before it echoes: an accepted
+# key echoes itself with a trailing newline, and refusing one after that
+# used to leave a second `Choice: ` under the first.
 _CHOICE_PROMPT = "Choice: "
 
 
@@ -752,14 +752,6 @@ async def _write_choice_prompt(session: Session) -> None:
     # before the redraw is gone.
     await write_notices(session)
     await session.write(_CHOICE_PROMPT)
-
-
-async def _reject_after_echo(session: Session) -> None:
-    """Refuse an action whose own keystroke already echoed a newline:
-    bell, then put the prompt back, because the one that was on screen
-    has scrolled up out of reach."""
-    await session.write("\a")
-    await _write_choice_prompt(session)
 
 
 # Paging is `<` `>` on every screen (issue #1158); a hotkey read turns
@@ -835,6 +827,7 @@ async def _read_file_choice(
     session: Session,
     page: FileEntryPage,
     highlighted: int | None,
+    offered: Callable[[str], Awaitable[bool]] | None = None,
 ) -> tuple[str, FileEntry | None, int | None]:
     """Read one keystroke: a hotkey, a file-number shortcut, or cursor
     navigation.
@@ -872,7 +865,16 @@ async def _read_file_choice(
     whatever last rendered the screen (see `_CHOICE_PROMPT`). Returning
     `('none', ...)` means the screen is unchanged and the bell already
     rung here is the entire response.
+
+    `offered` says whether an action kind is on offer right now; a key
+    whose action is not is refused like an unknown key, before anything
+    echoes, so the prompt stays where it is.
     """
+
+    async def _on_offer(action):
+        if action is None or offered is None:
+            return action
+        return action if await offered(action[0]) else None
     read_editor_key = getattr(session, "read_editor_key", None)
     if read_editor_key is not None:
         try:
@@ -913,7 +915,7 @@ async def _read_file_choice(
                     return ("highlight", None, None)
                 return ("back", None, highlighted)  # Esc is Back (issue #1158)
             elif key.kind != EditorKeyKind.CHAR and page_step(key) is not None:
-                action = _key_action("<" if page_step(key) < 0 else ">", page, highlighted)
+                action = await _on_offer(_key_action("<" if page_step(key) < 0 else ">", page, highlighted))
                 if action is None:
                     await session.write("\a")
                     return ("none", None, highlighted)
@@ -928,7 +930,7 @@ async def _read_file_choice(
                     session, page, key.char, highlighted, first_echoed=False, read=_read_structured,
                 )
             elif key.kind == EditorKeyKind.CHAR and key.char:
-                action = _key_action(key.char, page, highlighted)
+                action = await _on_offer(_key_action(key.char, page, highlighted))
                 if action is None:
                     # `read_editor_key` echoes nothing, so the prompt is
                     # still intact and the bell is the whole response.
@@ -973,7 +975,7 @@ async def _read_file_choice(
             return EditorKey(EditorKeyKind.CHAR, char=await session.read_key()), True
 
         return await _numbered_download(session, page, char, highlighted, first_echoed=True, read=_read_plain)
-    action = _key_action(char, page, highlighted)
+    action = await _on_offer(_key_action(char, page, highlighted))
     if action is None:
         await session.write(reject_unhandled_key(char))
         return ("none", None, highlighted)
@@ -1228,6 +1230,37 @@ async def _show_area(
         nonlocal highlighted
         highlighted = value
 
+    async def _offered(kind: str) -> bool:
+        """Whether `kind` is on offer on the page shown now: the same
+        conditions the action bar is drawn under, checked before the key
+        echoes (see `_read_file_choice`)."""
+        if kind == "older":
+            return page.has_older and page.oldest_cursor is not None
+        if kind == "newer":
+            return page.has_newer and page.newest_cursor is not None
+        if kind == "recent":
+            return page.has_newer
+        if kind == "upload":
+            return can_write
+        # Gated on the same condition the hint is drawn under (issue
+        # #475): on a transport that cannot carry Zmodem at all, `[D]`/`[U]`
+        # already hand out browser links themselves, so `[W]` is not
+        # offered there -- and §3.5 says a `Choice: ` prompt accepts
+        # exactly the keys its action bar shows.
+        if kind == "weblink":
+            return transfers is not None and supports_zmodem(session)
+        if kind == "describe":
+            return _can_describe(page)
+        if kind == "remote":
+            return show_remote_hint
+        if kind == "queue":
+            return bool(await _queue_count())
+        if kind == "pin":
+            return can_edit_any_file
+        if kind == "keep":
+            return can_edit_any_file and _keep_offered(area, page)
+        return True
+
     highlighted: int | None = None
     if not page.entries:
         header_color = await lane.run(effective_header_color_256)
@@ -1251,7 +1284,7 @@ async def _show_area(
         highlighted = jump["highlight"]
         await _render_and_advance_cursor(page, highlighted=highlighted)
         while True:
-            kind, target, new_h = await _read_file_choice(session, page, highlighted)
+            kind, target, new_h = await _read_file_choice(session, page, highlighted, _offered)
 
             if kind == "highlight":
                 highlighted = new_h
@@ -1295,9 +1328,6 @@ async def _show_area(
                     continue
                 return
             elif kind == "upload":
-                if not can_write:
-                    await _reject_after_echo(session)
-                    continue
                 if await _handle_upload(
                     session, lane, area, user, link_context=link_context, transfers=transfers
                 ) is None:
@@ -1318,15 +1348,6 @@ async def _show_area(
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "weblink":
-                # Gated on the same condition the hint is drawn under
-                # (issue #475): on a transport that cannot carry Zmodem
-                # at all, `[D]`/`[U]` already hand out browser links
-                # themselves, so `[W]` is not offered there -- and §3.5
-                # now says a `Choice: ` prompt accepts exactly the keys
-                # its action bar shows.
-                if transfers is None or not supports_zmodem(session):
-                    await _reject_after_echo(session)
-                    continue
                 await _transfer_link_screen(
                     session, lane, user, area, page,
                     highlighted=highlighted, can_write=can_write, transfers=transfers,
@@ -1334,9 +1355,6 @@ async def _show_area(
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "describe":
-                if not _can_describe(page):
-                    await _reject_after_echo(session)
-                    continue
                 described = await _handle_describe(
                     session, lane, area, user, _describe_candidates(page),
                     highlighted=highlighted, can_edit_any_file=can_edit_any_file,
@@ -1363,44 +1381,26 @@ async def _show_area(
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "remote":
-                if not show_remote_hint:
-                    await _reject_after_echo(session)
-                    continue
                 await _browse_remote_files(session, lane, area, user, link_context)
                 return
             elif kind == "back":
                 break
             elif kind == "older":
-                if not page.has_older or page.oldest_cursor is None:
-                    # Every recognized key echoes itself with a newline
-                    # before dispatching, so one refused at the edge of
-                    # the listing has already scrolled the prompt away.
-                    await _reject_after_echo(session)
-                    continue
                 page = await lane.run(list_files_page, area, user, before=page.oldest_cursor, with_pinned=True)
                 highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "newer":
-                if not page.has_newer or page.newest_cursor is None:
-                    await _reject_after_echo(session)
-                    continue
                 page = await lane.run(list_files_page, area, user, after=page.newest_cursor, with_pinned=True)
                 highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "recent":
-                if not page.has_newer:
-                    await _reject_after_echo(session)
-                    continue
                 page = await lane.run(list_files_page, area, user, with_pinned=True)
                 highlighted = None
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "queue":
-                if not await _queue_count():
-                    await _reject_after_echo(session)
-                    continue
                 listed = (await lane.run(count_visible_files, area))[0]
                 await _open_queue()
                 # What `[E]` could reach has changed with the decisions
@@ -1428,9 +1428,6 @@ async def _show_area(
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind in ("pin", "keep"):
-                if not can_edit_any_file or (kind == "keep" and not _keep_offered(area, page)):
-                    await _reject_after_echo(session)
-                    continue
                 candidates, cursor = page, highlighted
                 if kind == "keep" and area.max_file_age_days is None:
                     # Where files no longer expire, [K]eep only undoes a

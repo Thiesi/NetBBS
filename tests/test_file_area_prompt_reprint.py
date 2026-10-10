@@ -6,12 +6,13 @@ A caller leaning on Enter in a file area used to get
     Choice: Choice: Choice: ...
 
 marching across the line, because the key reader wrote the prompt
-itself and the loop called it once per keystroke. These tests hold the
-two halves of the rule apart: a key that changes nothing leaves the
-screen exactly as it was, and an action whose own echo consumed the
-prompt line puts it back.
+itself and the loop called it once per keystroke. The rule these tests
+hold: a key that changes nothing leaves the screen exactly as it was.
+That covers a key the screen knows but does not offer right now, such
+as `<` on the oldest page: it is refused before it echoes, where it
+used to echo a newline and then put a second `Choice: ` under the first.
 
-Both halves are checked on both of the screen's input paths: the
+The rule is checked on both of the screen's input paths: the
 editor-key path (arrows and a cursor) and the plain `read_key()`
 fallback a transport without editor keys gets. The screen no longer
 reads typed lines at all, so there is no third dialect to check.
@@ -150,16 +151,19 @@ def test_rejected_keys_never_run_prompts_together_on_one_line(tmp_path, monkeypa
     db.close()
 
 
-def test_nav_key_refused_at_the_edge_reprints_the_prompt(tmp_path, monkeypatch):
-    """The other half of the rule: `<` echoes itself and a newline
-    before this screen discovers there is no older page, so the prompt
-    it scrolled away has to come back."""
+def test_nav_key_refused_at_the_edge_leaves_the_prompt_alone(tmp_path, monkeypatch):
+    """`<` on the oldest page and `>` on the newest are not on offer, so
+    they are refused like any key the screen does not handle: a bell,
+    nothing echoed, and the one prompt still the live one."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, monkeypatch=monkeypatch)
 
     keys = [
         EditorKey(EditorKeyKind.CHAR, char="<"),  # no older page exists
+        EditorKey(EditorKeyKind.CHAR, char=">"),  # nor a newer one
+        EditorKey(EditorKeyKind.PAGE_UP),
+        EditorKey(EditorKeyKind.PAGE_DOWN),
         EditorKey(EditorKeyKind.CHAR, char="b"),
     ]
     session = FakeInteractiveSession(editor_keys=keys)
@@ -167,9 +171,9 @@ def test_nav_key_refused_at_the_edge_reprints_the_prompt(tmp_path, monkeypatch):
 
     asyncio.run(_show_area(session, lane, area, user))
 
-    # One from the initial render, one put back after the refusal.
-    assert _prompt_count(session) == 2
-    assert "\a" in session.output
+    assert _prompt_count(session) == 1
+    assert session.output.count("\a") == 4
+    assert "<\n" not in session.output and ">\n" not in session.output
 
     lane.close()
     db.close()
@@ -197,16 +201,10 @@ def test_unhandled_key_without_editor_support_leaves_the_prompt_alone(tmp_path, 
     db.close()
 
 
-def test_refused_hotkey_without_editor_support_reprints_the_prompt(tmp_path, monkeypatch):
-    """The other half, again without editor keys: `<` is a key this
-    screen does handle, so it echoes a newline before the screen
-    discovers there is no older page. That scrolled the prompt away,
-    so the refusal puts it back.
-
-    This pair is what the old `/frobnicate`-style "unknown command
-    reprints the prompt" test was proving before the screen stopped
-    reading typed lines: a deliberate act that failed on its own terms
-    owes the caller a fresh prompt, a stray keystroke does not."""
+def test_refused_hotkey_without_editor_support_leaves_the_prompt_alone(tmp_path, monkeypatch):
+    """The same without editor keys: `read_key()` has echoed the `<`
+    itself, so the refusal erases it and bells, and no newline or second
+    prompt follows."""
     db_path = tmp_path / "node.db"
     db = Database(db_path)
     area, user = _setup_area(db, monkeypatch=monkeypatch)
@@ -216,9 +214,8 @@ def test_refused_hotkey_without_editor_support_reprints_the_prompt(tmp_path, mon
 
     asyncio.run(_show_area(session, lane, area, user))
 
-    # One from the initial render, one put back after the refusal.
-    assert _prompt_count(session) == 2
-    assert "\a" in session.output
+    assert _prompt_count(session) == 1
+    assert "\b \b\a" in session.output
 
     lane.close()
     db.close()
