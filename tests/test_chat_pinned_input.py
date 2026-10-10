@@ -763,6 +763,78 @@ def test_resize_within_the_pinned_range_clears_the_stale_row_instead_of_leaving_
     assert "\x1b[2J\x1b[H\x1b[1;37r" in text  # clear_screen() + set_scroll_region(1, 40 - 3)
 
 
+def test_a_resize_draws_the_conversation_again_after_clearing_the_screen(
+    lane, hub, presence, mailbox, channel, alice
+):
+    """Reported from an MRC room: maximizing an 80x24 window repainted the
+    status line at the new size, but the chat above it stayed blank. The
+    resize clears the screen to rebuild the pinned rows, and nothing drew
+    the conversation again. The lines shown before the resize now follow
+    that clear."""
+
+    class _RealLines(_LiveTypingSession):
+        # Lines go through `Session.write_line`, as on every transport, so
+        # the chat's line record sees them.
+        write_line = Session.write_line
+
+    async def scenario():
+        session = _RealLines()
+        task = asyncio.create_task(
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice)
+        )
+        await asyncio.sleep(0.05)
+        session.feed("before the resize")
+        session.feed_enter()
+        await session.wait_for_output("before the resize", count=2)
+
+        session.terminal_height = 40
+        session.feed("after")
+        session.feed_enter()
+        await asyncio.sleep(0.05)
+
+        session.feed("/quit")
+        session.feed_enter()
+        await asyncio.wait_for(task, timeout=2)
+        return session
+
+    session = asyncio.run(scenario())
+    text = session.output
+    rebuilt = text.rindex("\x1b[2J\x1b[H\x1b[1;37r")
+    after_clear = text[rebuilt:]
+    # The join line and the line typed before the resize, drawn again
+    # above the line typed after it.
+    assert "Joined" in after_clear
+    assert after_clear.index("before the resize") < after_clear.index("after")
+    # Recording stops with the chat.
+    assert session.line_transcript is None
+
+
+def test_replayed_lines_fit_the_new_size_and_carry_no_cursor_controls():
+    """Only the newest lines that fit are drawn, wrapped at the new width,
+    with colour kept and every cursor move, clear and bell taken out."""
+    from collections import deque
+
+    class _Sized:
+        terminal_width = 40
+        line_transcript = deque([
+            "\x1b[2J\x1b[Hold heading",
+            "\x07" + colored("private", fg_color=SELF_COLOR),
+            "word " * 12,
+            "newest",
+        ])
+
+    rows = chat_flow._replay_transcript(_Sized(), 4).split("\r\n")[:-1]
+    # "word " * 12 wraps to two rows at 40 columns; with "newest" and the
+    # private line that is four rows, so the heading is left out.
+    assert len(rows) == 4
+    assert not any("old heading" in row for row in rows)
+    assert rows[0] == colored("private", fg_color=SELF_COLOR)
+    assert rows[-1] == "newest"
+    joined = "".join(rows)
+    assert "\x07" not in joined and "\x1b[2J" not in joined and "\x1b[H" not in joined
+    assert chat_flow._replay_transcript(_Sized(), 0) == ""
+
+
 # -- Session.pinned_notice_hook (out-of-band notices, e.g. shutdown) --------
 
 

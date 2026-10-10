@@ -72,6 +72,7 @@ import datetime
 import json
 import re
 import sqlite3
+from collections import deque
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
@@ -4783,6 +4784,9 @@ async def _print_and_redraw_input(
     if height < _PINNED_UI_MIN_HEIGHT:
         return
     scroll_bottom = height - _PINNED_ROWS
+    transcript = getattr(session, "line_transcript", None)
+    if transcript is not None:
+        transcript.append(text)
     wrapped = wrap_terminal_text(text, session.terminal_width)
     await session.write(
         set_scroll_region(1, scroll_bottom)
@@ -4819,6 +4823,43 @@ async def _enter_content_region(session: Session, height: int) -> None:
         return
     scroll_bottom = height - _PINNED_ROWS
     await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1))
+
+
+# How many lines a chat keeps to draw again after a resize: more than the
+# tallest terminal shows, so a maximized window fills from history.
+_TRANSCRIPT_LINES = 500
+
+# Everything in a recorded line that is not text or colour: cursor moves,
+# clears and the bell. Drawn again, they would move the cursor, wipe the
+# screen (a heading drawn with redraw-in-place starts with a clear) or ring.
+_REPLAY_CONTROLS = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-ln-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[78]|\x07"
+)
+
+
+def _new_transcript() -> deque[str]:
+    return deque(maxlen=_TRANSCRIPT_LINES)
+
+
+def _replay_transcript(session: Session, rows: int) -> str:
+    """The newest of the chat's recorded lines that fit in `rows`,
+    wrapped at the terminal's current width, each ending in CRLF.
+
+    Written where the next line would go, they scroll into place the same
+    way the lines did when they first arrived. A resize clears the screen
+    to rebuild the pinned rows; without this the conversation above them
+    was lost, and a caller who maximized the window saw an empty chat."""
+    transcript = getattr(session, "line_transcript", None)
+    if not transcript or rows < 1:
+        return ""
+    width = session.terminal_width
+    shown: list[str] = []
+    for text in reversed(transcript):
+        cleaned = _REPLAY_CONTROLS.sub("", text)
+        shown[:0] = wrap_terminal_text(cleaned, width).split("\r\n")
+        if len(shown) >= rows:
+            break
+    return "".join(row + "\r\n" for row in shown[-rows:])
 
 
 @dataclass
@@ -4891,8 +4932,10 @@ class _PinnedUIState:
         resized_in_place = now_active and self.active and height != self.last_height
         if now_active != self.active or resized_in_place:
             if now_active:
+                scroll_bottom = height - _PINNED_ROWS
                 await session.write(
-                    clear_screen() + set_scroll_region(1, height - _PINNED_ROWS)
+                    clear_screen() + set_scroll_region(1, scroll_bottom)
+                    + move_cursor(scroll_bottom, 1) + _replay_transcript(session, scroll_bottom - 1)
                 )
                 await _repaint_status_line(
                     session, lane, hub, presence, channel, user,
@@ -4904,7 +4947,10 @@ class _PinnedUIState:
                     accent_color=self.accent_color, unicode_style=self.unicode_style,
                 )
             else:
-                await session.write(reset_scroll_region() + clear_screen())
+                await session.write(
+                    reset_scroll_region() + clear_screen() + move_cursor(height, 1)
+                    + _replay_transcript(session, height - 1)
+                )
             self.active = now_active
         self.last_height = height
         # Return the same validated height used for this state transition.
@@ -5156,6 +5202,7 @@ async def _chat_loop(
             truecolor=truecolor,
             mrc_bridge=mrc_bridge,
         )
+        session.line_transcript = _new_transcript()
         if pinned_ui_enabled:
             await session.write(clear_screen() + set_scroll_region(1, initial_height - _PINNED_ROWS))
 
@@ -5981,6 +6028,7 @@ async def _chat_loop(
         # notice call back into closures capturing this session's own
         # now-defunct `lock`/`live_buffer`/`channel`/`user`.
         session.pinned_notice_hook = None
+        session.line_transcript = None
         # `pinned_ui.active` (GitHub issue #46), not the entry-time
         # `pinned_ui_enabled` local -- a resize during the session may
         # have changed which regime was actually active by the time
@@ -6194,7 +6242,11 @@ class _DirectChatPinnedUIState:
         resized_in_place = now_active and self.active and height != self.last_height
         if now_active != self.active or resized_in_place:
             if now_active:
-                await session.write(clear_screen() + set_scroll_region(1, height - _PINNED_ROWS))
+                scroll_bottom = height - _PINNED_ROWS
+                await session.write(
+                    clear_screen() + set_scroll_region(1, scroll_bottom)
+                    + move_cursor(scroll_bottom, 1) + _replay_transcript(session, scroll_bottom - 1)
+                )
                 await _repaint_direct_chat_status_line(
                     session, user, other_user, presence,
                     accent=self.accent_color,
@@ -6207,7 +6259,10 @@ class _DirectChatPinnedUIState:
                     unicode_style=self.unicode_style,
                 )
             else:
-                await session.write(reset_scroll_region() + clear_screen())
+                await session.write(
+                    reset_scroll_region() + clear_screen() + move_cursor(height, 1)
+                    + _replay_transcript(session, height - 1)
+                )
             self.active = now_active
         self.last_height = height
         return height if self.active else None
@@ -6250,6 +6305,7 @@ async def run_direct_chat_loop(
             unicode_style=unicode_style,
             truecolor=effective_tc,
         )
+        session.line_transcript = _new_transcript()
         if pinned_ui_enabled:
             await session.write(clear_screen() + set_scroll_region(1, initial_height - _PINNED_ROWS))
 
@@ -6391,6 +6447,7 @@ async def run_direct_chat_loop(
                 pass
     finally:
         session.pinned_notice_hook = None
+        session.line_transcript = None
         if pinned_ui is not None and pinned_ui.active:
             try:
                 await session.write(reset_scroll_region() + clear_screen())
