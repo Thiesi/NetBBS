@@ -3094,6 +3094,14 @@ to go to and overwrote the line. Tab completion edits the line and the window
 redraws, and the repaint after an incoming message or a status update draws the
 same window around the cursor, not the head of the line.
 
+A resize keeps the conversation on screen. When the height changes, chat clears
+the screen to rebuild its scroll region and pinned rows at the new size, and
+then draws again the newest lines it has shown, rewrapped at the new width, as
+many as the content area holds. It keeps the last 500 lines for this, with
+their colour but without cursor moves, clears or the bell. Before, the clear
+left the content area blank: a caller who maximized the window saw the status
+line move and the chat vanish.
+
 A line from MRC is marked by an `[MRC]` badge in front of it, and its sender is
 `nick@site`: the nick in its MRC color, the `@` muted, the site in a color of
 its own that a linked node never uses (`MRC_SITE_COLOR`). Stored rows keep

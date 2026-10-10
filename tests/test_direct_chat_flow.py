@@ -630,6 +630,52 @@ def test_partial_input_survives_incoming_direct_chat_output_and_resize(tmp_path)
         database.close()
 
 
+def test_a_resize_draws_the_direct_chat_again_after_clearing_the_screen(tmp_path):
+    """The direct-chat side of the channel fix: a resize clears the screen
+    to rebuild the pinned rows, and the conversation is drawn again after
+    it rather than left blank."""
+    from netbbs.rendering import clear_screen, set_scroll_region
+    from tests.test_chat_pinned_input import _LiveTypingSession
+
+    database = Database(tmp_path / "node.db")
+    try:
+        alice = create_user(database, "alice", password="hunter2", user_level=10)
+        bob = create_user(database, "bob", password="hunter2", user_level=10)
+
+        async def scenario():
+            hub = ChatHub()
+            room_token = "resize-replay"
+            room = f"{chat_flow._DM_CHANNEL_PREFIX}{room_token}"
+            peer_id = chat_flow.ParticipantId(username=bob.username, session_key=99)
+            hub.join(room, peer_id)
+            session = _LiveTypingSession()
+            task = asyncio.create_task(
+                chat_flow.run_direct_chat_loop(session, hub, PresenceRegistry(), alice, bob, room_token)
+            )
+            await _run_until(lambda: hub.participant_count(room) == 2)
+
+            say = lambda text: chat_flow._render_direct_chat_message(bob.username, text, self_message=False)
+            await hub.broadcast(room, say("said before"), exclude={peer_id})
+            await _run_until(lambda: "said before" in session.output)
+
+            session.terminal_height = 40
+            await hub.broadcast(room, say("said after"), exclude={peer_id})
+            await _run_until(lambda: "said after" in session.output)
+
+            session.feed("/close")
+            session.feed_enter()
+            await asyncio.wait_for(task, timeout=2)
+            return session
+
+        session = asyncio.run(scenario())
+        output = session.output
+        after_clear = output[output.rindex(clear_screen() + set_scroll_region(1, 37)):]
+        assert after_clear.index("said before") < after_clear.index("said after")
+        assert session.line_transcript is None
+    finally:
+        database.close()
+
+
 def test_close_works_without_pinned_ui(tmp_path):
     database = Database(tmp_path / "node.db")
     try:

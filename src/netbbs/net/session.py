@@ -16,6 +16,7 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -311,6 +312,14 @@ class Session(ABC):
     #: and clears it again on exit so a stale closure never lingers past
     #: the chat session that captured it.
     pinned_notice_hook: Callable[[str], Awaitable[None]] | None = None
+
+    #: The lines a chat has written, oldest first, while one is open: every
+    #: `write_line` appends its text here when this is set. A resize makes
+    #: chat clear the screen to rebuild its pinned rows, and it draws the
+    #: newest of these lines again so the conversation stays on screen.
+    #: Chat sets it with a bounded `deque` and clears it on exit, the way it
+    #: does `pinned_notice_hook`.
+    line_transcript: deque[str] | None = None
 
     #: True while a binary protocol (Zmodem) owns the byte stream: its
     #: frames are not terminal output and must not reach the screen copy.
@@ -689,6 +698,8 @@ class Session(ABC):
         terminal clients, so there's no reason for subclasses to
         override this.
         """
+        if self.line_transcript is not None:
+            self.line_transcript.append(text)
         await self.write(wrap_terminal_text(text, self.terminal_width) + "\r\n")
 
     @abstractmethod
