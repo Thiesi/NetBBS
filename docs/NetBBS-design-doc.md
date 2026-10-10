@@ -16181,6 +16181,139 @@ node.
 - CP437 when the text fits, UTF-8 otherwise, named by `^ACHRS`;
 - file echoes, file requests, hub mode and QWK out of scope.
 
+### Issue #1208 — chat bots — decided
+
+The issue scoped chat bots: something that gives a node personality without
+compromising Link's openness or its callers' privacy. The maintainer decided
+the design on 2026-10-10 and 2026-10-11; implementing it is separate work.
+
+**Grounding.** Door output already speaks in chat without being a person
+(issue #520):
+- it uses a label, `<Name>.door`, that is not an account, and the username
+  validator reserves the suffix;
+- `/mute` works on it;
+- it is held to 30 lines an hour;
+- it is refused in MRC-bridged channels, and a Linked channel needs the
+  SysOp's confirmation first.
+
+A peer's door line is recognized by the same suffix, both live
+(`x.door@Node`) and as a stored line whose authenticated author is `x.door`
+(`_is_door_line`). Bots reuse this model.
+
+**Decision 1 (locked in): a house bot built on an open bot API.** NetBBS gets
+a bot API, and the bot that ships with it uses that API like any other bot.
+- **Rejected: a bot built into NetBBS only.** Every new ability would need a
+  release, and SysOps could not add their own.
+- **Rejected: one bot for the whole network.** It needs a central host on a
+  mesh that has none, and that host's operator would see every node's chat.
+  MRC operators also frown on bots.
+
+**Decision 2 (locked in): a bot is never taken for a person.**
+- **Name.** It speaks as `<Name>.bot`, a label that is not an account, and
+  the suffix is reserved as `.door` is.
+- **Marking.** It carries a `[BOT]` badge, has its own entry in `/who` and
+  `/names`, and the status line counts it apart from people
+  (`4 online (1 bot)`). Scrollback records it as a bot, so replay marks it
+  too.
+- **Control.** Moderators can `/mute` it. The SysOp has a kill switch for
+  each bot and one for all of them. NetBBS enforces a per-channel rate limit
+  that a bot cannot opt out of.
+- **Peers.** A peer's bot line is recognized by its suffix, the way a door
+  line is. A person on an older peer whose name ends in `.bot` would be shown
+  as a bot; the same edge already exists for `.door`, and it is accepted.
+
+**Decision 3 (locked in): where a bot may speak.**
+- **Local channels:** the default.
+- **Linked channels:** only after the SysOp confirms it for that channel.
+- **MRC-bridged channels:** refused. Hub rules, and the rule never to send
+  the hub a request shape it does not document, make bot traffic there
+  unsafe.
+- **A per-channel bot setting:** *all bots*, *only this node's own*, or
+  *none*. The SysOp or the channel's moderators set it. In a Linked channel
+  each node decides what it shows, so no SysOp is made to carry another
+  node's bot.
+
+**Decision 4 (locked in): the same rules for every bot.** Scopes (Decision 5)
+are granted by the SysOp. They never depend on where a bot's code came from.
+The bot that ships with NetBBS gets no privilege that others lack. What
+protects callers is consent and transparency, and a code privilege would
+add nothing: NetBBS is open source, and a SysOp can change its chat code.
+
+**Decision 5 (locked in): the bot API.**
+- **Process.** A bot is an external program that NetBBS starts and
+  supervises, like a native door. A crash restarts it with backoff and never
+  takes the node down.
+- **Protocol.** JSON lines over stdin and stdout, versioned as
+  `BOT_API_VERSION`.
+  - NetBBS sends events: a line, a join or a leave, a new post or file in an
+    area the bot watches, and a timer tick.
+  - The bot sends actions: say a line in a channel, reply to a user, and read
+    or write its own state.
+  - The door hook's file drop is rejected for this: a bot has to receive
+    events as they happen.
+- **Scopes,** which the SysOp grants per bot and per channel:
+  - `addressed`, the default: the bot sees only lines that name it or use its
+    command prefix;
+  - `channel`: everything said in the channel;
+  - `events`: posts, files, joins and leaves.
+
+  A grant of `channel` comes with a warning. While a bot holds it, the
+  channel's heading and `/who` say that the bot reads the channel.
+- **Memory.** Each bot has a store of its own under `<db>.bots/<name>/`,
+  mirroring doors' `<db>.doors/<name>/`, and backups include it.
+
+**Decision 6 (locked in): the house bot, `Baud`.**
+- **Off by default.** The SysOp switches it on, chooses its channels and may
+  rename it. A node can run several instances, each with its own name,
+  channels, temperament, limits and memory.
+- **Temperament.** A few presets shape its fixed phrases. They need no
+  language model.
+- **Abilities:**
+  - `!help`;
+  - `!seen`;
+  - node statistics;
+  - reminders;
+  - greetings and announcements of new posts and files, each switched on
+    separately.
+- **Scope.** `!seen`, greetings and announcements come from facts the node
+  already holds, through `events` and node queries. Baud therefore runs with
+  `addressed` alone unless the SysOp grants more.
+
+**Decision 7 (locked in): conversation through a language model is narrow
+and off by default.**
+- **Consent.** Only the SysOp's explicit choice turns it on, after being told
+  what is sent where.
+- **Provider.** Any endpoint that speaks the OpenAI-compatible API. A model on
+  the SysOp's own machine (Ollama, llama.cpp) is offered first: no chat
+  leaves the node and nothing costs money per request.
+- **What the model sees.** Only lines addressed to the bot, plus at most N
+  lines of context; the SysOp sets N, and it may be 0. Ordinary chat is never
+  sent.
+- **Callers are told.** The first time a caller addresses it, the bot says
+  once what is sent and to whom, before anything is sent.
+- **Limits.** NetBBS enforces these on top of the provider's own:
+  - a node budget per day and per month;
+  - a per-user daily quota;
+  - a per-user cooldown;
+  - a per-channel rate;
+  - a minimum level to use it, with guests excluded by default;
+  - a cap on reply length.
+
+  A limit that is hit is said in a reply, never shown as silence.
+- **Accounting.**
+  - **Tokens, always.** NetBBS counts the token usage each response reports.
+  - **Money, optional.** It is worked out from prices the SysOp enters per
+    million input tokens and per million output tokens. There is no standard
+    API that reports prices.
+  - **Local models** need token or rate limits only.
+  - **The console** shows spending, users and limits hit.
+- **Secrets and logs.**
+  - The API key is stored as a secret, the way FTN passwords are.
+  - Prompts are not logged unless the SysOp turns logging on, and callers are
+    told when it is on.
+- **Persona.** NetBBS ships a default system prompt for Baud, and the SysOp
+  can edit it.
+
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
