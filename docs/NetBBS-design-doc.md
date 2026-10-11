@@ -11606,7 +11606,8 @@ age, so reset never renews newcomer protection. Ownership and the latest 100 Sys
 audit entries survive, with destructive changes and their audit record in the same
 transaction. Maintenance stays on until the SysOp explicitly reopens the world.
 
-Host metadata is either absent (an intentional unbound standalone demo) or valid.
+Host metadata is either absent (a standalone launch; the world is then
+self-owned, see §16, issue #1223) or valid.
 Unreadable, oversized, malformed or invalid identity/dimension metadata is refused
 before world creation; it never falls back to Guest. Caller messages remain clear
 and SysOp diagnostics are bounded. Commands do not activate or redeploy services.
@@ -15347,7 +15348,17 @@ present the matching `war_dialer_owner`, exactly as the world ownership rule
 above requires. A launch without one is refused, never quietly trusted, so a
 foreign BBS pointed at a NetBBS world by mistake cannot create or open rows in
 that node's user-ID namespace. Under NetBBS, `war_dialer_owner` still wins.
-Rejected:
+
+A world that is neither, an *unbound* world, is adopted on its next launch,
+because nothing in it belongs to a host. Today's standalone launches create
+such worlds; any NetBBS launch would already have bound them.
+- **A launch without `war_dialer_owner`** marks it self-owned and writes its
+  owner ID.
+- **A launch with `war_dialer_owner`** binds it to that host, exactly as a
+  first host launch does now.
+
+Either way the adoption is one transaction before any player row is read, and
+an unbound world never stays unbound past its first launch. Rejected:
 - an ID the SysOp must set, which is one more setup step for no added safety;
 - an ID derived from the drop file's BBS name, which a rename would turn into
   a lockout.
