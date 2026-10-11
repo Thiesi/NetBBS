@@ -300,7 +300,10 @@ def test_link_access_fields_are_bounded(access):
         build_bot_frame("bot_request", {"channel_id": "c", "bot": "Baud.bot", "caller": "alice", "text": "hello", "access": access})
 
 
-def test_busy_reset_and_settings_change_discard_inflight_context(db, lane, sysop, alice, channel):
+def test_busy_reset_and_settings_change_discard_inflight_context(db, lane, sysop, alice, channel, monkeypatch):
+    from types import SimpleNamespace
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(model, "time", SimpleNamespace(time=time.time, monotonic=lambda: clock["now"]))
     bot = install(db, sysop, channel, model_conversation=True)
     callers = [{"id": alice.id, "name": alice.username}]
     for name in ("bob", "carol"):
@@ -313,8 +316,13 @@ def test_busy_reset_and_settings_change_discard_inflight_context(db, lane, sysop
             for caller in callers:
                 await exchange(service, bot, channel, caller, "notice")
             control["gate"] = asyncio.Event()
+            active_key = (bot.id, str(alice.id), channel.id)
+            service.contexts[active_key].touched -= 1799
             jobs = [asyncio.create_task(exchange(service, bot, channel, c, "waiting")) for c in callers[:2]]
             await eventually(lambda: len(calls) == 2)
+            clock["now"] += 2
+            await service.upkeep()
+            assert active_key in service.contexts  # accepted input is activity, even before the reply
             with pytest.raises(BotError, match="busy"):
                 await exchange(service, bot, channel, callers[2], "third")
             await exchange(service, bot, channel, callers[0], "reset", reset=True)
@@ -325,6 +333,35 @@ def test_busy_reset_and_settings_change_discard_inflight_context(db, lane, sysop
             assert model.usage_summary(db)["day"]["tokens"] == 40
             assert not service.busy and all(not c.lines for c in service.contexts.values())
             assert "Submit again" in await exchange(service, bot, channel, callers[2], "new settings")
+    asyncio.run(run())
+
+
+def test_baud_availability_tracks_node_switch_without_losing_instance_grant(db, lane, hub, sysop, alice, channel):
+    bot = install(db, sysop, channel, model_conversation=True)
+    async def run():
+        async with provider() as (endpoint, calls, _control):
+            config = configure(db, sysop, endpoint)
+            model.save_settings(db, replace(config, enabled=False), actor=sysop, api_key="")
+            runtime = BotRuntime(lane, hub, poll_seconds=.03)
+            pid = ParticipantId(alice.username, 1)
+            queue = hub.join(channel.name, pid)
+            caller = {"id": alice.id, "name": alice.username}
+            runtime.start()
+            try:
+                await eventually(lambda: bot.id in runtime.running_ids)
+                await runtime.enqueue(bot, channel, caller, "help", pid)
+                await next_line(queue, "No language model is enabled")
+                await runtime.enqueue(bot, channel, caller, "unknown command", pid)
+                await next_line(queue, "Conversation and other abilities are not enabled")
+                for enabled in (True, False):
+                    old = runtime.workers[bot.id]
+                    model.save_settings(db, replace(config, enabled=enabled), actor=sysop, api_key="")
+                    await eventually(lambda: bot.id in runtime.running_ids and runtime.workers[bot.id] is not old)
+                    await runtime.enqueue(bot, channel, caller, "help", pid)
+                    await next_line(queue, "Conversation is enabled" if enabled else "No language model is enabled")
+                assert runtime.workers[bot.id].bot.model_conversation and not calls
+            finally:
+                await runtime.close()
     asyncio.run(run())
 
 

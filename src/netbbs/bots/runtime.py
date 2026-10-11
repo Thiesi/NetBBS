@@ -53,12 +53,14 @@ class BotRuntime:
                 self.link.start()
 
     async def _run(self) -> None:
+        from netbbs.bots.model import settings as model_settings
         try:
             await self.lane.run(reset_runtime_status)
             while True:
                 try:
                     await self.model.upkeep()
                     desired = {b.id: b for b in await self.lane.run(list_bots) if b.enabled}
+                    model_enabled = (await self.lane.run(model_settings)).enabled
                     disclosures = {}
                     for bot in desired.values():
                         for name in bot.reading_channels:
@@ -70,12 +72,13 @@ class BotRuntime:
                             await self.hub.broadcast(name, "[BOT] " + notice)
                     self.disclosures = disclosures
                     for bot_id, worker in list(self.workers.items()):
-                        if desired.get(bot_id) != worker.bot or worker.task.done():
+                        if (desired.get(bot_id) != worker.bot or worker.task.done() or
+                                worker.model_enabled != (worker.bot.model_conversation and model_enabled)):
                             await worker.stop()
                             del self.workers[bot_id]
                     for bot_id, bot in desired.items():
                         if bot_id not in self.workers:
-                            worker = _Worker(self, bot)
+                            worker = _Worker(self, bot, model_enabled=bot.model_conversation and model_enabled)
                             self.workers[bot_id] = worker
                             worker.task = asyncio.create_task(worker.run(), name=f"bot-{bot.name}")
                 except Exception:
@@ -154,8 +157,9 @@ class BotRuntime:
 
 
 class _Worker:
-    def __init__(self, owner: BotRuntime, bot: Bot):
+    def __init__(self, owner: BotRuntime, bot: Bot, *, model_enabled: bool = False):
         self.owner, self.bot = owner, bot
+        self.model_enabled = model_enabled
         self.events: asyncio.Queue = asyncio.Queue(maxsize=64)
         self.pending: dict[str, tuple] = {}
         self.announcements = {}
@@ -248,7 +252,7 @@ class _Worker:
                                "board_sources": self.bot.board_sources, "file_sources": self.bot.file_sources,
                                "announcement_channel": self.bot.announcement_channel,
                                "announce_posts": self.bot.announce_posts, "announce_files": self.bot.announce_files,
-                               "model_conversation": self.bot.model_conversation})
+                               "model_conversation": self.model_enabled})
             ready = await asyncio.wait_for(self._read(), 5)
             if ready != {"type": "ready", "version": BOT_API_VERSION}:
                 raise BotError("Bot did not acknowledge BOT_API_VERSION 1.")

@@ -309,6 +309,7 @@ class ModelService:
         if not isinstance(prompt, str) or not 1 <= len(prompt) <= 4000:
             raise BotError("Model messages must contain 1-4000 characters.")
         self.busy.add(key)
+        context.touched = now
         try:
             messages = [{"role": "system", "content": config.persona +
                          f"\nYour chat identity is {label}. Use this name when identifying yourself."}]

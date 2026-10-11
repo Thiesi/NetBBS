@@ -296,6 +296,9 @@ by `netbbs[web]`); ordinary bots need neither it nor a model server. No HTTP
 request occurs while editing settings. Enable the model service and each
 instance's **Grant model conversation** separately. Save confirms where
 addressed conversation goes. Use HTTPS for a remote provider.
+The handshake's `model_conversation` reflects both switches. Changing the
+node-wide switch restarts granted instances so their help and command handling
+track availability; their persisted grants and reminder state remain intact.
 
 The API base URL gets `/chat/completions` appended. Calls are non-streaming
 with `messages`, `model`, `store: false` and a bounded output limit. Select
