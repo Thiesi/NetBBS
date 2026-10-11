@@ -60,7 +60,7 @@ def bot_origin(db: Database, message: ChannelMessage) -> BotOrigin | None:
                 pass
     # Live Link and origin snapshots carry a node-qualified canonical label;
     # this node's own signed row has link_event_json and remains local.
-    return bot_label_origin(db, message.author_label, remote=bool(message.author_fingerprint))
+    return bot_label_origin(db, message.author_label)
 
 
 def channel_bot_policy(db: Database, channel: Channel) -> str:

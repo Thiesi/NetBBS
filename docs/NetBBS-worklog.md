@@ -6481,6 +6481,7 @@ search and remote roster filtering use the same policy; signed events and
 retained rows are not deleted. MRC mapping presence overrides the policy
 even while paused. These receiving controls do not grant publishing access
 or provide a process sandbox.
+
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,

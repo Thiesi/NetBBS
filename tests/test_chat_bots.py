@@ -79,6 +79,31 @@ def test_legacy_local_account_is_a_person_even_under_none_policy(db, sysop, chan
     assert "humanword" in rendered and "[BOT]" not in rendered
 
 
+@pytest.mark.parametrize("policy", ["all", "local", "none"])
+def test_legacy_account_with_signing_key_remains_human_through_chat(
+    db, lane, hub, presence, mailbox, history, channel, sysop, policy,
+):
+    from nacl.signing import SigningKey
+    from netbbs.auth.users import add_ssh_key
+
+    legacy = insert_user_on_old_schema(db, "Chatty.bot")
+    legacy = add_ssh_key(db, legacy, SigningKey.generate().verify_key, label="laptop", changed_by=sysop)
+    assert legacy.fingerprint is not None
+    set_channel_bot_policy(db, channel, policy, changed_by=sysop)
+
+    text = asyncio.run(_run_chat(lane, hub, presence, mailbox, history, channel, legacy,
+                                ["humanword", "/me waves", "/quit"]))
+    messages = get_scrollback(db, channel)
+    assert {message.kind for message in messages} >= {"message", "action", "join", "leave"}
+    assert all(message.author_fingerprint == legacy.fingerprint for message in messages)
+    assert all(message.author_kind == "user" for message in messages)
+    assert "humanword" in text and "waves" in text and "[BOT]" not in text
+    replay = chat_flow._render_all_scrollback(db, channel, legacy, messages)
+    assert len(replay) == len(messages)
+    assert all("[BOT]" not in line for line in replay)
+    assert len(search_channel_messages(db, legacy, "humanword", visible_channels=[channel])) == 1
+
+
 def test_an_mrc_handle_with_the_suffix_is_not_a_netbbs_bot(db, alice, channel):
     line = _line(channel, "Baud.bot@Other (MRC)", external_source="mrc")
     assert bot_origin(db, line) is None
