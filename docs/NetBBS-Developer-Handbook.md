@@ -732,14 +732,14 @@ with `netbbs.net.row_numbers.read_row_number`, and give a `FieldSpec` no key
 at all, since `edit_resource_draft` numbers fields by their position.
 
 For bundled door presentation, inspect real renders, not just width tests.
-[door_gallery.py](../scripts/door_gallery.py) renders War Dialer and the vendored
-Voidrunner; add appropriate walks/fixtures for changed screens and attach
-pictures to the PR. Retro Trivia requires a direct run. Respect each game's
-normative presentation contract in the design reference.
+[door_gallery.py](../scripts/door_gallery.py) renders the vendored War Dialer
+and Voidrunner, for website captures and bump checks. A game's own presentation
+contract lives in its repository's `docs/design.md`.
 
-Voidrunner and Retro Trivia are developed in their own repositories,
-[Thiesi/Voidrunner](https://github.com/Thiesi/Voidrunner) and
-[Thiesi/RetroTrivia](https://github.com/Thiesi/RetroTrivia), each with its own
+The three bundled games are developed in their own repositories,
+[Thiesi/Voidrunner](https://github.com/Thiesi/Voidrunner),
+[Thiesi/RetroTrivia](https://github.com/Thiesi/RetroTrivia) and
+[Thiesi/WarDialer](https://github.com/Thiesi/WarDialer), each with its own
 suite and design notes. NetBBS ships one tagged release of each single file:
 `scripts/vendor_door.py <door> <tag>` downloads it, checks it against the
 release's checksums and the tagged commit, and records its origin in
@@ -747,9 +747,12 @@ release's checksums and the tagged commit, and records its origin in
 refuses a copy that differs from that record. Fix a door upstream, release it,
 and vendor the release; never edit the copy. NetBBS keeps the tests of how it
 hosts the doors: the drop file, the save directory, resize signals, guest
-calls and Voidrunner's backup maintenance gate, which also imports
-`_default_save_dir`, `PilotBusy` and `maintenance_session` from the door.
-NetBBS imports nothing from Retro Trivia.
+calls, the backup and the War Dialer administration wrapper. The suite pins the
+names NetBBS imports: `_default_save_dir`, `PilotBusy` and
+`maintenance_session` from Voidrunner for its backup gate, and
+`inspect_world`, `world_session`, `administer_world`, `WorldStateError` and
+`_event_plain` from War Dialer for its backup and SysOp controls. NetBBS imports
+nothing from Retro Trivia.
 
 ### Documentation changes
 

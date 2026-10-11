@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import collections
-import importlib.util
 import json
 import os
 import re
@@ -358,39 +357,6 @@ def test_play_door_is_audit_logged(db, lane, player, tmp_path):
 
 _BUNDLED_DOORS_DIR = Path(__file__).resolve().parent.parent / "src" / "netbbs" / "doors" / "bundled"
 _RETRO_TRIVIA_PATH = _BUNDLED_DOORS_DIR / "retro_trivia.py"
-
-
-@pytest.mark.parametrize(
-    "path",
-    (
-        _BUNDLED_DOORS_DIR / "voidrunner.py",
-        _BUNDLED_DOORS_DIR / "war_dialer.py",
-    ),
-)
-def test_bundled_door_wrappers_normalize_tabs_and_keep_indentation_with_content(path):
-    name = f"door_wrap_under_test_{path.stem}"
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-        tabbed = module._wrap_output("1234\t56789", 10)
-        indented = module._wrap_output("  0123456789", 5)
-        combining = module._wrap_output("aaa\u0301b", 3)
-        boxed = module._wrap_output(
-            "\x1b[35m│\x1b[37m" + ("word " * 12) + "\x1b[35m│\x1b[0m",
-            20,
-        )
-    finally:
-        sys.modules.pop(name, None)
-
-    assert tabbed == "1234 56789"
-    assert indented.split("\r\n") == ["  012", "34567", "89"]
-    assert combining.split("\r\n") == ["aaa\u0301", "b"]
-    boxed_rows = boxed.split("\r\n")
-    assert len(boxed_rows) > 1
-    assert all(row.startswith("\x1b[35m│\x1b[37m") for row in boxed_rows)
 
 
 def test_the_real_demo_door_plays_a_full_round_through_run_door(db, lane, player):

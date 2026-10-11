@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-War Dialer -- an asynchronous, play-by-post multiplayer door for NetBBS
-(issue #200; design decision recorded in `docs/NetBBS-design-doc.md`
-Sec.16 "Issue #200"). Rival 80s/90s BBS-scene hacker/phreaker crews
+War Dialer -- an asynchronous, play-by-post multiplayer BBS door
+(originally NetBBS issue #200; design recorded in `docs/design.md`).
+Rival 80s/90s BBS-scene hacker/phreaker crews
 fight over ten shared phone exchanges. Unlike Voidrunner (one save, one
 player, no shared state), this door's whole point is a persistent world
 shared by every caller who plays it -- but it stays inside the same
@@ -14,9 +14,9 @@ actions instantly against shared persistent storage, and the *target*
 of an action -- who is very often not online at that moment -- finds
 out via a summary the next time they themselves log in.
 
-Same v1 door contract as `retro_trivia.py`/`voidrunner.py`: reads the
-drop-file NetBBS hands it via `NETBBS_DOOR_INFO` for handle/user_id/
-color depth, then owns raw stdin/stdout for the whole session (single
+Reads NetBBS's `NETBBS_DOOR_INFO` JSON or a positional DOOR32.SYS/DOOR.SYS
+filename for caller identity and terminal metadata, then owns raw
+stdin/stdout for the whole session (single
 keystroke reads only -- no typed input anywhere in this door, by
 design, to keep entry friction low). Runnable completely standalone
 outside NetBBS too. Zero external dependencies -- stdlib only.
@@ -72,6 +72,7 @@ import os
 import random
 import re
 import select
+import socket
 import sqlite3
 import sys
 import textwrap
@@ -91,6 +92,21 @@ DIM = f"{ESC}[2m"
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 _OUTPUT_WIDTH = 80
+_CLASSIC_DROP_FILE: str | None = None
+_OUTPUT_ENCODING = "utf-8"
+_DEFAULT_ENCODING = "utf-8"
+_SOCKET_TRANSPORT = None
+DISPLAY_ENCODINGS = {"auto": "Automatic", "utf-8": "UTF-8", "cp437": "CP437"}
+# Single-column substitutes retain authored alignment and avoid CP437's low
+# control-byte symbols, which some terminals would interpret as commands.
+_CP437_TRANSLATION = str.maketrans({
+    "╭": "┌", "╮": "┐", "╯": "┘", "╰": "└",
+    "▁": "_", "▂": "▄", "▃": "▄", "▅": "█", "▆": "█", "▇": "█",
+    "◆": "*", "◈": "+", "◉": "@", "◇": "o", "○": ".", "●": "o",
+    "▮": "█", "▯": "░", "▚": "▒", "▲": "^", "▼": "v", "▸": ">", "›": ">",
+    "⟦": "[", "⟧": "]", "•": "·", "…": ".", "∿": "~", "≋": "≈",
+    "‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +166,82 @@ def counted(number: int, noun: str) -> str:
     return f"{number} {noun}{'' if number == 1 else 's'}"
 
 
-def _load_door_info() -> dict:
+def _classic_door_info(path: Path) -> dict:
+    """Read the 11-line DOOR32 or 31/52-line DOOR.SYS format atomically.
+
+    Never accept a partial identity: a caller's record number, not their alias,
+    owns the save. Legacy hosts write CP437; UTF-8 drop files also occur.
+    """
+    raw = path.read_bytes()
+    if len(raw) > 16384:
+        raise ValueError("drop file exceeds 16 KiB")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp437")
+    lines = [line.strip() for line in text.splitlines()]
+
+    def number(line: int, minimum: int = 0) -> int:
+        value = lines[line - 1]
+        if not value.isascii() or not value.isdecimal() or int(value) < minimum:
+            raise ValueError(f"invalid number on line {line}")
+        return int(value)
+
+    def name(line: int) -> str:
+        value = lines[line - 1]
+        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError(f"invalid name on line {line}")
+        return value
+
+    kind = path.name.upper()
+    if kind not in ("DOOR32.SYS", "DOOR.SYS"):
+        if lines and re.fullmatch(r"COM\d+:", lines[0], re.IGNORECASE):
+            kind = "DOOR.SYS"
+        elif len(lines) == 11 and lines[0] in ("0", "1", "2"):
+            kind = "DOOR32.SYS"
+        else:
+            raise ValueError("unrecognized drop-file format")
+    if kind == "DOOR32.SYS":
+        if len(lines) < 11:
+            raise ValueError("DOOR32.SYS needs 11 lines")
+        comm_type = number(1)
+        emulation = number(10)
+        if comm_type not in (0, 1, 2) or emulation not in (0, 1, 2, 3, 4):
+            raise ValueError("invalid DOOR32 communications type or emulation")
+        number(3)  # baud rate (zero is valid for a local launch)
+        number(8)  # security level
+        number(11, 1)  # node number
+        info = {
+            "drop_file_type": kind, "user_id": number(5, 1),
+            "handle": name(7) if lines[6] else name(6),
+            "node_name": name(4) if lines[3] else "Local",
+            "terminal_height": 24, "emulation": emulation,
+            "minutes_left": number(9), "comm_type": comm_type,
+            "comm_handle": number(2),
+        }
+        graphics = emulation != 0
+    else:
+        if len(lines) < 31:
+            raise ValueError("DOOR.SYS needs at least 31 lines")
+        if not re.fullmatch(r"COM\d+:", lines[0], re.IGNORECASE):
+            raise ValueError("invalid DOOR.SYS communications port")
+        emulation = lines[19].upper()
+        if emulation not in ("GR", "NG", "7E"):
+            raise ValueError("invalid DOOR.SYS graphics mode")
+        info = {
+            "drop_file_type": kind, "user_id": number(26, 1),
+            "handle": name(36) if len(lines) >= 36 and lines[35] else name(10),
+            "terminal_height": number(21, 1), "emulation": emulation,
+            "minutes_left": number(19), "comm_port": lines[0],
+        }
+        graphics = emulation == "GR"
+    info.update(terminal_width=80, color_depth="16" if graphics else "none",
+                display_style="basic" if graphics else "plain", display_encoding="cp437")
+    return info
+
+
+def _load_door_info(drop_file: str | None = None) -> dict:
+    path = os.environ.get("NETBBS_DOOR_INFO")
     default = {
         "handle": "Guest",
         "user_id": 0,
@@ -158,11 +249,16 @@ def _load_door_info() -> dict:
         "terminal_height": 24,
         "color_depth": "256",
         "unicode_style": True,
-        "node_name": "NetBBS",
+        "node_name": "NetBBS" if path is not None else "Local",
     }
-    path = os.environ.get("NETBBS_DOOR_INFO")
     if path is None:
-        return default  # Deliberate standalone demo only.
+        drop_file = drop_file if drop_file is not None else _CLASSIC_DROP_FILE
+        if drop_file is not None:
+            try:
+                default.update(_classic_door_info(Path(drop_file)))
+            except (OSError, ValueError) as exc:
+                raise WorldStateError("War Dialer drop file is invalid. Contact the SysOp; no player was loaded.") from exc
+        return default
     try:
         with open(path, encoding="utf-8") as f:
             raw = f.read(16385)
@@ -234,16 +330,24 @@ class Palette:
         "grey": ((0x8A, 0x8F, 0xC4), 103),
     }
 
-    def __init__(self, truecolor: bool):
+    BASIC = {82: 92, 65: 32, 121: 97, 214: 93, 81: 96, 199: 95,
+             203: 91, 195: 37, 103: 90}
+
+    def __init__(self, truecolor: bool, color_depth: str | None = None):
         self._truecolor = truecolor
+        self.color_depth = color_depth
+        self.default_monochrome = color_depth == "none"
         self.ascii_art = False
         self.default_ascii = False
         self.monochrome = False
         self.fast = False
 
     def _sgr(self, rgb: tuple[int, int, int], idx256: int) -> str:
-        if self.monochrome:
+        if self.monochrome or self.color_depth == "none":
             return ""
+        if self.color_depth == "16":
+            # Named roles have authored fallbacks; animation ramps stay green.
+            return f"{ESC}[{self.BASIC.get(idx256, 92 if max(rgb) >= 180 else 32)}m"
         if self._truecolor:
             r, g, b = rgb
             return f"{ESC}[38;2;{r};{g};{b}m"
@@ -386,9 +490,151 @@ def spark_ramp() -> str:
     return SPARK_ASCII if _ASCII_DECOR else SPARK
 
 
+class _CarrierLost(EOFError):
+    """The inherited socket disconnected; use the ordinary EOF exit path."""
+
+
+class _SocketTransport:
+    """Borrow the host's connection through this process's inherited handle.
+
+    Close only our handle on return, never shutdown the shared connection or
+    change its blocking mode. Telnet negotiation remains the host's job.
+    Filtering keeps constant space even for an unfinished subnegotiation.
+    """
+
+    def __init__(self, handle: int):
+        self.socket = socket.socket(fileno=handle)
+        self.mode = "text"
+        self.lost = False
+        self.after_cr = False
+
+    def waiting(self, timeout: float | None = 0) -> bool:
+        if self.lost:
+            return True
+        import select
+
+        try:
+            return bool(select.select([self.socket], [], [], timeout)[0])
+        except OSError:
+            self.lost = True
+            return True
+
+    def __call__(self, timeout: float | None) -> bytes | None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for _ in range(4096):
+            if self.lost:
+                return b""
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            if not self.waiting(remaining):
+                return None
+            if self.lost:
+                return b""
+            try:
+                byte = self.socket.recv(1)
+            except BlockingIOError:
+                continue  # the host may have handed us a nonblocking socket
+            except OSError:
+                self.lost = True
+                return b""
+            if not byte:
+                self.lost = True
+                return b""
+            n = byte[0]
+            if self.mode == "option":
+                self.mode = "text"  # WILL/WONT/DO/DONT's option byte
+            elif self.mode == "sub":
+                if n == 255:
+                    self.mode = "sub_iac"
+            elif self.mode == "sub_iac":
+                self.mode = "text" if n == 240 else "sub"
+            elif self.mode == "iac":
+                self.mode = "text"
+                if n == 255:
+                    return self._text_byte(byte)  # IAC IAC is literal data
+                if n in (251, 252, 253, 254):
+                    self.mode = "option"
+                elif n == 250:
+                    self.mode = "sub"
+            elif n == 255:
+                self.mode = "iac"
+            else:
+                data = self._text_byte(byte)
+                if data is not None:
+                    return data
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+        return None  # yield after a bounded run of telnet control traffic
+
+    def _text_byte(self, byte: bytes) -> bytes | None:
+        if self.after_cr:
+            self.after_cr = False
+            if byte in (b"\x00", b"\n"):
+                return None
+        self.after_cr = byte == b"\r"
+        return byte
+
+    def write(self, data: bytes) -> None:
+        if self.lost:
+            raise _CarrierLost("socket closed")
+        import select
+
+        pending = memoryview(data.replace(b"\xff", b"\xff\xff"))
+        try:
+            while pending:
+                select.select([], [self.socket], [])
+                try:
+                    sent = self.socket.send(pending)
+                except BlockingIOError:
+                    continue
+                if not sent:
+                    raise _CarrierLost("socket closed")
+                pending = pending[sent:]
+        except (OSError, _CarrierLost) as exc:
+            self.lost = True
+            raise _CarrierLost("socket closed") from exc
+
+    def close(self) -> None:
+        self.socket.close()
+
+
+def apply_display_encoding(encoding: str) -> None:
+    """Select the wire encoding; NetBBS owns its caller-side conversion."""
+    global _OUTPUT_ENCODING
+    effective = _DEFAULT_ENCODING if encoding == "auto" else encoding
+    if os.environ.get("NETBBS_DOOR_INFO") is not None:
+        effective = "utf-8"
+    if _SOCKET_TRANSPORT is None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding=effective)
+    _OUTPUT_ENCODING = effective
+
+
+def _cp437_text(text: str) -> str:
+    """Map art and transliterate names without changing their display width."""
+    text = text.translate(_CP437_TRANSLATION)
+    try:
+        text.encode("cp437")
+        return text
+    except UnicodeEncodeError:
+        result = []
+        for char in text:
+            try:
+                char.encode("cp437")
+                result.append(char)
+            except UnicodeEncodeError:
+                width = _char_width(char)
+                folded = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
+                result.append(folded[:width].ljust(width, "_") if width else "")
+        return "".join(result)
+
+
 def out(text: str = "") -> None:
     if _MONOCHROME:
         text = re.sub(r"\x1b\[[0-9;:]*m", "", text)
+    if _OUTPUT_ENCODING == "cp437":
+        text = _cp437_text(text)
+    if _SOCKET_TRANSPORT is not None:
+        _SOCKET_TRANSPORT.write(text.encode(_OUTPUT_ENCODING))
+        return
     try:
         sys.stdout.write(text)
         sys.stdout.flush()
@@ -439,7 +685,12 @@ def read_key() -> str:
     # via `os.read()` directly instead is unbuffered -- never pulls more
     # than the one byte asked for -- so what `select()` sees on the fd
     # always matches what's actually still unread.
-    data = os.read(sys.stdin.fileno(), 1)
+    if _SOCKET_TRANSPORT is not None:
+        data = _SOCKET_TRANSPORT(None)
+        while data is None:
+            data = _SOCKET_TRANSPORT(None)
+    else:
+        data = os.read(sys.stdin.fileno(), 1)
     if not data:
         raise EOFError("stdin closed")
     return data.decode("ascii", errors="replace")
@@ -486,6 +737,11 @@ def _read_key_with_timeout(timeout: float) -> str | None:
     `os.set_blocking()` is unavailable on Windows."""
     if _PENDING_INPUT:
         return read_key()
+    if _SOCKET_TRANSPORT is not None:
+        data = _SOCKET_TRANSPORT(timeout)
+        if data == b"":
+            raise _CarrierLost("socket closed")
+        return None if data is None else data.decode("ascii", errors="replace")
     fd = sys.stdin.fileno()
     try:
         ready, _, _ = select.select([sys.stdin], [], [], timeout)
@@ -496,38 +752,40 @@ def _read_key_with_timeout(timeout: float) -> str | None:
     return read_key()
 
 
+def _windows_input_waiting(fd: int) -> bool:
+    """Peek without consuming typed-ahead input or changing pipe mode."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel.GetFileType.restype = wintypes.DWORD
+    kernel.PeekNamedPipe.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel.PeekNamedPipe.restype = wintypes.BOOL
+    handle = msvcrt.get_osfhandle(fd)
+    kind = kernel.GetFileType(handle)
+    if kind == 2:
+        return bool(msvcrt.kbhit())
+    if kind != 3:
+        return True  # disk or invalid handle: read/EOF/error does not await a key
+    available = wintypes.DWORD()
+    if not kernel.PeekNamedPipe(handle, None, 0, None, ctypes.byref(available), None):
+        error = ctypes.get_last_error()
+        if error in (109, 232):
+            raise EOFError("stdin closed")
+        raise ctypes.WinError(error)
+    return bool(available.value)
+
+
 def _poll_read_key_windows(fd: int, timeout: float) -> str | None:
-    """Windows-only fallback for `_read_key_with_timeout` -- see that
-    function's own docstring for why `select()` can't be used here."""
+    """Bounded lookahead on Windows pipes, including Python 3.11."""
     deadline = time.monotonic() + timeout
     if os.name == "nt":
-        import ctypes
-        import msvcrt
-        from ctypes import wintypes
-
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.GetFileType.argtypes = [wintypes.HANDLE]
-        kernel.GetFileType.restype = wintypes.DWORD
-        kernel.PeekNamedPipe.argtypes = [
-            wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
-            ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
-        ]
-        kernel.PeekNamedPipe.restype = wintypes.BOOL
-        handle = msvcrt.get_osfhandle(fd)
-        kind = kernel.GetFileType(handle)
-        while True:
-            if kind == 1 or (kind == 2 and msvcrt.kbhit()):
-                break
-            if kind == 3:
-                available = wintypes.DWORD()
-                if not kernel.PeekNamedPipe(handle, None, 0, None,
-                                             ctypes.byref(available), None):
-                    error = ctypes.get_last_error()
-                    if error in (109, 232):
-                        raise EOFError("stdin closed")
-                    raise ctypes.WinError(error)
-                if available.value:
-                    break
+        while not _windows_input_waiting(fd):
             if time.monotonic() >= deadline:
                 return None
             time.sleep(min(_WINDOWS_POLL_INTERVAL_SECONDS,
@@ -1442,15 +1700,21 @@ def world_session(db_path: Path, *, maintenance: bool = False):
 
 
 def bind_world_owner(conn: sqlite3.Connection, owner: str | None) -> None:
-    """Bind the first host launch to its node's persistent user-ID namespace."""
+    """Adopt an unbound world before loading players; retain its owner thereafter."""
     if owner is not None and (not isinstance(owner, str) or re.fullmatch(r"[0-9a-f]{32}", owner) is None):
         raise WorldStateError("War Dialer host ownership metadata is invalid. Contact the SysOp.")
     with _write_transaction(conn):
         stored = conn.execute("SELECT value FROM meta WHERE key='node_owner'").fetchone()
+        self_owned = conn.execute("SELECT value FROM meta WHERE key='self_owned'").fetchone()
+        if stored is not None and owner is None and self_owned is not None and self_owned[0] == "1":
+            return
         if stored is not None and stored[0] != owner:
             raise WorldStateError("This War Dialer world belongs to another node. Contact the SysOp; no player was loaded.")
-        if stored is None and owner is not None:
-            conn.execute("INSERT INTO meta (key, value) VALUES ('node_owner', ?)", (owner,))
+        if stored is None:
+            conn.execute("INSERT INTO meta (key, value) VALUES ('node_owner', ?)",
+                         (owner if owner is not None else os.urandom(16).hex(),))
+            if owner is None:
+                conn.execute("INSERT INTO meta (key, value) VALUES ('self_owned', '1')")
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -3777,12 +4041,18 @@ def _splash_ready(p: Palette) -> bool:
     """Whether a caller is plainly there, watching, with nothing typed yet."""
     if not motion_enabled(p) or _PENDING_INPUT:
         return False
+    if _SOCKET_TRANSPORT is not None:
+        return not _SOCKET_TRANSPORT.waiting()
     try:
         ready, _, _ = select.select([sys.stdin], [], [], 0)
-    except (OSError, ValueError, TypeError, AttributeError):
-        # Not pollable without reading: a Windows pipe, a test double. A
-        # splash that cannot be skipped without risking a keystroke is no
-        # splash at all.
+    except OSError:
+        if os.name == "nt":
+            try:
+                return not _windows_input_waiting(sys.stdin.fileno())
+            except (EOFError, OSError, ValueError, TypeError, AttributeError):
+                pass
+        return False
+    except (ValueError, TypeError, AttributeError):
         return False
     return not ready  # typed-ahead input, or a closed stdin, belongs to the screens after
 
@@ -4598,22 +4868,25 @@ DISPLAY_KEYS = ('ascii_art', 'monochrome', 'fast')
 NPC_ART = {'patch': '(o)--[::]', 'relay': '<==[##]==>', 'spool': '[##]--{##}'}
 
 
-def read_display(conn: sqlite3.Connection, user_id: int) -> dict[str, bool]:
+def read_display(conn: sqlite3.Connection, user_id: int) -> dict[str, bool | str]:
     row = conn.execute("SELECT value FROM meta WHERE key=?", (f'display:{user_id}',)).fetchone()
     if row is None:
         return {}
     try:
         values = json.loads(row[0])
-        return {key: value for key, value in values.items() if key in DISPLAY_KEYS and type(value) is bool}
+        return {key: value for key, value in values.items()
+                if (key in DISPLAY_KEYS and type(value) is bool)
+                or (key == "encoding" and isinstance(value, str) and value in DISPLAY_ENCODINGS)}
     except (ValueError, AttributeError):
         return {}
 
 
-def apply_display(p: Palette, values: dict[str, bool]) -> None:
+def apply_display(p: Palette, values: dict[str, bool | str]) -> None:
     global _ASCII_DECOR, _MONOCHROME
     for key in DISPLAY_KEYS:
-        setattr(p, key, values.get(key, p.default_ascii if key == 'ascii_art' else False))
+        setattr(p, key, values.get(key, p.default_ascii if key == 'ascii_art' else p.default_monochrome if key == 'monochrome' else False))
     _ASCII_DECOR, _MONOCHROME = p.ascii_art, p.monochrome
+    apply_display_encoding(values.get("encoding", "auto"))
 
 
 def do_display(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, height: int) -> None:
@@ -4635,14 +4908,24 @@ def do_display(p: Palette, conn: sqlite3.Connection, user_id: int, width: int, h
                             badge(p, "ON" if on else "OFF",
                                   style=p.phosphor if on else p.grey)], inner - 4)
             rendered.append((rows + prose_rows(p, note, inner - 4, style=p.grey), True))
+        managed = os.environ.get("NETBBS_DOOR_INFO") is not None
+        encoding = "UTF-8 (NetBBS managed)" if managed else DISPLAY_ENCODINGS[values.get("encoding", "auto")]
+        rows = prose_rows(p, "Encoding: " + encoding, inner - 4, style=p.mint)
+        rows += prose_rows(p, "Match your terminal: Automatic, UTF-8 or CP437."
+                           if not managed else "NetBBS converts for your terminal.", inner - 4, style=p.grey)
+        rendered.append((rows, not managed))
         choice = pick_record_page(p, 'DISPLAY', [], width, height, rendered=rendered,
                                   trailing="free; survives seasons")
         if choice in 'BQ':
             return
-        key = DISPLAY_KEYS[int(choice) - 1]
         with _write_transaction(conn):
             values = read_display(conn, user_id)
-            values[key] = not values.get(key, p.default_ascii if key == 'ascii_art' else False)
+            if choice == "4" and not managed:
+                encodings = tuple(DISPLAY_ENCODINGS)
+                values["encoding"] = encodings[(encodings.index(values.get("encoding", "auto")) + 1) % len(encodings)]
+            else:
+                key = DISPLAY_KEYS[int(choice) - 1]
+                values[key] = not values.get(key, p.default_ascii if key == 'ascii_art' else p.default_monochrome if key == 'monochrome' else False)
             conn.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                          (f'display:{user_id}', json.dumps(values)))
         apply_display(p, values)
@@ -5141,7 +5424,14 @@ def _resized_while_idle() -> bool:
     the handler returns. So the wait is a short select and the read that follows
     a False only happens once a byte is there. Scripted input and Windows never
     wait here."""
-    if _PENDING_INPUT or os.name != "posix":
+    if _PENDING_INPUT:
+        return _RESIZE_PENDING
+    if _SOCKET_TRANSPORT is not None:
+        while not _RESIZE_PENDING:
+            if _SOCKET_TRANSPORT.waiting(_RESIZE_POLL_SECONDS):
+                return False
+        return True
+    if os.name != "posix":
         return _RESIZE_PENDING
     try:
         fd = sys.stdin.fileno()
@@ -6308,12 +6598,17 @@ def admin_main(argv=None) -> int:
     return 0
 
 
-def main() -> int:
-    if "--admin" in sys.argv[1:] or any(arg.startswith("--admin=") for arg in sys.argv[1:]):
-        return admin_main()
-    global _OUTPUT_WIDTH
+def _main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if "--admin" in argv or any(arg.startswith("--admin=") for arg in argv):
+        return admin_main(argv)
+    global _OUTPUT_WIDTH, _CLASSIC_DROP_FILE, _DEFAULT_ENCODING, _SOCKET_TRANSPORT
+    parser = argparse.ArgumentParser(description="War Dialer BBS door")
+    parser.add_argument("drop_file", nargs="?", help="DOOR32.SYS or DOOR.SYS filename")
+    _CLASSIC_DROP_FILE = parser.parse_args(argv).drop_file
 
-    sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     # Before anything else: the host may signal at any moment after the spawn,
     # and SIGUSR1 ends a process that has not said what to do with it.
     install_resize_handler()
@@ -6323,8 +6618,17 @@ def main() -> int:
         sys.stderr.write(f"War Dialer metadata: {_event_plain(str(exc.__cause__))[:300]}\n")
         out_line(str(exc))
         return 1
-    palette = Palette(truecolor=info.get("color_depth") == "truecolor")
-    palette.default_ascii = info.get("unicode_style", True) is False
+    if os.environ.get("NETBBS_DOOR_INFO") is None and info.get("comm_type") == 2:
+        try:
+            _SOCKET_TRANSPORT = _SocketTransport(info["comm_handle"])
+        except OSError as exc:
+            sys.stderr.write(f"War Dialer socket is unavailable: {_event_plain(str(exc))}\n")
+            return 1
+    _DEFAULT_ENCODING = info.get("display_encoding", "utf-8") if "drop_file_type" in info else "utf-8"
+    apply_display_encoding("auto")
+    palette = Palette(truecolor=info.get("color_depth") == "truecolor",
+                      color_depth=info.get("color_depth"))
+    palette.default_ascii = info.get("unicode_style", True) is False or info.get("color_depth") == "none"
     # Node-wide, per the drop-file contract: NetBBS has no per-caller timezone.
     apply_timezone(info.get("timezone"))
     _OUTPUT_WIDTH, height = terminal_size(info)
@@ -6486,6 +6790,18 @@ def main() -> int:
         except OSError:
             pass
     return 0
+
+
+def main(argv=None) -> int:
+    global _SOCKET_TRANSPORT
+    try:
+        return _main(argv)
+    except (EOFError, BrokenPipeError):
+        return 0
+    finally:
+        if _SOCKET_TRANSPORT is not None:
+            _SOCKET_TRANSPORT.close()
+            _SOCKET_TRANSPORT = None
 
 
 if __name__ == "__main__":

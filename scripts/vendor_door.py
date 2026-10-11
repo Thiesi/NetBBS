@@ -3,7 +3,7 @@
     python scripts/vendor_door.py voidrunner v1.1.0
     python scripts/vendor_door.py retro_trivia v1.0.0
 
-Each bundled door lives in its own repository (issues #1216 and #1226), and
+Each bundled door lives in its own repository (issues #1216, #1226, #1228), and
 NetBBS ships a copy of one tagged release. This downloads that release's door
 file, checks it against the release's `SHA256SUMS` and against the file stored
 at the tagged commit, writes it to `src/netbbs/doors/bundled/` unchanged, and
@@ -28,6 +28,7 @@ import urllib.request
 DOORS = {
     "retro_trivia": "Thiesi/RetroTrivia",
     "voidrunner": "Thiesi/Voidrunner",
+    "war_dialer": "Thiesi/WarDialer",
 }
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BUNDLED = ROOT / "src" / "netbbs" / "doors" / "bundled"

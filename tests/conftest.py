@@ -18,6 +18,7 @@ call site needs to change.
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 
 import nacl.pwhash
@@ -91,8 +92,22 @@ def _no_door_splash(monkeypatch):
 
     A finished launch splash waits for a key, so a test that starts a real door
     and waits for its first prompt before typing would wait forever. The
-    splash's own tests take this back off (`monkeypatch.delenv`)."""
+    splash's own tests take this back off (`monkeypatch.delenv`).
+
+    `run_door` hands a door only a narrow environment, so the switch is
+    forwarded into it here too; a SysOp sets it through the door profile."""
     monkeypatch.setenv("DOOR_SPLASH", "0")
+    from netbbs.doors import runtime
+
+    door_environment = runtime._door_environment
+
+    def with_splash_switch(*args, **kwargs):
+        env = door_environment(*args, **kwargs)
+        if "DOOR_SPLASH" in os.environ:
+            env["DOOR_SPLASH"] = os.environ["DOOR_SPLASH"]
+        return env
+
+    monkeypatch.setattr(runtime, "_door_environment", with_splash_switch)
     yield
 
 

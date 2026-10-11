@@ -1,4 +1,4 @@
-"""The bundled doors are unmodified tagged releases (issues #1216 and #1226).
+"""The bundled doors are unmodified tagged releases (issues #1216, #1226, #1228).
 
 Each game lives in its own repository with its own suite. NetBBS ships one
 tagged release of each, written by `scripts/vendor_door.py`, and must never
@@ -18,7 +18,8 @@ from tests.vendored_voidrunner import VOIDRUNNER_PATH, live_voidrunner, vr, worl
 
 BUNDLED = VOIDRUNNER_PATH.parent
 RECORD = BUNDLED / "VENDORED.json"
-VENDORED = {"retro_trivia.py": "Thiesi/RetroTrivia", "voidrunner.py": "Thiesi/Voidrunner"}
+VENDORED = {"retro_trivia.py": "Thiesi/RetroTrivia", "voidrunner.py": "Thiesi/Voidrunner",
+            "war_dialer.py": "Thiesi/WarDialer"}
 
 
 def test_every_vendored_door_has_a_record():

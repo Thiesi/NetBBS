@@ -102,13 +102,14 @@ The standing principle is:
 - **Review door presentation by looking at it.** A change to a bundled door's
   screens comes with pictures attached to the PR. Tests can only assert that a
   screen fits its terminal; they cannot fail because it is ugly, and both games
-  lost their visual design to slices that all passed. Voidrunner and Retro
-  Trivia are vendored from Thiesi/Voidrunner and Thiesi/RetroTrivia (issues
-  #1216, #1226): change their screens there, reviewed with that repository's
-  gallery, and never edit `src/netbbs/doors/bundled/voidrunner.py` or
-  `retro_trivia.py` here -- bump them with `scripts/vendor_door.py <door> <tag>`.
-  `scripts/door_gallery.py <door>` renders every screen of War Dialer, and of
-  the vendored Voidrunner for website captures and bump checks, at every
+  lost their visual design to slices that all passed. All three bundled games
+  are vendored from their own repositories -- Thiesi/Voidrunner,
+  Thiesi/RetroTrivia and Thiesi/WarDialer (issues #1216, #1226, #1228): change
+  their screens there, reviewed with that repository's gallery, and never edit
+  `src/netbbs/doors/bundled/voidrunner.py`, `retro_trivia.py` or `war_dialer.py`
+  here -- bump them with `scripts/vendor_door.py <door> <tag>`.
+  `scripts/door_gallery.py <door>` renders every screen of the vendored War
+  Dialer and Voidrunner, for website captures and bump checks, at every
   supported size and preset; it works from a cached career, so a door that keeps no state
   between launches (Retro Trivia, whose round is drawn fresh from an unseeded
   RNG) is not in it yet and is reviewed by running it. Add the screen you changed
@@ -131,8 +132,7 @@ The standing principle is:
   that flattens a row to plain text is how both games became grey walls -- War
   Dialer by coloring the whole line from outside, Voidrunner by stripping the
   row in its paginator before it was ever printed. Each door's contract is
-  normative for that door: see "the War Dialer presentation contract" in the
-  design document, and Voidrunner's in Thiesi/Voidrunner's `docs/design.md`.
+  normative for that door and lives in its repository's `docs/design.md`.
 - **The public site's source is `web/`, not a published artifact.** Both pages
   of www.netbbs.org live in the repo and are reviewed as a diff; `web/README.md`
   has the deploy procedure, the checkers to run afterwards, and the line-ending

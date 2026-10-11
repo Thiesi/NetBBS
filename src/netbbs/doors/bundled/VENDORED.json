@@ -12,5 +12,12 @@
     "commit": "60d7bd6ee2ec30bf151c93b004f4d7c1ef521482",
     "git_blob": "ef89d5a49c884d50e9259ba3fa2801e21a74952e",
     "sha256": "86d89f7f0aec76d55bc570756f70242309b7bc7ae599b92d828f8c1b9983ddcd"
+  },
+  "war_dialer.py": {
+    "repository": "Thiesi/WarDialer",
+    "tag": "v1.1.0",
+    "commit": "cd35cc040e32679ed7cc72e6118b4c6f54321587",
+    "git_blob": "c2c4563bf1f03775133258c63dcf91aa9a5ca4ab",
+    "sha256": "94a0e23b4dff02e25327a053425229bf962420f881c642345fc7036256b45507"
   }
 }
