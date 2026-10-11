@@ -75,7 +75,7 @@ def test_real_baud_disclosure_no_first_prompt_help_reset_and_restart(db, lane, h
     bot = install(db, sysop, channel, model_conversation=True)
     async def run():
         async with provider() as (endpoint, calls, control):
-            configure(db, sysop, endpoint)
+            configure(db, sysop, endpoint, token_parameter="max_completion_tokens")
             runtime = BotRuntime(lane, hub, poll_seconds=.03)
             pid = ParticipantId(alice.username, 1)
             queue = hub.join(channel.name, pid)
@@ -94,6 +94,7 @@ def test_real_baud_disclosure_no_first_prompt_help_reset_and_restart(db, lane, h
                 payload = calls[0][0]
                 assert [m["content"] for m in payload["messages"][1:]] == ["second input"]
                 assert not payload["store"] and not payload["stream"]
+                assert payload["max_completion_tokens"] == 256 and "max_tokens" not in payload
                 await send("help")
                 await next_line(queue, "reset clears")
                 assert len(calls) == 1

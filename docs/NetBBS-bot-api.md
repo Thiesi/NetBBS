@@ -299,8 +299,9 @@ addressed conversation goes. Use HTTPS for a remote provider.
 
 The API base URL gets `/chat/completions` appended. Calls are non-streaming
 with `messages`, `model`, `store: false` and a bounded output limit. Select
-`max_completion_tokens` for current OpenAI models, or `max_tokens` for a
-compatible server requiring the older parameter. NetBBS accepts text from
+`max_completion_tokens` for current OpenAI models; the default `max_tokens`
+matches [Ollama's documented fields](https://docs.ollama.com/api/openai-compatibility).
+NetBBS accepts text from
 `choices[0].message.content` and usage from `prompt_tokens`,
 `completion_tokens`, `total_tokens`. See the
 [official Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).

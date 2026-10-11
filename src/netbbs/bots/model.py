@@ -47,7 +47,7 @@ class ModelSettings:
     channel_per_minute: int = 2
     reply_chars: int = 400
     output_tokens: int = 256
-    token_parameter: str = "max_completion_tokens"
+    token_parameter: str = "max_tokens"
     # Micro-currency per million tokens: 1,000,000 means 1 currency unit.
     input_price: int = 0
     output_price: int = 0

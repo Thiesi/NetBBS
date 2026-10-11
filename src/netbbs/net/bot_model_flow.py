@@ -65,7 +65,7 @@ async def model_editor(session, lane, actor, chrome):
         FieldSpec("token_parameter", "Output-limit parameter", lambda d: d["token_parameter"],
                   choice_field("token_parameter", ["max_completion_tokens", "max_tokens"]),
                   step=choice_step("token_parameter", ["max_completion_tokens", "max_tokens"]),
-                  help="Use max_completion_tokens for current OpenAI models; max_tokens for local/older compatible servers that require it.", section="Provider"),
+                  help="Defaults to max_tokens for Ollama. Select max_completion_tokens for current OpenAI models that require it.", section="Provider"),
         text("persona", "System prompt", "Baud's host-owned persona, 1-2000 characters. No ordinary channel history is included.", "Privacy and access"),
         text("context_lines", "Prior exchange lines", "0-20; only this caller's addressed inputs and replies in this channel. Memory only; 30-minute idle expiry and reset.", "Privacy and access"),
         switch("log_prompts", "Log submitted prompts", "Off by default. When on, stores each submitted input with the bounded usage ledger. Callers are told. Does not log unrelated chat or provider responses.", "Privacy and access"),
