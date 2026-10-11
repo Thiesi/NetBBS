@@ -4,6 +4,7 @@ import json
 
 from netbbs.bots.registry import (
     BotError, TEMPERAMENTS, get_bot, list_bots, require_sysop, runtime_status, save_bot, stop_bots,
+    deletable_bot, delete_bot,
 )
 from netbbs.net.picker import pick_item
 from netbbs.net.confirm import prompt_yes_no
@@ -33,6 +34,10 @@ async def bot_menu(session, lane, actor):
         await lane.run(stop_bots, actor=actor, bot_id=bot.id)
         return await refresh()
 
+    async def delete_one(bot):
+        await _delete_bot(session, lane, actor, bot.id)
+        return await refresh()
+
     async def create():
         return await bot_editor(session, lane, actor, chrome)
 
@@ -48,8 +53,9 @@ async def bot_menu(session, lane, actor):
             stable_id_of=lambda b: b.id,
             description_of=description, title="Chat bots", breadcrumb=("SysOp", "Content"),
             empty_message="No bots installed. Create an instance of Baud to get started.",
-            refresh=refresh, on_create=create, live_keys={"x": stop_all}, item_keys={"k": stop_one},
+            refresh=refresh, on_create=create, live_keys={"x": stop_all}, item_keys={"k": stop_one, "d": delete_one},
             live_nav=(MenuEntry(label=menu_key("K", "ill selected"), brief="Stop this bot persistently"),
+                      MenuEntry(label=menu_key("D", "elete selected"), brief="Delete a stopped bot and its state"),
                       MenuEntry(label=menu_key("X", " Stop all"), brief="Stop every bot persistently")),
             masthead="Bots read addressed messages only. Linked channels require explicit approval. Changes apply within a second.",
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -58,6 +64,22 @@ async def bot_menu(session, lane, actor):
         if bot is None:
             return
         await bot_editor(session, lane, actor, chrome, bot=await lane.run(get_bot, bot.id))
+
+
+async def _delete_bot(session, lane, actor, bot_id):
+    try:
+        bot = await lane.run(deletable_bot, bot_id, actor=actor)
+        if await prompt_yes_no(
+            session, f"Delete {bot.label} and its entire state directory, including all reminders? "
+            "Channel history and existing backups will remain.", default=False,
+        ):
+            await lane.run(delete_bot, bot_id, actor=actor)
+            return True
+    except BotError as exc:
+        await session.write_line(sanitize_text(str(exc)))
+        await session.write_line("Press any key to return to Chat bots.")
+        await session.read_key()
+    return False
 
 
 async def bot_editor(session, lane, actor, chrome, *, bot=None):
@@ -119,7 +141,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         fields=fields, draft=draft, save=save, error_type=BotError, save_menu_text=menu_key("S", "ave"),
         back_menu_text=menu_key("B", "ack"), preamble=status + "Addressed messages only; replies and reminders are public in their channel. "
         "Baud supports help, remind, reminders and cancel. No language model. "
-        "Bot state is not yet included in node backups; copy the .bots directory with the node stopped.",
+        "Node backups include API-managed bot state. Kill a bot before using Delete selected to remove it and its state.",
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         collapsed=chrome.collapsed, header_color=chrome.header_color,
     )

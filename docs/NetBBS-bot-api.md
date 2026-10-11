@@ -121,8 +121,26 @@ it, up to 16 KiB encoded JSON; success returns `null`. A bot cannot select a
 different instance's state through the API. Wait for success before promising
 the caller that a reminder was saved. State lives at
 `<database-filename>.bots/<original-instance-name>/state.json`; renaming keeps
-that directory. **Node backups do not include it yet**; with the node stopped,
-copy the `.bots` directory alongside the database. No model context is stored.
+that directory. Node backups include API-managed `state.json` files as the
+checksummed `bot-state` component. Capture reads complete atomic files before
+the database snapshot so caller ids are not newer than that snapshot. Restore
+replaces the entire live `.bots` directory with the archived generation;
+restoring an older archive with no bot state removes newer live state, keeping
+it in the restore rollback directory. Use a build supporting this component
+to restore it. No model context is stored.
+
+Backups allow at most 64 instance directories with one state value of up to
+16 KiB each. Invalid JSON, symlinks, oversized values and case-colliding names
+are refused. Executables, temporary files and extra files written directly by
+an external program are outside the state API and are not captured. Install
+programs separately and use the state API for persistent bot data.
+
+**Delete selected** removes a stopped instance and its entire state directory,
+including reminders and any extra program-owned files there. Kill it first
+and wait for the process to stop. The final confirmation defaults to No;
+backing out changes nothing. Channel history and existing backups remain.
+Recreating the name starts with empty state. Restoring an earlier node backup
+can bring back the deleted instance and its captured state.
 
 Unknown actions, including ungranted queries, return a refusal. A malformed
 line, failed handshake or more than 240 actions/minute ends the process. The

@@ -6492,8 +6492,14 @@ transaction and survive restarts. The supervising task adopts a child even
 when cancelled during spawn, then terminates/reaps it. State API writes are
 atomic per instance, under the original name even after a rename. Reminder
 delivery followed by state removal is intentionally at-least-once across a
-crash. Automatic bot-state backup/restore is not yet implemented. MRC
-destinations remain refused; Linked destinations require a separate persisted
+crash. Bot-state backup reads each atomic API state file before the database
+snapshot so caller ids cannot be newer than the captured database. Restore
+switches the whole state directory, including absence for pre-bot archives;
+merging would leave newer reminders beside an older account namespace. The
+checksummed component contains bounded API-managed JSON, not arbitrary program
+files. Deletion requires disabled configuration and stopped process status;
+manager startup resets stale statuses from the previous node process before
+starting workers. MRC destinations remain refused; Linked destinations require a separate persisted
 approval. Bot requests use their own optional live frames, never parsing
 received channel messages. Keep node-qualified resolution at the caller's
 input boundary; executing shorthand at every receiving node would multiply

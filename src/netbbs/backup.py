@@ -2,7 +2,7 @@
 Node backup and restore (design doc §13.4/§13.10, issue #60's first
 operational slice, hardened by issue #75).
 
-A node's recoverable state is fifteen `db_path`-relative artifacts, not
+A node's recoverable state includes `db_path`-relative artifacts, not
 just the database: content blobs (`netbbs.files.storage`), node
 identity (`netbbs.link.node_identity`), the SSH host key
 (`netbbs.net.ssh`), the managed-DNS registration credential
@@ -13,17 +13,18 @@ masthead (`netbbs.net.main_menu_banner`, issue #161), the logoff banner
 (`netbbs.net.new_account_banner_before`/`_after`, issue #177), the
 three submenu mastheads (`netbbs.net.board_list_banner`/`file_area_
 banner`/`chat_channel_picker_banner`, issue #176), and the door
-outbound receipts (`netbbs.doors.outbound`, issue #556) all live at
+outbound receipts (`netbbs.doors.outbound`, issue #556) and bot API state
+(`netbbs.bots.state`, issue #1210) all live at
 derived paths alongside the database, each with no independent config
 field of its own. A backup covering only the database silently loses
 the SSH host key (every client gets a MITM warning after restore) and,
 far more seriously, the Link node identity -- root-key custody is
 explicitly "part of ordinary node backup and restore" (design doc
-§4.5), not a separate ceremony. This module treats all fifteen as one
+§4.5), not a separate ceremony. This module treats these as one
 atomic backup operation, never a DB-only one.
 
-The receipts are the one of the fifteen with a generation of its own to
-respect. A receipt records what became of one door's post request, and
+Door receipts have a generation of their own to respect.
+A receipt records what became of one door's post request, and
 a `"posted"` one names a `post_id` in the database beside it -- so it
 is captured *before* the database snapshot, the same direction the
 Voidrunner component is captured for the same reason. That ordering
@@ -140,6 +141,9 @@ _VOIDRUNNER_DIRNAME = "voidrunner"
 _WAR_DIALER_DIRNAME = "war-dialer"
 _DOOR_INSTALLS_DIRNAME = "door-installs"
 _DOOR_OUTBOUND_DIRNAME = "door-outbound"
+_BOT_STATE_DIRNAME = "bot-state"
+_BOT_STATE_MAX_INSTANCES = 64
+_BOT_STATE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,23}")
 _WAR_DIALER_MAX_WORLDS = 64
 _WAR_DIALER_MAX_BYTES = 512 * 1024 * 1024
 _VOIDRUNNER_MAX_FILES = 10_000
@@ -255,6 +259,11 @@ def _door_outbound_root_for(db_path: Path) -> Path:
     return results_root(db_path)
 
 
+def _bot_state_root_for(db_path: Path) -> Path:
+    from netbbs.bots.state import state_root
+    return state_root(db_path)
+
+
 def _ssh_host_key_path_for(db_path: Path) -> Path:
     """Mirrors `netbbs.net.ssh.ensure_host_key`'s own derived path."""
     return db_path.parent / f"{db_path.stem}_ssh_host_key"
@@ -341,6 +350,7 @@ def _runtime_reserved_paths(db_path: Path) -> list[Path]:
         pat, *(Path(str(path) + ".tmp") for path in credentials),
         parent / "doors", parent / "door-nodes", parent / f"{db_path.name}_drafts",
         parent / f"{db_path.stem}_backups",
+        _bot_state_root_for(db_path),
         *(Path(str(path) + ".draft") for path in _extra_artifact_paths(db_path) if path.suffix == ".ans"),
     ]
 
@@ -1098,6 +1108,91 @@ def _validate_door_outbound_component(source: Path, manifest: dict) -> None:
     _refuse_unlisted_entries(root, expected_doors, "Door outbound directories")
 
 
+def _bot_state_bytes(path: Path) -> bytes:
+    from netbbs.bots.state import MAX_STATE_BYTES
+    if path.is_symlink() or not path.is_file():
+        raise BackupError("Bot state must be a regular file, not a symbolic link.")
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_STATE_BYTES + 1)
+    if len(raw) > MAX_STATE_BYTES:
+        raise BackupError("Bot state exceeds 16 KiB.")
+    try:
+        value = json.loads(raw)
+        json.dumps(value, allow_nan=False)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise BackupError("Bot state is not finite JSON.") from exc
+    return raw
+
+
+def _capture_bot_state(db_path: Path, destination: Path, checksums: dict) -> dict | None:
+    """Only API-managed state, read atomically before the database snapshot.
+
+    Caller ids in a reminder cannot be newer than the database taken after
+    it. External programs' executables/caches are not part of the state API.
+    """
+    root = _bot_state_root_for(db_path)
+    if root.is_symlink():
+        raise BackupError("Bot state root must not be a symbolic link.")
+    if not root.exists():
+        return None
+    if not root.is_dir():
+        raise BackupError("Bot state root is not a directory.")
+    if destination.resolve().is_relative_to(root.resolve()):
+        raise BackupError("A backup destination cannot be inside the bot state directory.")
+    output = destination / _BOT_STATE_DIRNAME
+    output.mkdir()
+    instances, seen = [], set()
+    with os.scandir(root) as entries:
+        for index, entry in enumerate(entries):
+            if index >= _BOT_STATE_MAX_INSTANCES:
+                raise BackupError("Bot state backup exceeds 64 instance directories; remove obsolete stores first.")
+            if (not _BOT_STATE_NAME.fullmatch(entry.name) or entry.is_symlink()
+                    or not entry.is_dir(follow_symlinks=False) or entry.name.casefold() in seen):
+                raise BackupError("Invalid or case-colliding bot state directory.")
+            seen.add(entry.name.casefold())
+            state = Path(entry.path) / "state.json"
+            if not state.exists() and not state.is_symlink():
+                continue  # A new instance may never have stored a value.
+            raw = _bot_state_bytes(state)
+            saved = output / entry.name / "state.json"
+            saved.parent.mkdir()
+            saved.write_bytes(raw)
+            checksums[f"{_BOT_STATE_DIRNAME}/{entry.name}/state.json"] = hashlib.sha256(raw).hexdigest()
+            instances.append(entry.name)
+    return {"version": 1, "instances": sorted(instances)}
+
+
+def _validate_bot_state_component(source: Path, manifest: dict) -> None:
+    metadata = manifest.get("bot_state")
+    root = source / _BOT_STATE_DIRNAME
+    database_named_component = _database_filename_from_manifest(manifest).casefold() == _BOT_STATE_DIRNAME
+    if metadata is None:
+        if (root.exists() or root.is_symlink()) and not (database_named_component and root.is_file() and not root.is_symlink()):
+            raise BackupError("Bot state component has no coverage manifest.")
+        return
+    if database_named_component:
+        raise BackupError("Bot state component collides with the database snapshot filename.")
+    if (not isinstance(metadata, dict) or metadata.get("version") != 1
+            or not isinstance(metadata.get("instances"), list)
+            or len(metadata["instances"]) > _BOT_STATE_MAX_INSTANCES
+            or root.is_symlink() or not root.is_dir()):
+        raise BackupError("Invalid bot state coverage manifest.")
+    names, folded = set(), set()
+    for name in metadata["instances"]:
+        if not isinstance(name, str) or not _BOT_STATE_NAME.fullmatch(name) or name.casefold() in folded:
+            raise BackupError("Invalid bot state instance name.")
+        names.add(name)
+        folded.add(name.casefold())
+        directory = root / name
+        if directory.is_symlink() or not directory.is_dir():
+            raise BackupError("Bot state instance must be a real directory.")
+        _bot_state_bytes(directory / "state.json")
+        if f"{_BOT_STATE_DIRNAME}/{name}/state.json" not in manifest.get("checksums", {}):
+            raise BackupError("Bot state has no checksum.")
+        _refuse_unlisted_entries(directory, {"state.json"}, "Bot state files")
+    _refuse_unlisted_entries(root, names, "Bot state directories")
+
+
 def _discard_incomplete_backup(destination: Path, exc: BaseException) -> None:
     """Remove the destination this run created; the caller re-raises `exc`.
 
@@ -1187,6 +1282,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         # a related reason: a receipt must never name a post the snapshot
         # beside it does not contain (issue #556).
         receipt_metadata = _capture_door_outbound(db_path, destination, checksums)
+        bot_metadata = _capture_bot_state(db_path, destination, checksums)
         door_metadata = _capture_door_installs(db_path, destination)
     except BaseException as exc:
         _discard_incomplete_backup(destination, exc)
@@ -1194,7 +1290,8 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
     if ((game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME)
             or (war_metadata is not None and database_filename.casefold() == _WAR_DIALER_DIRNAME)
             or (door_metadata is not None and database_filename.casefold() == _DOOR_INSTALLS_DIRNAME)
-            or (receipt_metadata is not None and database_filename.casefold() == _DOOR_OUTBOUND_DIRNAME)):
+            or (receipt_metadata is not None and database_filename.casefold() == _DOOR_OUTBOUND_DIRNAME)
+            or (bot_metadata is not None and database_filename.casefold() == _BOT_STATE_DIRNAME)):
         # The live custom filename remains valid. Only its archive name changes;
         # the manifest and explicit restore --db already separate those paths.
         database_filename = _LEGACY_DB_FILENAME
@@ -1254,6 +1351,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         "war_dialer": war_metadata,
         "door_installs": door_metadata,
         "door_outbound": receipt_metadata,
+        "bot_state": bot_metadata,
     }
     try:
         # Checked against what was actually written, and inside the same
@@ -1262,6 +1360,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         # the same path.
         _validate_war_dialer_component(destination, manifest)
         _validate_door_outbound_component(destination, manifest)
+        _validate_bot_state_component(destination, manifest)
         (destination / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
     except BaseException as exc:
         _discard_incomplete_backup(destination, exc)
@@ -1349,6 +1448,7 @@ def _validate_backup_source(source: Path, *, allow_migrate: bool) -> dict:
         raise BackupError(f"backup is missing its database snapshot: {db_snapshot}")
     _validate_war_dialer_component(source, manifest)
     _validate_door_outbound_component(source, manifest)
+    _validate_bot_state_component(source, manifest)
 
     for relative_name, expected_hash in manifest.get("checksums", {}).items():
         candidate = source / relative_name
@@ -1561,6 +1661,12 @@ def _restore_switch_plan(
     if staged_identity.is_dir():
         plan.append(("identity", staged_identity, identity_dir))
 
+    # Absence is a generation too: never leave newer reminders next to an
+    # older database, including archives made before bots were supported.
+    staged_bots = staging_dir / _BOT_STATE_DIRNAME
+    plan.append((_BOT_STATE_DIRNAME, staged_bots if staged_bots.is_dir() else None,
+                 _bot_state_root_for(db_path)))
+
     # Planned whether or not this archive has the component (issue #556):
     # a point-in-time restore must restore the absence of receipts too, or a
     # later generation's receipts survive beside an older database and claim
@@ -1588,7 +1694,7 @@ def _restore_switch_plan(
 
     for entry in sorted(staging_dir.iterdir()):
         if entry.name in (*_RESERVED_BACKUP_ENTRIES, _VOIDRUNNER_DIRNAME, _WAR_DIALER_DIRNAME,
-                          _DOOR_OUTBOUND_DIRNAME, database_filename):
+                          _DOOR_OUTBOUND_DIRNAME, _BOT_STATE_DIRNAME, database_filename):
             continue
         if entry.is_file():
             live_path = db_path.parent / entry.name

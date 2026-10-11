@@ -195,6 +195,34 @@ def mute_bot(db: Database, channel: Channel, bot: Bot, *, actor: User, mute: boo
                       object_id=channel.id, detail=f"{bot.label}: {until or 'unmuted'}")
 
 
+def deletable_bot(db: Database, bot_id: int, *, actor: User) -> Bot:
+    require_sysop(db, actor)
+    bot = get_bot(db, bot_id)
+    state = db.connection.execute("SELECT runtime_state FROM chat_bots WHERE id=?", (bot_id,)).fetchone()[0]
+    if bot.enabled or state != "stopped":
+        raise BotError("Kill this bot first and wait for its status to become stopped before deleting it.")
+    return bot
+
+
+def delete_bot(db: Database, bot_id: int, *, actor: User) -> None:
+    from netbbs.bots.state import remove_state
+    bot = deletable_bot(db, bot_id, actor=actor)
+    try:
+        remove_state(db, bot.storage_name)
+    except OSError as exc:
+        raise BotError("Could not remove the bot's state directory; check its filesystem permissions.") from exc
+    with db.connection:
+        db.connection.execute("DELETE FROM chat_bots WHERE id=?", (bot.id,))
+        record_action(db, actor=actor, action="bot_delete", object_type="bot", object_id=bot.id,
+                      detail=f"Deleted {bot.label} and its state; channel history retained")
+
+
+def reset_runtime_status(db: Database) -> None:
+    """One manager startup: yesterday's process statuses are not live processes."""
+    db.connection.execute("UPDATE chat_bots SET runtime_state='stopped'")
+    db.connection.commit()
+
+
 def allowed_channel(db: Database, bot_id: int, name: str, *, check_rate: bool = False) -> tuple[Bot, Channel]:
     bot = get_bot(db, bot_id)
     if not bot.enabled:

@@ -7932,9 +7932,8 @@ every other replaced artifact. None of this makes receipt retention a
 publication ledger: it restores the same bounded, best-effort record a running
 node keeps, and a door still must not infer exactly-once publication from it.
 
-A node's recoverable state is not only its database — it is sixteen
-artifacts, today scattered across derived, `db_path`-relative filenames
-with no single existing tool that treats them as one recoverable set:
+A node's recoverable state includes the following artifacts at derived,
+`db_path`-relative paths, captured together by the node backup tool:
 
 | Artifact | Location | Written by |
 |---|---|---|
@@ -7954,12 +7953,13 @@ with no single existing tool that treats them as one recoverable set:
 | File area masthead | `db_path.parent / f"{db_path.stem}_file_area_banner.ans"` | SysOp, via its own menu screen (issue #176) |
 | Chat channel picker masthead | `db_path.parent / f"{db_path.stem}_chat_channel_picker_banner.ans"` | SysOp, via its own menu screen (issue #176) |
 | Door outbound receipts | `db_path.parent / "door-outbound"` (one directory per door, bounded by that door's own retention) | `netbbs.doors.outbound`, once per answered request (issue #556) |
+| Bot API state | `<database-filename>.bots/<original-instance-name>/state.json` | `netbbs.bots.state`; bounded atomic JSON captured before the database snapshot, restored as a whole generation including absence (issue #1210) |
 
 A backup covering only the database silently loses the SSH host key (every
 client gets a MITM warning on next connect after restore) and, far more
 seriously, the Link node identity (root-key custody is explicitly "part of
 ordinary node backup and restore" per §4.5's node identity model, not a
-separate ceremony) — so this design treats all sixteen as one atomic backup
+separate ceremony) — so this design treats these as one complete backup
 operation, never a DB-only one.
 
 **Mechanism**: a new `netbbs.backup` module (synchronous, path-based — no
@@ -16211,9 +16211,12 @@ local receiving filter, including history/search, keyed by bot label and home
 fingerprint. Remote caller ids are distinct from local account ids and from
 identically named callers on other nodes. A remote request's public reply
 also goes directly to the caller's node, with ordinary live deduplication,
-so an offline channel origin does not swallow that reply. Channel/event
-scopes, node queries, automatic bot-state backup/restore and model
-conversation remain subsequent slices.
+so an offline channel origin does not swallow that reply. Node backups now
+capture bounded API-managed state files with checksums before the database
+snapshot, and restore the matching generation, including absence. SysOps may
+delete a stopped instance and its state after explicit confirmation; channel
+history and existing backups remain. Channel/event scopes, node queries and
+model conversation remain subsequent slices.
 See `NetBBS-bot-api.md` for the implemented protocol and limits.
 
 **Grounding.** Door output already speaks in chat without being a person

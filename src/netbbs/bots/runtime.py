@@ -16,6 +16,7 @@ import uuid
 from netbbs.bots import BOT_API_VERSION
 from netbbs.bots.registry import (
     Bot, BotError, allowed_channel, list_bots, publish, select_request, set_runtime_status,
+    reset_runtime_status,
 )
 from netbbs.bots.state import read_state, write_state, state_path
 from netbbs.rendering import sanitize_text
@@ -47,6 +48,7 @@ class BotRuntime:
 
     async def _run(self) -> None:
         try:
+            await self.lane.run(reset_runtime_status)
             while True:
                 try:
                     desired = {b.id: b for b in await self.lane.run(list_bots) if b.enabled}

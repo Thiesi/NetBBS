@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+import shutil
 from pathlib import Path
 
 from netbbs.bots.registry import BotError
@@ -9,8 +11,14 @@ from netbbs.bots.registry import BotError
 MAX_STATE_BYTES = 16384
 
 
+def state_root(db_path: Path) -> Path:
+    return db_path.with_name(db_path.name + ".bots")
+
+
 def state_path(db, storage_name: str) -> Path:
-    root = db.path.with_name(db.path.name + ".bots")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}", storage_name):
+        raise BotError("Invalid bot state directory name.")
+    root = state_root(db.path)
     directory = root / storage_name
     # The name was validated on creation. Do not follow a replacement directory
     # outside the store; same-OS-user programs are still not a security sandbox.
@@ -18,6 +26,15 @@ def state_path(db, storage_name: str) -> Path:
         raise BotError("Bot state directories must not be symbolic links.")
     directory.mkdir(parents=True, exist_ok=True)
     return directory / "state.json"
+
+
+def remove_state(db, storage_name: str) -> None:
+    directory = state_path(db, storage_name).parent
+    root = state_root(db.path)
+    expected_root = root.parent.resolve() / root.name
+    if root.resolve() != expected_root or directory.resolve() != expected_root / storage_name:
+        raise BotError("Bot state directory is outside this node's store.")
+    shutil.rmtree(directory)
 
 
 def read_state(db, storage_name: str):
