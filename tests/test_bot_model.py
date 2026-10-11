@@ -325,6 +325,10 @@ def test_busy_reset_and_settings_change_discard_inflight_context(db, lane, sysop
             assert active_key in service.contexts  # accepted input is activity, even before the reply
             with pytest.raises(BotError, match="busy"):
                 await exchange(service, bot, channel, callers[2], "third")
+            monkeypatch.setattr(model, "MAX_CONTEXTS", 3)
+            late = create_user(db, "late", password="hunter2", user_level=10)
+            await exchange(service, bot, channel, {"id": late.id, "name": late.username}, "notice")
+            assert active_key in service.contexts  # capacity eviction also respects recent input
             await exchange(service, bot, channel, callers[0], "reset", reset=True)
             model.save_settings(db, replace(config, persona="Changed persona"), actor=sysop, api_key="different-key")
             control["gate"].set()

@@ -310,6 +310,7 @@ class ModelService:
             raise BotError("Model messages must contain 1-4000 characters.")
         self.busy.add(key)
         context.touched = now
+        self.contexts.move_to_end(key)
         try:
             messages = [{"role": "system", "content": config.persona +
                          f"\nYour chat identity is {label}. Use this name when identifying yourself."}]
