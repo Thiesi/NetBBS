@@ -120,6 +120,9 @@ class ChatHub:
         # database in the first place. Resets on node restart, same as
         # every other piece of in-memory ChatHub state.
         self._last_activity: dict[str, str] = {}
+        # Optional node-owned bot service. Bots have a separate roster and do
+        # not occupy human participant queues or inflate human presence counts.
+        self.bot_runtime = None
 
     def join(self, channel_name: str, participant_id: ParticipantId) -> asyncio.Queue:
         """Register `participant_id` as present in `channel_name`,

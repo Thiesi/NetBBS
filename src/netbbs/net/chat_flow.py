@@ -2951,6 +2951,9 @@ async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
     target_name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     duration, reason = _split_duration_and_reason(rest)
 
+    if await _moderate_bot(ctx, target_name, mute=True, duration=duration, reason=reason):
+        return
+
     if (door := await _door_named(ctx, target_name)) is not None:
         await _moderate_door(ctx, door, kind="mute", duration=duration, reason=reason)
         return
@@ -2978,6 +2981,9 @@ async def _handle_unmute(ctx: ChatCommandContext, args: str) -> None:
     target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
         await _show_usage(ctx.session, "unmute")
+        return
+
+    if await _moderate_bot(ctx, target_name, mute=False):
         return
 
     if (door := await _door_named(ctx, target_name)) is not None:
@@ -3752,13 +3758,38 @@ async def _handle_follow(ctx: ChatCommandContext, args: str) -> None:
         await ctx.session.write_line(colored(f"No longer following {name}.", fg_color=MUTED_COLOR))
 
 
+def _local_bot_labels(db: Database, hub: ChatHub, channel: Channel) -> list[str]:
+    if hub.bot_runtime is None:
+        return []
+    from netbbs.bots.registry import active_labels
+    return active_labels(db, channel, hub.bot_runtime.running_ids)
+
+
+async def _moderate_bot(ctx, name, *, mute, duration=None, reason=None) -> bool:
+    if not name.lower().endswith(".bot"):
+        return False
+    from netbbs.bots.registry import BotError, bot_for_label, mute_bot
+    bot = await ctx.lane.run(bot_for_label, name)
+    if bot is None:
+        return False
+    try:
+        await ctx.lane.run(mute_bot, ctx.channel, bot, actor=ctx.user, mute=mute, duration=duration)
+    except BotError as exc:
+        await ctx.session.write_line(sanitize_text(str(exc)))
+    else:
+        await _announce_moderation(ctx.lane, ctx.hub, ctx.channel, kind="mute" if mute else "unmute",
+                                   target_label=bot.label, detail=_moderation_detail(ctx.user.username, duration, reason))
+    return True
+
+
 async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
     """`/names` (design doc): a compact, one-line roster
     of `ctx.channel`."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
     remote_entries = await _remote_roster_entries(ctx)
     mrc_entries = _mrc_roster_entries(ctx)
-    if not usernames and not remote_entries and not mrc_entries:
+    bot_labels = await ctx.lane.run(_local_bot_labels, ctx.hub, ctx.channel)
+    if not usernames and not remote_entries and not mrc_entries and not bot_labels:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
 
@@ -3771,6 +3802,7 @@ async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
         return result
 
     labels = await ctx.lane.run(_labels)
+    labels.extend(f"[BOT] {label}" for label in bot_labels)
     labels.extend(label for label, _fingerprint in remote_entries)
     # "(on MRC)", as /who says it: "bob (MRC)" would read as an alias
     # for a local account named MRC (issue #899).
@@ -3786,7 +3818,8 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
     which linked node they're on."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
     remote_entries = await _remote_roster_entries(ctx)
-    if not usernames and not remote_entries and not _mrc_roster_entries(ctx):
+    bot_labels = await ctx.lane.run(_local_bot_labels, ctx.hub, ctx.channel)
+    if not usernames and not remote_entries and not _mrc_roster_entries(ctx) and not bot_labels:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
 
@@ -3799,6 +3832,8 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
         return result
 
     labels_by_username = await ctx.lane.run(_labels)
+    for label in bot_labels:
+        await ctx.session.write_line(f"[BOT] {label} (addressed messages only)")
     for username in usernames:
         label = labels_by_username.get(username)
         if label is None:
@@ -4610,6 +4645,7 @@ def _render_chat_status_line(
     roster = _roster_usernames(hub, channel)
     online_count = hub.participant_count(channel.name)
     away_count = sum(1 for username in roster if presence.is_away(username))
+    bot_count = len(_local_bot_labels(db, hub, channel))
 
     groups: list[_StatusGroup] = [
         [
@@ -4623,6 +4659,9 @@ def _render_chat_status_line(
             _StatusSpan(" away)", fg_color=MUTED_COLOR),
         ],
     ]
+
+    if bot_count:
+        groups[1].append(_StatusSpan(f" ({bot_count} bot{'s' if bot_count != 1 else ''})", fg_color=MUTED_COLOR))
 
     mrc_mapping = get_mrc_mapping(db, channel)
     if mrc_mapping is not None and mrc_mapping.active:
@@ -5813,6 +5852,10 @@ async def _chat_loop(
                         )
                         await session.write_line(rendered_self)
                         await hub.broadcast(channel.name, recorded_message, exclude={participant_id})
+                        if hub.bot_runtime is not None:
+                            bot_problem = await hub.bot_runtime.addressed(channel, user, recorded_message, participant_id)
+                            if bot_problem:
+                                await session.write_line(sanitize_text(bot_problem))
                         # Issue #275: the MRC sibling of the live-Link push
                         # above -- a no-op unless this channel is bridged.
                         # After local delivery, as the `/me` path does: the

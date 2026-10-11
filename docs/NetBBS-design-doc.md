@@ -16194,9 +16194,15 @@ are implemented. `/bots` shows the policy; `/bots all`, `/bots local` and
 The receiving policy starts at *all bots*; this grants no process, event,
 query or publishing permission. It filters live display, history, search
 and remote rosters without deleting retained messages or signed events.
-MRC mappings, including paused mappings, always refuse bots. Bot execution,
-local bot presence/counts, per-bot moderation, Baud and model conversation
-remain unimplemented. These controls do not start or enable a bot.
+MRC mappings, including paused mappings, always refuse bots. The local
+runtime now supervises BOT API v1 programs, with addressed-only grants,
+per-channel output limits, mutes, local bot presence/counts and persistent
+stop controls. Baud provides help and public channel reminders through that
+same API. Instances are off by default and configured in Content > Chat bots.
+Linked bot execution/routing, channel/event scopes, node queries, automatic
+bot-state backup/restore and model conversation remain subsequent slices.
+The local runtime refuses Linked channels until that integration is ready.
+See `NetBBS-bot-api.md` for the implemented protocol and limits.
 
 **Grounding.** Door output already speaks in chat without being a person
 (issue #520):

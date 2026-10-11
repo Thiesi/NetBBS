@@ -693,6 +693,8 @@ async def run(
     # guard would survive a failing startup step, because the `stop_all` which
     # ends it lives in that finally.
     door_services = DoorServiceManager()
+    from netbbs.bots.runtime import BotRuntime
+    bot_runtime = BotRuntime(background_lane, hub)
     throttle = _build_throttle(config)
     throttle_config = config.throttle
     if session_registry is None:
@@ -1399,6 +1401,8 @@ async def run(
             # the node from starting; the door simply has no service.
             _logger.error("could not start door services: %s", exc, exc_info=exc)
 
+        bot_runtime.start()
+
         # Design doc: the piece that makes this node
         # *originate* outbound Link activity, not just answer it. A
         # separate try/except ImportError from LinkServer's own,
@@ -1581,6 +1585,8 @@ async def run(
                 return
             task.cancel()
             await _swallow_after(task)
+
+        await bot_runtime.close()
 
         # Issue #466: stop the door services first, before the listeners and
         # background tasks below. Each one is SIGTERM, its own configured

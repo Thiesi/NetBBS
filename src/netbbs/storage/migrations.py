@@ -4271,4 +4271,34 @@ MIGRATIONS = [
             CHECK (author_kind IN ('user', 'bot'));
         """,
     ),
+    Migration(
+        description="Issue #1210: supervised local bots, addressed grants, mutes and persistent output limits.",
+        sql="""
+        CREATE TABLE chat_bots (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            storage_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+            command_json TEXT NOT NULL DEFAULT '[]',
+            temperament TEXT NOT NULL DEFAULT 'friendly',
+            lines_per_hour INTEGER NOT NULL DEFAULT 60 CHECK (lines_per_hour BETWEEN 1 AND 120),
+            runtime_state TEXT NOT NULL DEFAULT 'stopped',
+            last_error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE bot_channels (
+            bot_id INTEGER NOT NULL REFERENCES chat_bots(id) ON DELETE CASCADE,
+            channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+            muted_until TEXT,
+            PRIMARY KEY (bot_id, channel_id)
+        );
+        CREATE UNIQUE INDEX idx_bot_channel_default ON bot_channels(channel_id) WHERE is_default=1;
+        CREATE TABLE bot_output_history (
+            bot_id INTEGER NOT NULL REFERENCES chat_bots(id) ON DELETE CASCADE,
+            channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_bot_output_rate ON bot_output_history(bot_id, channel_id, created_at);
+        """,
+    ),
 ]

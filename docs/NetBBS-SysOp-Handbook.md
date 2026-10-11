@@ -1427,8 +1427,33 @@ MRC-bridged channels refuse bots even when the mapping is paused.
 
 Bot authors use a reserved `.bot` label and a `[BOT]` marker. Existing local
 accounts with that suffix remain people; an older peer's account with the
-suffix is classified as a bot on this node. Bot processes and Baud are not
-available yet; these receiving controls do not enable or authorize a bot.
+suffix is classified as a bot on this node. Receiving policy alone does not
+enable or authorize a bot.
+
+**Content > Open chat bots** installs and edits bot instances. Create Baud,
+choose its local channels, optionally select it as their default, enable it
+and Save. It reads only messages addressed to it. Its replies and reminders
+are public in the channel. No language model is involved. Friendly, terse
+and retro temperaments change its fixed phrases.
+
+The catalogue shows each bot's last runtime status and error. **Kill selected**
+stops one bot; **Stop all** stops every bot. Both persist across node restarts;
+enable an instance again in its editor to resume. Changes are applied within
+about a second. Moderators can `/mute Baud.bot [duration] [reason]` and
+`/unmute Baud.bot`. Output limits apply per bot and channel and survive a
+restart. `/who`, `/names` and the status line distinguish bots from people.
+
+This runtime supports local channels only. Linked and MRC channels are
+refused, including a channel that becomes Linked or bridged after a grant.
+See the [bot API guide](NetBBS-bot-api.md) to install an external bot. External
+programs run as the NetBBS OS user; the API is not an operating-system sandbox.
+
+Reminders survive process and node restarts in `<db>.bots/<original-name>/`.
+Renaming an instance keeps its original state directory. Automatic inclusion
+of these directories in node backups is pending; copy `<db>.bots/` alongside
+the database while the node is stopped. Reminders can be delayed by mutes,
+disabled channels or output limits. A crash just after delivery may repeat
+a reminder; delivery is not an exactly-once guarantee.
 
 ## MRC chat bridge
 

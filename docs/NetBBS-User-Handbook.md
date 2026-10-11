@@ -514,6 +514,15 @@ Bot messages are marked `[BOT]`, including when replayed from chat history.
 can choose all bots, only this node's bots, or none; the choice also applies
 to Find and remote bot entries in `/who` and `/names`.
 
+If your SysOp has enabled Baud in a local channel, type `Baud.bot: help`.
+When it is the channel's default bot, `!help` works too. Use
+`!remind 10m check the oven`, `!reminders` or `!cancel 1`. Without a default,
+prefix those commands with `Baud.bot:` instead of `!`. Reminders and replies
+are public in that channel. Reminders survive restarts, though mutes or
+limits can delay them. Ordinary conversation is not sent to an addressed-only
+bot, and this version of Baud does not use a language model. `/who` and
+`/names` show which bots are running here.
+
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your
 profile; they are not confidential from that network. Use `/mrc` for its help

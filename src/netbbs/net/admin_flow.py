@@ -18749,6 +18749,11 @@ async def _content_menu(
             await _channel_menu(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
+        elif choice == "o":
+            from netbbs.net.bot_flow import bot_menu
+            await bot_menu(session, lane, actor)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "c":
             await session.write_line("")
             await _category_menu(session, lane, actor)
@@ -18791,6 +18796,7 @@ _CONTENT_MENU = (
     MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
     MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
     MenuEntry(label=menu_key("L", "ive chat"), brief="Create/edit chat channels"),
+    MenuEntry(label=menu_key("O", "pen chat bots"), brief="Configure bots, status and kill switches"),
     MenuEntry(label=menu_key("C", "ategories"), brief="Group lists of one kind"),
     MenuEntry(label=menu_key("T", "opics"), brief="Communities holding every kind"),
     MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),

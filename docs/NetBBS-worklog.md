@@ -6482,6 +6482,19 @@ retained rows are not deleted. MRC mapping presence overrides the policy
 even while paused. These receiving controls do not grant publishing access
 or provide a process sandbox.
 
+The local bot runtime owns its subprocesses independently of chat sessions.
+Only the accepted human send path dispatches addressed events; attaching a
+bot subscriber to `ChatHub.broadcast` would also feed it replay/automatic
+traffic and risk reply loops. Bots have a separate roster and never enter the
+human participant or presence registries. Grants, policy and mutes are read
+fresh on dispatch and output; per-channel rate debits share the chat message's
+transaction and survive restarts. The supervising task adopts a child even
+when cancelled during spawn, then terminates/reaps it. State API writes are
+atomic per instance, under the original name even after a rename. Reminder
+delivery followed by state removal is intentionally at-least-once across a
+crash. Automatic bot-state backup/restore and Linked execution are not yet
+implemented; the local runtime refuses Linked/MRC destinations.
+
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,
