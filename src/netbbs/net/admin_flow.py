@@ -18796,7 +18796,7 @@ _CONTENT_MENU = (
     MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
     MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
     MenuEntry(label=menu_key("L", "ive chat"), brief="Create/edit chat channels"),
-    MenuEntry(label=menu_key("O", "pen chat bots"), brief="Configure bots, status and kill switches"),
+    MenuEntry(label=menu_key("O", "pen chat bots"), brief="Bots, status and kill switches"),
     MenuEntry(label=menu_key("C", "ategories"), brief="Group lists of one kind"),
     MenuEntry(label=menu_key("T", "opics"), brief="Communities holding every kind"),
     MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),

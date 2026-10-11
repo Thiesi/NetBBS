@@ -6,6 +6,7 @@ from netbbs.bots.registry import (
     BotError, TEMPERAMENTS, get_bot, list_bots, require_sysop, runtime_status, save_bot, stop_bots,
     deletable_bot, delete_bot,
 )
+from netbbs.net.notices import announce
 from netbbs.net.picker import pick_item
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.resource_editor import (
@@ -63,10 +64,10 @@ async def bot_menu(session, lane, actor):
             stable_id_of=lambda b: b.id,
             description_of=description, title="Chat bots", breadcrumb=("SysOp", "Content"),
             empty_message="No bots installed. Create an instance of Baud to get started.",
-            refresh=refresh, on_create=create, live_keys={"x": stop_all, "m": model_settings, "u": model_usage}, item_keys={"k": stop_one, "d": delete_one},
+            refresh=refresh, on_create=create, live_keys={"s": stop_all, "m": model_settings, "u": model_usage}, item_keys={"k": stop_one, "d": delete_one},
             live_nav=(MenuEntry(label=menu_key("K", "ill selected"), brief="Stop this bot persistently"),
                       MenuEntry(label=menu_key("D", "elete selected"), brief="Delete a stopped bot and its state"),
-                      MenuEntry(label=menu_key("X", " Stop all"), brief="Stop every bot persistently"),
+                      MenuEntry(label=menu_key("S", "top all"), brief="Stop every bot persistently"),
                       MenuEntry(label=menu_key("M", "odel settings"), brief="Optional provider, privacy and budgets"),
                       MenuEntry(label=menu_key("U", "sage"), brief="Model spending, callers and limits hit")),
             masthead="Bots read addressed messages by default. Broader access and Linked channels require explicit grants. Changes apply within a second.",
@@ -88,9 +89,8 @@ async def _delete_bot(session, lane, actor, bot_id):
             await lane.run(delete_bot, bot_id, actor=actor)
             return True
     except BotError as exc:
-        await session.write_line(sanitize_text(str(exc)))
-        await session.write_line("Press any key to return to Chat bots.")
-        await session.read_key()
+        # Carried into the catalogue's redraw rather than held behind a key.
+        announce(session, str(exc), tone="error")
     return False
 
 

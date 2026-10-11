@@ -10,7 +10,7 @@ from netbbs.net.resource_editor import (
     FieldSpec, InputCancelled, bool_field, bool_step, choice_field, choice_step,
     edit_resource_draft, inline_field, read_field_line, text_field, write_field_prompt,
 )
-from netbbs.rendering import menu_key, sanitize_text
+from netbbs.rendering import continue_prompt, menu_key, sanitize_text
 
 MONEY = {"input_price", "output_price", "day_money", "month_money"}
 
@@ -105,5 +105,5 @@ async def model_usage(session, lane, actor):
     for row in value["limits"]:
         await session.write_line(f"Limit hit: {row['reason']} ({row['hits']} times).")
     await session.write_line("Estimates include interrupted or unmetered calls. Up to 20,000 requests per UTC month; prior-day records retained at month rollover. Prompt logs, if enabled, share that retention. No provider invoice is fetched.")
-    await session.write_line("Press any key to return.")
+    await session.write_line(continue_prompt("Back to Chat bots"))
     await session.read_key()
