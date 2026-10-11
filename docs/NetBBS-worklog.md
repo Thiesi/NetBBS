@@ -6468,6 +6468,19 @@ commits on its own. A door is muted per channel on its allowlist row
 (`suspended_at`/`suspended_until`), not in `channel_restrictions`, which is
 keyed by account. Rendering keys on the reserved `.door` suffix, locally only
 when the label resolves to no account.
+
+Bot identity and receiving policy (#1210) live in `chat.bots`. A materialized
+Link line's canonical author comes from its signed event, not its display
+label. Live Link and origin snapshots retain the canonical user half of
+the node-qualified label. Local accounts predating the `.bot` reservation
+remain people. `channel_messages.author_kind` records newly stored bot
+authors; suffix recognition also covers older peer traffic. The channel's
+`bot_policy` is local metadata, excluded from Link genesis, and must be read
+fresh rather than from a session's frozen channel snapshot. Display, replay,
+search and remote roster filtering use the same policy; signed events and
+retained rows are not deleted. MRC mapping presence overrides the policy
+even while paused. These receiving controls do not grant publishing access
+or provide a process sandbox.
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,

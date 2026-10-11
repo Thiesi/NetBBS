@@ -94,6 +94,10 @@ from netbbs.auth.users import (
     get_user_by_username,
     list_users,
 )
+from netbbs.chat.bots import (
+    BOT_POLICIES, BotPolicyError, bot_label_origin, bot_origin, bot_origin_allowed,
+    channel_bot_policy, set_channel_bot_policy,
+)
 from netbbs.chat import (
     Channel,
     account_suffix,
@@ -1693,6 +1697,9 @@ def _render_channel_message(
     `_message_author_label`'s output, which may or may not already
     carry its own embedded color.
     """
+    origin = bot_origin(db, message)
+    if not bot_origin_allowed(db, channel, origin):
+        return ""
     link_speaker = _link_speaker(db, message)
     author_label = _message_author_label(db, channel, message, link_speaker)
     from_mrc = message.external_source == "mrc"
@@ -1751,6 +1758,8 @@ def _render_channel_message(
             line = f"{label} " + colored(sanitize_text(message.body), fg_color=CHAT_BODY_COLOR)
     if from_mrc:
         line = colored(_MRC_BADGE, fg_color=MUTED_COLOR) + line
+    elif origin is not None:
+        line = colored("[BOT] ", fg_color=MUTED_COLOR, bold=True) + line
     durable_author = _durable_link_author(db, message)
     author_fingerprint = (
         message.author_fingerprint
@@ -1821,6 +1830,8 @@ def _render_all_scrollback(db: Database, channel: Channel, user: User, messages:
     rendered = []
     for message in messages:
         line = _render_scrollback_message(db, channel, user, message)
+        if not line:
+            continue
         if message.body_truncated:
             line += colored(" [truncated in join snapshot]", fg_color=MUTED_COLOR)
         rendered.append(line)
@@ -1880,6 +1891,8 @@ async def _deliver_remote_scrollback_snapshot(
     if not messages:
         return
     rendered = await lane.run(_render_all_scrollback, channel, user, messages)
+    if not rendered:
+        return
     await deliver(
         f"{badge('HISTORY')} "
         + colored("Recent activity from this channel's origin", fg_color=MUTED_COLOR)
@@ -2097,6 +2110,21 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
 async def _handle_rooms(ctx: ChatCommandContext, args: str) -> None:
     """`/rooms` (issue #300): the hub's room list, as `/mrc rooms`."""
     await _handle_mrc(ctx, "rooms")
+
+
+async def _handle_bots(ctx: ChatCommandContext, args: str) -> None:
+    """Inspect or change this node's bot policy for the current channel."""
+    policy = args.strip().lower()
+    if policy:
+        try:
+            await ctx.lane.run(set_channel_bot_policy, ctx.channel, policy, changed_by=ctx.user)
+        except BotPolicyError as exc:
+            await ctx.session.write_line(str(exc))
+            return
+    current = await ctx.lane.run(channel_bot_policy, ctx.channel)
+    await ctx.session.write_line(f"Bots in #{sanitize_text(ctx.channel.name)} on this node: {BOT_POLICIES[current]}.")
+    if await ctx.lane.run(_requires_moderate, ctx.channel, ctx.user):
+        await ctx.session.write_line("Set with /bots all, /bots local or /bots none. This does not start or authorize a bot.")
 
 
 async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
@@ -3341,7 +3369,7 @@ def _roster_usernames(hub: ChatHub, channel: Channel) -> list[str]:
     return sorted(usernames, key=str.lower)
 
 
-def _remote_roster_entries(ctx: ChatCommandContext) -> list[tuple[str, str]]:
+async def _remote_roster_entries(ctx: ChatCommandContext) -> list[tuple[str, str]]:
     """Issue #195: `ctx.channel`'s merged live roster from a linked
     origin, if this node currently holds a live subscription to it --
     `(sanitized display_label, origin fingerprint)` pairs, sorted
@@ -3361,10 +3389,19 @@ def _remote_roster_entries(ctx: ChatCommandContext) -> list[tuple[str, str]]:
     if not entries:
         return []
     fingerprint = ctx.realtime_bridge.remote_channel_origin_fingerprint(ctx.channel.channel_id) or ""
-    return sorted(
-        ((sanitize_text(label), fingerprint) for label in entries.values()),
-        key=lambda pair: pair[0].lower(),
-    )
+    snapshot = tuple(entries.items())
+
+    def _visible(db: Database) -> list[tuple[str, str]]:
+        result = []
+        for username, label in snapshot:
+            origin = bot_label_origin(db, username, remote=True)
+            if not bot_origin_allowed(db, ctx.channel, origin):
+                continue
+            shown = f"[BOT] {sanitize_text(username)}" if origin else sanitize_text(label)
+            result.append((shown, fingerprint))
+        return sorted(result, key=lambda pair: pair[0].lower())
+
+    return await ctx.lane.run(_visible)
 
 
 def _mrc_roster_entries(ctx: ChatCommandContext) -> list[str]:
@@ -3719,7 +3756,7 @@ async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
     """`/names` (design doc): a compact, one-line roster
     of `ctx.channel`."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
-    remote_entries = _remote_roster_entries(ctx)
+    remote_entries = await _remote_roster_entries(ctx)
     mrc_entries = _mrc_roster_entries(ctx)
     if not usernames and not remote_entries and not mrc_entries:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
@@ -3748,7 +3785,7 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
     participant known through a live Link subscription, annotated with
     which linked node they're on."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
-    remote_entries = _remote_roster_entries(ctx)
+    remote_entries = await _remote_roster_entries(ctx)
     if not usernames and not remote_entries and not _mrc_roster_entries(ctx):
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
@@ -4048,6 +4085,7 @@ async def _handle_members(ctx: ChatCommandContext, args: str) -> None:
 # "help") -- an alias needs no documentation entry of its own, and
 # `_handle_help`'s bare listing skips any `_COMMANDS` name absent here.
 _COMMAND_INFO: dict[str, tuple[str, str]] = {
+    "bots": ("/bots [all|local|none]", "Show this node's channel bot policy; moderators can change it. Does not enable a bot."),
     "quit": ("/quit", "Leave chat and return to the main menu."),
     "leave": ("/leave", "Leave this chat channel and return to the chat channel picker."),
     "join": ("/join <channel>", "Switch to another chat channel; inside an MRC room, /join <room> opens that MRC room (mrc:<room> from anywhere)."),
@@ -4086,6 +4124,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
 }
 
 _COMMANDS: dict[str, CommandHandler] = {
+    "bots": _handle_bots,
     "quit": _handle_quit,
     "mrc": _handle_mrc,
     "rooms": _handle_rooms,
@@ -5230,8 +5269,8 @@ async def _chat_loop(
             await session.write_line(gates_note)
 
         scrollback = await lane.run(get_scrollback, channel)
-        if scrollback:
-            rendered_scrollback = await lane.run(_render_all_scrollback, channel, user, scrollback)
+        rendered_scrollback = await lane.run(_render_all_scrollback, channel, user, scrollback)
+        if rendered_scrollback:
             await session.write_line(f"\r\n{badge('HISTORY')} " + colored("Recent channel activity", fg_color=MUTED_COLOR))
             for line in rendered_scrollback:
                 await session.write_line(line)
@@ -5250,6 +5289,7 @@ async def _chat_loop(
             await session.write_line(
                 colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
             )
+        if scrollback:
             # Issue #56: viewing this channel's scrollback advances
             # user's read cursor to whatever is now newest on screen --
             # scrollback is oldest-first (get_scrollback's own contract),
@@ -5373,6 +5413,8 @@ async def _chat_loop(
                     # (design doc) -- join/leave affect the
                     # participant count every repaint shows regardless.
                     rendered = await lane.run(_render_channel_message, channel, user, message, self_message=False)
+                    if not rendered:
+                        continue
                     await deliver(rendered, repaint_status=True)
                     continue
                 if isinstance(message, _TimestampedNotice):

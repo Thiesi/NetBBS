@@ -16187,6 +16187,17 @@ The issue scoped chat bots: something that gives a node personality without
 compromising Link's openness or its callers' privacy. The maintainer decided
 the design on 2026-10-10 and 2026-10-11; implementing it is separate work.
 
+**Implementation boundary (#1210).** Bot identity recognition, the reserved
+suffix, live/replay marking, remote roster marking and local channel policy
+are implemented. `/bots` shows the policy; `/bots all`, `/bots local` and
+`/bots none` change it with channel moderation permission and an audit entry.
+The receiving policy starts at *all bots*; this grants no process, event,
+query or publishing permission. It filters live display, history, search
+and remote rosters without deleting retained messages or signed events.
+MRC mappings, including paused mappings, always refuse bots. Bot execution,
+local bot presence/counts, per-bot moderation, Baud and model conversation
+remain unimplemented. These controls do not start or enable a bot.
+
 **Grounding.** Door output already speaks in chat without being a person
 (issue #520):
 - it uses a label, `<Name>.door`, that is not an account, and the username

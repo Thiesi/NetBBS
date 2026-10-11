@@ -4259,4 +4259,16 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1210: local-only channel bot presentation policy and retained author kind. "
+            "Receiving bot labels does not enable a bot process or grant publishing access."
+        ),
+        sql="""
+        ALTER TABLE channels ADD COLUMN bot_policy TEXT NOT NULL DEFAULT 'all'
+            CHECK (bot_policy IN ('all', 'local', 'none'));
+        ALTER TABLE channel_messages ADD COLUMN author_kind TEXT NOT NULL DEFAULT 'user'
+            CHECK (author_kind IN ('user', 'bot'));
+        """,
+    ),
 ]

@@ -321,6 +321,8 @@ def _channel_message_from_row(row) -> LocalChannelMessage:
     return LocalChannelMessage(
         id=row["id"], channel_id=row["channel_id"], kind=row["kind"], author_label=row["author_label"],
         author_fingerprint=row["author_fingerprint"], body=row["body"], created_at=row["created_at"],
+        link_content_id=row["link_content_id"],
+        author_kind=row["author_kind"] if "author_kind" in row.keys() else "user",
     )
 
 
@@ -376,6 +378,8 @@ def materialize_carried_channel_message(
     payload = message.payload
     author = payload["author"]
     author_label = f"{author['local_user_id']}@{author['home_node_fingerprint']}"
+    from netbbs.auth.users import BOT_LABEL_SUFFIX
+    author_kind = "bot" if author["local_user_id"].lower().endswith(BOT_LABEL_SUFFIX) else "user"
 
     db.connection.execute(
         """
@@ -391,10 +395,10 @@ def materialize_carried_channel_message(
     db.connection.execute(
         """
         INSERT INTO channel_messages
-            (channel_id, kind, author_label, author_fingerprint, body, created_at, link_content_id)
-        VALUES (?, 'message', ?, NULL, ?, ?, ?)
+            (channel_id, kind, author_label, author_fingerprint, body, created_at, link_content_id, author_kind)
+        VALUES (?, 'message', ?, NULL, ?, ?, ?, ?)
         """,
-        (channel_local_id, author_label, payload["body"], payload["created_at"], message.content_id),
+        (channel_local_id, author_label, payload["body"], payload["created_at"], message.content_id, author_kind),
     )
     limit = get_scrollback_limit(db)
     db.connection.execute(

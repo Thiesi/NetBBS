@@ -235,6 +235,8 @@ def search_channel_messages(
     message trust suppresses is skipped, as scrollback skips it (issue
     #677)."""
     from netbbs.link.enforcement import link_content_visible  # deferred -- see module's TYPE_CHECKING note
+    from netbbs.chat.bots import bot_message_visible
+    from netbbs.chat.scrollback import _row_to_message
 
     expr = _match_expression(query)
     if expr is None:
@@ -255,10 +257,12 @@ def search_channel_messages(
         if channel is None:
             continue
         message_row = db.connection.execute(
-            "SELECT author_label, link_content_id FROM channel_messages WHERE id = ?", (row["message_id"],)
+            "SELECT * FROM channel_messages WHERE id = ?", (row["message_id"],)
         ).fetchone()
         if message_row is None:
             continue  # trimmed since the search index was last pruned
+        if not bot_message_visible(db, channel, _row_to_message(message_row)):
+            continue
         if message_row["link_content_id"] is not None and not link_content_visible(
             db, message_row["link_content_id"]
         ):

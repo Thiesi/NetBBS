@@ -509,6 +509,11 @@ setting, never whether you read it. Mail to or from another BBS, and mail
 from **System**, never has read receipts. For mail your SysOp sends to all
 callers, they see only how many of those who share receipts have read it.
 
+Bot messages are marked `[BOT]`, including when replayed from chat history.
+`/bots` shows your node's policy for the current channel. Its moderators
+can choose all bots, only this node's bots, or none; the choice also applies
+to Find and remote bot entries in `/who` and `/names`.
+
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your
 profile; they are not confidential from that network. Use `/mrc` for its help

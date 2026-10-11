@@ -88,6 +88,7 @@ RESERVED_USERNAMES = {NEW_ACCOUNT_SENTINEL}
 #: protects the door path is `netbbs.doors.outbound`'s check that a minted
 #: label is free at the moment outbound is switched on.
 DOOR_LABEL_SUFFIX = ".door"
+BOT_LABEL_SUFFIX = ".bot"
 
 # Self-service registration's own minimum, deliberately stricter than
 # admin-created accounts (netbbs.net.admin_flow._prompt_optional_password
@@ -383,6 +384,10 @@ def _validate_username(username: str) -> None:
         raise AuthError(
             f"usernames may not end in {DOOR_LABEL_SUFFIX!r} — that suffix is reserved "
             "for doors which post to a board"
+        )
+    if username.lower().endswith(BOT_LABEL_SUFFIX):
+        raise AuthError(
+            f"usernames may not end in {BOT_LABEL_SUFFIX!r} — that suffix is reserved for chat bots"
         )
 
 

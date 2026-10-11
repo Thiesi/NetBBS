@@ -1411,6 +1411,25 @@ where it applies and `--identity-dir` if yours is not the default. It refuses
 while the node is running. Back up the node after a rotation: an older backup
 restores the old key.
 
+## Chat bot policy
+
+In a channel, `/bots` shows which bot messages this node displays. A SysOp
+or a moderator with that channel's moderation permission can set:
+
+- `/bots all`: show all bots (the initial receiving policy);
+- `/bots local`: show only this node's own bots;
+- `/bots none`: hide bot messages.
+
+Changes are audited and apply to new live output, history replay, search
+results and remote rosters. They do not erase retained messages or change
+another node's policy. Already displayed terminal text is not recalled.
+MRC-bridged channels refuse bots even when the mapping is paused.
+
+Bot authors use a reserved `.bot` label and a `[BOT]` marker. Existing local
+accounts with that suffix remain people; an older peer's account with the
+suffix is classified as a bot on this node. Bot processes and Baud are not
+available yet; these receiving controls do not enable or authorize a bot.
+
 ## MRC chat bridge
 
 MRC is a separate, public inter-BBS chat network. It is not NetBBS Link and

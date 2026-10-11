@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from netbbs.chat.channels import Channel
+from netbbs.chat.bots import bot_origin
 from netbbs.config import get_config, set_config
 from netbbs.link.enforcement import link_content_visible
 from netbbs.search import index_channel_message, prune_channel_message_search
@@ -87,6 +88,7 @@ class ChannelMessage:
     # The decorated handle an MRC line arrived with (issue #1156), pipe
     # codes and all; shown per viewer, never part of the sender's identity.
     mrc_handle: str | None = None
+    author_kind: Literal["user", "bot"] = "user"
 
 
 def get_scrollback_limit(db: Database) -> int:
@@ -202,6 +204,9 @@ def record_message(
     row = db.connection.execute(
         "SELECT * FROM channel_messages WHERE id = ?", (message_id,)
     ).fetchone()
+    if "author_kind" in row.keys() and bot_origin(db, _row_to_message(row)) is not None:
+        db.connection.execute("UPDATE channel_messages SET author_kind = 'bot' WHERE id = ?", (message_id,))
+        row = db.connection.execute("SELECT * FROM channel_messages WHERE id = ?", (message_id,)).fetchone()
     limit = get_scrollback_limit(db)
     db.connection.execute(
         """
@@ -278,4 +283,5 @@ def _row_to_message(row: sqlite3.Row) -> ChannelMessage:
         external_source=row["external_source"] if "external_source" in columns else None,
         mrc_nick_color=row["mrc_nick_color"] if "mrc_nick_color" in columns else None,
         mrc_handle=row["mrc_handle"] if "mrc_handle" in columns else None,
+        author_kind=row["author_kind"] if "author_kind" in columns else "user",
     )
