@@ -15338,18 +15338,27 @@ vendored, then gains DOOR32.SYS/DOOR.SYS, CP437 and Windows socket mode,
 following Voidrunner's implementation.
 
 **Decision 3 — outside NetBBS, a War Dialer world owns itself.** The first
-launch against a new world writes a random owner ID into it, and later
-launches trust that ID. Each BBS points `WAR_DIALER_DB_PATH` at its own
+launch against a new world, without `war_dialer_owner`, writes a random owner
+ID into it and records the world as *self-owned*. Later launches trust that ID
+only for a self-owned world. Each BBS points `WAR_DIALER_DB_PATH` at its own
 world, so the file's location already keeps one BBS's user numbers out of
-another's world. Under NetBBS, `war_dialer_owner` still wins. Rejected:
+another's world. A world NetBBS created stays *host-bound*: every launch must
+present the matching `war_dialer_owner`, exactly as the world ownership rule
+above requires. A launch without one is refused, never quietly trusted, so a
+foreign BBS pointed at a NetBBS world by mistake cannot create or open rows in
+that node's user-ID namespace. Under NetBBS, `war_dialer_owner` still wins.
+Rejected:
 - an ID the SysOp must set, which is one more setup step for no added safety;
 - an ID derived from the drop file's BBS name, which a rename would turn into
   a lockout.
 
 **Decision 4 — administration moves into the door, and NetBBS wraps it.**
 `war_dialer.py --admin` will offer `status`, `maintenance`, `close-season`
-and `reset`. Its backup is a file copy taken under the door's own maintenance
-lock. NetBBS's `war_dialer_admin` calls these commands and keeps its own
+and `reset`. Its backup is a SQLite-consistent snapshot taken with SQLite's
+backup API under the door's own maintenance lock, never a copy of the `.db`
+file alone, whose latest committed pages may still be in the `-wal` file.
+This is the same rule as the node backup's world component above.
+NetBBS's `war_dialer_admin` calls these commands and keeps its own
 requirement of a verified node backup before a destructive operation.
 Rejected: administration that only NetBBS provides, which would leave
 another BBS's SysOp no season or reset tools.
