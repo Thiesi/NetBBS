@@ -4327,4 +4327,57 @@ MIGRATIONS = [
         ALTER TABLE chat_bots ADD COLUMN greetings INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    Migration(
+        description="Issue #1210: explicit bot announcement sources and bounded content event journal.",
+        sql="""
+        ALTER TABLE chat_bots ADD COLUMN announcement_channel_id INTEGER REFERENCES channels(id) ON DELETE SET NULL;
+        ALTER TABLE chat_bots ADD COLUMN announce_posts INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE chat_bots ADD COLUMN announce_files INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE bot_board_sources (
+            bot_id INTEGER NOT NULL REFERENCES chat_bots(id) ON DELETE CASCADE,
+            board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            PRIMARY KEY (bot_id, board_id)
+        );
+        CREATE TABLE bot_file_sources (
+            bot_id INTEGER NOT NULL REFERENCES chat_bots(id) ON DELETE CASCADE,
+            area_id INTEGER NOT NULL REFERENCES file_areas(id) ON DELETE CASCADE,
+            PRIMARY KEY (bot_id, area_id)
+        );
+        CREATE TABLE bot_source_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL CHECK (kind IN ('post', 'file')),
+            source_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            UNIQUE (kind, item_id)
+        );
+        CREATE TRIGGER bot_source_events_bound AFTER INSERT ON bot_source_events BEGIN
+            DELETE FROM bot_source_events WHERE id <= NEW.id - 1024;
+        END;
+        CREATE TRIGGER bot_new_post AFTER INSERT ON posts
+        WHEN NEW.status = 'approved' AND NEW.post_id = NEW.root_post_id BEGIN
+            INSERT OR IGNORE INTO bot_source_events(kind, source_id, item_id)
+                VALUES ('post', NEW.board_id, NEW.post_id);
+        END;
+        CREATE TRIGGER bot_approved_post AFTER UPDATE OF status ON posts
+        WHEN OLD.status = 'pending' AND NEW.status = 'approved' AND NEW.post_id = NEW.root_post_id BEGIN
+            INSERT OR IGNORE INTO bot_source_events(kind, source_id, item_id)
+                VALUES ('post', NEW.board_id, NEW.post_id);
+        END;
+        CREATE TRIGGER bot_new_file AFTER INSERT ON files
+        WHEN NEW.status = 'approved' AND NOT EXISTS (SELECT 1 FROM remote_files WHERE file_id = NEW.file_id) BEGIN
+            INSERT OR IGNORE INTO bot_source_events(kind, source_id, item_id)
+                VALUES ('file', NEW.area_id, NEW.file_id);
+        END;
+        CREATE TRIGGER bot_approved_file AFTER UPDATE OF status ON files
+        WHEN OLD.status = 'pending' AND NEW.status = 'approved' BEGIN
+            INSERT OR IGNORE INTO bot_source_events(kind, source_id, item_id)
+                VALUES ('file', NEW.area_id, NEW.file_id);
+        END;
+        CREATE TRIGGER bot_new_remote_file AFTER INSERT ON remote_files
+        WHEN NOT EXISTS (SELECT 1 FROM files WHERE file_id = NEW.file_id) BEGIN
+            INSERT OR IGNORE INTO bot_source_events(kind, source_id, item_id)
+                VALUES ('file', NEW.area_id, NEW.file_id);
+        END;
+        """,
+    ),
 ]

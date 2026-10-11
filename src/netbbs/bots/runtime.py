@@ -155,6 +155,8 @@ class _Worker:
         self.owner, self.bot = owner, bot
         self.events: asyncio.Queue = asyncio.Queue(maxsize=64)
         self.pending: dict[str, tuple] = {}
+        self.announcements = {}
+        self.source_cursor = 0
         self.ready = False
         self.proc = None
         self.task = None
@@ -208,6 +210,9 @@ class _Worker:
 
     async def _session(self) -> None:
         lane = self.owner.lane
+        from netbbs.bots.sources import source_head
+        self.source_cursor = await lane.run(source_head)
+        self.announcements.clear()
         state = await lane.run(read_state, self.bot.storage_name)
         path = await lane.run(state_path, self.bot.storage_name)
         command = self.bot.command or (sys.executable, "-u", str(Path(__file__).with_name("baud.py")))
@@ -235,7 +240,10 @@ class _Worker:
                                "scope": "addressed", "channels": self.bot.channels,
                                "temperament": self.bot.temperament, "state": state, "queries": self.bot.queries,
                                "reading_channels": self.bot.reading_channels,
-                               "event_channels": self.bot.event_channels, "greetings": self.bot.greetings})
+                               "event_channels": self.bot.event_channels, "greetings": self.bot.greetings,
+                               "board_sources": self.bot.board_sources, "file_sources": self.bot.file_sources,
+                               "announcement_channel": self.bot.announcement_channel,
+                               "announce_posts": self.bot.announce_posts, "announce_files": self.bot.announce_files})
             ready = await asyncio.wait_for(self._read(), 5)
             if ready != {"type": "ready", "version": BOT_API_VERSION}:
                 raise BotError("Bot did not acknowledge BOT_API_VERSION 1.")
@@ -243,6 +251,8 @@ class _Worker:
             await self.status("running")
             tasks.extend([asyncio.create_task(self._reader()), asyncio.create_task(self._writer()),
                           asyncio.create_task(self._ticks())])
+            if self.bot.board_sources or self.bot.file_sources:
+                tasks.append(asyncio.create_task(self._source_events()))
             # A program may close stderr while keeping its protocol pipes open.
             # EOF there is not the end of the bot session.
             done, _ = await asyncio.wait(tasks[1:], return_when=asyncio.FIRST_COMPLETED)
@@ -314,7 +324,40 @@ class _Worker:
                 except BotError as exc:
                     await self.notify(event["request"], str(exc))
                     continue
+            elif event["type"] in {"post", "file"}:
+                from netbbs.bots.sources import source_event
+                reference = self.announcements.get(event["event"])
+                if reference is None:
+                    continue
+                try:
+                    current = await self.owner.lane.run(source_event, self.bot.id, reference[0])
+                    event = {**current, "event": event["event"]}
+                except BotError as exc:
+                    self.announcements.pop(event["event"], None)
+                    await self.status("running", str(exc))
+                    continue
             await self._write(event)
+
+    async def _source_events(self):
+        from netbbs.bots.sources import source_batch, source_event
+        while True:
+            rows, self.source_cursor, advanced = await self.owner.lane.run(source_batch, self.bot.id, self.source_cursor)
+            if advanced:
+                await self.status("running", "Source-event window advanced; earlier notifications may have been skipped.")
+            for reference in rows:
+                if len(self.announcements) >= MAX_PENDING or self.events.full():
+                    await self.status("running", "Bot source-event queue full; a notification was dropped.")
+                    break
+                try:
+                    event = await self.owner.lane.run(source_event, self.bot.id, reference)
+                except BotError as exc:
+                    await self.status("running", str(exc))
+                    continue
+                token = uuid.uuid4().hex
+                reference["destination"] = event["channel"]
+                self.announcements[token] = (reference, time.monotonic() + REQUEST_SECONDS)
+                self.events.put_nowait({**event, "event": token})
+            await asyncio.sleep(self.owner.poll_seconds)
 
     async def _ticks(self) -> None:
         while True:
@@ -322,6 +365,9 @@ class _Worker:
             for request, (_, _, deadline, _, _) in list(self.pending.items()):
                 if time.monotonic() >= deadline:
                     await self.notify(request, "The bot did not reply within 60 seconds.")
+            for token, (_, deadline) in list(self.announcements.items()):
+                if time.monotonic() >= deadline:
+                    del self.announcements[token]
             if not self.events.full():
                 self.events.put_nowait({"type": "tick", "time": time.time()})
 
@@ -371,11 +417,17 @@ class _Worker:
                 caller=pending[4], online=self.owner.presence.online_usernames(),
                 uptime_seconds=int(time.monotonic() - self.owner.started_at),
             )
-        if action not in {"say", "reply"}:
-            raise BotError("Unknown action or missing grant. Available: say, reply, state.get, state.set, query.")
+        if action not in {"say", "reply", "announce"}:
+            raise BotError("Unknown action or missing grant. Available: say, reply, announce, state.get, state.set, query.")
         body = value.get("text")
         request = value.get("request")
-        if action == "reply":
+        if action == "announce":
+            token = value.get("event")
+            reference = self.announcements.pop(token, None) if isinstance(token, str) else None
+            if reference is None or reference[1] <= time.monotonic():
+                raise BotError("Announce needs this bot's live source-event token.")
+            body, channel_name = "Source announcement", reference[0]["destination"]
+        elif action == "reply":
             if not isinstance(request, str) or request not in self.pending:
                 raise BotError("Reply request has expired or does not belong to this bot.")
             channel_name = self.pending[request][0]
@@ -385,7 +437,8 @@ class _Worker:
                 raise BotError("Say needs an allowed channel name.")
         link = self.owner.link
         channel, message = await lane.run(publish, self.bot.id, channel_name, body,
-                                          node_identity=link.node.identity if link else None)
+                                          node_identity=link.node.identity if link else None,
+                                          source_reference=reference[0] if action == "announce" else None)
         await self.owner.hub.broadcast(channel.name, message)
         if link is not None:
             await link.bridge.broadcast_local_message_live(channel, message)

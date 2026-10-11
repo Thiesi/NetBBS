@@ -13,7 +13,13 @@ grants live human messages and actions in a named subset of those channels;
 **Presence-event channels** separately grants their live joins and leaves.
 Both lists start empty. Greetings require the presence grant, not channel
 reading. Statistics and last-seen queries have separate, default-off grants.
-Board/file events and model requests remain unavailable in this slice.
+Board and file-area event sources are separately granted, with one allowed
+**Announcement channel** per instance. Sources must be readable by everyone,
+including inherited Community gates; restricted mappings are refused. This
+conservative audience rule also holds for Linked destinations. **Baud post
+announcements** and **Baud file announcements** are separate, default-off
+abilities requiring their corresponding source grants. Model requests remain
+unavailable in this slice.
 Linked channels also need an explicit per-channel **Linked approvals** entry,
 confirmed on Save. MRC channels are refused, even with a paused bridge.
 A grant is checked again on dispatch and
@@ -33,7 +39,7 @@ Each line is one UTF-8 JSON object, at most 32 KiB including the newline.
 `BOT_API_VERSION = 1`. The host sends:
 
 ```json
-{"type":"hello","version":1,"name":"Baud.bot","scope":"addressed","channels":["lobby"],"temperament":"friendly","state":{},"queries":["stats","seen"],"reading_channels":[],"event_channels":[],"greetings":false}
+{"type":"hello","version":1,"name":"Baud.bot","scope":"addressed","channels":["lobby"],"temperament":"friendly","state":{},"queries":["stats","seen"],"reading_channels":[],"event_channels":[],"greetings":false,"board_sources":[],"file_sources":[],"announcement_channel":null,"announce_posts":false,"announce_files":false}
 ```
 
 The bot must answer within five seconds with exactly:
@@ -84,6 +90,30 @@ Source grants, policy and mutes are checked when dispatching each event. A
 full event queue drops the observation and records the reason in SysOp status;
 events are not replayed later.
 
+Board/file source grants supply bounded metadata events, never post bodies or
+file contents:
+
+```json
+{"type":"post","event":"opaque-event-token","channel":"lobby","source":"News","item_id":"content-id","title":"Node update","text":"New post in News: Node update"}
+```
+
+File events use `type: "file"` and a filename as `title`. Sources are named
+explicitly in the editor; at most 32 boards/file areas combined are allowed.
+Events cover newly approved posts/uploads and newly catalogued carried files.
+Pending content is announced only after approval, edits do not reannounce a
+post, and downloading an already-catalogued file creates no second event.
+Existing history is skipped when a bot process starts or restarts. New arrivals
+through Link may produce source events while it runs, subject to current trust
+and visibility. Channel catch-up still never produces channel observations or
+addressed requests.
+
+The host retains at most 1,024 content-event references, without titles/bodies,
+and dispatches at most 32 per poll per instance. There are at most 32 pending
+source-event tokens per instance, expiring after 60 seconds. Queue/window
+overruns record an explanation in SysOp status. These are best-effort notices,
+not a durable delivery queue: stopped programs, expired tokens and refused
+announcements are not replayed. Ordinary content remains in its board/area.
+
 Granting channel reading warns the SysOp that the program receives other
 callers' conversation and requires a final default-No confirmation on Save.
 New reading and Linked grants share that one confirmation; declining preserves
@@ -105,6 +135,7 @@ events can arrive between a request and its result. Flush each output line.
 {"id":"4","action":"state.set","value":{"reminders":[]}}
 {"id":"5","action":"query","request":"opaque-token","query":"stats"}
 {"id":"6","action":"query","request":"opaque-token","query":"seen","target":"alice"}
+{"id":"7","action":"announce","event":"opaque-event-token"}
 ```
 
 `reply` publishes one line in the original request's channel; it is **public**,
@@ -117,6 +148,17 @@ events and live delivery; MRC never receives it. A remote request's public
 reply is also delivered directly to its requesting node, so it can arrive
 while the channel origin is offline. Normal live-message deduplication hides
 any second copy through the origin. Reminders use the ordinary channel route.
+
+`announce` consumes this instance's live source-event token. The host chooses
+the destination and public summary; action-supplied text or channel cannot
+replace them. The source grant, destination, public audience, current content
+and trust visibility are checked again inside the publication transaction.
+A source made restricted/hidden or content removed/expired while the program
+was processing it is refused before publishing or debiting output rate.
+Changing the destination discards old events rather than moving them. It uses
+the same ordinary chat/Link output, mutes and hourly rate as `say`/`reply`.
+As elsewhere in this API, installed programs remain trusted OS processes;
+the host's grant checks do not sandbox arbitrary code.
 
 Running bots have separate channel presence, including bots on subscriber
 nodes. They never enter human or node-wide online counts. `/mute Baud.bot`
@@ -223,6 +265,9 @@ With the corresponding grants, Baud also offers `stats` and
 The separate **Baud greetings** toggle greets live joins in presence-event
 channels. Greetings obey the same mutes, channel policy and hourly output limit
 as replies and reminders, and require no whole-channel reading grant.
+Post/file announcements likewise need only their explicit source grants and
+destination, with the corresponding Baud ability enabled. They require no
+channel reading or presence access.
 Reminder text is capped at 160 characters. Baud holds up to eight reminders
 per caller and 48 per instance, also subject to the state byte limit. Listing
 and cancelling work only for the caller's reminders in the current channel,

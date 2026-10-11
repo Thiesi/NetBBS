@@ -44,6 +44,11 @@ class Bot:
     reading_channels: tuple[str, ...] = ()
     event_channels: tuple[str, ...] = ()
     greetings: bool = False
+    board_sources: tuple[str, ...] = ()
+    file_sources: tuple[str, ...] = ()
+    announcement_channel: str | None = None
+    announce_posts: bool = False
+    announce_files: bool = False
 
     @property
     def label(self) -> str:
@@ -59,6 +64,11 @@ def require_sysop(db: Database, actor: User) -> None:
 def list_bots(db: Database) -> list[Bot]:
     result = []
     for row in db.connection.execute("SELECT * FROM chat_bots ORDER BY name COLLATE NOCASE"):
+        boards = tuple(r[0] for r in db.connection.execute(
+            "SELECT b.name FROM bot_board_sources s JOIN boards b ON b.id=s.board_id WHERE s.bot_id=? ORDER BY b.name", (row["id"],)))
+        areas = tuple(r[0] for r in db.connection.execute(
+            "SELECT a.name FROM bot_file_sources s JOIN file_areas a ON a.id=s.area_id WHERE s.bot_id=? ORDER BY a.name", (row["id"],)))
+        destination = db.connection.execute("SELECT name FROM channels WHERE id=?", (row["announcement_channel_id"],)).fetchone()
         grants = db.connection.execute(
             "SELECT c.name, bc.is_default, bc.linked_approved, bc.channel_read, bc.presence_events FROM bot_channels bc JOIN channels c ON c.id = bc.channel_id "
             "WHERE bc.bot_id = ? ORDER BY c.name", (row["id"],),
@@ -69,7 +79,9 @@ def list_bots(db: Database) -> list[Bot]:
                           tuple(g["name"] for g in grants if g["linked_approved"]),
                           tuple(json.loads(row["queries_json"])),
                           tuple(g["name"] for g in grants if g["channel_read"]),
-                          tuple(g["name"] for g in grants if g["presence_events"]), bool(row["greetings"])))
+                          tuple(g["name"] for g in grants if g["presence_events"]), bool(row["greetings"]),
+                          boards, areas, destination[0] if destination else None,
+                          bool(row["announce_posts"]), bool(row["announce_files"])))
     return result
 
 
@@ -105,7 +117,9 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
              enabled: bool = False, command: list[str] | None = None, temperament: str = "friendly",
              lines_per_hour: int = 60, bot_id: int | None = None, linked_channels: list[str] | None = None,
              queries: list[str] | None = None, reading_channels: list[str] | None = None,
-             event_channels: list[str] | None = None, greetings: bool = False) -> Bot:
+             event_channels: list[str] | None = None, greetings: bool = False,
+             board_sources: list[str] | None = None, file_sources: list[str] | None = None,
+             announcement_channel: str | None = None, announce_posts: bool = False, announce_files: bool = False) -> Bot:
     require_sysop(db, actor)
     name = name.strip()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}", name):
@@ -145,6 +159,11 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
         raise BotError("This node already has 16 bot instances.")
     if bot_id is not None:
         get_bot(db, bot_id)
+    from netbbs.bots.sources import validate_sources
+    boards, areas, destination = validate_sources(
+        db, board_sources or [], file_sources or [], announcement_channel, allowed, approved,
+        announce_posts=announce_posts, announce_files=announce_files,
+    )
     try:
         with db.connection:
             if bot_id is None:
@@ -161,6 +180,14 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
                 )
             db.connection.execute("UPDATE chat_bots SET queries_json=? WHERE id=?", (json.dumps(queries), bot_id))
             db.connection.execute("UPDATE chat_bots SET greetings=? WHERE id=?", (int(greetings), bot_id))
+            db.connection.execute(
+                "UPDATE chat_bots SET announcement_channel_id=?, announce_posts=?, announce_files=? WHERE id=?",
+                (destination.id if destination else None, int(announce_posts), int(announce_files), bot_id),
+            )
+            db.connection.execute("DELETE FROM bot_board_sources WHERE bot_id=?", (bot_id,))
+            db.connection.execute("DELETE FROM bot_file_sources WHERE bot_id=?", (bot_id,))
+            db.connection.executemany("INSERT INTO bot_board_sources(bot_id, board_id) VALUES (?, ?)", [(bot_id, b.id) for b in boards])
+            db.connection.executemany("INSERT INTO bot_file_sources(bot_id, area_id) VALUES (?, ?)", [(bot_id, a.id) for a in areas])
             keep = []
             for channel_name in allowed:
                 channel = get_channel(db, channel_name)
@@ -186,7 +213,7 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
                 if row[0] not in keep:
                     db.connection.execute("DELETE FROM bot_channels WHERE bot_id=? AND channel_id=?", (bot_id, row[0]))
             record_action(db, actor=actor, action="bot_configure", object_type="bot", object_id=bot_id,
-                          detail=f"{name}.bot enabled={enabled}; addressed channels={allowed}; defaults={sorted(default_names)}; Linked approvals={sorted(approved)}; queries={queries}; channel reads={sorted(reading)}; presence events={sorted(events)}; greetings={greetings}")
+                          detail=f"{name}.bot enabled={enabled}; addressed channels={allowed}; defaults={sorted(default_names)}; Linked approvals={sorted(approved)}; queries={queries}; channel reads={sorted(reading)}; presence events={sorted(events)}; greetings={greetings}; post sources={[b.name for b in boards]}; file sources={[a.name for a in areas]}; announcement channel={announcement_channel}; post/file announcements={announce_posts}/{announce_files}")
     except sqlite3.IntegrityError as exc:
         raise BotError("A bot with that name or state directory already exists.") from exc
     return get_bot(db, bot_id)
@@ -323,7 +350,7 @@ def observation_targets(db: Database, channel_name: str, kind: str) -> list[int]
     return result
 
 
-def publish(db: Database, bot_id: int, channel_name: str, body: str, *, node_identity=None):
+def publish(db: Database, bot_id: int, channel_name: str, body: str, *, node_identity=None, source_reference=None):
     if not isinstance(body, str) or not body.strip() or len(body) > MAX_BODY:
         raise BotError("A bot line must contain 1-500 characters.")
     if any(c in body for c in "\r\n\t") or sanitize_text(body) != body:
@@ -331,6 +358,12 @@ def publish(db: Database, bot_id: int, channel_name: str, body: str, *, node_ide
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         bot, channel = allowed_channel(db, bot_id, channel_name, check_rate=True)
+        if source_reference is not None:
+            from netbbs.bots.sources import source_event
+            event = source_event(db, bot_id, source_reference)
+            if event["channel"] != channel.name:
+                raise BotError("The announcement destination changed.")
+            body = event["text"]
         if is_channel_linked(db, channel) and node_identity is None:
             raise BotError("Link is not running; this bot cannot publish in a Linked channel.")
         cutoff = utc_iso(dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1))

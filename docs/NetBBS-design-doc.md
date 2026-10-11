@@ -16227,9 +16227,16 @@ conversation access. Channel headings, `/who` and live grant-change notices
 disclose readers; `chat_bot_readers_v1` carries that disclosure over Link to
 supporting peers. A local receiving mute cannot hide a remote reader's access.
 Older peers retain ordinary bot traffic but lack the extended disclosure.
-History and presence snapshots never become fresh bot events. Board/file
-events, audience-safe announcements and model conversation remain subsequent
-slices.
+Channel history and presence snapshots never become fresh channel events.
+Board/file events and optional Baud announcements now use explicit source
+lists and one destination per instance. The initial audience proof accepts
+only sources readable by everyone, including Community inheritance, so it
+holds for local and Linked destinations without assuming peer admission rules.
+Restricted mappings are refused. Only public metadata is delivered; source,
+content, trust and destination are rechecked inside publication. Events are
+bounded, best-effort notices of new approvals/arrivals while the program runs,
+not replay on startup. Edits and fetching already-catalogued files do not
+reannounce them. Optional model conversation remains subsequent work.
 See `NetBBS-bot-api.md` for the implemented protocol and limits.
 
 **Grounding.** Door output already speaks in chat without being a person

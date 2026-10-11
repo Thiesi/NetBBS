@@ -6533,6 +6533,19 @@ Reader rosters use their own optional capability because
 older bot-capable peers reject unknown frame types. Presence snapshots are
 roster reconstruction, not new joins to greet.
 
+Content-source events use a bounded SQLite reference journal populated in
+the content transaction, including pending-to-approved transitions. API
+metadata is loaded only after checking the explicit source grant and current
+public audience. Publication repeats those checks inside its write transaction;
+a queued title must not bypass a later restriction or trust change. A fetched
+remote file's local `files` row need not carry its signed descriptor: retain
+the `remote_files` envelope's trust check and its catalogue origin's admission
+when considering it for announcement. A descriptor need not repeat that origin
+in its payload, so envelope-author extraction alone is insufficient.
+Fetching known metadata is not another new-file event. Worker startup begins
+at the journal head; this prevents restart/restore from replaying old notices.
+The journal and pending tokens are bounded and do not promise durable delivery.
+
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,

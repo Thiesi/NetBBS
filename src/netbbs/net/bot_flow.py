@@ -97,6 +97,11 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         "reading": ", ".join(bot.reading_channels) if bot else "",
         "events": ", ".join(bot.event_channels) if bot else "",
         "greetings": bot.greetings if bot else False,
+        "boards": ", ".join(bot.board_sources) if bot else "",
+        "files": ", ".join(bot.file_sources) if bot else "",
+        "announcement_channel": (bot.announcement_channel or "") if bot else "",
+        "announce_posts": bot.announce_posts if bot else False,
+        "announce_files": bot.announce_files if bot else False,
         "command": json.dumps(bot.command) if bot else "[]",
         "temperament": bot.temperament if bot else "friendly", "rate": bot.lines_per_hour if bot else 60,
     }
@@ -133,6 +138,10 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
             reading_channels=reading,
             event_channels=[n.strip() for n in values["events"].split(",") if n.strip()],
             greetings=values["greetings"],
+            board_sources=[n.strip() for n in values["boards"].split(",") if n.strip()],
+            file_sources=[n.strip() for n in values["files"].split(",") if n.strip()],
+            announcement_channel=values["announcement_channel"].strip() or None,
+            announce_posts=values["announce_posts"], announce_files=values["announce_files"],
         )
 
     def text_spec(key, label, help):
@@ -149,6 +158,13 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         text_spec("events", "Presence-event channels", "Allowed channels whose live joins and leaves this program may receive. Does not grant access to conversation; greetings require this grant."),
         FieldSpec("greetings", "Baud greetings", lambda d: "on" if d["greetings"] else "off", bool_field("greetings"),
                   step=bool_step("greetings"), help="Greet live joins in explicitly granted presence-event channels. Subject to the ordinary output limit and mutes."),
+        text_spec("boards", "Board-event sources", "Comma-separated public board names. Grants new approved post titles only; inherited Community restrictions are checked. No post bodies."),
+        text_spec("files", "File-event sources", "Comma-separated public file-area names. Grants newly approved uploads and carried file names. No file contents."),
+        text_spec("announcement_channel", "Announcement channel", "One allowed channel for these source events. Linked destinations need their existing approval. Sources must be readable by everyone."),
+        FieldSpec("announce_posts", "Baud post announcements", lambda d: "on" if d["announce_posts"] else "off", bool_field("announce_posts"),
+                  step=bool_step("announce_posts"), help="Requires explicit board-event sources and an announcement channel. Existing posts are not replayed on startup."),
+        FieldSpec("announce_files", "Baud file announcements", lambda d: "on" if d["announce_files"] else "off", bool_field("announce_files"),
+                  step=bool_step("announce_files"), help="Requires explicit file-event sources and an announcement channel. Subject to channel policy, mutes and output limits."),
         FieldSpec("stats", "Grant statistics query", lambda d: "on" if d["stats"] else "off", bool_field("stats"),
                   step=bool_step("stats"), help="Allows node name, uptime and online human count. Replies are public; no board, file or channel activity is queried."),
         FieldSpec("seen", "Grant last-seen query", lambda d: "on" if d["seen"] else "off", bool_field("seen"),
