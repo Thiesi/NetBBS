@@ -36,6 +36,7 @@ class BotRuntime:
         self.workers: dict[int, _Worker] = {}
         self.task: asyncio.Task | None = None
         self.link = None
+        self.disclosures = {}
 
     @property
     def running_ids(self) -> frozenset[int]:
@@ -55,6 +56,16 @@ class BotRuntime:
             while True:
                 try:
                     desired = {b.id: b for b in await self.lane.run(list_bots) if b.enabled}
+                    disclosures = {}
+                    for bot in desired.values():
+                        for name in bot.reading_channels:
+                            disclosures.setdefault(name, []).append(bot.label)
+                    for name in self.disclosures.keys() | disclosures.keys():
+                        labels = disclosures.get(name, [])
+                        if labels != self.disclosures.get(name, []):
+                            notice = ", ".join(labels) + " reads this channel." if labels else "No local bot now has whole-channel reading access."
+                            await self.hub.broadcast(name, "[BOT] " + notice)
+                    self.disclosures = disclosures
                     for bot_id, worker in list(self.workers.items()):
                         if desired.get(bot_id) != worker.bot or worker.task.done():
                             await worker.stop()
@@ -110,6 +121,33 @@ class BotRuntime:
         worker.pending[request] = (channel.name, participant_id, time.monotonic() + REQUEST_SECONDS, completed, dict(caller))
         worker.events.put_nowait({"type": "message", "request": request, "channel": channel.name,
                                  "caller": caller, "text": text})
+
+    async def observe(self, channel, message, *, caller=None):
+        """Only accepted live human paths call this; no tokens or replay dispatch."""
+        from netbbs.bots.registry import observation_targets
+        if (message.kind not in {"message", "action", "join", "leave"} or
+                message.external_source or message.author_kind != "user"):
+            return
+        if caller is None:
+            caller = {"name": message.author_label}
+        # Remote legacy automatic authors have no local author_kind marker.
+        if (isinstance(caller.get("id"), str) and
+                caller["name"].split("@", 1)[0].lower().endswith((".bot", ".door"))):
+            return
+        caller = {**caller, "name": sanitize_text(caller["name"])}
+        targets = await self.lane.run(observation_targets, channel.name, message.kind)
+        for bot_id in targets:
+            worker = self.workers.get(bot_id)
+            if worker is None or not worker.ready:
+                continue
+            if worker.events.full():
+                await worker.status("running", "Bot event queue full; a live observation was dropped.")
+                continue
+            worker.events.put_nowait({
+                "type": "presence" if message.kind in {"join", "leave"} else "channel",
+                "channel": channel.name, "kind": message.kind, "caller": caller,
+                "text": sanitize_text(message.body or ""),
+            })
 
 
 class _Worker:
@@ -195,7 +233,9 @@ class _Worker:
             tasks.append(asyncio.create_task(self._drain_stderr()))
             await self._write({"type": "hello", "version": BOT_API_VERSION, "name": self.bot.label,
                                "scope": "addressed", "channels": self.bot.channels,
-                               "temperament": self.bot.temperament, "state": state, "queries": self.bot.queries})
+                               "temperament": self.bot.temperament, "state": state, "queries": self.bot.queries,
+                               "reading_channels": self.bot.reading_channels,
+                               "event_channels": self.bot.event_channels, "greetings": self.bot.greetings})
             ready = await asyncio.wait_for(self._read(), 5)
             if ready != {"type": "ready", "version": BOT_API_VERSION}:
                 raise BotError("Bot did not acknowledge BOT_API_VERSION 1.")

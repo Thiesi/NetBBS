@@ -231,7 +231,7 @@ REALTIME_FRAME_TYPES = frozenset(
      "node_presence_snapshot", "node_presence_delta",
      "channel_message", "scrollback_snapshot", "ping", "pong", "error", "close",
      "relay_request", "relay_waiting", "relay_ready", "relay_reject", "direct_message",
-     "bot_request", "bot_result", "bot_presence"}
+     "bot_request", "bot_result", "bot_presence", "bot_readers"}
 )
 _REALTIME_MAX_MESSAGE_ID_BYTES = 64
 _JSON_SAFE_INTEGER = (1 << 53) - 1
@@ -925,6 +925,7 @@ _REALTIME_PAYLOAD_VALIDATORS = {
     "bot_request": _validate_bot_request_payload,
     "bot_result": _validate_bot_result_payload,
     "bot_presence": _validate_bot_presence_payload,
+    "bot_readers": _validate_bot_presence_payload,
     "relay_request": _validate_relay_request_payload,
     "relay_waiting": _validate_relay_waiting_payload,
     "relay_ready": _validate_relay_ready_payload,
@@ -960,8 +961,8 @@ def new_realtime_message_id() -> str:
 
 
 def build_bot_frame(kind: str, payload: dict, *, message_id: str | None = None) -> RealtimeFrame:
-    """Optional chat_bots_v1 frames; callers must check the peer capability."""
-    if kind not in {"bot_request", "bot_result", "bot_presence"}:
+    """Optional bot frames; bot_readers additionally needs chat_bot_readers_v1."""
+    if kind not in {"bot_request", "bot_result", "bot_presence", "bot_readers"}:
         raise LinkProtocolError("Unknown bot frame")
     frame = RealtimeFrame(type=kind, message_id=message_id or new_realtime_message_id(), payload=payload)
     validate_realtime_frame_payload(frame)

@@ -11,10 +11,10 @@ import asyncio
 from collections import OrderedDict
 import logging
 
-from netbbs.bots.registry import BotError, active_labels, allowed_channel, bot_for_label, list_bots
+from netbbs.bots.registry import BotError, active_labels, allowed_channel, bot_for_label, list_bots, channel_readers
 from netbbs.chat.bots import remote_bot_visible
 from netbbs.link.channels import channel_origin_fingerprint, is_channel_linked
-from netbbs.link.events import CHAT_BOTS_CAPABILITY, descriptor_has_capability
+from netbbs.link.events import CHAT_BOTS_CAPABILITY, CHAT_BOT_READERS_CAPABILITY, descriptor_has_capability
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
 from netbbs.link.protocol import (
@@ -40,15 +40,16 @@ class BotLink:
         self.requests = set()
         self.pending = {}  # request_id -> (expected fingerprint, Future)
         self.remote = {}  # (channel_id, author fingerprint) -> (source session, labels)
+        self.remote_readers = {}
         self.seen = OrderedDict()
         runtime.link = self
         bridge.bot_link = self
         bridge.register_frame_handler(self.owns_frame, self.handle_frame)
 
-    def capable(self, fingerprint):
+    def capable(self, fingerprint, capability=CHAT_BOTS_CAPABILITY):
         peer = self.node.peers.get(fingerprint)
         return peer is not None and peer.descriptor is not None and descriptor_has_capability(
-            peer.descriptor, CHAT_BOTS_CAPABILITY
+            peer.descriptor, capability
         )
 
     def start(self):
@@ -66,12 +67,15 @@ class BotLink:
         self.requests.clear()
         self.pending.clear()
         self.remote.clear()
+        self.remote_readers.clear()
 
     @staticmethod
     def owns_frame(session, frame):
-        return frame.type in {"bot_request", "bot_result", "bot_presence"}
+        return frame.type in {"bot_request", "bot_result", "bot_presence", "bot_readers"}
 
     async def _send(self, session, frame):
+        if frame.type == "bot_readers" and not self.capable(session.remote_fingerprint, CHAT_BOT_READERS_CAPABILITY):
+            return
         if session.closed.is_set() or not self.capable(session.remote_fingerprint):
             return
         if not await self.lane.run(lambda db: decide_node_action(db, session.remote_fingerprint, LinkPolicyAction.REALTIME).allowed):
@@ -128,6 +132,8 @@ class BotLink:
                 await self.hub.send_to(channel.name, participant_id, sanitize_text(f"{label}: {reason}"))
 
     async def handle_frame(self, session, frame):
+        if frame.type == "bot_readers" and not self.capable(session.remote_fingerprint, CHAT_BOT_READERS_CAPABILITY):
+            raise LinkProtocolError("Peer has not advertised chat_bot_readers_v1")
         if not self.capable(session.remote_fingerprint):
             raise LinkProtocolError("Peer has not advertised chat_bots_v1")
         if frame.type == "bot_result":
@@ -221,6 +227,7 @@ class BotLink:
     async def _channel(self, channel):
         upstream = None
         advertised = None
+        advertised_readers = None
         cid = channel.channel_id
         self.bridge.register_local_interest(cid, id(self))
         try:
@@ -235,16 +242,22 @@ class BotLink:
                                 upstream = await self.direct.ensure_session(origin)
                             await upstream.send(build_subscribe_frame(cid))
                             advertised = None
+                            advertised_readers = None
                     labels = await self.lane.run(active_labels, channel, self.runtime.running_ids)
                     if labels != advertised:
                         await self._broadcast_presence(channel, self.registry.own_fingerprint, labels)
                         advertised = labels
+                    readers = await self.lane.run(channel_readers, channel)
+                    if readers != advertised_readers:
+                        await self._broadcast_presence(channel, self.registry.own_fingerprint, readers, readers=True)
+                        advertised_readers = readers
                     await asyncio.sleep(self.runtime.poll_seconds)
                 except Exception:
                     upstream = None
                     await asyncio.sleep(5)
         finally:
             await self._broadcast_presence(channel, self.registry.own_fingerprint, [])
+            await self._broadcast_presence(channel, self.registry.own_fingerprint, [], readers=True)
             if self.bridge.release_local_interest(cid, id(self)) and upstream is not None:
                 try:
                     await upstream.send(build_unsubscribe_frame(cid))
@@ -256,17 +269,22 @@ class BotLink:
             return
         labels = await self.lane.run(active_labels, channel, self.runtime.running_ids)
         await self._send_presence(session, channel.channel_id, self.registry.own_fingerprint, labels)
+        readers = await self.lane.run(channel_readers, channel)
+        await self._send_presence(session, channel.channel_id, self.registry.own_fingerprint, readers, readers=True)
         if await self.lane.run(channel_origin_fingerprint, channel) == self.registry.own_fingerprint:
             for (cid, author), (_, labels) in list(self.remote.items()):
                 if cid == channel.channel_id and author != session.remote_fingerprint:
                     await self._send_presence(session, cid, author, labels)
+            for (cid, author), (_, labels) in list(self.remote_readers.items()):
+                if cid == channel.channel_id and author != session.remote_fingerprint:
+                    await self._send_presence(session, cid, author, labels, readers=True)
 
-    async def _send_presence(self, session, cid, author, labels):
-        await self._send(session, build_bot_frame("bot_presence", {
+    async def _send_presence(self, session, cid, author, labels, *, readers=False):
+        await self._send(session, build_bot_frame("bot_readers" if readers else "bot_presence", {
             "channel_id": cid, "author_node_fingerprint": author, "labels": labels,
         }))
 
-    async def _broadcast_presence(self, channel, author, labels):
+    async def _broadcast_presence(self, channel, author, labels, *, readers=False):
         sessions = await self.bridge._live_subscribers(channel)
         origin = await self.lane.run(channel_origin_fingerprint, channel)
         if origin != self.registry.own_fingerprint:
@@ -275,7 +293,7 @@ class BotLink:
                 sessions.append(upstream)
         for session in sessions:
             if session.remote_fingerprint != author:
-                await self._send_presence(session, channel.channel_id, author, labels)
+                await self._send_presence(session, channel.channel_id, author, labels, readers=readers)
 
     async def _presence(self, session, frame):
         p = frame.payload
@@ -297,27 +315,39 @@ class BotLink:
 
         channel, origin, labels = await self.lane.run(authorize)
         key = (channel.channel_id, author)
+        readers = frame.type == "bot_readers"
+        rosters = self.remote_readers if readers else self.remote
+        previous = rosters.get(key, (None, []))[1]
         if labels:
-            if key not in self.remote and len(self.remote) >= MAX_REMOTE_ROSTERS:
+            if key not in rosters and len(rosters) >= MAX_REMOTE_ROSTERS:
                 return  # Local capacity is not a protocol fault by this peer.
-            self.remote[key] = (session, labels)
+            rosters[key] = (session, labels)
         else:
-            self.remote.pop(key, None)
+            rosters.pop(key, None)
+        if readers and labels != previous:
+            node = (await self.lane.run(identity_for_fingerprint, author)).label
+            names = ", ".join(link_address_label(label, node) for label in labels)
+            await self.hub.broadcast(channel.name, "[BOT] " + (
+                names + " reads this channel." if labels else
+                f"Whole-channel bot reading at {sanitize_text(node)} was withdrawn."
+            ))
         if origin == self.registry.own_fingerprint:
-            await self._broadcast_presence(channel, author, labels)
+            await self._broadcast_presence(channel, author, labels, readers=readers)
 
     async def on_disconnect(self, session):
         from netbbs.link.channels import get_channel_by_channel_id
-        for (cid, author), (source, _) in list(self.remote.items()):
-            if source is session:
-                self.remote.pop((cid, author), None)
-                channel = await self.lane.run(get_channel_by_channel_id, cid)
-                if channel and await self.lane.run(channel_origin_fingerprint, channel) == self.registry.own_fingerprint:
-                    await self._broadcast_presence(channel, author, [])
+        for readers, rosters in ((False, self.remote), (True, self.remote_readers)):
+            for (cid, author), (source, _) in list(rosters.items()):
+                if source is session:
+                    rosters.pop((cid, author), None)
+                    channel = await self.lane.run(get_channel_by_channel_id, cid)
+                    if channel and await self.lane.run(channel_origin_fingerprint, channel) == self.registry.own_fingerprint:
+                        await self._broadcast_presence(channel, author, [], readers=readers)
 
-    def visible_roster(self, db, channel):
+    def visible_roster(self, db, channel, *, readers=False):
         result = []
-        for (cid, author), (source, labels) in list(self.remote.items()):
+        rosters = self.remote_readers if readers else self.remote
+        for (cid, author), (source, labels) in list(rosters.items()):
             if cid != channel.channel_id or source.closed.is_set():
                 continue
             try:
@@ -325,7 +355,7 @@ class BotLink:
             except LinkProtocolError:
                 continue
             for label in labels:
-                if (remote_bot_visible(db, channel, label, author) and
+                if ((readers or remote_bot_visible(db, channel, label, author)) and
                         _live_author_allowed(db, author, label, relayed=author != source.remote_fingerprint)):
                     result.append((label, author))
         return result

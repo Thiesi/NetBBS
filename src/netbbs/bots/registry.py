@@ -41,6 +41,9 @@ class Bot:
     defaults: tuple[str, ...]
     linked_channels: tuple[str, ...] = ()
     queries: tuple[str, ...] = ()
+    reading_channels: tuple[str, ...] = ()
+    event_channels: tuple[str, ...] = ()
+    greetings: bool = False
 
     @property
     def label(self) -> str:
@@ -57,14 +60,16 @@ def list_bots(db: Database) -> list[Bot]:
     result = []
     for row in db.connection.execute("SELECT * FROM chat_bots ORDER BY name COLLATE NOCASE"):
         grants = db.connection.execute(
-            "SELECT c.name, bc.is_default, bc.linked_approved FROM bot_channels bc JOIN channels c ON c.id = bc.channel_id "
+            "SELECT c.name, bc.is_default, bc.linked_approved, bc.channel_read, bc.presence_events FROM bot_channels bc JOIN channels c ON c.id = bc.channel_id "
             "WHERE bc.bot_id = ? ORDER BY c.name", (row["id"],),
         ).fetchall()
         result.append(Bot(row["id"], row["name"], row["storage_name"], bool(row["enabled"]),
                           tuple(json.loads(row["command_json"])), row["temperament"], row["lines_per_hour"],
                           tuple(g["name"] for g in grants), tuple(g["name"] for g in grants if g["is_default"]),
                           tuple(g["name"] for g in grants if g["linked_approved"]),
-                          tuple(json.loads(row["queries_json"]))))
+                          tuple(json.loads(row["queries_json"])),
+                          tuple(g["name"] for g in grants if g["channel_read"]),
+                          tuple(g["name"] for g in grants if g["presence_events"]), bool(row["greetings"])))
     return result
 
 
@@ -99,7 +104,8 @@ def local_channel(db: Database, name: str, *, allow_linked: bool = False) -> Cha
 def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defaults: list[str],
              enabled: bool = False, command: list[str] | None = None, temperament: str = "friendly",
              lines_per_hour: int = 60, bot_id: int | None = None, linked_channels: list[str] | None = None,
-             queries: list[str] | None = None) -> Bot:
+             queries: list[str] | None = None, reading_channels: list[str] | None = None,
+             event_channels: list[str] | None = None, greetings: bool = False) -> Bot:
     require_sysop(db, actor)
     name = name.strip()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}", name):
@@ -121,6 +127,12 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
     approved = {local_channel(db, n, allow_linked=True).name for n in (linked_channels or [])}
     allowed = sorted({local_channel(db, n, allow_linked=True).name for n in channels})
     default_names = {local_channel(db, n, allow_linked=True).name for n in defaults}
+    reading = {local_channel(db, n, allow_linked=True).name for n in (reading_channels or [])}
+    events = {local_channel(db, n, allow_linked=True).name for n in (event_channels or [])}
+    if not reading.issubset(allowed) or not events.issubset(allowed):
+        raise BotError("Reading and presence-event grants must also be allowed channels.")
+    if greetings and not events:
+        raise BotError("Greetings require an explicit presence-event grant for at least one channel.")
     if not approved.issubset(allowed):
         raise BotError("Linked approvals must also be allowed channels.")
     for channel_name in allowed:
@@ -148,6 +160,7 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
                     (name, int(enabled), json.dumps(command), temperament, lines_per_hour, bot_id),
                 )
             db.connection.execute("UPDATE chat_bots SET queries_json=? WHERE id=?", (json.dumps(queries), bot_id))
+            db.connection.execute("UPDATE chat_bots SET greetings=? WHERE id=?", (int(greetings), bot_id))
             keep = []
             for channel_name in allowed:
                 channel = get_channel(db, channel_name)
@@ -164,12 +177,16 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
                     "ON CONFLICT(bot_id, channel_id) DO UPDATE SET is_default=excluded.is_default, linked_approved=excluded.linked_approved",
                     (bot_id, channel.id, int(channel_name in default_names), int(channel_name in approved)),
                 )
+                db.connection.execute(
+                    "UPDATE bot_channels SET channel_read=?, presence_events=? WHERE bot_id=? AND channel_id=?",
+                    (int(channel_name in reading), int(channel_name in events), bot_id, channel.id),
+                )
             rows = db.connection.execute("SELECT channel_id FROM bot_channels WHERE bot_id=?", (bot_id,)).fetchall()
             for row in rows:
                 if row[0] not in keep:
                     db.connection.execute("DELETE FROM bot_channels WHERE bot_id=? AND channel_id=?", (bot_id, row[0]))
             record_action(db, actor=actor, action="bot_configure", object_type="bot", object_id=bot_id,
-                          detail=f"{name}.bot enabled={enabled}; addressed channels={allowed}; defaults={sorted(default_names)}; Linked approvals={sorted(approved)}; queries={queries}")
+                          detail=f"{name}.bot enabled={enabled}; addressed channels={allowed}; defaults={sorted(default_names)}; Linked approvals={sorted(approved)}; queries={queries}; channel reads={sorted(reading)}; presence events={sorted(events)}; greetings={greetings}")
     except sqlite3.IntegrityError as exc:
         raise BotError("A bot with that name or state directory already exists.") from exc
     return get_bot(db, bot_id)
@@ -285,6 +302,25 @@ def select_request(db: Database, channel: Channel, line: str) -> tuple[Bot, str]
     if bot is None:
         raise BotError("No local bot has that name. Use /names to see running bots here.")
     return bot, body.strip()
+
+
+def channel_readers(db: Database, channel: Channel) -> list[str]:
+    """Disclose the grant even while a worker is starting or restarting."""
+    return [b.label for b in list_bots(db) if b.enabled and channel.name in b.reading_channels]
+
+
+def observation_targets(db: Database, channel_name: str, kind: str) -> list[int]:
+    result = []
+    for bot in list_bots(db):
+        sources = bot.event_channels if kind in {"join", "leave"} else bot.reading_channels
+        if channel_name not in sources:
+            continue
+        try:
+            allowed_channel(db, bot.id, channel_name)
+        except BotError:
+            continue
+        result.append(bot.id)
+    return result
 
 
 def publish(db: Database, bot_id: int, channel_name: str, body: str, *, node_identity=None):

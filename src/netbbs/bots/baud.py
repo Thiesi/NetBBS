@@ -18,6 +18,7 @@ class Baud:
         self.emit = emit
         self.temperament = hello.get("temperament", "friendly")
         self.queries = frozenset(hello.get("queries", []))
+        self.greetings = hello.get("greetings", False)
         self.state = hello.get("state") or {"next": 1, "reminders": []}
         if not isinstance(self.state, dict) or not isinstance(self.state.get("reminders", []), list):
             raise ValueError("Invalid Baud reminder state")
@@ -42,6 +43,13 @@ class Baud:
         self.waiting = (identity, "store", state, event, text)
 
     def handle(self, event):
+        if event.get("type") == "presence":
+            if self.greetings and event.get("kind") == "join":
+                name = event["caller"]["name"]
+                greeting = {"friendly": f"Welcome, {name}!", "terse": f"Welcome, {name}.",
+                            "retro": f"Carrier detected: welcome, {name}!"}[self.temperament]
+                self.action("say", channel=event["channel"], text=greeting)
+            return
         if event["type"] == "result":
             if self.waiting and event["id"] == self.waiting[0]:
                 _, kind, value, request, text = self.waiting

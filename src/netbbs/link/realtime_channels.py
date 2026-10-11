@@ -650,6 +650,10 @@ class LiveChannelBridge:
         await self._hub.broadcast(channel.name, message)
         if origin == own:
             await self._relay_to_subscribers(channel, frame, author_node=author_node)
+        if self.bot_link is not None:
+            await self.bot_link.runtime.observe(channel, message, caller={
+                "id": f"link:{author_node}:{payload['user_id']}", "name": message.author_label,
+            })
 
     async def _relay_to_subscribers(
         self, channel: Channel, frame: RealtimeFrame, *, author_node: str
@@ -705,6 +709,13 @@ class LiveChannelBridge:
             author_fingerprint=session.remote_fingerprint, body=None, created_at=utc_now_iso(),
         )
         await self._hub.broadcast(channel.name, message)
+
+        if self.bot_link is not None and await self._lane.run(
+            _live_author_allowed, session.remote_fingerprint, frame.payload["user_id"], relayed=False,
+        ):
+            await self.bot_link.runtime.observe(channel, message, caller={
+                "id": f"link:{session.remote_fingerprint}:{frame.payload['user_id']}", "name": message.author_label,
+            })
 
         # Issue #195: keep the merged live roster (populated by the
         # initial presence_snapshot below) in sync with subsequent

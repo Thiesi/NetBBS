@@ -397,6 +397,7 @@ would refuse a request that carries it."""
 
 CHANNEL_RELAY_CAPABILITY = "channel_relay"
 CHAT_BOTS_CAPABILITY = "chat_bots_v1"
+CHAT_BOT_READERS_CAPABILITY = "chat_bot_readers_v1"
 """Issue #860: this node understands a live `channel_message` frame's
 optional `author_node_fingerprint`, with which a channel's origin relays a
 subscriber's live line to its other subscribers. A node without it would
@@ -413,7 +414,7 @@ the unknown type, and an older recipient would never pick it up."""
 
 LINK_CAPABILITIES: tuple[str, ...] = (
     INVENTORY_NOT_CARRIED_CAPABILITY, INVENTORY_PAGES_CAPABILITY, CHANNEL_RELAY_CAPABILITY, CHAT_BOTS_CAPABILITY,
-    SEALED_ATTESTATIONS_CAPABILITY,
+    SEALED_ATTESTATIONS_CAPABILITY, CHAT_BOT_READERS_CAPABILITY,
 )
 """Every optional behaviour this version advertises in its own descriptor."""
 

@@ -3218,6 +3218,8 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     )
     await ctx.session.write_line(await ctx.lane.run(_render_channel_message, ctx.channel, ctx.user, recorded))
     await ctx.hub.broadcast(ctx.channel.name, recorded, exclude={ctx.participant_id})
+    if ctx.hub.bot_runtime is not None:
+        await ctx.hub.bot_runtime.observe(ctx.channel, recorded, caller={"id": ctx.user.id, "name": ctx.user.username})
     if ctx.mrc_bridge is not None:
         await _relay_to_mrc(ctx.session, ctx.mrc_bridge, ctx.channel, recorded)
 
@@ -3799,6 +3801,17 @@ def _local_bot_labels(db: Database, hub: ChatHub, channel: Channel) -> list[str]
     return active_labels(db, channel, hub.bot_runtime.running_ids)
 
 
+def _bot_readers(db: Database, hub: ChatHub, channel: Channel) -> list[str]:
+    from netbbs.bots.registry import channel_readers
+    from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
+    readers = channel_readers(db, channel)
+    runtime = hub.bot_runtime
+    if runtime is not None and runtime.link is not None:
+        for label, fingerprint in runtime.link.visible_roster(db, channel, readers=True):
+            readers.append(link_address_label(label, identity_for_fingerprint(db, fingerprint).label))
+    return readers
+
+
 async def _moderate_bot(ctx, name, *, mute, duration=None, reason=None) -> bool:
     label, at, node = name.partition("@")
     if at and label.lower().endswith(".bot"):
@@ -3871,7 +3884,10 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
     usernames = _roster_usernames(ctx.hub, ctx.channel)
     remote_entries = await _remote_roster_entries(ctx)
     bot_labels = await ctx.lane.run(_local_bot_labels, ctx.hub, ctx.channel)
-    if not usernames and not remote_entries and not _mrc_roster_entries(ctx) and not bot_labels:
+    readers = await ctx.lane.run(_bot_readers, ctx.hub, ctx.channel)
+    for label in readers:
+        await ctx.session.write_line(f"[BOT] {label} reads this channel.")
+    if not usernames and not remote_entries and not _mrc_roster_entries(ctx) and not bot_labels and not readers:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
 
@@ -3885,7 +3901,8 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
 
     labels_by_username = await ctx.lane.run(_labels)
     for label in bot_labels:
-        await ctx.session.write_line(f"[BOT] {label} (addressed messages only)")
+        if label not in readers:
+            await ctx.session.write_line(f"[BOT] {label} (addressed messages only; optional presence events)")
     for username in usernames:
         label = labels_by_username.get(username)
         if label is None:
@@ -5354,6 +5371,8 @@ async def _chat_loop(
         node_name_gradient=session.node_name_gradient)
         await session.write_line(f"\r\n{heading}")
         # The gates this channel applies, named under its title (issue #1105).
+        for reader in await lane.run(_bot_readers, hub, channel):
+            await session.write_line(f"[BOT] {reader} reads this channel.")
         gates_note = gates_line(
             await lane.run(resource_gates, channel), width=session.terminal_width, unicode_style=unicode_style,
             ellipsis=ellipsis_for(session, unicode_style=unicode_style),
@@ -5402,6 +5421,8 @@ async def _chat_loop(
                 await discard_buffered_input()
             return _ToPicker()
         await hub.broadcast(channel.name, recorded_join, exclude={participant_id})
+        if hub.bot_runtime is not None:
+            await hub.bot_runtime.observe(channel, recorded_join, caller={"id": user.id, "name": user.username})
         if link_context is not None and link_context.realtime_bridge is not None:
             await link_context.realtime_bridge.broadcast_local_presence_live(
                 channel, change="join", username=user.username
@@ -5907,6 +5928,7 @@ async def _chat_loop(
                         await session.write_line(rendered_self)
                         await hub.broadcast(channel.name, recorded_message, exclude={participant_id})
                         if hub.bot_runtime is not None:
+                            await hub.bot_runtime.observe(channel, recorded_message, caller={"id": user.id, "name": user.username})
                             bot_problem = await _address_bot(
                                 hub.bot_runtime, channel, user, recorded_message, participant_id, link_context,
                             )
@@ -6250,6 +6272,8 @@ async def _chat_loop(
         )
         if recorded_leave is not None:
             await hub.broadcast(channel.name, recorded_leave, exclude={participant_id})
+            if hub.bot_runtime is not None:
+                await hub.bot_runtime.observe(channel, recorded_leave, caller={"id": user.id, "name": user.username})
         if announced["live_join"] and link_context is not None and link_context.realtime_bridge is not None:
             await link_context.realtime_bridge.broadcast_local_presence_live(
                 channel, change="leave", username=user.username

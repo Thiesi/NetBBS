@@ -94,6 +94,9 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         "linked": ", ".join(bot.linked_channels) if bot else "",
         "stats": "stats" in bot.queries if bot else False,
         "seen": "seen" in bot.queries if bot else False,
+        "reading": ", ".join(bot.reading_channels) if bot else "",
+        "events": ", ".join(bot.event_channels) if bot else "",
+        "greetings": bot.greetings if bot else False,
         "command": json.dumps(bot.command) if bot else "[]",
         "temperament": bot.temperament if bot else "friendly", "rate": bot.lines_per_hour if bot else 60,
     }
@@ -120,6 +123,9 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
             defaults=[n.strip() for n in values["defaults"].split(",") if n.strip()], lines_per_hour=values["rate"],
             linked_channels=linked,
             queries=[key for key in ("stats", "seen") if values[key]],
+            reading_channels=[n.strip() for n in values["reading"].split(",") if n.strip()],
+            event_channels=[n.strip() for n in values["events"].split(",") if n.strip()],
+            greetings=values["greetings"],
         )
 
     def text_spec(key, label, help):
@@ -132,6 +138,10 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         text_spec("channels", "Allowed channels", "Comma-separated channel names. This grants addressed messages and replies there."),
         text_spec("linked", "Linked approvals", "A subset of allowed channels. Explicit approval to publish across Link; confirmed on Save. MRC is never allowed."),
         text_spec("defaults", "Default in channels", "A subset of allowed channels. !help and other !commands go only to the default bot."),
+        text_spec("reading", "Read whole channels", "WARNING: passes every live human message in these allowed channels to this program, including messages not addressed to it. Callers see this grant in the heading and /who. Leave empty for addressed-only access."),
+        text_spec("events", "Presence-event channels", "Allowed channels whose live joins and leaves this program may receive. Does not grant access to conversation; greetings require this grant."),
+        FieldSpec("greetings", "Baud greetings", lambda d: "on" if d["greetings"] else "off", bool_field("greetings"),
+                  step=bool_step("greetings"), help="Greet live joins in explicitly granted presence-event channels. Subject to the ordinary output limit and mutes."),
         FieldSpec("stats", "Grant statistics query", lambda d: "on" if d["stats"] else "off", bool_field("stats"),
                   step=bool_step("stats"), help="Allows node name, uptime and online human count. Replies are public; no board, file or channel activity is queried."),
         FieldSpec("seen", "Grant last-seen query", lambda d: "on" if d["seen"] else "off", bool_field("seen"),
@@ -146,7 +156,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
     return await edit_resource_draft(
         session, lane, title="Edit chat bot" if bot else "Create chat bot", breadcrumb=("SysOp", "Content", "Chat bots"),
         fields=fields, draft=draft, save=save, error_type=BotError, save_menu_text=menu_key("S", "ave"),
-        back_menu_text=menu_key("B", "ack"), preamble=status + "Addressed messages only; replies and reminders are public in their channel. "
+        back_menu_text=menu_key("B", "ack"), preamble=status + "Addressed-only by default. Read whole channels shares other callers' conversation with the program; grant only deliberately. Replies, reminders and greetings are public. "
         "Baud supports help, remind, reminders and cancel; stats and seen require their own query grants. No language model. "
         "Node backups include API-managed bot state. Kill a bot before using Delete selected to remove it and its state.",
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,

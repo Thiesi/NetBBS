@@ -177,6 +177,7 @@ def test_build_frame_helpers_produce_payloads_that_pass_their_own_validator():
         build_bot_frame("bot_request", {"channel_id": "channel-1", "bot": "Baud.bot", "caller": "alice", "text": "help"}),
         build_bot_frame("bot_result", {"request_id": "request-1", "error": ""}),
         build_bot_frame("bot_presence", {"channel_id": "channel-1", "author_node_fingerprint": "home", "labels": ["Baud.bot"]}),
+        build_bot_frame("bot_readers", {"channel_id": "channel-1", "author_node_fingerprint": "home", "labels": ["Baud.bot"]}),
         build_subscribe_frame("channel-1"),
         build_unsubscribe_frame("channel-1"),
         build_presence_snapshot_frame("channel-1", [{"user_id": "u1", "display_label": "Alice"}]),

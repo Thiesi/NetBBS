@@ -4319,4 +4319,12 @@ MIGRATIONS = [
         description="Issue #1210: explicit optional bot statistics and last-seen query grants.",
         sql="ALTER TABLE chat_bots ADD COLUMN queries_json TEXT NOT NULL DEFAULT '[]';",
     ),
+    Migration(
+        description="Issue #1210: per-channel bot reading and presence grants, optional greetings.",
+        sql="""
+        ALTER TABLE bot_channels ADD COLUMN channel_read INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE bot_channels ADD COLUMN presence_events INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE chat_bots ADD COLUMN greetings INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]

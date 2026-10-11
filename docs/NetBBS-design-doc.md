@@ -16221,7 +16221,15 @@ host-bound request API. Statistics expose node name, uptime and online human
 count. Last-seen exposes public online status or the latest recorded login or
 logout on the bot's host, respecting hidden session history even for SysOp
 requests because replies are public. No private activity is queried.
-Channel/event scopes and model conversation remain subsequent slices.
+Whole-channel reading and channel-specific live join/leave grants are now
+available separately. Baud's optional greetings require join events, not
+conversation access. Channel headings, `/who` and live grant-change notices
+disclose readers; `chat_bot_readers_v1` carries that disclosure over Link to
+supporting peers. A local receiving mute cannot hide a remote reader's access.
+Older peers retain ordinary bot traffic but lack the extended disclosure.
+History and presence snapshots never become fresh bot events. Board/file
+events, audience-safe announcements and model conversation remain subsequent
+slices.
 See `NetBBS-bot-api.md` for the implemented protocol and limits.
 
 **Grounding.** Door output already speaks in chat without being a person

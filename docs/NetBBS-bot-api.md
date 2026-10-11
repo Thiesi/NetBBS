@@ -7,10 +7,13 @@ a JSON argument array such as `["/usr/pkg/bin/python3.11", "-u", "/opt/bot.py"]`
 Arguments are executed directly, without a shell; use absolute program and
 script paths. The working directory is the instance's state directory.
 
-Baud and external bots have identical host permissions. This slice grants
-`addressed` only, for explicitly allowed channels. It does not provide
-channel-wide reads, source events or model requests. Statistics and last-seen
-queries have separate, default-off grants in the instance editor.
+Baud and external bots have identical host permissions. Each instance starts
+with `addressed` only, for explicitly allowed channels. **Read whole channels**
+grants live human messages and actions in a named subset of those channels;
+**Presence-event channels** separately grants their live joins and leaves.
+Both lists start empty. Greetings require the presence grant, not channel
+reading. Statistics and last-seen queries have separate, default-off grants.
+Board/file events and model requests remain unavailable in this slice.
 Linked channels also need an explicit per-channel **Linked approvals** entry,
 confirmed on Save. MRC channels are refused, even with a paused bridge.
 A grant is checked again on dispatch and
@@ -30,7 +33,7 @@ Each line is one UTF-8 JSON object, at most 32 KiB including the newline.
 `BOT_API_VERSION = 1`. The host sends:
 
 ```json
-{"type":"hello","version":1,"name":"Baud.bot","scope":"addressed","channels":["lobby"],"temperament":"friendly","state":{},"queries":["stats","seen"]}
+{"type":"hello","version":1,"name":"Baud.bot","scope":"addressed","channels":["lobby"],"temperament":"friendly","state":{},"queries":["stats","seen"],"reading_channels":[],"event_channels":[],"greetings":false}
 ```
 
 The bot must answer within five seconds with exactly:
@@ -56,10 +59,37 @@ requests. `Baud.bot: help` names an instance. `!help` selects at most one local
 default for the channel, even in Linked chat. `Baud.bot@Node: help` names one
 remote instance, using Link's unique friendly name, DNS name or fingerprint
 resolution. Unknown or ambiguous names are refused. Both nodes must carry
-the Linked channel and advertise live bot support. Ordinary chat creates no event. A request token is
+the Linked channel and advertise live bot support. Ordinary chat creates no
+addressed request. A request token is
 owned by that instance and expires after 60 seconds. There are at most 32
 outstanding requests per instance. Busy, unavailable, expired and refused
 requests give the caller an explanation.
+
+With the corresponding explicit source grants, additional live events are:
+
+```json
+{"type":"channel","channel":"lobby","kind":"message","caller":{"id":7,"name":"alice"},"text":"Hello everyone"}
+{"type":"presence","channel":"lobby","kind":"join","caller":{"id":7,"name":"alice"},"text":""}
+```
+
+Channel kinds are `message` and `action`; presence kinds are `join` and
+`leave`. These observations have no request token and cannot authorize a query
+or reply. An addressed line may also be observed by a channel reader, but
+creates at most one addressed request. Ordinary chat never invokes Baud's
+commands or model conversation. Bot/door output, MRC, history, presence
+snapshots and synchronization catch-up do not produce observations. Linked
+observations use the host's accepted live stream and existing presence
+topology, not a synthetic join for every person in a reconnect snapshot.
+Source grants, policy and mutes are checked when dispatching each event. A
+full event queue drops the observation and records the reason in SysOp status;
+events are not replayed later.
+
+Granting channel reading warns the SysOp that the program receives other
+callers' conversation. The heading and `/who` disclose each reader; changes
+also notify callers already in the channel. Disclosure describes the enabled
+grant even while a local process is restarting. Receiving mutes or bot-hiding
+policy do not hide a remote reader's disclosure: they cannot revoke access
+at its host.
 
 ## Actions and results
 
@@ -113,6 +143,14 @@ most 32 pending requests per instance. The last 1,024 incoming request ids
 are remembered to reject duplicates. Requests are never persisted, replayed
 or automatically resent after disconnect; a timeout advises checking the
 channel before retrying.
+
+The additional optional capability `chat_bot_readers_v1` enables `bot_readers`,
+with the same bounded payload and origin-only relay rules as `bot_presence`.
+Its labels are bots with whole-channel reading grants; an empty list withdraws
+them. Each receiver retains at most 512 reader rosters and discards disconnected
+sources. It is sent only to peers advertising both bot capabilities; older
+nodes continue carrying ordinary bot traffic but cannot display this extended
+reader disclosure. Realtime protocol version remains 4.
 
 ```json
 {"type":"result","id":"1","ok":true,"value":{"message_id":42}}
@@ -180,6 +218,9 @@ from one to 60 seconds. Kill controls disable the instance persistently.
 Commands: `help`, `remind <1s-30d> <text>`, `reminders`, `cancel <id>`.
 With the corresponding grants, Baud also offers `stats` and
 `seen <local-account>` and lists them in `help`. Both replies are public.
+The separate **Baud greetings** toggle greets live joins in presence-event
+channels. Greetings obey the same mutes, channel policy and hourly output limit
+as replies and reminders, and require no whole-channel reading grant.
 Reminder text is capped at 160 characters. Baud holds up to eight reminders
 per caller and 48 per instance, also subject to the state byte limit. Listing
 and cancelling work only for the caller's reminders in the current channel,

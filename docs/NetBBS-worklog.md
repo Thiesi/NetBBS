@@ -6521,6 +6521,16 @@ uses its recorded login instead. Presence counts distinct human accounts and
 does not include bots. Exercise both Baud and an independent subprocess against
 the same query API so the bundled bot cannot acquire an accidental privilege.
 
+Channel and presence observations enter only at accepted live human paths,
+separately from addressed requests. Never attach them to general hub broadcast:
+that also carries signed catch-up, bot output and notices. Observations carry
+no request token; only addressed dispatch may create one. Reader disclosure is
+about the source grant, not output visibility: a receiving mute cannot stop a
+remote program reading at its own node. Keep its disclosure visible even when
+its output is hidden. Reader rosters use their own optional capability because
+older bot-capable peers reject unknown frame types. Presence snapshots are
+roster reconstruction, not new joins to greet.
+
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,
