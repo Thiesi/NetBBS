@@ -2,7 +2,7 @@
 domain-layer formulas/invariants plus real-SQLite storage-layer
 behavior. Loaded directly from its file path rather than a normal
 `from netbbs.doors.bundled import war_dialer` import -- same reasoning
-as `tests/voidrunner/support.py`: this is the exact file NetBBS launches
+as `tests/vendored_voidrunner.py`: this is the exact file NetBBS launches
 as a standalone subprocess, not an ordinarily-imported library module.
 
 Regression-focused, per this codebase's own testing convention (real

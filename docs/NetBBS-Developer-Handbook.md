@@ -732,10 +732,22 @@ with `netbbs.net.row_numbers.read_row_number`, and give a `FieldSpec` no key
 at all, since `edit_resource_draft` numbers fields by their position.
 
 For bundled door presentation, inspect real renders, not just width tests.
-[door_gallery.py](../scripts/door_gallery.py) renders Voidrunner and War Dialer;
-add appropriate walks/fixtures for changed screens and attach pictures to the
-PR. Retro Trivia requires a direct run. Respect each game's normative presentation
-contract in the design reference.
+[door_gallery.py](../scripts/door_gallery.py) renders War Dialer and the vendored
+Voidrunner; add appropriate walks/fixtures for changed screens and attach
+pictures to the PR. Retro Trivia requires a direct run. Respect each game's
+normative presentation contract in the design reference.
+
+Voidrunner is developed in its own repository,
+[Thiesi/Voidrunner](https://github.com/Thiesi/Voidrunner), with its own suite,
+gallery and design document. NetBBS ships one tagged release of its single
+file: `scripts/vendor_voidrunner.py <tag>` downloads it, checks it against the
+release's checksums and records its origin in
+`src/netbbs/doors/bundled/VENDORED.json`, and `tests/test_voidrunner_vendored.py`
+refuses a copy that differs from that record. Fix the door upstream, release
+it, and vendor the release; never edit the copy. NetBBS keeps the tests of how
+it hosts the door: the drop file, the save directory, resize signals, guest
+calls and the backup's maintenance gate, which also imports
+`_default_save_dir`, `PilotBusy` and `maintenance_session` from the door.
 
 ### Documentation changes
 

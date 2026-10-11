@@ -3,6 +3,12 @@
     python scripts/door_gallery.py voidrunner --out build/gallery --open
     python scripts/door_gallery.py war_dialer --widths 80 64 40 --fresh
 
+Voidrunner is vendored from its own repository (issue #1216), and screen changes
+are reviewed there, with Thiesi/Voidrunner's `tools/door_gallery.py`. Its walks
+stay here too: `website_capture_door_screen.py` photographs the shipped release
+for www.netbbs.org through them, and a vendored bump is checked by building this
+gallery against the new file.
+
 Why this exists: a door's presentation cannot be reviewed by reading a diff, and
 the test suite can only ever assert that a screen *fits* -- never that it looks
 like anything. Both bundled games lost their entire visual design across an

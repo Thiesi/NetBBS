@@ -244,7 +244,7 @@ def test_the_runtime_vouches_for_a_registered_bundled_door_and_no_other(db, play
 
 
 def _voidrunner():
-    from tests.voidrunner.support import vr
+    from tests.vendored_voidrunner import vr
 
     return vr
 
@@ -352,12 +352,12 @@ def _signal_real_door(script, tmp_path, env, first_marker, prelude=(), wait=20.0
 @pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
 def test_the_real_voidrunner_survives_the_signal_and_redraws_forty_columns_wide(tmp_path):
     vr = _voidrunner()
-    from tests.voidrunner.support import _VOIDRUNNER_PATH, _world_with_seed, plain_bytes
+    from tests.vendored_voidrunner import VOIDRUNNER_PATH, plain_bytes, world_with_seed
 
-    vr.write_save(tmp_path, 77, _world_with_seed(42).save)
+    vr.write_save(tmp_path, 77, world_with_seed(42).save)
     (tmp_path / "door_info.json").write_text(json.dumps(
         {"user_id": 77, "handle": "Tester", "terminal_width": 80, "terminal_height": 24}), encoding="utf-8")
-    after = _signal_real_door(_VOIDRUNNER_PATH, tmp_path, {"VOIDRUNNER_SAVE_DIR": str(tmp_path)}, b"STATION SERVICES")
+    after = _signal_real_door(VOIDRUNNER_PATH, tmp_path, {"VOIDRUNNER_SAVE_DIR": str(tmp_path)}, b"STATION SERVICES")
     rows = plain_bytes(after.rsplit(b"\x1b[2J", 1)[-1]).decode("utf-8", "replace").splitlines()
     assert any("Command Deck" in row for row in rows)
     assert max(len(row) for row in rows) <= 40, rows

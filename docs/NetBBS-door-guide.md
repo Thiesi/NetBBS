@@ -37,6 +37,11 @@ several files or their own directory layout still go onto the host directly.
 | Voidrunner | Per-player career files and scores; one session per pilot; save root depends on the service environment |
 | War Dialer | Shared SQLite world owned by one node; concurrent play; maintenance required for administrative season/reset operations |
 
+Voidrunner is developed in its own repository,
+[Thiesi/Voidrunner](https://github.com/Thiesi/Voidrunner), and each NetBBS
+release bundles one tagged release of it. Report game bugs there; the save,
+backup and resize behaviour below is NetBBS's and is reported here.
+
 Use the Gallery to register them from the installed package. Keep game and runtime
 versions together. Do not replace a career or world merely to bypass a compatibility
 error. The detailed game strategy and screen walkthroughs formerly repeated here

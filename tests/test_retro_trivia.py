@@ -1,7 +1,7 @@
 """Retro Trivia's caller-facing contract (issue #514).
 
 The door is loaded from its file path under a private module name rather than
-through `netbbs.doors.bundled`, for the same reason `tests/voidrunner/support.py`
+through `netbbs.doors.bundled`, for the same reason `tests/vendored_voidrunner.py`
 and `test_doors_runtime.py` do: this is the exact file NetBBS launches as a
 standalone subprocess, not an ordinarily-imported library module.
 

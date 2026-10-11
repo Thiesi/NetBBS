@@ -9138,7 +9138,7 @@ def _assert_double_frame_rows_match_border(text: str, label: str) -> None:
     truncating/wrapping their own content). A caller passing a row wider
     than the frame budget silently pushed that one row's right border
     past where every other row's border sits. Mirrors the identical
-    checker `tests/voidrunner/` already uses for that
+    checker Voidrunner's own suite already uses for that
     module's own unrelated `╭│╰`-style boxes."""
     lines = [_ANSI_RE.sub("", line) for line in text.split("\r\n")]
     border_widths = {len(l) for l in lines if l.strip().startswith(("╔", "╚"))}
