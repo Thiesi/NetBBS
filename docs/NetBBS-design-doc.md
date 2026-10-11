@@ -16407,9 +16407,11 @@ a socket, the door does the telnet duties itself: it filters IAC sequences,
 escapes 0xFF in its output, and treats CR NUL as Enter.
 
 **Decision 2 — its own repository.** Voidrunner moves to
-Thiesi/Voidrunner, with its history and tests. Its game design text in this
-document (the Phase 7 Voidrunner paragraphs and the presentation contract)
-moves with it. This document keeps only how NetBBS hosts the door.
+Thiesi/Voidrunner, with its history and tests. When that move lands
+(Thiesi/Voidrunner#1, #1216), the game's design text in this document goes
+with it: the Phase 7 Voidrunner paragraphs and the presentation contract.
+From then on, this document covers only how NetBBS hosts the door. Until
+then, the existing text stays normative.
 
 **Decision 3 — DOOR32.SYS and DOOR.SYS.** Both drop files are read, mapped
 onto the same fields `NETBBS_DOOR_INFO` provides. When `NETBBS_DOOR_INFO`
@@ -16421,6 +16423,16 @@ are neutral.
 mapping live in the door's own file and are not shared with NetBBS's CP437
 work (#929). A portable door depends on nothing outside itself, and the
 table is small enough that duplicating it is cheaper than coupling the two.
+
+Encoding and colour depth are separate settings, and neither drop file
+names a character set. The door picks its encoding as follows:
+- **Under NetBBS:** always UTF-8. `door_info.json` carries no charset
+  either; NetBBS converts the door's UTF-8 output for a caller on a CP437
+  terminal profile.
+- **Under a foreign drop file:** CP437 by default, because that is what
+  classic BBS callers' terminals expect.
+- **Either way:** the player can switch encodings in Display Options, and
+  the choice is saved with the career, as the colour preset is.
 
 **Decision 5 — Synchronet is the test target.** Synchronet runs native
 doors on both platforms: stdio mode on Linux and DOOR32 sockets on Windows.
