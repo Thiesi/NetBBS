@@ -15354,15 +15354,11 @@ because nothing in it belongs to a host. Today's standalone launches create
 such worlds; any NetBBS launch would already have bound them.
 - **A launch without `war_dialer_owner`** marks it self-owned and writes its
   owner ID.
-- **A launch with `war_dialer_owner`** binds it to that host automatically
-  only while the world has no players, as a first host launch does now. An
-  unbound world that already holds players is refused until the SysOp performs
-  the documented legacy adoption: stopped sessions, a SQLite-consistent backup
-  and verified node-local user-ID ownership, as the world ownership rules above
-  require. Its numeric player rows came from some other installation's user
-  numbers, and only that check can say they are this node's.
+- **A launch with `war_dialer_owner`** binds it to that host, exactly as a
+  first host launch does now.
 
-Automatic adoption is one transaction before any player row is read. Rejected:
+Either way the adoption is one transaction before any player row is read, and
+an unbound world never stays unbound past its first launch. Rejected:
 - an ID the SysOp must set, which is one more setup step for no added safety;
 - an ID derived from the drop file's BBS name, which a rename would turn into
   a lockout.
