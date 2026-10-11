@@ -256,6 +256,41 @@ def test_editor_requires_explicit_link_approval_before_persisting(tmp_path, monk
     asyncio.run(run())
 
 
+def test_presence_refuses_fabricated_authors_before_retention_and_capacity_is_not_a_strike(tmp_path, monkeypatch):
+    from netbbs.bots import link as bot_link_module
+
+    async def run():
+        origin, receiver, other = [Node(tmp_path, n) for n in ("roster-origin", "roster-receiver", "roster-other")]
+        oc, rc = _setup_linked_channel(origin, receiver)
+        try:
+            await connect((origin, receiver, other))
+            source = SimpleNamespace(remote_fingerprint=origin.identity.fingerprint, closed=asyncio.Event())
+            other_source = SimpleNamespace(remote_fingerprint=other.identity.fingerprint, closed=asyncio.Event())
+
+            def frame(author):
+                return build_bot_frame("bot_presence", {"channel_id": rc.channel_id,
+                    "author_node_fingerprint": author, "labels": ["Baud.bot"]})
+
+            for index in range(20):
+                await receiver.bots.handle_frame(source, frame(f"fabricated-{index}"))
+            assert receiver.bots.remote == {}
+            assert receiver.db.connection.execute(
+                "SELECT COUNT(*) FROM link_trust_subjects WHERE node_fingerprint LIKE 'fabricated-%'"
+            ).fetchone()[0] == 0
+            monkeypatch.setattr(bot_link_module, "MAX_REMOTE_ROSTERS", 1)
+            await receiver.bots.handle_frame(source, frame(origin.identity.fingerprint))
+            assert len(receiver.bots.remote) == 1
+            # An unrelated honest peer must not receive a strike because
+            # this node's global roster is already full.
+            await receiver.bots.handle_frame(other_source, frame(other.identity.fingerprint))
+            assert len(receiver.bots.remote) == 1
+        finally:
+            for node in (other, receiver, origin):
+                await node.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("kind,payload", [
     ("bot_request", {"channel_id": "c", "bot": "alice", "caller": "bob", "text": "help"}),
     ("bot_request", {"channel_id": "c", "bot": "Baud.bot", "caller": "bob", "text": "x" * 4001}),

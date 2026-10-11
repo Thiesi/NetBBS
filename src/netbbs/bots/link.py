@@ -289,14 +289,17 @@ class BotLink:
             origin = channel_origin_fingerprint(db, channel)
             if author != session.remote_fingerprint and origin != session.remote_fingerprint:
                 raise LinkProtocolError("Only the channel origin can relay bot presence")
-            return channel, origin
+            # As with live channel lines, reject fabricated/blocked authors
+            # before they consume retained state or are relayed onward.
+            labels = [label for label in dict.fromkeys(p["labels"])
+                      if _live_author_allowed(db, author, label, relayed=author != session.remote_fingerprint)]
+            return channel, origin, labels
 
-        channel, origin = await self.lane.run(authorize)
+        channel, origin, labels = await self.lane.run(authorize)
         key = (channel.channel_id, author)
-        labels = list(dict.fromkeys(p["labels"]))
         if labels:
             if key not in self.remote and len(self.remote) >= MAX_REMOTE_ROSTERS:
-                raise LinkProtocolError("Bot presence capacity reached")
+                return  # Local capacity is not a protocol fault by this peer.
             self.remote[key] = (session, labels)
         else:
             self.remote.pop(key, None)
