@@ -1,9 +1,16 @@
 {
+  "retro_trivia.py": {
+    "repository": "Thiesi/RetroTrivia",
+    "tag": "v1.0.0",
+    "commit": "a068b05339bf1f8d25dd01408e8437071ef61c14",
+    "git_blob": "b8cc9d35b76cd3b36edf21b75a35547838ce6780",
+    "sha256": "df33bbd891ff642b45dfb82dc5750783277778a64671c857029079817333b9c2"
+  },
   "voidrunner.py": {
     "repository": "Thiesi/Voidrunner",
-    "tag": "v1.0.0",
-    "commit": "90dd8fe12466a34c285fff22e6a147b89adf4737",
-    "git_blob": "4f0a2e003a66db35de3bbee4e54b6b1ab78d0e88",
-    "sha256": "0bd4ebbef4328665c72a5e05fffc0ea9b03cbfeff029ff95767f9aa52c047034"
+    "tag": "v1.1.0",
+    "commit": "60d7bd6ee2ec30bf151c93b004f4d7c1ef521482",
+    "git_blob": "ef89d5a49c884d50e9259ba3fa2801e21a74952e",
+    "sha256": "86d89f7f0aec76d55bc570756f70242309b7bc7ae599b92d828f8c1b9983ddcd"
   }
 }

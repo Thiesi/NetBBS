@@ -9421,12 +9421,16 @@ here since #172 is self-contained):
 developed in its own repository, Thiesi/Voidrunner, and its rules, careers,
 saves, combat, economy and presentation contract are specified there, in
 `docs/design.md` (issues #1214, #1216). NetBBS ships one tagged release of its
-single file, unchanged: `scripts/vendor_voidrunner.py <tag>` fetches it and
+single file, unchanged: `scripts/vendor_door.py voidrunner <tag>` fetches it and
 records its origin in `src/netbbs/doors/bundled/VENDORED.json`, and the test
 suite refuses a copy that differs from that record. A fix to the game goes
 upstream and arrives with the next vendored release.
 
-NetBBS owns how it hosts the door:
+**Retro Trivia is vendored the same way** from Thiesi/RetroTrivia (issue
+#1226), recorded in the same `VENDORED.json`. NetBBS imports nothing from it;
+NetBBS keeps only the tests of how it launches and sizes the door.
+
+NetBBS owns how it hosts Voidrunner:
 - **Launch.** It runs as a native door that reads `door_info.json`.
 - **Save directory.** NetBBS resolves it, as below.
 - **Resize.** NetBBS rewrites the drop file and signals the door.
@@ -15294,7 +15298,7 @@ second Unix check.
 **Decision 6 — NetBBS vendors a tagged release.** NetBBS keeps bundling
 Voidrunner by copying the single file from a tagged release into
 `netbbs.doors.bundled`, recording where it came from
-(`scripts/vendor_voidrunner.py`, `VENDORED.json`). A new door version
+(`scripts/vendor_door.py`, `VENDORED.json`). A new door version
 reaches NetBBS through a deliberate, reviewable bump. Rejected: making the
 door a pip dependency, which adds a package to every install for one file.
 NetBBS keeps the door's registration, `VOIDRUNNER_SAVE_DIR`, and the

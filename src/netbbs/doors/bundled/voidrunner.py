@@ -8,7 +8,8 @@ drop-file NetBBS hands it via `NETBBS_DOOR_INFO` for handle/user_id/color
 depth, then owns raw stdin/stdout for the whole session (single keystroke
 reads; this module decodes UTF-8 and whole terminal keys, with a line editor for
 numeric quantities and the callsign prompt, since NetBBS gives a door no
-line-editing help). Runnable completely standalone outside NetBBS too.
+line-editing help). Classic DOOR32 socket launches use the inherited connection
+with telnet filtering instead of stdio. Runnable completely standalone too.
 Zero external dependencies -- stdlib only.
 
 **Persistence**: The native door API provides no mediated database access
@@ -19,7 +20,8 @@ the drop-file's stable numeric `user_id` (never the handle, which can
 change), under `VOIDRUNNER_SAVE_DIR`. NetBBS always sets it, to the node's
 own `<db path>.doors/voidrunner/` unless the SysOp chose another place
 (`netbbs.doors.runtime.voidrunner_save_dir`); standalone, the door falls back
-to `~/.netbbs/voidrunner_saves/`. Completed station actions commit before their success
+to `~/.voidrunner/`, with a fallback to an existing `~/.netbbs/voidrunner_saves/`
+when the new directory does not exist. Completed station actions commit before their success
 message, including actions inside nested menus. Each completed auto-route
 hop also commits without requiring the player to leave the chart. One process
 holds the pilot session lock from load through its final checkpoint. Writes
@@ -54,7 +56,7 @@ by itself make Voidrunner multiplayer, and nothing here assumes it ever
 will be; it just avoids closing that door (see the design discussion in
 issue #172 -- doors are locked as single-player/session-scoped in v1,
 and this stays strictly inside that: one save, one player, no shared
-galaxy state, no networking). Independent score records provide a shared ranking.
+galaxy state, no multiplayer networking). Independent score records provide a shared ranking.
 
 **Load-bearing invariant**: `generate_galaxy()` is a pure function of
 the save's `seed` -- only the seed is persisted, not the galaxy itself,
@@ -69,6 +71,7 @@ threaded into the middle of its existing call sequence.
 
 from __future__ import annotations
 
+import argparse
 import collections
 import contextlib
 import dataclasses
@@ -79,6 +82,7 @@ import math
 import os
 import random
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -101,6 +105,22 @@ _OUTPUT_HEIGHT = 24
 # Page lists still in use by a screen, so a resize can cut them again (issue #645).
 _LIVE_PAGES: list = []
 _OUTPUT_STYLE = "auto"
+_OUTPUT_ENCODING = "utf-8"
+_DEFAULT_ENCODING = "utf-8"
+_SOCKET_TRANSPORT: _SocketTransport | None = None
+_SESSION_CLOCK: _SessionClock | None = None
+DISPLAY_ENCODINGS = {"auto": "Automatic", "utf-8": "UTF-8", "cp437": "CP437"}
+# One-column substitutes for artwork absent from the CP437 repertoire. Keep
+# terminal escapes untouched; using the low CP437 control bytes for arrows or
+# symbols would make some terminals interpret artwork as commands.
+_CP437_TRANSLATION = str.maketrans({
+    "╭": "┌", "╮": "┐", "╯": "┘", "╰": "└",
+    "▁": "_", "▂": "▄", "▃": "▄", "▅": "█", "▆": "█", "▇": "█",
+    "→": ">", "▲": "^", "▼": "v", "◆": "*", "◈": "*",
+    "○": "o", "●": "o", "◤": ">", "⟦": "[", "⟧": "]",
+    "★": "*", "•": "·", "–": "-", "—": "-", "…": ".",
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+})
 DISPLAY_STYLES = {"auto": "Full palette", "fast": "Full palette, no motion", "basic": "16-color",
                   "mono": "Monochrome", "plain": "Plain / ASCII artwork"}
 # How much of a terminal each preset asks for, so a preview is never drawn above
@@ -157,24 +177,105 @@ def _spark_ramp() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _load_door_info() -> dict:
+def _classic_door_info(path: Path) -> dict:
+    """Read the 11-line DOOR32 or 31/52-line DOOR.SYS format atomically.
+
+    Never accept a partial identity: a caller's record number, not their alias,
+    owns the save. Legacy hosts write CP437; UTF-8 drop files also occur.
+    """
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp437")
+    lines = [line.strip() for line in text.splitlines()]
+
+    def number(line: int, minimum: int = 0) -> int:
+        value = lines[line - 1]
+        if not value.isascii() or not value.isdecimal() or int(value) < minimum:
+            raise ValueError(f"invalid number on line {line}")
+        return int(value)
+
+    def name(line: int) -> str:
+        value = lines[line - 1]
+        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError(f"invalid name on line {line}")
+        return value
+
+    kind = path.name.upper()
+    if kind not in ("DOOR32.SYS", "DOOR.SYS"):
+        if lines and re.fullmatch(r"COM\d+:", lines[0], re.IGNORECASE):
+            kind = "DOOR.SYS"
+        elif len(lines) == 11 and lines[0] in ("0", "1", "2"):
+            kind = "DOOR32.SYS"
+        else:
+            raise ValueError("unrecognized drop-file format")
+    if kind == "DOOR32.SYS":
+        if len(lines) < 11:
+            raise ValueError("DOOR32.SYS needs 11 lines")
+        comm_type = number(1)
+        emulation = number(10)
+        if comm_type not in (0, 1, 2) or emulation not in (0, 1, 2, 3, 4):
+            raise ValueError("invalid DOOR32 communications type or emulation")
+        number(3)  # baud rate (zero is valid for a local launch)
+        number(8)  # security level
+        number(11, 1)  # node number
+        info = {
+            "drop_file_type": kind, "user_id": number(5, 1),
+            "handle": name(7) if lines[6] else name(6),
+            "node_name": name(4) if lines[3] else "Local",
+            "terminal_height": 24, "emulation": emulation,
+            "minutes_left": number(9), "comm_type": comm_type,
+            "comm_handle": number(2),
+        }
+        graphics = emulation != 0
+    else:
+        if len(lines) < 31:
+            raise ValueError("DOOR.SYS needs at least 31 lines")
+        if not re.fullmatch(r"COM\d+:", lines[0], re.IGNORECASE):
+            raise ValueError("invalid DOOR.SYS communications port")
+        emulation = lines[19].upper()
+        if emulation not in ("GR", "NG", "7E"):
+            raise ValueError("invalid DOOR.SYS graphics mode")
+        info = {
+            "drop_file_type": kind, "user_id": number(26, 1),
+            "handle": name(36) if len(lines) >= 36 and lines[35] else name(10),
+            "terminal_height": number(21, 1), "emulation": emulation,
+            "minutes_left": number(19), "comm_port": lines[0],
+        }
+        graphics = emulation == "GR"
+    info.update(terminal_width=80, color_depth="16" if graphics else "none",
+                display_style="basic" if graphics else "plain", display_encoding="cp437")
+    return info
+
+
+def _load_door_info(drop_file: str | None = None) -> dict:
+    path = os.environ.get("NETBBS_DOOR_INFO")
     default = {
         "handle": "Guest",
         "user_id": 0,
         "terminal_width": 80,
         "terminal_height": 24,
         "color_depth": "256",
-        "node_name": "NetBBS",
+        "node_name": "NetBBS" if path else "Local",
     }
-    path = os.environ.get("NETBBS_DOOR_INFO")
-    if not path:
-        return default
-    try:
-        with open(path, encoding="utf-8") as f:
-            info = json.load(f)
-    except (OSError, ValueError):
-        return default
-    default.update(info)
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                info = json.load(f)
+            if isinstance(info, dict):
+                default.update(info)
+        except (OSError, ValueError):
+            pass
+    elif drop_file is not None:
+        # Even a malformed foreign file must not select the 256-color palette.
+        default.update(color_depth="16", display_style="basic", display_encoding="cp437")
+        try:
+            default.update(_classic_door_info(Path(drop_file)))
+        except (OSError, ValueError) as exc:
+            # Do not echo drop-file contents (DOOR.SYS includes a password).
+            reason = "cannot read file" if isinstance(exc, OSError) else str(exc)
+            print(f"Voidrunner: drop file ignored ({reason}); using Guest defaults.", file=sys.stderr)
     return default
 
 
@@ -380,6 +481,45 @@ def display_style(style: str):
         _OUTPUT_STYLE = previous
 
 
+def apply_display_encoding(encoding: str) -> None:
+    """Choose the wire charset; NetBBS always owns its caller-side conversion."""
+    global _OUTPUT_ENCODING
+    if type(encoding) is not str or encoding not in DISPLAY_ENCODINGS:
+        raise ValueError("Unknown display encoding.")
+    effective = _DEFAULT_ENCODING if encoding == "auto" else encoding
+    if os.environ.get("NETBBS_DOOR_INFO"):
+        effective = "utf-8"
+    if _SOCKET_TRANSPORT is None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding=effective, errors="strict")
+    _OUTPUT_ENCODING = effective
+    if _INPUT_READER is not None:
+        _INPUT_READER.encoding = effective
+        _INPUT_READER.utf8.clear()
+
+
+def _cp437_text(text: str) -> str:
+    """Map artwork, then transliterate user text while preserving its columns.
+
+    Careers remain Unicode. An unrepresentable wide name character is shown as
+    two underscores; combining marks use no columns. No replacement '?' bytes.
+    """
+    text = text.translate(_CP437_TRANSLATION)
+    try:
+        text.encode("cp437")
+        return text
+    except UnicodeEncodeError:
+        result = []
+        for char in text:
+            try:
+                char.encode("cp437")
+                result.append(char)
+            except UnicodeEncodeError:
+                width = _char_width(char)
+                folded = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
+                result.append(folded[:width].ljust(width, "_") if width else "")
+        return "".join(result)
+
+
 def out(text: str = "") -> None:
     if _OUTPUT_STYLE in ("mono", "plain"):
         # "No ANSI styling" means no colour, not no terminal. Stripping every
@@ -388,8 +528,13 @@ def out(text: str = "") -> None:
         text = ANSI_STYLE_RE.sub("", text)
     if _OUTPUT_STYLE == "plain":
         text = text.translate(_ASCII_ART_TRANSLATION)
-    sys.stdout.write(text)
-    sys.stdout.flush()
+    if _OUTPUT_ENCODING == "cp437":
+        text = _cp437_text(text)
+    if _SOCKET_TRANSPORT is not None:
+        _SOCKET_TRANSPORT.write(text.encode(_OUTPUT_ENCODING, "strict"))
+    else:
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
 
 def out_line(text: str = "") -> None:
@@ -586,6 +731,71 @@ RESIZE_KEY = "<resize>"
 _INPUT_TIMEOUT = 0.15
 
 
+class _SessionExpired(Exception):
+    """The host's allowance ended at a safe input, motion or lock boundary."""
+
+
+class _SessionClock:
+    def __init__(self, seconds: float, started: float):
+        self.deadline = started + seconds
+        # Keep short allowances useful too; never reserve more than a tenth.
+        self.exit_at = self.deadline - min(1.0, seconds / 10)
+        self.warned = False
+
+    def label(self) -> str:
+        seconds = max(0, math.ceil(self.deadline - time.monotonic()))
+        return f"{'LOW TIME' if seconds <= 180 else 'Time'} {seconds // 60}:{seconds % 60:02d}"
+
+    def check(self, *, warn: bool = False) -> None:
+        if time.monotonic() >= self.exit_at:
+            raise _SessionExpired
+        if warn and not self.warned and self.deadline - time.monotonic() <= 180:
+            self.warned = True
+            # A one-line alert over the top border, without scrolling the page
+            # or moving the line editor's cursor. Both unstyled presets retain
+            # cursor controls, just as they retain clear_screen's controls.
+            message = "Time low: returning to the BBS soon."
+            out(f"{ESC}7{ESC}[1;1H{RESET}{pal().gold}{_fit_text(message, _OUTPUT_WIDTH - 1)}{RESET}{ESC}[K{ESC}8")
+
+
+def _session_clock(info: dict, started: float) -> _SessionClock | None:
+    value = info.get("session_limit_seconds")
+    scale = 1
+    if "session_limit_seconds" not in info and info.get("drop_file_type") in ("DOOR32.SYS", "DOOR.SYS"):
+        value, scale = info.get("minutes_left"), 60
+    if type(value) not in (int, float):
+        return None
+    try:
+        seconds = float(value) * scale
+    except OverflowError:
+        return None
+    return _SessionClock(seconds, started) if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def _check_session_time(*, warn: bool = False) -> None:
+    if _SESSION_CLOCK is not None:
+        _SESSION_CLOCK.check(warn=warn)
+
+
+def _session_read(read_byte, timeout: float | None) -> bytes | None:
+    """Poll the allowance without inventing decoder timeouts or eating bytes."""
+    if _SESSION_CLOCK is None:
+        return read_byte(timeout)
+    until = None if timeout is None else time.monotonic() + timeout
+    while True:
+        _check_session_time(warn=True)
+        now = time.monotonic()
+        if until is not None and now >= until:
+            return None
+        wait = min(0.25, max(0, _SESSION_CLOCK.exit_at - now))
+        if until is not None:
+            wait = min(wait, until - now)
+        byte = read_byte(wait)
+        _check_session_time()
+        if byte is not None:
+            return byte
+
+
 class _StdioBytes:
     """Unbuffered byte reads with a short timeout only for partial keys.
 
@@ -685,16 +895,114 @@ class _StdioBytes:
         return os.read(self.fd, 1)
 
 
+class _CarrierLost(EOFError):
+    """The caller's socket closed; use the normal EOF checkpoint path."""
+
+
+class _SocketTransport:
+    """Borrow the host's connection through this process's inherited handle.
+
+    Close only our handle on return, never shutdown the shared connection or
+    change its blocking mode. Telnet negotiation remains the host's job.
+    Filtering keeps constant space even for an unfinished subnegotiation.
+    """
+
+    def __init__(self, handle: int):
+        self.socket = socket.socket(fileno=handle)
+        self.mode = "text"
+        self.lost = False
+
+    def waiting(self, timeout: float | None = 0) -> bool:
+        if self.lost:
+            return True
+        import select
+
+        try:
+            return bool(select.select([self.socket], [], [], timeout)[0])
+        except OSError:
+            self.lost = True
+            return True
+
+    def __call__(self, timeout: float | None) -> bytes | None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for _ in range(4096):
+            if self.lost:
+                return b""
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            if not self.waiting(remaining):
+                return None
+            if self.lost:
+                return b""
+            try:
+                byte = self.socket.recv(1)
+            except BlockingIOError:
+                continue  # the host may have handed us a nonblocking socket
+            except OSError:
+                self.lost = True
+                return b""
+            if not byte:
+                self.lost = True
+                return b""
+            n = byte[0]
+            if self.mode == "option":
+                self.mode = "text"  # WILL/WONT/DO/DONT's option byte
+            elif self.mode == "sub":
+                if n == 255:
+                    self.mode = "sub_iac"
+            elif self.mode == "sub_iac":
+                self.mode = "text" if n == 240 else "sub"
+            elif self.mode == "iac":
+                self.mode = "text"
+                if n == 255:
+                    return byte  # IAC IAC is a literal data byte
+                if n in (251, 252, 253, 254):
+                    self.mode = "option"
+                elif n == 250:
+                    self.mode = "sub"
+            elif n == 255:
+                self.mode = "iac"
+            else:
+                return byte
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+        return None  # yield after a bounded run of telnet control traffic
+
+    def write(self, data: bytes) -> None:
+        if self.lost:
+            raise _CarrierLost("socket closed")
+        import select
+
+        pending = memoryview(data.replace(b"\xff", b"\xff\xff"))
+        try:
+            while pending:
+                select.select([], [self.socket], [])
+                try:
+                    sent = self.socket.send(pending)
+                except BlockingIOError:
+                    continue
+                if not sent:
+                    raise _CarrierLost("socket closed")
+                pending = pending[sent:]
+        except (OSError, _CarrierLost) as exc:
+            self.lost = True
+            raise _CarrierLost("socket closed") from exc
+
+    def close(self) -> None:
+        self.socket.close()
+
+
 class _DoorInput:
-    """A bounded UTF-8/terminal-key decoder shared by every input screen.
+    """A bounded UTF-8 or CP437/terminal-key decoder shared by every input screen.
 
     Partial sequences survive timeouts, so a delayed arrow suffix cannot become
     a menu command. Control strings and bracketed paste are discarded through
     their terminator, retaining only enough bytes to recognize that terminator.
     """
 
-    def __init__(self, read_byte):
+    def __init__(self, read_byte, encoding: str = "utf-8", *, telnet: bool = False):
         self.read_byte = read_byte
+        self.encoding = encoding
+        self.telnet = telnet
         self.mode = "text"
         self.sequence = bytearray()
         self.utf8 = bytearray()
@@ -707,11 +1015,12 @@ class _DoorInput:
 
     def read_key(self) -> str:
         for _ in range(256):
+            _check_session_time(warn=True)
             if self.pending is not None:
                 byte, self.pending = self.pending, None
             else:
                 timeout = _INPUT_TIMEOUT if not self.after_timeout and (self.mode != "text" or self.utf8) else None
-                byte = self.read_byte(timeout)
+                byte = _session_read(self.read_byte, timeout)
             if byte is None:
                 self.after_timeout = True
                 if self.mode == "escape":
@@ -720,7 +1029,7 @@ class _DoorInput:
                     # CSI/SS3 introducer first. Without it a fragmented arrow key on a slow
                     # link erases a half-typed quantity or answers No (issue #413 review).
                     self.mode = "late_escape"
-                    follow = self.read_byte(_INPUT_TIMEOUT)
+                    follow = _session_read(self.read_byte, _INPUT_TIMEOUT)
                     if follow in (b"[", b"O"):
                         self.mode = "csi" if follow == b"[" else "ss3"
                         self.sequence.clear()
@@ -816,6 +1125,10 @@ class _DoorInput:
             elif n == 27:
                 self.mode = "escape"
                 continue
+            elif n >= 0x80 and self.encoding == "cp437":
+                # CP437's high bytes are printable letters/artwork, including
+                # bytes used as C1 controls by the UTF-8 terminal protocol.
+                char = byte.decode("cp437")
             elif n in (0x9b, 0x8f):
                 self.mode = "csi" if n == 0x9b else "ss3"
                 self.sequence.clear()
@@ -838,7 +1151,7 @@ class _DoorInput:
                 return IGNORED_KEY
             if self.skip_lf:
                 self.skip_lf = False
-                if char == "\n":
+                if char == "\n" or (self.telnet and char == "\0"):
                     continue
             self.skip_lf = char == "\r"
             if char in ("\r", "\n", "\x7f", "\x08") or char.isprintable():
@@ -859,10 +1172,11 @@ def input_reader() -> "_DoorInput":
     could not reveal, because nothing had read a key yet.
     """
     global _INPUT_READER, _INPUT_STREAM
-    stream = sys.stdin.buffer
+    stream = _SOCKET_TRANSPORT if _SOCKET_TRANSPORT is not None else sys.stdin.buffer
     if _INPUT_STREAM is not stream:
         _INPUT_STREAM = stream
-        _INPUT_READER = _DoorInput(_StdioBytes(stream))
+        _INPUT_READER = _DoorInput(stream if _SOCKET_TRANSPORT is not None else _StdioBytes(stream),
+                                   _OUTPUT_ENCODING, telnet=_SOCKET_TRANSPORT is not None)
     return _INPUT_READER
 
 
@@ -896,10 +1210,11 @@ def motion_interrupted() -> bool:
     has opened stdin -- and an effect nobody is watching is only a delay, so it
     is skipped rather than slept through.
     """
+    _check_session_time()
     if not motion_enabled():
         return True
     reader = _INPUT_READER
-    if reader is None or not isinstance(reader.read_byte, _StdioBytes):
+    if reader is None or not isinstance(reader.read_byte, (_StdioBytes, _SocketTransport)):
         return True
     return reader.read_byte.waiting()
 
@@ -1587,6 +1902,7 @@ class SaveData:
     best_credits: int = 0
     galaxy_version: int = 1
     display_style: str = "auto"
+    display_encoding: str = "auto"
     # Each known FIFO lot is [remaining quantity, remaining total paid cost].
     # Any hold quantity without a lot is older cargo of unknown acquisition cost.
     cargo_basis: dict[str, list[list[int]]] = field(default_factory=dict)
@@ -1601,6 +1917,7 @@ class SaveData:
             "schema_version": self.schema_version,
             "galaxy_version": self.galaxy_version,
             "display_style": self.display_style,
+            "display_encoding": self.display_encoding,
             "seed": self.seed,
             "pilot": self.pilot.to_dict(),
             "ship": self.ship.to_dict(),
@@ -1641,6 +1958,7 @@ class SaveData:
             schema_version=d["schema_version"],
             galaxy_version=d.get("galaxy_version", 1),
             display_style=d.get("display_style", "auto"),
+            display_encoding=d.get("display_encoding", "auto"),
             seed=d["seed"],
             pilot=Pilot.from_dict(d["pilot"]),
             ship=Ship.from_dict(d["ship"]),
@@ -1726,6 +2044,8 @@ def _validate_save_document(data: dict) -> None:
     record(data, SaveData, "career")
     style = data.get("display_style", "auto")
     require(type(style) is str and style in DISPLAY_STYLES, "display style")
+    encoding = data.get("display_encoding", "auto")
+    require(type(encoding) is str and encoding in DISPLAY_ENCODINGS, "display encoding")
     integer(data["seed"], "galaxy seed", minimum=-(2**63))
     system(data["current_system"], "current system")
     integer(data["turn"], "day")
@@ -4098,7 +4418,11 @@ class SaveError(OSError):
     """A gameplay checkpoint failed; no further actions may be accepted."""
 
 
-def _default_save_dir() -> Path:
+def _default_save_dir(*, standalone: bool = False) -> Path:
+    # NetBBS backup imports this function, PilotBusy and maintenance_session.
+    # Its environment-free, no-argument call must keep the legacy host default,
+    # even when the same OS account also has standalone careers (NetBBS #1221).
+    # Only a game launch explicitly opts into the standalone migration policy.
     override = os.environ.get("VOIDRUNNER_SAVE_DIR")
     if override:
         return Path(override).expanduser().resolve()
@@ -4116,7 +4440,11 @@ def _default_save_dir() -> Path:
         # child environment, so a launched door does not take this fallback
         # merely because its scratch working directory is isolated.
         home = Path(tempfile.gettempdir())
-    return home / ".netbbs" / "voidrunner_saves"
+    legacy = home / ".netbbs" / "voidrunner_saves"
+    current = home / ".voidrunner"
+    if not standalone or os.environ.get("NETBBS_DOOR_INFO") or (not current.exists() and legacy.is_dir()):
+        return legacy
+    return current
 
 
 def _save_path(save_dir: Path, user_id: int) -> Path:
@@ -4154,6 +4482,7 @@ def retire_pilot(old_save: SaveData) -> SaveData:
     retirements = old_save.pilot.retirements + 1
     new_save = _new_career(old_save.pilot.handle)
     new_save.display_style = old_save.display_style
+    new_save.display_encoding = old_save.display_encoding
     new_save.retired_careers = [dict(item, highlights=list(item["highlights"])) for item in old_save.retired_careers]
     new_save.best_credits = max(old_save.best_credits, old_save.pilot.credits)
     new_save.pilot.retirements = retirements
@@ -4296,7 +4625,7 @@ class SavesInMaintenance(PilotBusy):
 
 
 @contextlib.contextmanager
-def _file_lease(path: Path, *, wait: float = 0):
+def _file_lease(path: Path, *, wait: float = 0, session_deadline: float | None = None):
     """Hold a stable OS lock; never unlink its inode while another opener exists."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as handle:
@@ -4313,6 +4642,8 @@ def _file_lease(path: Path, *, wait: float = 0):
             acquire = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         deadline = time.monotonic() + wait
         while True:
+            if session_deadline is not None and time.monotonic() >= session_deadline:
+                raise _SessionExpired
             try:
                 acquire()
                 break
@@ -4321,28 +4652,29 @@ def _file_lease(path: Path, *, wait: float = 0):
                     raise
                 if time.monotonic() >= deadline:
                     raise PilotBusy from exc
-                time.sleep(0.02)
+                remaining = 0.02 if session_deadline is None else max(0, session_deadline - time.monotonic())
+                time.sleep(min(0.02, remaining))
         # Closing the descriptor releases the lock on every exit, including a
         # killed process. Keep the file itself: unlinking it could split owners.
         yield
 
 
 @contextlib.contextmanager
-def _maintenance_gate(save_dir: Path):
+def _maintenance_gate(save_dir: Path, *, session_deadline: float | None = None):
     # Restore preserves this directory and its lock inodes, switching only data.
     # Existing service-owned directories need no write access to their parent.
-    with _file_lease(save_dir / ".maintenance.lock", wait=1):
+    with _file_lease(save_dir / ".maintenance.lock", wait=1, session_deadline=session_deadline):
         yield
 
 
 @contextlib.contextmanager
-def pilot_session(save_dir: Path, user_id: int):
+def pilot_session(save_dir: Path, user_id: int, *, session_deadline: float | None = None):
     save_dir = save_dir.resolve()
     with contextlib.ExitStack() as lease:
         try:
-            with _maintenance_gate(save_dir):
+            with _maintenance_gate(save_dir, session_deadline=session_deadline):
                 try:
-                    lease.enter_context(_file_lease(save_dir / f".{user_id}.lock"))
+                    lease.enter_context(_file_lease(save_dir / f".{user_id}.lock", session_deadline=session_deadline))
                 except PilotBusy as exc:
                     raise PilotInUse from exc
         except PilotInUse:
@@ -4353,16 +4685,16 @@ def pilot_session(save_dir: Path, user_id: int):
 
 
 @contextlib.contextmanager
-def maintenance_session(save_dir: Path):
+def maintenance_session(save_dir: Path, *, session_deadline: float | None = None):
     """Exclude new launches and refuse maintenance while any pilot is active."""
     save_dir = save_dir.resolve()
-    with _maintenance_gate(save_dir):
+    with _maintenance_gate(save_dir, session_deadline=session_deadline):
         # Probe every stable session lock while the gate prevents new owners.
         # The gate prevents new owners, so each probe can close immediately.
         # Permanent pilot files must not consume one descriptor per past caller.
         for path in save_dir.glob(".*.lock"):
             if re.fullmatch(r"\.[0-9]+\.lock", path.name):
-                with _file_lease(path):
+                with _file_lease(path, session_deadline=session_deadline):
                     pass
         yield
 
@@ -4559,7 +4891,7 @@ def _read_score_json(path: Path, limit: int = MAX_SAVE_BYTES):
     return None
 
 
-def import_hall_of_fame(save_dir: Path) -> None:
+def import_hall_of_fame(save_dir: Path, *, session_deadline: float | None = None) -> None:
     """Move a pre-`scores/` `leaderboard.json` into `scores/`, at launch (issue #421).
 
     Careers do not survive schema 2, but Hall of Fame records outlive careers by
@@ -4582,7 +4914,7 @@ def import_hall_of_fame(save_dir: Path) -> None:
     if not entries:
         return
     try:
-        with maintenance_session(save_dir):
+        with maintenance_session(save_dir, session_deadline=session_deadline):
             for user_id, entry in entries.items():
                 _import_one_score(save_dir, user_id, entry)
     except (OSError, PilotBusy):
@@ -5401,7 +5733,7 @@ def style_body_line(text: str, *, key_labels: bool = False) -> str:
 
 TITLE_LOGO = ("█░░█ █▀▀█ ▀█▀ █▀▀▄   █▀▀▄ █░░█ █▄░█ █▄░█ █▀▀ █▀▀▄",
               "░▀▄▀ █▄▄█ ░█░ █▄▄▀   █░▀▄ █▄▄█ █░▀█ █░▀█ ██▄ █░▀▄")
-TITLE_TAGLINE = "a NetBBS door game"
+TITLE_TAGLINE = "a BBS door game"
 TITLE_SUBTITLE = "Tactical Deep-Space Trading & Exploration"
 
 
@@ -5436,7 +5768,7 @@ def title_rows(info: dict, inner_w: int) -> list[tuple[str, str, str]]:
     fits, otherwise a complete compact one (wordmark, wrapped subtitle, stacked
     meta fields), following the portraits' rule of a whole composition or none.
     Kinds: "blank", "logo", "wordmark", "sub", "rule", "meta"."""
-    node = info.get("node_name", "NetBBS")
+    node = info.get("node_name", "Local")
     handle = info.get("handle", "Pilot")
     rows: list[tuple[str, str, str]] = []
     large = inner_w >= max(_visible_width(row) for row in TITLE_LOGO) + 2
@@ -5501,7 +5833,7 @@ def screen_title(p: Palette, info: dict) -> None:
         body = f"{styles[kind]}{text}{RESET}" if text else ""
         out_line(f"{edge}║{RESET}{_pad(body, inner_w, align)}{edge}║{RESET}")
     out_line(f"{edge}╚{'═' * inner_w}╝{RESET}")
-    out_line(f"{p.muted}A {info.get('node_name', 'NetBBS')} space trading door.{RESET}")
+    out_line(f"{p.muted}A {info.get('node_name', 'Local')} space trading door.{RESET}")
     out_line()
 
 
@@ -5989,7 +6321,7 @@ def splash_frames(width: int, height: int, info: dict) -> Iterator[str]:
     wire. A larger terminal gets the capped scene centred on a dark screen.
     """
     cols, rows, top, left = _splash_box(width, height)
-    layout = _SplashLayout(cols, rows, _splash_plain(info.get("node_name", "NetBBS")) or "NetBBS",
+    layout = _SplashLayout(cols, rows, _splash_plain(info.get("node_name", "Local")) or "Local",
                            _splash_plain(info.get("handle", "Pilot")) or "Pilot")
     previous = [[(" ", None, None)] * cols for _ in range(rows)]
     for frame in range(SPLASH_FRAMES):
@@ -6029,6 +6361,7 @@ def _splash_hold() -> None:
     """
     reader = _INPUT_READER
     while reader is not None and not _RESIZE_PENDING:
+        _check_session_time(warn=True)
         if reader.read_byte.waiting():
             try:
                 reader.read_key()
@@ -6382,13 +6715,18 @@ def screen_display_options(p: Palette, world: World) -> None:
     styles = list(DISPLAY_STYLES)
     blurbs = {"auto": "the terminal's own color depth, with motion",
               "fast": "the same palette with every reveal, tick and drain off",
-              "basic": "sixteen ANSI colors and Unicode artwork",
-              "mono": "Unicode artwork, no ANSI styling",
-              "plain": "ASCII artwork, no ANSI styling; letters and typed text stay UTF-8"}
+              "basic": "sixteen ANSI colors and terminal artwork",
+              "mono": "terminal artwork, no ANSI styling",
+              "plain": "ASCII artwork, no ANSI styling; text uses the chosen encoding"}
     while True:
         p_ = pal()
         lines = [f"{p_.slate}Choose a preset to apply and save it. "
                  f"Back keeps the current preference.{RESET}", section("PRESETS")]
+        managed = bool(os.environ.get("NETBBS_DOOR_INFO"))
+        encoding_label = ("UTF-8 (managed by NetBBS)" if managed else
+                          f"{DISPLAY_ENCODINGS[world.save.display_encoding]} ({_OUTPUT_ENCODING.upper()})")
+        lines.insert(1, f"Encoding: {encoding_label}." + ("" if managed else
+                         " [E] cycles Automatic / UTF-8 / CP437."))
         # Each preset previews itself: the sample row beside a name is drawn
         # the way that preset would draw it, so the choice is made by looking
         # rather than by reading an adjective (issue #493 §5).
@@ -6419,10 +6757,17 @@ def screen_display_options(p: Palette, world: World) -> None:
             # preset actually does.
             lines.append("\n".join(record + [f"  {p_.slate}{blurbs[style]}{RESET}"]))
         if result: lines.insert(0, result)
+        encoding_key = "" if managed else "[E] Encoding "
         key, page, count = _draw_service_page(p, "Display Options", lines,
-                                              f"[1-{len(styles)}] Set [<] Prev [>] Next [B] Back: ", page)
+                                              f"[1-{len(styles)}] Set {encoding_key}[<] Prev [>] Next [B] Back: ", page)
         if key in ("B", "Q"): return
-        if (moved := page_step(key, page, count)) is not None: page = moved
+        if key == "E" and not managed:
+            encodings = list(DISPLAY_ENCODINGS)
+            world.save.display_encoding = encodings[(encodings.index(world.save.display_encoding) + 1) % len(encodings)]
+            world.commit()
+            apply_display_encoding(world.save.display_encoding)
+            result, page = f"Encoding saved: {DISPLAY_ENCODINGS[world.save.display_encoding]}.", 0
+        elif (moved := page_step(key, page, count)) is not None: page = moved
         elif len(key) == 1 and "1" <= key <= str(len(styles)):
             style = styles[int(key) - 1]
             changed = select_display_style(world, style)
@@ -8188,7 +8533,14 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         # is how the color was lost one slice at a time to begin with.
         row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
         out_line(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
-    out_line(_box_bottom(p, border_color=p.hull))
+    if _SESSION_CLOCK is None:
+        out_line(_box_bottom(p, border_color=p.hull))
+    else:
+        # Keep the allowance visible on every page, including 40x12 terminals;
+        # a body-row badge could be paginated off the opening deck entirely.
+        label = _fit_text(_SESSION_CLOCK.label(), inner - 4)
+        tone = p.gold if _SESSION_CLOCK.deadline - time.monotonic() <= 180 else p.slate
+        out_line(f"{p.hull}╰{'─' * (inner - len(label) - 3)} {tone}{label}{p.hull} ─╯{RESET}")
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
@@ -8217,6 +8569,7 @@ def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, pa
 
 _RESIZE_PENDING = False
 _RESIZE_POLL_SECONDS = 0.25
+_CLASSIC_DROP_FILE: str | None = None
 
 
 def _note_resize(signum=None, frame=None) -> None:
@@ -8263,7 +8616,8 @@ def take_resize() -> bool:
         return False
     _RESIZE_PENDING = False
     before = (_OUTPUT_WIDTH, _OUTPUT_HEIGHT)
-    apply_terminal_size(_load_door_info())
+    info = _load_door_info(_CLASSIC_DROP_FILE) if _CLASSIC_DROP_FILE is not None else _load_door_info()
+    apply_terminal_size(info)
     _OUTPUT_WIDTH, _OUTPUT_HEIGHT = max(MINIMUM_WIDTH, _OUTPUT_WIDTH), max(MINIMUM_HEIGHT, _OUTPUT_HEIGHT)
     _LAST_PAGE_DRAWN = None
     changed = (_OUTPUT_WIDTH, _OUTPUT_HEIGHT) != before
@@ -8284,8 +8638,8 @@ def _resized_while_idle() -> bool:
     # Only a door with a live terminal waits: a scripted test has no reader open,
     # and selecting on the test runner's own stdin would never return.
     live = _INPUT_READER.read_byte if _INPUT_READER is not None else None
-    fd = live.fd if isinstance(live, _StdioBytes) else None
-    if os.name != "posix" or fd is None:
+    fd = live.socket if isinstance(live, _SocketTransport) else live.fd if isinstance(live, _StdioBytes) else None
+    if fd is None or (os.name != "posix" and not isinstance(live, _SocketTransport)):
         return take_resize()
     if _INPUT_READER.pending is not None:
         # A byte the decoder has already taken off the pipe (the key typed just
@@ -8295,9 +8649,17 @@ def _resized_while_idle() -> bool:
     import select
 
     while True:
+        _check_session_time(warn=True)
         if take_resize():
             return True
-        if select.select([fd], [], [], _RESIZE_POLL_SECONDS)[0]:
+        wait = _RESIZE_POLL_SECONDS
+        if _SESSION_CLOCK is not None:
+            wait = min(wait, max(0, _SESSION_CLOCK.exit_at - time.monotonic()))
+        if isinstance(live, _SocketTransport):
+            ready = live.waiting(wait)
+        else:
+            ready = bool(select.select([fd], [], [], wait)[0])
+        if ready:
             return False
 
 
@@ -11238,7 +11600,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                     out_line("Recovery failed. No replacement was completed. Please contact your SysOp.")
                     try:
                         pause(p)
-                    except EOFError:
+                    except (EOFError, _SessionExpired):
                         pass
                     return RecoveryResult(None, 1)
                 # Said by `main`, on the deck the restored career opens at: a line
@@ -11246,39 +11608,87 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                 return RecoveryResult(restored, 0)
 
 
-def main() -> int:
-    global _OUTPUT_WIDTH, _OUTPUT_HEIGHT, _OUTPUT_STYLE
+def main(drop_file: str | None = None) -> int:
+    global _OUTPUT_STYLE, _DEFAULT_ENCODING, _CLASSIC_DROP_FILE, _SOCKET_TRANSPORT
+    global _INPUT_READER, _INPUT_STREAM, _SESSION_CLOCK
+    session_started = time.monotonic()
     _OUTPUT_STYLE = "auto"
+    # Resize notifications must reload the same metadata source as this launch.
+    _CLASSIC_DROP_FILE = drop_file
 
-    sys.stdout.reconfigure(encoding="utf-8")
+    _DEFAULT_ENCODING = "utf-8"
     # Before anything else: the host may signal at any moment after the spawn,
     # and SIGUSR1 ends a process that has not said what to do with it.
     install_resize_handler()
-    info = _load_door_info()
+    info = _load_door_info(drop_file) if drop_file is not None else _load_door_info()
+    started = False
+    try:
+        if info.get("drop_file_type") == "DOOR32.SYS" and info.get("comm_type") == 2:
+            try:
+                _SOCKET_TRANSPORT = _SocketTransport(info["comm_handle"])
+            except (OSError, ValueError, OverflowError):
+                print("Voidrunner: cannot open inherited DOOR32 socket.", file=sys.stderr)
+                return 1
+        started = True
+        _SESSION_CLOCK = _session_clock(info, session_started)
+        return _run_game(info)
+    except _SessionExpired:
+        _SESSION_CLOCK = None
+        with contextlib.suppress(_CarrierLost):
+            out_line("Time limit reached. Returning to the BBS.")
+        return 0
+    except _CarrierLost:
+        # Pre-career output, or a busy/refused launch: nothing to checkpoint.
+        # Once a World exists, _run_game handles EOF and checkpoints it.
+        return 0
+    finally:
+        _SESSION_CLOCK = None
+        try:
+            if started:
+                with contextlib.suppress(_CarrierLost):
+                    out(RESET)
+        finally:
+            _OUTPUT_STYLE = "auto"
+            _CLASSIC_DROP_FILE = None
+            _DEFAULT_ENCODING = "utf-8"
+            apply_display_encoding("auto")
+            _INPUT_READER = _INPUT_STREAM = None
+            if _SOCKET_TRANSPORT is not None:
+                with contextlib.suppress(OSError):
+                    _SOCKET_TRANSPORT.close()
+                _SOCKET_TRANSPORT = None
+
+
+def _run_game(info: dict) -> int:
+    global _DEFAULT_ENCODING, _SESSION_CLOCK
+    _DEFAULT_ENCODING = info.get("display_encoding", "utf-8")
+    apply_display_encoding("auto")
+    apply_display_style(info.get("display_style", "auto"))
     reported_height = apply_terminal_size(info)
     p = Palette(truecolor=info.get("color_depth") == "truecolor")
     set_palette(p)  # what every component in the style layer draws with
     input_reader()  # opened before the first page, so it can reveal itself
+    _check_session_time()
     if _terminal_too_small():
         _refuse_size(p, reported_height)
         return 0
-    save_dir = _default_save_dir()
-    # Real NetBBS launches always carry a real positive user_id from the
-    # drop-file; this fallback only fires for standalone tinkering
-    # (`python3 voidrunner.py` with no NETBBS_DOOR_INFO) and must be
+    save_dir = _default_save_dir(standalone=True)
+    # Valid host drop files carry a positive user_id. The Guest fallback for a
+    # standalone launch or unreadable drop file must be
     # deterministic per handle -- Python's built-in hash() is randomized
     # per process (PYTHONHASHSEED), which would silently start a fresh
     # career file on every standalone run.
     user_id = int(info.get("user_id", 0)) or zlib.crc32(info["handle"].encode())
     # Before any pilot lock: the import needs the maintenance gate, and the gate
     # must never be asked for by a session that already owns a pilot (issue #421).
-    import_hall_of_fame(save_dir)
+    deadline_args = {"session_deadline": _SESSION_CLOCK.exit_at} if _SESSION_CLOCK is not None else {}
+    import_hall_of_fame(save_dir, **deadline_args)
 
     world = None
     lease = contextlib.ExitStack()
     try:
         try:
-            lease.enter_context(pilot_session(save_dir, user_id))
+            lease.enter_context(pilot_session(save_dir, user_id, **deadline_args))
         except OSError as exc:
             raise SaveError from exc
         outdated = False
@@ -11301,7 +11711,10 @@ def main() -> int:
             if save is None:
                 return recovery.exit_code
             is_new, notice = False, "Previous checkpoint restored. Resuming this career."
+        if is_new:
+            save.display_style = info.get("display_style", "auto")
         apply_display_style(save.display_style)
+        apply_display_encoding(save.display_encoding)
         if splashable:
             # After the caller's own preset is known, so a caller who asked for
             # no motion is never shown any; before the first screen it opens on.
@@ -11403,21 +11816,34 @@ def main() -> int:
                  + RESET)
         return 0
     except ResumeError as exc:
-        out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "
-                 f"Please contact your SysOp.{RESET}")
         try:
+            out_line(f"{p.wrong}{exc} Play has stopped; your saved career is unchanged. "
+                     f"Please contact your SysOp.{RESET}")
             pause(p)
-        except EOFError:
+        except (EOFError, _SessionExpired):
             pass
         return 1
     except SaveError:
-        out_line(f"{p.wrong}Save failed. Play has stopped to protect your last saved career. "
-                 f"Please contact your SysOp before playing again.{RESET}")
         try:
+            out_line(f"{p.wrong}Save failed. Play has stopped to protect your last saved career. "
+                     f"Please contact your SysOp before playing again.{RESET}")
             pause(p)
-        except EOFError:
+        except (EOFError, _SessionExpired):
             pass
         return 1
+    except _SessionExpired:
+        _SESSION_CLOCK = None
+        try:
+            if world is not None:
+                world.commit()
+        except SaveError:
+            with contextlib.suppress(_CarrierLost):
+                out_line("Save failed. Please contact your SysOp before playing again.")
+            return 1
+        with contextlib.suppress(_CarrierLost):
+            out_line()
+            out_line("Time limit reached. " + ("Career saved. " if world is not None else "") + "Returning to the BBS.")
+        return 0
     except EOFError:
         try:
             if world is not None:
@@ -11427,9 +11853,9 @@ def main() -> int:
         return 0
     finally:
         lease.close()
-        out(RESET)
-        _OUTPUT_STYLE = "auto"
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description="Voidrunner space trading door")
+    parser.add_argument("drop_file", nargs="?", help="path to DOOR32.SYS or DOOR.SYS")
+    sys.exit(main(parser.parse_args().drop_file))

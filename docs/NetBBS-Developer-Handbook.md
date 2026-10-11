@@ -737,17 +737,19 @@ Voidrunner; add appropriate walks/fixtures for changed screens and attach
 pictures to the PR. Retro Trivia requires a direct run. Respect each game's
 normative presentation contract in the design reference.
 
-Voidrunner is developed in its own repository,
-[Thiesi/Voidrunner](https://github.com/Thiesi/Voidrunner), with its own suite,
-gallery and design document. NetBBS ships one tagged release of its single
-file: `scripts/vendor_voidrunner.py <tag>` downloads it, checks it against the
-release's checksums and records its origin in
-`src/netbbs/doors/bundled/VENDORED.json`, and `tests/test_voidrunner_vendored.py`
-refuses a copy that differs from that record. Fix the door upstream, release
-it, and vendor the release; never edit the copy. NetBBS keeps the tests of how
-it hosts the door: the drop file, the save directory, resize signals, guest
-calls and the backup's maintenance gate, which also imports
+Voidrunner and Retro Trivia are developed in their own repositories,
+[Thiesi/Voidrunner](https://github.com/Thiesi/Voidrunner) and
+[Thiesi/RetroTrivia](https://github.com/Thiesi/RetroTrivia), each with its own
+suite and design notes. NetBBS ships one tagged release of each single file:
+`scripts/vendor_door.py <door> <tag>` downloads it, checks it against the
+release's checksums and the tagged commit, and records its origin in
+`src/netbbs/doors/bundled/VENDORED.json`, and `tests/test_vendored_doors.py`
+refuses a copy that differs from that record. Fix a door upstream, release it,
+and vendor the release; never edit the copy. NetBBS keeps the tests of how it
+hosts the doors: the drop file, the save directory, resize signals, guest
+calls and Voidrunner's backup maintenance gate, which also imports
 `_default_save_dir`, `PilotBusy` and `maintenance_session` from the door.
+NetBBS imports nothing from Retro Trivia.
 
 ### Documentation changes
 

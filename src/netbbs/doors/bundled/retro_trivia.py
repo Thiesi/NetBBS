@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Retro Trivia -- a real, playable door game for NetBBS (issue #172).
+Retro Trivia -- a single-player BBS trivia door, originally for NetBBS.
 
 A genuine proof-of-concept for the native door-game vertical, not a
 throwaway test fixture: reads the v1 drop-file (see `netbbs.doors.
@@ -17,22 +17,29 @@ field falls back to a sane default if `NETBBS_DOOR_INFO` is unset or
 unreadable, so a SysOp (or anyone) can try it before ever registering
 it as a door.
 
-Zero external dependencies -- stdlib only, so "python3" plus this
-file's path is the entire executable_path/args a SysOp needs to
-register (see examples/README.md for the exact registration steps).
+Classic hosts can pass a DOOR32.SYS or DOOR.SYS filename on the command
+line; NETBBS_DOOR_INFO takes precedence. Output is CP437 for classic hosts
+and UTF-8 for NetBBS, with a --encoding override outside NetBBS. DOOR32
+socket launches use the inherited connection with telnet filtering.
+Zero external dependencies -- see README.md for SysOp setup.
 """
 
 from __future__ import annotations
 
+import argparse
+from contextlib import contextmanager
 import json
 import os
 import random
 import re
 import select
+import shutil
+import socket
 import sys
 import time
 import unicodedata
 import zlib
+from pathlib import Path
 
 ESC = "\x1b"
 RESET = f"{ESC}[0m"
@@ -41,6 +48,17 @@ DIM = f"{ESC}[2m"
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
 _OUTPUT_WIDTH = 80
+_OUTPUT_ENCODING = "utf-8"
+_SOCKET_TRANSPORT: _SocketTransport | None = None
+_CONSOLE_INPUT = None
+_TERMINAL_FD = None
+# Screen artwork uses printable CP437 bytes, never its low control-byte glyphs.
+_CP437_TRANSLATION = str.maketrans({
+    "╭": "┌", "╮": "┐", "╯": "┘", "╰": "└",
+    "⟦": "[", "⟧": "]", "•": "·", "…": ".",
+    "⋆": "*", "★": "*", "☆": ".", "✦": "*", "✧": "+",
+    "●": "o", "□": "o", "⚡": "!", "✔": "+", "✘": "x",
+})
 
 
 def _strip_ansi(text: str) -> str:
@@ -99,37 +117,144 @@ def _wrap(text: str, width: int) -> list[str]:
     return lines or [""]
 
 
-def _load_door_info() -> dict:
+def _drop_file_text(value: str) -> str:
+    """Remove terminal commands and control characters from foreign names."""
+    value = re.sub(
+        r"(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)"
+        r"|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\x1b\x9c]*(?:\x1b\\|\x9c|$)"
+        r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+        r"|\x1b[ -/]*[@-~]",
+        "", value,
+    )
+    return "".join(ch for ch in value if not unicodedata.category(ch).startswith("C")).strip()
+
+
+def _classic_door_info(path: Path) -> dict:
+    """Read DOOR32 or DOOR.SYS atomically; adapted from Voidrunner's reader."""
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp437")
+    # Only CR/LF delimit records: other controls belong to the name sanitizer.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    lines = [line.strip() for line in lines]
+
+    def number(line: int, minimum: int = 0) -> int:
+        value = lines[line - 1]
+        if not value.isascii() or not value.isdecimal() or len(value) > 10:
+            raise ValueError(f"invalid number on line {line}")
+        result = int(value)
+        if result < minimum:
+            raise ValueError(f"invalid number on line {line}")
+        return result
+
+    def name(line: int, fallback: str) -> str:
+        return _drop_file_text(lines[line - 1]) or fallback
+
+    kind = path.name.upper()
+    if kind not in ("DOOR32.SYS", "DOOR.SYS"):
+        if lines and re.fullmatch(r"COM\d+:", lines[0], re.IGNORECASE):
+            kind = "DOOR.SYS"
+        elif len(lines) == 11 and lines[0] in ("0", "1", "2"):
+            kind = "DOOR32.SYS"
+        else:
+            raise ValueError("unrecognized drop-file format")
+    if kind == "DOOR32.SYS":
+        if len(lines) < 11:
+            raise ValueError("DOOR32.SYS needs 11 lines")
+        comm_type = number(1)
+        emulation = number(10)
+        if comm_type not in (0, 1, 2) or emulation not in (0, 1, 2, 3, 4):
+            raise ValueError("invalid DOOR32 communications type or emulation")
+        number(3)  # baud rate (zero is valid locally)
+        number(8)  # security level
+        number(11, 1)  # node number
+        info = {
+            "drop_file_type": kind, "user_id": number(5, 1),
+            "handle": name(7, name(6, "Guest")),
+            "node_name": name(4, "Local"),
+            "terminal_height": 24, "emulation": emulation,
+            "minutes_left": number(9), "comm_type": comm_type,
+            "comm_handle": number(2),
+        }
+    else:
+        if len(lines) < 31:
+            raise ValueError("DOOR.SYS needs at least 31 lines")
+        if not re.fullmatch(r"COM\d+:", lines[0], re.IGNORECASE):
+            raise ValueError("invalid DOOR.SYS communications port")
+        emulation = lines[19].upper()
+        if emulation not in ("GR", "NG", "7E"):
+            raise ValueError("invalid DOOR.SYS graphics mode")
+        info = {
+            "drop_file_type": kind, "user_id": number(26, 1),
+            "handle": name(36, name(10, "Guest")) if len(lines) >= 36 else name(10, "Guest"),
+            "node_name": "Local", "terminal_height": number(21, 1),
+            "emulation": emulation, "minutes_left": number(19),
+            "comm_port": lines[0],
+        }
+    info.update(terminal_width=80, color_depth="16")
+    return info
+
+
+def _load_door_info(drop_file: str | None = None) -> dict:
+    path = os.environ.get("NETBBS_DOOR_INFO")
     default = {
         "handle": "Guest",
         "user_id": 0,
         "terminal_width": 80,
         "terminal_height": 24,
         "color_depth": "256",
-        "node_name": "NetBBS",
+        "node_name": "NetBBS" if path else "Local",
     }
-    path = os.environ.get("NETBBS_DOOR_INFO")
-    if not path:
-        return default
-    try:
-        with open(path, encoding="utf-8") as f:
-            info = json.load(f)
-    except (OSError, ValueError):
-        return default
-    default.update(info)
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                info = json.load(f)
+            if isinstance(info, dict):
+                default.update(info)
+        except (OSError, ValueError):
+            pass
+    elif drop_file is not None:
+        default["color_depth"] = "16"
+        try:
+            default.update(_classic_door_info(Path(drop_file)))
+        except (OSError, ValueError) as exc:
+            # Never echo file contents or paths: DOOR.SYS can contain a password.
+            reason = "cannot read file" if isinstance(exc, OSError) else str(exc)
+            print(f"Retro Trivia: drop file ignored ({reason}); using Guest defaults.", file=sys.stderr)
+    else:
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        default.update(terminal_width=size.columns, terminal_height=size.lines)
     return default
 
 
 class Palette:
-    """Two depths of the same handful of named colors -- truecolor RGB
-    triples, and their nearest hand-picked xterm 256 equivalents. A real
-    nearest-256 algorithm is overkill for the colors this door
-    actually uses."""
+    """Named colors in truecolor, xterm 256, or classic ANSI 16 colors."""
 
-    def __init__(self, truecolor: bool):
+    def __init__(self, truecolor: bool, *, basic: bool = False):
         self._truecolor = truecolor
+        self._basic = basic
+
+    @staticmethod
+    def _ansi16(rgb: tuple[int, int, int], *, background: bool = False) -> str:
+        colors = (
+            (0, 0, 0), (170, 0, 0), (0, 170, 0), (170, 85, 0),
+            (0, 0, 170), (170, 0, 170), (0, 170, 170), (170, 170, 170),
+            (85, 85, 85), (255, 85, 85), (85, 255, 85), (255, 255, 85),
+            (85, 85, 255), (255, 85, 255), (85, 255, 255), (255, 255, 255),
+        )
+        index = min(range(8 if background else 16),
+                    key=lambda i: sum((a - b) ** 2 for a, b in zip(rgb, colors[i])))
+        if background:
+            return str(40 + index)
+        return f"{'1;' if index >= 8 else ''}{30 + index % 8}"
 
     def _sgr(self, rgb: tuple[int, int, int], idx256: int) -> str:
+        if self._basic:
+            return f"{ESC}[{self._ansi16(rgb)}m"
         if self._truecolor:
             r, g, b = rgb
             return f"{ESC}[38;2;{r};{g};{b}m"
@@ -172,9 +297,33 @@ class Palette:
         return self._sgr((250, 250, 255), 255)
 
 
+def _cp437_text(text: str) -> str:
+    """Map artwork and transliterate unsupported caller text without '?' loss."""
+    text = text.translate(_CP437_TRANSLATION)
+    try:
+        text.encode("cp437", "strict")
+        return text
+    except UnicodeEncodeError:
+        result = []
+        for char in text:
+            try:
+                char.encode("cp437", "strict")
+                result.append(char)
+            except UnicodeEncodeError:
+                width = _char_width(char)
+                folded = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
+                result.append(folded[:width].ljust(width, "_") if width else "")
+        return "".join(result)
+
+
 def out(text: str = "") -> None:
-    sys.stdout.write(text)
-    sys.stdout.flush()
+    if _OUTPUT_ENCODING == "cp437":
+        text = _cp437_text(text)
+    if _SOCKET_TRANSPORT is not None:
+        _SOCKET_TRANSPORT.write(text.encode(_OUTPUT_ENCODING, "strict"))
+    else:
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
 
 def out_line(text: str = "") -> None:
@@ -304,6 +453,163 @@ def _active_sgr_after(text: str, active: str) -> str:
     return active
 
 
+class _CarrierLost(EOFError):
+    """The remote caller disconnected; do not print a traceback or fallback UI."""
+
+
+class _SocketTransport:
+    """Borrow the host's connection through this process's inherited handle.
+
+    Close only our handle on return, never shutdown the shared connection or
+    change its blocking mode. Telnet negotiation remains the host's job.
+    Filtering keeps constant space even for an unfinished subnegotiation.
+    """
+
+    def __init__(self, handle: int):
+        self.socket = socket.socket(fileno=handle)
+        self.mode = "text"
+        self.lost = False
+        self.after_cr = False
+
+    def waiting(self, timeout: float | None = 0) -> bool:
+        if self.lost:
+            return True
+        try:
+            return bool(select.select([self.socket], [], [], timeout)[0])
+        except OSError:
+            self.lost = True
+            return True
+
+    def __call__(self, timeout: float | None) -> bytes | None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for _ in range(4096):
+            if self.lost:
+                return b""
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            if not self.waiting(remaining):
+                return None
+            if self.lost:
+                return b""
+            try:
+                byte = self.socket.recv(1)
+            except BlockingIOError:
+                continue  # the host may have handed us a nonblocking socket
+            except OSError:
+                self.lost = True
+                return b""
+            if not byte:
+                self.lost = True
+                return b""
+            n = byte[0]
+            if self.mode == "option":
+                self.mode = "text"  # WILL/WONT/DO/DONT's option byte
+            elif self.mode == "sub":
+                if n == 255:
+                    self.mode = "sub_iac"
+            elif self.mode == "sub_iac":
+                self.mode = "text" if n == 240 else "sub"
+            elif self.mode == "iac":
+                self.mode = "text"
+                if n == 255:
+                    return byte  # IAC IAC is a literal data byte
+                if n in (251, 252, 253, 254):
+                    self.mode = "option"
+                elif n == 250:
+                    self.mode = "sub"
+            elif n == 255:
+                self.mode = "iac"
+            else:
+                if self.after_cr:
+                    self.after_cr = False
+                    if byte in (b"\x00", b"\n"):
+                        continue
+                self.after_cr = byte == b"\r"
+                return byte
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+        return None  # yield after a bounded run of telnet control traffic
+
+    def write(self, data: bytes) -> None:
+        if self.lost:
+            raise _CarrierLost("socket closed")
+        pending = memoryview(data.replace(b"\xff", b"\xff\xff"))
+        try:
+            while pending:
+                select.select([], [self.socket], [])
+                try:
+                    sent = self.socket.send(pending)
+                except BlockingIOError:
+                    continue
+                if not sent:
+                    raise _CarrierLost("socket closed")
+                pending = pending[sent:]
+        except (OSError, _CarrierLost) as exc:
+            self.lost = True
+            raise _CarrierLost("socket closed") from exc
+
+    def close(self) -> None:
+        # Enter can be the final key before returning to the BBS. Consume its
+        # queued CR-NUL/CR-LF trailer, but leave any next host command untouched.
+        # A bounded wait covers a split TCP read without hanging on a bare CR.
+        if self.after_cr and not self.lost:
+            try:
+                if self.waiting(0.25):
+                    trailer = self.socket.recv(1, socket.MSG_PEEK)
+                    if trailer in (b"\x00", b"\n"):
+                        self.socket.recv(1)
+            except OSError:
+                pass  # The caller may disconnect while returning to the host.
+        self.lost = True
+        self.socket.close()
+
+
+def _console_key() -> str | None:
+    """Read one Windows console key without echo; ignore extended key codes."""
+    # A blocking getwch() does not yield to Python's SIGINT handler. Poll first
+    # so Ctrl-C can exit even when no subsequent key is pressed.
+    while not _CONSOLE_INPUT.kbhit():
+        time.sleep(0.01)
+    key = _CONSOLE_INPUT.getwch()
+    if key in ("\x00", "\xe0"):
+        _CONSOLE_INPUT.getwch()
+        return None
+    if key == "\x03":
+        raise KeyboardInterrupt
+    return key
+
+
+@contextmanager
+def _standalone_terminal(drop_file: str | None):
+    """Own terminal input only for an interactive launch without a BBS host."""
+    global _CONSOLE_INPUT, _TERMINAL_FD
+    if drop_file is not None or os.environ.get("NETBBS_DOOR_INFO") or not sys.stdin.isatty():
+        yield
+        return
+    if os.name == "nt":
+        import msvcrt
+
+        previous = _CONSOLE_INPUT
+        _CONSOLE_INPUT = msvcrt
+        try:
+            yield
+        finally:
+            _CONSOLE_INPUT = previous
+    else:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        previous = termios.tcgetattr(fd)
+        previous_fd = _TERMINAL_FD
+        try:
+            tty.setcbreak(fd)
+            _TERMINAL_FD = fd
+            yield
+        finally:
+            _TERMINAL_FD = previous_fd
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+
+
 def read_key() -> str:
     """One raw byte -- see this module's own docstring for why that's
     all a door gets. A caller disconnecting mid-question doesn't reach
@@ -312,7 +618,34 @@ def read_key() -> str:
     anyway for the rarer case of stdin closing gracefully first."""
     if _PUSHBACK:
         return _PUSHBACK.pop(0)
-    data = sys.stdin.buffer.read(1)
+    if _CONSOLE_INPUT is not None:
+        while True:
+            key = _console_key()
+            if key is not None:
+                return key
+    if _SOCKET_TRANSPORT is not None:
+        while True:
+            data = _SOCKET_TRANSPORT(None)
+            if data is not None:
+                break
+        if not data:
+            raise _CarrierLost("socket closed")
+    elif _TERMINAL_FD is not None:
+        # Use unbuffered reads so select also sees bytes following an Escape.
+        data = os.read(_TERMINAL_FD, 1)
+        if data == b"\x1b":
+            # Cursor/function keys are CSI or SS3 sequences. Consume the whole
+            # key so their A-D suffix cannot accidentally answer a question.
+            if select.select([_TERMINAL_FD], [], [], 0.05)[0]:
+                prefix = os.read(_TERMINAL_FD, 1)
+                if prefix in (b"[", b"O"):
+                    while select.select([_TERMINAL_FD], [], [], 0.05)[0]:
+                        tail = os.read(_TERMINAL_FD, 1)
+                        if not tail or b"@" <= tail <= b"~":
+                            break
+            return "\x1b"
+    else:
+        data = sys.stdin.buffer.read(1)
     if not data:
         raise EOFError("stdin closed")
     return data.decode("ascii", errors="replace")
@@ -702,10 +1035,44 @@ class _KeyPoll:
         return True
 
 
-def _open_key_poll() -> _KeyPoll | None:
+class _SocketPoll(_KeyPoll):
+    """Use the same splash key handling, after removing telnet control traffic."""
+
+    def __init__(self, transport: _SocketTransport):
+        self.transport = transport
+        self.use_select = False
+
+    def _read_now(self, size: int) -> bytes | None:
+        return self.transport(0)
+
+
+class _ConsolePoll:
+    """Windows console input bypasses the CRT's line buffering and echo."""
+
+    def waiting(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while not _CONSOLE_INPUT.kbhit():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+        return True
+
+    def take(self, timeout: float) -> bool:
+        if not self.waiting(timeout):
+            return False
+        _console_key()  # Consume the whole key, including an extended key's tail.
+        return True
+
+
+def _open_key_poll() -> _KeyPoll | _ConsolePoll | None:
     """A poll of the caller's stdin, or `None` when there is no live stream to
     poll -- a test harness's stand-in stdin, a closed one -- in which case the
     splash is skipped entirely: an effect nobody can skip is only a delay."""
+    if _SOCKET_TRANSPORT is not None:
+        return _SocketPoll(_SOCKET_TRANSPORT)
+    if _CONSOLE_INPUT is not None:
+        return _ConsolePoll()
     try:
         fd = sys.stdin.fileno()
     except (AttributeError, OSError, ValueError):
@@ -718,7 +1085,7 @@ def _open_key_poll() -> _KeyPoll | None:
     try:
         os.set_blocking(fd, False)
         os.set_blocking(fd, True)
-    except (OSError, ValueError):
+    except (AttributeError, OSError, ValueError):
         return None
     return _KeyPoll(fd, use_select=False)
 
@@ -874,7 +1241,7 @@ class _Splash:
         self.right = usable if usable % 2 else usable - 1
         self.bottom = height
         self.canvas = _Canvas(usable, height)
-        self.node = _splash_plain(info.get("node_name", "NetBBS")) or "NetBBS"
+        self.node = _splash_plain(info.get("node_name", "Local")) or "Local"
         self.handle = _splash_plain(info.get("handle", "Guest")) or "Guest"
         self.cells: dict[tuple[int, int], tuple[str, str]] = {}
         self.letters: list[list[tuple[int, int, str, str]]] = []
@@ -893,7 +1260,11 @@ class _Splash:
     def style(self, fg, bg=None, *, bold: bool = False) -> str:
         """One escape that resets and sets everything a cell needs."""
         params = ["0"] + (["1"] if bold else [])
-        if self.p._truecolor:
+        if self.p._basic:
+            params.append(self.p._ansi16(fg[0]))
+            if bg is not None:
+                params.append(self.p._ansi16(bg[0], background=True))
+        elif self.p._truecolor:
             params.append("38;2;{};{};{}".format(*fg[0]))
             if bg is not None:
                 params.append("48;2;{};{};{}".format(*bg[0]))
@@ -1269,7 +1640,8 @@ def splash_switched_off() -> bool:
     return os.environ.get("DOOR_SPLASH", "").strip().lower() in ("0", "off", "no", "false")
 
 
-def play_splash(p: Palette, info: dict, width: int, height: int, poll: _KeyPoll | None = None) -> bool:
+def play_splash(p: Palette, info: dict, width: int, height: int,
+                poll: _KeyPoll | _ConsolePoll | None = None) -> bool:
     """Show the splash. Returns True if it ran (to the end or until a key),
     False if it was not shown: no live input to skip it with, typing-ahead
     already waiting, or a terminal too small for it."""
@@ -1317,12 +1689,12 @@ def draw_title(p: Palette, info: dict, width: int = 78) -> None:
     out_line(_center_line(f"{p.border}{BOLD}║{RESET}", t2, f"{p.border}{BOLD}║{RESET}", w))
     out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
     out_line()
-    b1 = f"{p.dark_border}⟦{RESET} {p.muted}NODE:{RESET} {p.accent}{BOLD}{info.get('node_name', 'NetBBS')}{RESET} {p.dark_border}⟧{RESET}"
+    b1 = f"{p.dark_border}⟦{RESET} {p.muted}NODE:{RESET} {p.accent}{BOLD}{info.get('node_name', 'Local')}{RESET} {p.dark_border}⟧{RESET}"
     b2 = f"{p.dark_border}⟦{RESET} {p.muted}CALLER:{RESET} {p.gold}{BOLD}{info.get('handle', 'Guest')}{RESET} {p.dark_border}⟧{RESET}"
     b3 = f"{p.dark_border}⟦{RESET} {p.muted}ROUND:{RESET} {p.accent}{BOLD}YOU CHOOSE{RESET} {p.dark_border}⟧{RESET}"
     out_line(f"  {b1}   {b2}   {b3}")
     out_line()
-    out_line(f"{p.muted}Welcome, {RESET}{p.accent}{BOLD}{info.get('handle', 'Guest')}{RESET}{p.muted}, to {info.get('node_name', 'NetBBS')}'s trivia challenge.{RESET}")
+    out_line(f"{p.muted}Welcome, {RESET}{p.accent}{BOLD}{info.get('handle', 'Guest')}{RESET}{p.muted}, to {info.get('node_name', 'Local')}'s trivia challenge.{RESET}")
     out_line(f"{p.dark_border}╭{'─' * (w - 2)}╮{RESET}")
     how = (f"  {p.gold}{BOLD}HOW TO PLAY:{RESET} {p.white}Press {p.gold}{BOLD}A{RESET}{p.white}/"
            f"{p.gold}{BOLD}B{RESET}{p.white}/{p.gold}{BOLD}C{RESET}{p.white}/{p.gold}{BOLD}D{RESET}"
@@ -1534,19 +1906,48 @@ def draw_final_score(p: Palette, score: int, total: int, info: dict | None = Non
     out_line(_box_line(f"{p.border}{BOLD}║{RESET}", "", f"{p.border}{BOLD}║{RESET}", w))
     out_line(f"{p.border}{BOLD}╠{'─' * (w - 2)}╣{RESET}")
 
-    caller_str = f"  {p.muted}Player: {p.accent}{info.get('handle', 'Guest')}{p.muted}  •  Node: {p.accent}{info.get('node_name', 'NetBBS')}{p.muted}  •  Format: {p.accent}{total}-Question Round{RESET}"
+    caller_str = f"  {p.muted}Player: {p.accent}{info.get('handle', 'Guest')}{p.muted}  •  Node: {p.accent}{info.get('node_name', 'Local')}{p.muted}  •  Format: {p.accent}{total}-Question Round{RESET}"
     out_line(_box_line(f"{p.border}{BOLD}║{RESET}", caller_str, f"{p.border}{BOLD}║{RESET}", w))
     out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
     out_line()
     out_line(f"{p.muted}Thanks for playing. Press any key to leave...{RESET}")
 
 
-def main() -> int:
-    global _OUTPUT_WIDTH
+def main(drop_file: str | None = None, *, encoding: str = "auto") -> int:
+    global _OUTPUT_ENCODING, _SOCKET_TRANSPORT
 
-    sys.stdout.reconfigure(encoding="utf-8")
-    info = _load_door_info()
-    palette = Palette(truecolor=info.get("color_depth") == "truecolor")
+    _OUTPUT_ENCODING = encoding
+    if encoding == "auto":
+        _OUTPUT_ENCODING = "cp437" if drop_file is not None else "utf-8"
+    if os.environ.get("NETBBS_DOOR_INFO"):
+        _OUTPUT_ENCODING = "utf-8"
+    info = _load_door_info(drop_file)
+    if not os.environ.get("NETBBS_DOOR_INFO") and info.get("comm_type") == 2:
+        try:
+            _SOCKET_TRANSPORT = _SocketTransport(info["comm_handle"])
+        except OSError:
+            print("Retro Trivia: cannot open inherited DOOR32 socket.", file=sys.stderr)
+            return 1
+    else:
+        sys.stdout.reconfigure(encoding=_OUTPUT_ENCODING, errors="strict")
+    try:
+        with _standalone_terminal(drop_file):
+            return _play_round(info)
+    except _CarrierLost:
+        return 0
+    except KeyboardInterrupt:
+        out_line()
+        return 130
+    finally:
+        if _SOCKET_TRANSPORT is not None:
+            _SOCKET_TRANSPORT.close()
+            _SOCKET_TRANSPORT = None
+
+
+def _play_round(info: dict) -> int:
+    global _OUTPUT_WIDTH
+    palette = Palette(truecolor=info.get("color_depth") == "truecolor",
+                      basic=info.get("color_depth") == "16")
 
     try:
         _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
@@ -1603,4 +2004,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description="Retro Trivia BBS door (stdio or DOOR32 socket)")
+    parser.add_argument("drop_file", nargs="?", help="DOOR32.SYS or DOOR.SYS path")
+    parser.add_argument("--encoding", choices=("auto", "utf-8", "cp437"), default="auto",
+                        help="output encoding (auto: CP437 with a drop file, UTF-8 otherwise; NetBBS always UTF-8)")
+    args = parser.parse_args()
+    sys.exit(main(args.drop_file, encoding=args.encoding))

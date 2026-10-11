@@ -6605,8 +6605,9 @@ and never edits it, so those notes constrain upstream changes only. The host
 boundary stays here:
 - `tests/vendored_voidrunner.py` loads the shipped file by path for NetBBS's
   host-contract tests: resize, runtime, guest calls, save location and backup.
-- `tests/test_voidrunner_vendored.py` refuses a copy that differs from
-  `VENDORED.json` and pins the three names `netbbs.backup` imports from the door.
+- `tests/test_vendored_doors.py` refuses a copy of any vendored door that differs
+  from `VENDORED.json` and pins the three names `netbbs.backup` imports from
+  Voidrunner.
 - The backup half of the pilot/maintenance gate needs a real second process
   holding the lease. `live_voidrunner` in that helper holds one.
 
@@ -7909,21 +7910,10 @@ the mechanism behind it is removed, including the ones about durability and
 ordering, which pass trivially against an implementation that never keeps the
 promise at all.
 
-Retro Trivia wraps a row twice, at two different layers, and only the outer one
-is a safety net. `_box_line` pads a short row and returns a long one unchanged,
-so it alone would push a border off the screen; `out_line` then passes every row
-through `_wrap_output`, which recognises a `|...|` row and re-wraps its content
-inside the borders. Nothing overflows as a result, but the fallback wrap knows
-nothing about the row it is splitting: a continuation starts hard against the
-left border rather than under the text it continues, and a header built as one
-string splits its own box border across two rows. A screen therefore has to size
-its own rows to be legible, not merely to fit -- wrapped with a hanging indent
-for text a caller reads (a truncated trivia answer can make a question
-unanswerable), and shortened for decoration such as a progress meter or a
-prompt. A prompt needs `_dlen(prompt) < width`, not `<=`: one that exactly fills
-the row leaves the cursor nowhere to sit but the next line. The door draws at
-`min(78, terminal_width)`, so the 40-column floor and the 78-column cap are live
-paths for the same string.
+Retro Trivia's implementation notes, such as how it wraps a boxed row twice,
+moved with the game to Thiesi/RetroTrivia's `docs/engineering-notes.md` (issue
+#1226). NetBBS ships the door vendored, imports nothing from it, and keeps only
+the tests of how it launches and sizes the door.
 
 Voidrunner's `style_body_line` returns a row that already carries SGR untouched:
 a component's decision beats a pattern's guess. So a row needing one token

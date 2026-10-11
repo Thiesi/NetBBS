@@ -102,10 +102,11 @@ The standing principle is:
 - **Review door presentation by looking at it.** A change to a bundled door's
   screens comes with pictures attached to the PR. Tests can only assert that a
   screen fits its terminal; they cannot fail because it is ugly, and both games
-  lost their visual design to slices that all passed. Voidrunner is vendored
-  from Thiesi/Voidrunner (issue #1216): change its screens there, reviewed with
-  that repository's gallery, and never edit `src/netbbs/doors/bundled/
-  voidrunner.py` here -- bump it with `scripts/vendor_voidrunner.py <tag>`.
+  lost their visual design to slices that all passed. Voidrunner and Retro
+  Trivia are vendored from Thiesi/Voidrunner and Thiesi/RetroTrivia (issues
+  #1216, #1226): change their screens there, reviewed with that repository's
+  gallery, and never edit `src/netbbs/doors/bundled/voidrunner.py` or
+  `retro_trivia.py` here -- bump them with `scripts/vendor_door.py <door> <tag>`.
   `scripts/door_gallery.py <door>` renders every screen of War Dialer, and of
   the vendored Voidrunner for website captures and bump checks, at every
   supported size and preset; it works from a cached career, so a door that keeps no state
