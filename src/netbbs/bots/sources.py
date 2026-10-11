@@ -18,7 +18,7 @@ def _public(db, resource):
 
 
 def validate_sources(db, board_names, area_names, destination_name, allowed, approved, *, announce_posts, announce_files):
-    if len(board_names) + len(area_names) > 32:
+    if len(set(board_names)) + len(set(area_names)) > 32:
         raise BotError("Allow at most 32 board and file sources per bot.")
     try:
         boards = [_public(db, get_board_by_name(db, n)) for n in sorted(set(board_names))]
