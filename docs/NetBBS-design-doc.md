@@ -16390,7 +16390,7 @@ and off by default.**
 
 The issue asked what it takes to run Voidrunner as a door under other BBS
 packages, such as Synchronet, Mystic and ENiGMA½. The maintainer decided on
-2026-10-11. Implementation is tracked in Thiesi/voidrunner#1–#6 and #1216.
+2026-10-11. Implementation is tracked in Thiesi/Voidrunner#1–#6 and #1216.
 
 **Starting point.** The door is already one stdlib-only Python file that
 imports nothing from `netbbs` and runs standalone. It manages its own
@@ -16407,7 +16407,7 @@ a socket, the door does the telnet duties itself: it filters IAC sequences,
 escapes 0xFF in its output, and treats CR NUL as Enter.
 
 **Decision 2 — its own repository.** Voidrunner moves to
-Thiesi/voidrunner, with its history and tests. Its game design text in this
+Thiesi/Voidrunner, with its history and tests. Its game design text in this
 document (the Phase 7 Voidrunner paragraphs and the presentation contract)
 moves with it. This document keeps only how NetBBS hosts the door.
 
