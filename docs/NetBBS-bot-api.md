@@ -88,7 +88,7 @@ Granting channel reading warns the SysOp that the program receives other
 callers' conversation. The heading and `/who` disclose each reader; changes
 also notify callers already in the channel. Disclosure describes the enabled
 grant even while a local process is restarting. Receiving mutes or bot-hiding
-policy do not hide a remote reader's disclosure: they cannot revoke access
+policy or a bot's user-level trust block do not hide a remote reader's disclosure: they cannot revoke access
 at its host.
 
 ## Actions and results

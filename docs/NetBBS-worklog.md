@@ -6527,7 +6527,9 @@ that also carries signed catch-up, bot output and notices. Observations carry
 no request token; only addressed dispatch may create one. Reader disclosure is
 about the source grant, not output visibility: a receiving mute cannot stop a
 remote program reading at its own node. Keep its disclosure visible even when
-its output is hidden. Reader rosters use their own optional capability because
+its output is hidden, including a user-level trust block on its label. The
+transport and relayed node identities still need admission before retention.
+Reader rosters use their own optional capability because
 older bot-capable peers reject unknown frame types. Presence snapshots are
 roster reconstruction, not new joins to greet.
 

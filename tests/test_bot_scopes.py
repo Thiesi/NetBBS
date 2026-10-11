@@ -147,6 +147,16 @@ def test_real_link_observation_disclosure_and_receiving_mutes_do_not_hide_reader
             set_channel_bot_policy(caller.db, cc, "none", changed_by=caller.sysop)
             assert caller.bots.visible_roster(caller.db, cc) == []
             assert "Observer.bot@" in str(chat_flow._bot_readers(caller.db, caller.hub, cc))
+            from netbbs.link.trust import TrustSubject, TrustDimension, TrustState, register_subject, set_trust_override
+            subject = TrustSubject.user(host.identity.fingerprint, "Observer.bot")
+            register_subject(caller.db, subject, first_accepted_at=utc_now_iso(), now_iso=utc_now_iso())
+            set_trust_override(caller.db, subject, TrustDimension.IDENTITY_INTEGRITY, TrustState.BLOCKED,
+                               reason="Hide this bot's output", now_iso=utc_now_iso())
+            assert caller.bots.visible_roster(caller.db, cc, readers=True) == [("Observer.bot", host.identity.fingerprint)]
+            # Fresh advertisements must retain the disclosure too.
+            await caller.bots.on_disconnect(caller.registry.get(host.identity.fingerprint))
+            await session.send(build_subscribe_frame(cc.channel_id))
+            await eventually(lambda: caller.bots.visible_roster(caller.db, cc, readers=True))
             frame = build_channel_message_frame(cc.channel_id, "alice", "alice", "live text", utc_now_iso())
             await session.send(frame)
             await session.send(frame)  # normal live dedup applies before observation

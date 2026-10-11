@@ -30,6 +30,15 @@ MAX_REQUESTS = 256
 MAX_REMOTE_ROSTERS = 512
 
 
+def _roster_author_allowed(db, author, label, source, *, readers):
+    if readers:
+        # A bot's user-level output filter cannot revoke its node's reading
+        # access. The transport source is already authorized; relayed node
+        # identities still need admission before they consume roster space.
+        return author == source or decide_node_action(db, author, LinkPolicyAction.EVENTS).allowed
+    return _live_author_allowed(db, author, label, relayed=author != source)
+
+
 class BotLink:
     def __init__(self, runtime, node, bridge, direct, registry):
         self.runtime, self.node, self.bridge = runtime, node, bridge
@@ -310,7 +319,8 @@ class BotLink:
             # As with live channel lines, reject fabricated/blocked authors
             # before they consume retained state or are relayed onward.
             labels = [label for label in dict.fromkeys(p["labels"])
-                      if _live_author_allowed(db, author, label, relayed=author != session.remote_fingerprint)]
+                      if _roster_author_allowed(db, author, label, session.remote_fingerprint,
+                                                readers=frame.type == "bot_readers")]
             return channel, origin, labels
 
         channel, origin, labels = await self.lane.run(authorize)
@@ -356,6 +366,6 @@ class BotLink:
                 continue
             for label in labels:
                 if ((readers or remote_bot_visible(db, channel, label, author)) and
-                        _live_author_allowed(db, author, label, relayed=author != source.remote_fingerprint)):
+                        _roster_author_allowed(db, author, label, source.remote_fingerprint, readers=readers)):
                     result.append((label, author))
         return result
