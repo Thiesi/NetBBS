@@ -1212,6 +1212,8 @@ async def run(
                     link_realtime_relay_client.owns_frame, link_realtime_relay_client.handle_frame
                 )
                 link_realtime_bridge.register_frame_handler(link_direct_chat.owns_frame, link_direct_chat.handle_frame)
+                from netbbs.bots.link import BotLink
+                BotLink(bot_runtime, link_node, link_realtime_bridge, link_direct_chat, link_realtime_registry)
 
         # Issue #624: the SysOp console's live rotation. Built here, after
         # everything that holds a key exists; the listener is looked up

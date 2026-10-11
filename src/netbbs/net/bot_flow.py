@@ -6,6 +6,7 @@ from netbbs.bots.registry import (
     BotError, TEMPERAMENTS, get_bot, list_bots, require_sysop, runtime_status, save_bot, stop_bots,
 )
 from netbbs.net.picker import pick_item
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.resource_editor import (
     FieldSpec, bool_field, bool_step, choice_field, choice_step, edit_resource_draft, text_field,
 )
@@ -50,7 +51,7 @@ async def bot_menu(session, lane, actor):
             refresh=refresh, on_create=create, live_keys={"x": stop_all}, item_keys={"k": stop_one},
             live_nav=(MenuEntry(label=menu_key("K", "ill selected"), brief="Stop this bot persistently"),
                       MenuEntry(label=menu_key("X", " Stop all"), brief="Stop every bot persistently")),
-            masthead="Bots read addressed messages only. Local channels only. Changes apply within a second.",
+            masthead="Bots read addressed messages only. Linked channels require explicit approval. Changes apply within a second.",
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             collapsed=chrome.collapsed, header_color=chrome.header_color,
         )
@@ -68,6 +69,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         "name": bot.name if bot else "Baud", "enabled": bot.enabled if bot else False,
         "channels": ", ".join(bot.channels) if bot else "",
         "defaults": ", ".join(bot.defaults) if bot else "",
+        "linked": ", ".join(bot.linked_channels) if bot else "",
         "command": json.dumps(bot.command) if bot else "[]",
         "temperament": bot.temperament if bot else "friendly", "rate": bot.lines_per_hour if bot else 60,
     }
@@ -79,11 +81,20 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
             raise BotError('Command must be a JSON argument array, for example ["/usr/local/bin/mybot"].') from exc
         if not isinstance(command, list):
             raise BotError("Command must be a JSON array; [] selects bundled Baud.")
+        linked = [n.strip().lstrip("#") for n in values["linked"].split(",") if n.strip()]
+        added = set(linked) - set(bot.linked_channels if bot else ())
+        if added and not await prompt_yes_no(
+            session, "Allow this bot to participate across Link in " +
+            ", ".join("#" + sanitize_text(n) for n in sorted(added)) +
+            "? Its replies and reminders will be visible on other nodes.", default=False,
+        ):
+            raise BotError("Linked approval was not granted. Your draft has been kept.")
         return await lane.run(
             save_bot, actor=actor, bot_id=bot.id if bot else None, name=values["name"],
             enabled=values["enabled"], command=command, temperament=values["temperament"],
             channels=[n.strip() for n in values["channels"].split(",") if n.strip()],
             defaults=[n.strip() for n in values["defaults"].split(",") if n.strip()], lines_per_hour=values["rate"],
+            linked_channels=linked,
         )
 
     def text_spec(key, label, help):
@@ -93,7 +104,8 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         text_spec("name", "Name", "A 1-24 character name; .bot is added automatically."),
         FieldSpec("enabled", "Enabled", lambda d: "on" if d["enabled"] else "off", bool_field("enabled"),
                   step=bool_step("enabled"), help="Starts after Save. Kill selected or Stop all stops it without deleting state."),
-        text_spec("channels", "Allowed channels", "Comma-separated local channel names. This grants addressed messages and replies there."),
+        text_spec("channels", "Allowed channels", "Comma-separated channel names. This grants addressed messages and replies there."),
+        text_spec("linked", "Linked approvals", "A subset of allowed channels. Explicit approval to publish across Link; confirmed on Save. MRC is never allowed."),
         text_spec("defaults", "Default in channels", "A subset of allowed channels. !help and other !commands go only to the default bot."),
         FieldSpec("temperament", "Temperament", lambda d: d["temperament"], choice_field("temperament", list(TEMPERAMENTS)),
                   step=choice_step("temperament", list(TEMPERAMENTS))),

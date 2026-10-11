@@ -7,6 +7,7 @@ controls local presentation; it never rewrites or deletes signed Link events.
 from __future__ import annotations
 
 import json
+import datetime as dt
 from typing import TYPE_CHECKING, Literal
 
 from netbbs.auth.users import BOT_LABEL_SUFFIX, AuthError, User, get_user_by_username
@@ -82,7 +83,53 @@ def bot_origin_allowed(db: Database, channel: Channel, origin: BotOrigin | None)
 
 
 def bot_message_visible(db: Database, channel: Channel, message: ChannelMessage) -> bool:
-    return bot_origin_allowed(db, channel, bot_origin(db, message))
+    origin = bot_origin(db, message)
+    if not bot_origin_allowed(db, channel, origin):
+        return False
+    if origin != "remote":
+        return True
+    label, fingerprint = message.author_label.partition("@")[0], message.author_fingerprint
+    if message.link_content_id and not message.link_event_json:
+        row = db.connection.execute("SELECT envelope_json FROM link_events WHERE content_id=?",
+                                    (message.link_content_id,)).fetchone()
+        if row:
+            try:
+                author = json.loads(row[0])["envelope"]["payload"]["author"]
+                label, fingerprint = author["local_user_id"], author["home_node_fingerprint"]
+            except (KeyError, TypeError, ValueError):
+                pass
+    return remote_bot_visible(db, channel, label, fingerprint)
+
+
+def remote_bot_visible(db: Database, channel: Channel, label: str, fingerprint: str) -> bool:
+    if not bot_origin_allowed(db, channel, "remote"):
+        return False
+    row = db.connection.execute(
+        "SELECT muted_until FROM remote_bot_mutes WHERE channel_id=? AND node_fingerprint=? AND label=?",
+        (channel.id, fingerprint, label),
+    ).fetchone()
+    return row is None or (row[0] != "forever" and dt.datetime.fromisoformat(row[0]) <= dt.datetime.now(dt.timezone.utc))
+
+
+def mute_remote_bot(db: Database, channel: Channel, label: str, fingerprint: str, *, actor: User,
+                    mute: bool, duration: dt.timedelta | None = None) -> None:
+    if not has_permission(db, actor, object_type="channel", object_id=channel.id,
+                          permission=ChannelPermission.MODERATE):
+        raise BotPolicyError("You do not have moderation permission on this channel.")
+    with db.connection:
+        db.connection.execute("DELETE FROM remote_bot_mutes WHERE muted_until != 'forever' AND muted_until <= ?",
+                              (dt.datetime.now(dt.timezone.utc).isoformat(),))
+        if mute:
+            until = (dt.datetime.now(dt.timezone.utc) + duration).isoformat() if duration else "forever"
+            db.connection.execute(
+                "INSERT INTO remote_bot_mutes VALUES (?, ?, ?, ?) ON CONFLICT(channel_id, node_fingerprint, label) "
+                "DO UPDATE SET muted_until=excluded.muted_until", (channel.id, fingerprint, label, until),
+            )
+        else:
+            db.connection.execute("DELETE FROM remote_bot_mutes WHERE channel_id=? AND node_fingerprint=? AND label=?",
+                                  (channel.id, fingerprint, label))
+        record_action(db, actor=actor, action="bot_mute" if mute else "bot_unmute", object_type="channel",
+                      object_id=channel.id, detail=f"{label}@{fingerprint}: local receiving policy")
 
 
 def set_channel_bot_policy(db: Database, channel: Channel, policy: str, *, changed_by: User) -> None:

@@ -32,6 +32,7 @@ class BotRuntime:
         self.poll_seconds, self.restart_seconds = poll_seconds, restart_seconds
         self.workers: dict[int, _Worker] = {}
         self.task: asyncio.Task | None = None
+        self.link = None
 
     @property
     def running_ids(self) -> frozenset[int]:
@@ -41,6 +42,8 @@ class BotRuntime:
         if self.task is None:
             self.hub.bot_runtime = self
             self.task = asyncio.create_task(self._run(), name="bot-manager")
+            if self.link is not None:
+                self.link.start()
 
     async def _run(self) -> None:
         try:
@@ -68,6 +71,8 @@ class BotRuntime:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
+        if self.link is not None:
+            await self.link.close()
         if self.hub.bot_runtime is self:
             self.hub.bot_runtime = None
 
@@ -84,19 +89,22 @@ class BotRuntime:
             if selected is None:
                 return None
             bot, text = selected
-            await self.lane.run(allowed_channel, bot.id, channel.name, check_rate=True)
-            worker = self.workers.get(bot.id)
-            if worker is None or not worker.ready:
-                raise BotError(f"{bot.label} is not ready. The SysOp can check its status in Chat bots.")
-            if len(worker.pending) >= MAX_PENDING or worker.events.full():
-                raise BotError(f"{bot.label} is busy; try again shortly.")
-            request = uuid.uuid4().hex
-            worker.pending[request] = (channel.name, participant_id, time.monotonic() + REQUEST_SECONDS)
-            worker.events.put_nowait({"type": "message", "request": request, "channel": channel.name,
-                                     "caller": {"id": user.id, "name": user.username}, "text": text})
+            await self.enqueue(bot, channel, {"id": user.id, "name": user.username}, text, participant_id)
         except BotError as exc:
             return str(exc)
         return None
+
+    async def enqueue(self, bot, channel, caller, text, participant_id=None, *, completed=None):
+        await self.lane.run(allowed_channel, bot.id, channel.name, check_rate=True)
+        worker = self.workers.get(bot.id)
+        if worker is None or not worker.ready:
+            raise BotError(f"{bot.label} is not ready. The SysOp can check its status in Chat bots.")
+        if len(worker.pending) >= MAX_PENDING or worker.events.full():
+            raise BotError(f"{bot.label} is busy; try again shortly.")
+        request = uuid.uuid4().hex
+        worker.pending[request] = (channel.name, participant_id, time.monotonic() + REQUEST_SECONDS, completed)
+        worker.events.put_nowait({"type": "message", "request": request, "channel": channel.name,
+                                 "caller": caller, "text": text})
 
 
 class _Worker:
@@ -112,11 +120,14 @@ class _Worker:
     async def status(self, state: str, error: str = "") -> None:
         await self.owner.lane.run(set_runtime_status, self.bot.id, state, error)
 
-    async def notify(self, request: str, text: str) -> None:
+    async def notify(self, request: str, text: str, message=None) -> None:
         target = self.pending.pop(request, None)
         if target:
-            await self.owner.hub.send_to(target[0], target[1],
-                                         f"{self.bot.label}: {sanitize_text(text)}")
+            if target[3] is not None:
+                await target[3](text, message)
+            elif text:
+                await self.owner.hub.send_to(target[0], target[1],
+                                             f"{self.bot.label}: {sanitize_text(text)}")
 
     async def run(self) -> None:
         delay = self.owner.restart_seconds
@@ -263,7 +274,7 @@ class _Worker:
     async def _ticks(self) -> None:
         while True:
             await asyncio.sleep(1)
-            for request, (_, _, deadline) in list(self.pending.items()):
+            for request, (_, _, deadline, _) in list(self.pending.items()):
                 if time.monotonic() >= deadline:
                     await self.notify(request, "The bot did not reply within 60 seconds.")
             if not self.events.full():
@@ -314,8 +325,12 @@ class _Worker:
             channel_name = value.get("channel")
             if not isinstance(channel_name, str):
                 raise BotError("Say needs an allowed channel name.")
-        channel, message = await lane.run(publish, self.bot.id, channel_name, body)
+        link = self.owner.link
+        channel, message = await lane.run(publish, self.bot.id, channel_name, body,
+                                          node_identity=link.node.identity if link else None)
         await self.owner.hub.broadcast(channel.name, message)
+        if link is not None:
+            await link.bridge.broadcast_local_message_live(channel, message)
         if action == "reply":
-            self.pending.pop(request, None)
+            await self.notify(request, "", message)
         return {"message_id": message.id}

@@ -6492,8 +6492,19 @@ transaction and survive restarts. The supervising task adopts a child even
 when cancelled during spawn, then terminates/reaps it. State API writes are
 atomic per instance, under the original name even after a rename. Reminder
 delivery followed by state removal is intentionally at-least-once across a
-crash. Automatic bot-state backup/restore and Linked execution are not yet
-implemented; the local runtime refuses Linked/MRC destinations.
+crash. Automatic bot-state backup/restore is not yet implemented. MRC
+destinations remain refused; Linked destinations require a separate persisted
+approval. Bot requests use their own optional live frames, never parsing
+received channel messages. Keep node-qualified resolution at the caller's
+input boundary; executing shorthand at every receiving node would multiply
+replies. Remote reminder owners use a fingerprint/username string while
+existing local owners keep integer account ids. Bot subscriptions hold the
+same local-interest registry as human views: stopping a bot must not
+unsubscribe a channel another caller still watches. Presence is channel-only
+and disconnected sources are discarded. A direct public reply to the request's
+home covers an unavailable channel origin; normal live dedup hides the relayed
+copy. Verify these behaviors with real multi-node Noise sessions and a real
+bot subprocess, alongside signed-message materialization.
 
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.

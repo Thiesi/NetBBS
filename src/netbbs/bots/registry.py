@@ -39,6 +39,7 @@ class Bot:
     lines_per_hour: int
     channels: tuple[str, ...]
     defaults: tuple[str, ...]
+    linked_channels: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
@@ -55,12 +56,13 @@ def list_bots(db: Database) -> list[Bot]:
     result = []
     for row in db.connection.execute("SELECT * FROM chat_bots ORDER BY name COLLATE NOCASE"):
         grants = db.connection.execute(
-            "SELECT c.name, bc.is_default FROM bot_channels bc JOIN channels c ON c.id = bc.channel_id "
+            "SELECT c.name, bc.is_default, bc.linked_approved FROM bot_channels bc JOIN channels c ON c.id = bc.channel_id "
             "WHERE bc.bot_id = ? ORDER BY c.name", (row["id"],),
         ).fetchall()
         result.append(Bot(row["id"], row["name"], row["storage_name"], bool(row["enabled"]),
                           tuple(json.loads(row["command_json"])), row["temperament"], row["lines_per_hour"],
-                          tuple(g["name"] for g in grants), tuple(g["name"] for g in grants if g["is_default"])))
+                          tuple(g["name"] for g in grants), tuple(g["name"] for g in grants if g["is_default"]),
+                          tuple(g["name"] for g in grants if g["linked_approved"])))
     return result
 
 
@@ -77,7 +79,7 @@ def bot_for_label(db: Database, label: str) -> Bot | None:
     return next((b for b in list_bots(db) if b.label.casefold() == label.casefold()), None)
 
 
-def local_channel(db: Database, name: str) -> Channel:
+def local_channel(db: Database, name: str, *, allow_linked: bool = False) -> Channel:
     try:
         channel = get_channel(db, name.lstrip("#"))
     except ChannelError as exc:
@@ -85,8 +87,8 @@ def local_channel(db: Database, name: str) -> Channel:
     row = db.connection.execute("SELECT * FROM channels WHERE id = ?", (channel.id,)).fetchone()
     if row["mrc_room"]:
         raise BotError("Bots cannot use MRC channels, including paused bridges.")
-    if is_channel_linked(db, channel):
-        raise BotError("This runtime slice supports local channels only; Linked bot routing comes next.")
+    if is_channel_linked(db, channel) and not allow_linked:
+        raise BotError("Linked bot participation needs explicit SysOp approval for this channel.")
     if channel.hidden:
         raise BotError("Unhide the channel before allowing a bot there.")
     return channel
@@ -94,7 +96,7 @@ def local_channel(db: Database, name: str) -> Channel:
 
 def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defaults: list[str],
              enabled: bool = False, command: list[str] | None = None, temperament: str = "friendly",
-             lines_per_hour: int = 60, bot_id: int | None = None) -> Bot:
+             lines_per_hour: int = 60, bot_id: int | None = None, linked_channels: list[str] | None = None) -> Bot:
     require_sysop(db, actor)
     name = name.strip()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}", name):
@@ -109,8 +111,13 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
     if (not isinstance(command, list) or len(command) > 32 or
             any(not isinstance(s, str) or not s or len(s) > 2048 or "\x00" in s for s in command)):
         raise BotError("Command must be a JSON array of up to 32 nonempty arguments, or [] for Baud.")
-    allowed = sorted({local_channel(db, n).name for n in channels})
-    default_names = {local_channel(db, n).name for n in defaults}
+    approved = {local_channel(db, n, allow_linked=True).name for n in (linked_channels or [])}
+    allowed = sorted({local_channel(db, n, allow_linked=True).name for n in channels})
+    default_names = {local_channel(db, n, allow_linked=True).name for n in defaults}
+    if not approved.issubset(allowed):
+        raise BotError("Linked approvals must also be allowed channels.")
+    for channel_name in allowed:
+        local_channel(db, channel_name, allow_linked=channel_name in approved)
     if len(allowed) > MAX_CHANNELS or not default_names.issubset(allowed):
         raise BotError("Allow up to 32 channels; default channels must also be allowed.")
     if enabled and not allowed:
@@ -145,16 +152,16 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
                     if other:
                         raise BotError(f"#{channel_name} already has a default bot; clear it there first.")
                 db.connection.execute(
-                    "INSERT INTO bot_channels(bot_id, channel_id, is_default) VALUES (?, ?, ?) "
-                    "ON CONFLICT(bot_id, channel_id) DO UPDATE SET is_default=excluded.is_default",
-                    (bot_id, channel.id, int(channel_name in default_names)),
+                    "INSERT INTO bot_channels(bot_id, channel_id, is_default, linked_approved) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(bot_id, channel_id) DO UPDATE SET is_default=excluded.is_default, linked_approved=excluded.linked_approved",
+                    (bot_id, channel.id, int(channel_name in default_names), int(channel_name in approved)),
                 )
             rows = db.connection.execute("SELECT channel_id FROM bot_channels WHERE bot_id=?", (bot_id,)).fetchall()
             for row in rows:
                 if row[0] not in keep:
                     db.connection.execute("DELETE FROM bot_channels WHERE bot_id=? AND channel_id=?", (bot_id, row[0]))
             record_action(db, actor=actor, action="bot_configure", object_type="bot", object_id=bot_id,
-                          detail=f"{name}.bot enabled={enabled}; addressed channels={allowed}; defaults={sorted(default_names)}")
+                          detail=f"{name}.bot enabled={enabled}; addressed channels={allowed}; defaults={sorted(default_names)}; Linked approvals={sorted(approved)}")
     except sqlite3.IntegrityError as exc:
         raise BotError("A bot with that name or state directory already exists.") from exc
     return get_bot(db, bot_id)
@@ -192,7 +199,7 @@ def allowed_channel(db: Database, bot_id: int, name: str, *, check_rate: bool = 
     bot = get_bot(db, bot_id)
     if not bot.enabled:
         raise BotError("This bot is stopped.")
-    channel = local_channel(db, name)
+    channel = local_channel(db, name, allow_linked=name in bot.linked_channels)
     grant = db.connection.execute("SELECT muted_until FROM bot_channels WHERE bot_id=? AND channel_id=?",
                                   (bot_id, channel.id)).fetchone()
     if grant is None:
@@ -237,14 +244,14 @@ def select_request(db: Database, channel: Channel, line: str) -> tuple[Bot, str]
     if not colon or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}\.bot(?:@.+)?", target, re.IGNORECASE):
         return None
     if "@" in target:
-        raise BotError("Remote bot addressing is not available in this local runtime slice.")
+        raise BotError("Remote bot addressing needs a resolved Link node identity.")
     bot = bot_for_label(db, target)
     if bot is None:
         raise BotError("No local bot has that name. Use /names to see running bots here.")
     return bot, body.strip()
 
 
-def publish(db: Database, bot_id: int, channel_name: str, body: str):
+def publish(db: Database, bot_id: int, channel_name: str, body: str, *, node_identity=None):
     if not isinstance(body, str) or not body.strip() or len(body) > MAX_BODY:
         raise BotError("A bot line must contain 1-500 characters.")
     if any(c in body for c in "\r\n\t") or sanitize_text(body) != body:
@@ -252,6 +259,8 @@ def publish(db: Database, bot_id: int, channel_name: str, body: str):
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         bot, channel = allowed_channel(db, bot_id, channel_name, check_rate=True)
+        if is_channel_linked(db, channel) and node_identity is None:
+            raise BotError("Link is not running; this bot cannot publish in a Linked channel.")
         cutoff = utc_iso(dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1))
         db.connection.execute("DELETE FROM bot_output_history WHERE created_at <= ?", (cutoff,))
         db.connection.execute("INSERT INTO bot_output_history(bot_id, channel_id, created_at) VALUES (?, ?, ?)",
@@ -260,6 +269,9 @@ def publish(db: Database, bot_id: int, channel_name: str, body: str):
     except BaseException:
         db.connection.rollback()
         raise
+    if node_identity is not None:
+        from netbbs.link.channels import queue_channel_message_if_linked
+        queue_channel_message_if_linked(db, message, channel, node_identity=node_identity)
     return channel, message
 
 

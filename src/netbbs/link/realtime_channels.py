@@ -290,6 +290,7 @@ class LiveChannelBridge:
         self._lane = lane
         self._presence = presence
         self._registry = registry
+        self.bot_link = None
         # Issue #860: whether a peer advertises `CHANNEL_RELAY_CAPABILITY`,
         # the only peers sent a frame's optional fields. None: no peer is.
         self._peer_capable = peer_capable or (lambda fingerprint: False)
@@ -454,6 +455,8 @@ class LiveChannelBridge:
         for request_id, (_, fingerprint) in list(self._pending_scrollback_requests.items()):
             if fingerprint == session.remote_fingerprint:
                 self.finish_scrollback_request(request_id)
+        if self.bot_link is not None:
+            await self.bot_link.on_disconnect(session)
 
     async def close(self) -> None:
         if self._watchers:
@@ -509,6 +512,8 @@ class LiveChannelBridge:
             build_presence_snapshot_frame(channel_id, entries[:_MAX_PRESENCE_SNAPSHOT_ENTRIES])
         )
         await self._send_scrollback_snapshot(session, channel, request_id=frame.message_id)
+        if self.bot_link is not None:
+            await self.bot_link.on_subscribe(session, channel)
 
     async def _send_scrollback_snapshot(
         self, session: LinkRealtimeSession, channel: Channel, *, request_id: str

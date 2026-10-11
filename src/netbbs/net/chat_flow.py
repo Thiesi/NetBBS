@@ -97,6 +97,7 @@ from netbbs.auth.users import (
 from netbbs.chat.bots import (
     BOT_POLICIES, BotPolicyError, bot_label_origin, bot_origin, bot_origin_allowed,
     channel_bot_policy, set_channel_bot_policy,
+    bot_message_visible, mute_remote_bot, remote_bot_visible,
 )
 from netbbs.chat import (
     Channel,
@@ -1698,7 +1699,7 @@ def _render_channel_message(
     carry its own embedded color.
     """
     origin = bot_origin(db, message)
-    if not bot_origin_allowed(db, channel, origin):
+    if not bot_message_visible(db, channel, message):
         return ""
     link_speaker = _link_speaker(db, message)
     author_label = _message_author_label(db, channel, message, link_speaker)
@@ -2123,8 +2124,13 @@ async def _handle_bots(ctx: ChatCommandContext, args: str) -> None:
             return
     current = await ctx.lane.run(channel_bot_policy, ctx.channel)
     await ctx.session.write_line(f"Bots in #{sanitize_text(ctx.channel.name)} on this node: {BOT_POLICIES[current]}.")
+    await ctx.session.write_line(
+        "Use /names to find bots. Address Baud.bot: help locally, or Baud.bot@Node: help across Link. "
+        "!help uses only this node's default bot. Replies are public in this channel."
+    )
     if await ctx.lane.run(_requires_moderate, ctx.channel, ctx.user):
         await ctx.session.write_line("Set with /bots all, /bots local or /bots none. This does not start or authorize a bot.")
+        await ctx.session.write_line("Mute one with /mute Baud.bot or /mute Baud.bot@node-fingerprint; /unmute reverses it.")
 
 
 async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
@@ -3392,8 +3398,6 @@ async def _remote_roster_entries(ctx: ChatCommandContext) -> list[tuple[str, str
     if ctx.realtime_bridge is None:
         return []
     entries = ctx.realtime_bridge.remote_channel_presence(ctx.channel.channel_id)
-    if not entries:
-        return []
     fingerprint = ctx.realtime_bridge.remote_channel_origin_fingerprint(ctx.channel.channel_id) or ""
     snapshot = tuple(entries.items())
 
@@ -3403,11 +3407,41 @@ async def _remote_roster_entries(ctx: ChatCommandContext) -> list[tuple[str, str
             origin = bot_label_origin(db, username, remote=True)
             if not bot_origin_allowed(db, ctx.channel, origin):
                 continue
+            if origin and not remote_bot_visible(db, ctx.channel, username, fingerprint):
+                continue
             shown = f"[BOT] {sanitize_text(username)}" if origin else sanitize_text(label)
             result.append((shown, fingerprint))
+        bot_link = getattr(ctx.realtime_bridge, "bot_link", None)
+        if bot_link is not None:
+            for label, home in bot_link.visible_roster(db, ctx.channel):
+                from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
+                address = link_address_label(label, identity_for_fingerprint(db, home).label)
+                entry = (f"[BOT] {sanitize_text(address)}", home)
+                if entry not in result:
+                    result.append(entry)
         return sorted(result, key=lambda pair: pair[0].lower())
 
     return await ctx.lane.run(_visible)
+
+
+async def _address_bot(runtime, channel, user, message, participant_id, link_context):
+    """Resolve qualified bot targets only at the accepted local human send seam."""
+    import re
+    if message.kind != "message" or message.external_source or message.author_kind != "user":
+        return None
+    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_-]{0,23}\.bot)@([^:]+):\s*(.*)",
+                         message.body.strip(), re.IGNORECASE)
+    if match is None:
+        return await runtime.addressed(channel, user, message, participant_id)
+    if runtime.link is None or link_context is None:
+        return "Remote bot addressing needs a running NetBBS Link connection."
+    from netbbs.net.link_direct import resolve_node_fingerprint
+    label, node, text = match.groups()
+    fingerprint = resolve_node_fingerprint(link_context, node)
+    if isinstance(fingerprint, list):
+        return ("That node name is ambiguous; use its DNS name or fingerprint." if fingerprint else
+                "No known node matches that name.")
+    return runtime.link.request(channel, user, participant_id, fingerprint, label, text)
 
 
 def _mrc_roster_entries(ctx: ChatCommandContext) -> list[str]:
@@ -3766,6 +3800,24 @@ def _local_bot_labels(db: Database, hub: ChatHub, channel: Channel) -> list[str]
 
 
 async def _moderate_bot(ctx, name, *, mute, duration=None, reason=None) -> bool:
+    label, at, node = name.partition("@")
+    if at and label.lower().endswith(".bot"):
+        if ctx.link_context is None:
+            await ctx.session.write_line("Remote bot moderation needs Link identity information.")
+            return True
+        from netbbs.net.link_direct import resolve_node_fingerprint
+        fingerprint = resolve_node_fingerprint(ctx.link_context, node)
+        if isinstance(fingerprint, list):
+            await ctx.session.write_line("Unknown or ambiguous node; use its DNS name or fingerprint.")
+            return True
+        try:
+            await ctx.lane.run(mute_remote_bot, ctx.channel, label, fingerprint,
+                               actor=ctx.user, mute=mute, duration=duration)
+        except BotPolicyError as exc:
+            await ctx.session.write_line(sanitize_text(str(exc)))
+        else:
+            await ctx.session.write_line(f"{sanitize_text(name)} is {'muted' if mute else 'unmuted'} on this node.")
+        return True
     if not name.lower().endswith(".bot"):
         return False
     from netbbs.bots.registry import BotError, bot_for_label, mute_bot
@@ -4646,6 +4698,8 @@ def _render_chat_status_line(
     online_count = hub.participant_count(channel.name)
     away_count = sum(1 for username in roster if presence.is_away(username))
     bot_count = len(_local_bot_labels(db, hub, channel))
+    if hub.bot_runtime is not None and hub.bot_runtime.link is not None:
+        bot_count += len(hub.bot_runtime.link.visible_roster(db, channel))
 
     groups: list[_StatusGroup] = [
         [
@@ -5853,7 +5907,9 @@ async def _chat_loop(
                         await session.write_line(rendered_self)
                         await hub.broadcast(channel.name, recorded_message, exclude={participant_id})
                         if hub.bot_runtime is not None:
-                            bot_problem = await hub.bot_runtime.addressed(channel, user, recorded_message, participant_id)
+                            bot_problem = await _address_bot(
+                                hub.bot_runtime, channel, user, recorded_message, participant_id, link_context,
+                            )
                             if bot_problem:
                                 await session.write_line(sanitize_text(bot_problem))
                         # Issue #275: the MRC sibling of the live-Link push

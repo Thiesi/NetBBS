@@ -230,7 +230,8 @@ REALTIME_FRAME_TYPES = frozenset(
     {"subscribe", "unsubscribe", "presence_snapshot", "presence_delta",
      "node_presence_snapshot", "node_presence_delta",
      "channel_message", "scrollback_snapshot", "ping", "pong", "error", "close",
-     "relay_request", "relay_waiting", "relay_ready", "relay_reject", "direct_message"}
+     "relay_request", "relay_waiting", "relay_ready", "relay_reject", "direct_message",
+     "bot_request", "bot_result", "bot_presence"}
 )
 _REALTIME_MAX_MESSAGE_ID_BYTES = 64
 _JSON_SAFE_INTEGER = (1 << 53) - 1
@@ -887,7 +888,43 @@ def _validate_direct_message_payload(payload: dict, *, path: str) -> None:
     _parse_aware_timestamp(payload["created_at"], field_name=f"{path}.created_at")
 
 
+def _validate_bot_request_payload(payload: dict, *, path: str) -> None:
+    if set(payload) != {"channel_id", "bot", "caller", "text"}:
+        raise LinkProtocolError(f"{path} needs channel_id, bot, caller and text")
+    for field in ("channel_id", "bot", "caller"):
+        _validate_bounded_id(payload[field], path=f"{path}.{field}")
+    _validate_bounded_text(payload["text"], path=f"{path}.text", max_bytes=4000)
+    _validate_bot_label(payload["bot"], path=path)
+
+
+def _validate_bot_label(value: object, *, path: str) -> None:
+    import re
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}\.bot", value, re.IGNORECASE):
+        raise LinkProtocolError(f"{path} needs a canonical bot label")
+
+
+def _validate_bot_result_payload(payload: dict, *, path: str) -> None:
+    if set(payload) != {"request_id", "error"}:
+        raise LinkProtocolError(f"{path} needs request_id and error")
+    _validate_bounded_id(payload["request_id"], path=f"{path}.request_id")
+    _validate_bounded_text(payload["error"], path=f"{path}.error", max_bytes=500)
+
+
+def _validate_bot_presence_payload(payload: dict, *, path: str) -> None:
+    if set(payload) != {"channel_id", "author_node_fingerprint", "labels"}:
+        raise LinkProtocolError(f"{path} needs channel_id, author_node_fingerprint and labels")
+    _validate_bounded_id(payload["channel_id"], path=f"{path}.channel_id")
+    _validate_bounded_id(payload["author_node_fingerprint"], path=f"{path}.author_node_fingerprint")
+    if not isinstance(payload["labels"], list) or len(payload["labels"]) > 16:
+        raise LinkProtocolError(f"{path}.labels must be a list of at most 16 bot labels")
+    for label in payload["labels"]:
+        _validate_bot_label(label, path=path)
+
+
 _REALTIME_PAYLOAD_VALIDATORS = {
+    "bot_request": _validate_bot_request_payload,
+    "bot_result": _validate_bot_result_payload,
+    "bot_presence": _validate_bot_presence_payload,
     "relay_request": _validate_relay_request_payload,
     "relay_waiting": _validate_relay_waiting_payload,
     "relay_ready": _validate_relay_ready_payload,
@@ -920,6 +957,16 @@ def validate_realtime_frame_payload(frame: RealtimeFrame) -> None:
 
 def new_realtime_message_id() -> str:
     return secrets.token_hex(16)
+
+
+def build_bot_frame(kind: str, payload: dict, *, message_id: str | None = None) -> RealtimeFrame:
+    """Optional chat_bots_v1 frames; callers must check the peer capability."""
+    if kind not in {"bot_request", "bot_result", "bot_presence"}:
+        raise LinkProtocolError("Unknown bot frame")
+    frame = RealtimeFrame(type=kind, message_id=message_id or new_realtime_message_id(), payload=payload)
+    validate_realtime_frame_payload(frame)
+    frame.to_json_bytes()
+    return frame
 
 
 def build_subscribe_frame(channel_id: str, *, message_id: str | None = None) -> RealtimeFrame:

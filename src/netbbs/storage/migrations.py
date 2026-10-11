@@ -4301,4 +4301,18 @@ MIGRATIONS = [
         CREATE INDEX idx_bot_output_rate ON bot_output_history(bot_id, channel_id, created_at);
         """,
     ),
+    Migration(
+        description="Issue #1210: explicit per-channel approval for Linked bot participation.",
+        sql="""
+        ALTER TABLE bot_channels ADD COLUMN linked_approved INTEGER NOT NULL DEFAULT 0
+            CHECK (linked_approved IN (0, 1));
+        CREATE TABLE remote_bot_mutes (
+            channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            node_fingerprint TEXT NOT NULL,
+            label TEXT NOT NULL COLLATE NOCASE,
+            muted_until TEXT NOT NULL,
+            PRIMARY KEY (channel_id, node_fingerprint, label)
+        );
+        """,
+    ),
 ]

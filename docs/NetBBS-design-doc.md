@@ -16199,9 +16199,21 @@ runtime now supervises BOT API v1 programs, with addressed-only grants,
 per-channel output limits, mutes, local bot presence/counts and persistent
 stop controls. Baud provides help and public channel reminders through that
 same API. Instances are off by default and configured in Content > Chat bots.
-Linked bot execution/routing, channel/event scopes, node queries, automatic
-bot-state backup/restore and model conversation remain subsequent slices.
-The local runtime refuses Linked channels until that integration is ready.
+Linked participation requires a per-instance, per-channel approval confirmed
+by the SysOp on Save. Approved bots publish ordinary signed/live channel
+messages and advertise separate channel-scoped presence. The optional
+`chat_bots_v1` endpoint capability enables bounded `bot_request`, `bot_result`
+and `bot_presence` frames without changing mandatory realtime version 4.
+Requests travel directly from the caller's authenticated home to the selected
+bot host; ordinary channel frames and replay never dispatch them. Only a
+channel origin may relay another node's bot presence. Remote `/mute` is a
+local receiving filter, including history/search, keyed by bot label and home
+fingerprint. Remote caller ids are distinct from local account ids and from
+identically named callers on other nodes. A remote request's public reply
+also goes directly to the caller's node, with ordinary live deduplication,
+so an offline channel origin does not swallow that reply. Channel/event
+scopes, node queries, automatic bot-state backup/restore and model
+conversation remain subsequent slices.
 See `NetBBS-bot-api.md` for the implemented protocol and limits.
 
 **Grounding.** Door output already speaks in chat without being a person
