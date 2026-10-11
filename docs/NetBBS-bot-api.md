@@ -329,8 +329,9 @@ The first conversational request only publishes a notice naming the provider,
 context allowance and prompt-logging policy. It is not forwarded or added to
 context. Submit again to proceed. Disclosure repeats after settings changes,
 context expiry, reset or restart. Model input consists of the host's configured
-persona, this addressed message and at most 0-20 prior lines of this caller's
-exchange with this bot in this channel. It never includes ordinary conversation
+persona with the active bot's chat identity, this addressed message and at most
+0-20 prior lines of this caller's exchange with this bot in this channel. It
+never includes ordinary conversation
 or another caller's exchange, even if the bot has a whole-channel reading grant.
 Only successfully published replies enter context. Context is memory-only,
 limited to 256 caller/bot/channel entries, expires after 30 idle minutes, and

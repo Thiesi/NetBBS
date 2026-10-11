@@ -35,7 +35,7 @@ class ModelSettings:
     enabled: bool = False
     endpoint: str = "http://127.0.0.1:11434/v1"
     model: str = ""
-    persona: str = "You are Baud, a friendly BBS chat companion. Keep replies brief and suitable for a public chat channel."
+    persona: str = "You are a friendly BBS chat companion. Keep replies brief and suitable for a public chat channel."
     context_lines: int = 6
     log_prompts: bool = False
     min_level: int = 0
@@ -149,7 +149,7 @@ def authorize(db, bot_id, channel_name, caller):
         raise BotError("Guest accounts cannot use model conversation on this node.")
     if access["level"] < config.min_level:
         raise BotError("Your account level is too low for model conversation on this node.")
-    return config, channel
+    return config, channel, bot.label
 
 
 def _periods(now):
@@ -175,7 +175,7 @@ def limit_hit(db, reason, now):
 
 def reserve(db, bot_id, channel_name, caller, config, messages, prompt, *, now=None):
     now = time.time() if now is None else now
-    current, channel = authorize(db, bot_id, channel_name, caller)
+    current, channel, _label = authorize(db, bot_id, channel_name, caller)
     if config != current:
         raise BotError("Model settings changed; address the bot again for the new disclosure.")
     inputs = sum(len(m["content"].encode("utf-8")) + 32 for m in messages) + 32
@@ -286,7 +286,7 @@ class ModelService:
 
     async def respond(self, bot_id, channel_name, caller, prompt, *, reset=False):
         """Return (text, acceptance callback); remember only a published reply."""
-        config, channel = await self.lane.run(authorize, bot_id, channel_name, caller)
+        config, channel, label = await self.lane.run(authorize, bot_id, channel_name, caller)
         key = (bot_id, str(caller["id"]), channel.id)
         now = time.monotonic()
         for old, context in list(self.contexts.items()):
@@ -310,7 +310,8 @@ class ModelService:
             raise BotError("Model messages must contain 1-4000 characters.")
         self.busy.add(key)
         try:
-            messages = [{"role": "system", "content": config.persona}]
+            messages = [{"role": "system", "content": config.persona +
+                         f"\nYour chat identity is {label}. Use this name when identifying yourself."}]
             messages.extend(context.lines[-config.context_lines:] if config.context_lines else [])
             messages.append({"role": "user", "content": prompt})
             ticket = await self.lane.run(reserve, bot_id, channel_name, caller, config, messages, prompt)
@@ -326,9 +327,9 @@ class ModelService:
                     raise ValueError
             except (KeyError, IndexError, TypeError, ValueError):
                 raise BotError("The model returned no usable text; try again or ask the SysOp.") from None
-            current, _ = await self.lane.run(authorize, bot_id, channel_name, caller)
-            if current != config or self.contexts.get(key) is not context:
-                raise BotError("Model settings or context changed while waiting; the reply was discarded.")
+            current, _, current_label = await self.lane.run(authorize, bot_id, channel_name, caller)
+            if current != config or current_label != label or self.contexts.get(key) is not context:
+                raise BotError("Model settings, identity or context changed while waiting; the reply was discarded.")
             def accept_reply():
                 context.lines = ([*context.lines, {"role": "user", "content": prompt},
                                   {"role": "assistant", "content": text}][-config.context_lines:]

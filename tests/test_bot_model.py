@@ -135,6 +135,10 @@ def test_context_isolated_by_caller_bot_channel_expiry_and_changed_disclosure(db
                 assert "Submit again" in await exchange(service, current_bot, current_channel, caller, "discard")
                 await exchange(service, current_bot, current_channel, caller, "first for this scope")
                 assert len(calls[-1][0]["messages"]) == 2
+                system_prompt = calls[-1][0]["messages"][0]["content"]
+                assert f"Your chat identity is {current_bot.label}." in system_prompt
+                if current_bot.name != "Baud":
+                    assert "Baud" not in system_prompt
             await exchange(service, bot, channel, a, "follow up")
             assert [m["role"] for m in calls[-1][0]["messages"]] == ["system", "user", "assistant", "user"]
             assert len(service.contexts[(bot.id, str(alice.id), channel.id)].lines) == 2
