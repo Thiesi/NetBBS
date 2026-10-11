@@ -2461,15 +2461,22 @@ def _help_column_width(entries: Sequence[tuple[str, str]], width: int) -> int:
     return max(1, min(widest, 32, preferred, available))
 
 
+def _styled_command_parameters(parameters: str) -> str:
+    """Separate syntax punctuation from parameter names, including wrapped fragments."""
+    return "".join(
+        colored(part, fg_color=MUTED_COLOR if part in "<>[]|" else LABEL_COLOR)
+        for part in re.split(r"([<>\[\]|])", parameters)
+        if part
+    )
+
+
 def _styled_help_syntax(
     fragment: str, command: str, *, first: bool, accent_color: int = ACCENT_COLOR,
 ) -> str:
     if first and fragment.startswith(command):
         parameters = fragment[len(command):]
-        return colored(command, fg_color=accent_color, bold=True) + (
-            colored(parameters, fg_color=LABEL_COLOR) if parameters else ""
-        )
-    return colored(fragment, fg_color=LABEL_COLOR)
+        return colored(command, fg_color=accent_color, bold=True) + _styled_command_parameters(parameters)
+    return _styled_command_parameters(fragment)
 
 
 def _wrap_help_syntax(syntax: str, width: int) -> list[str]:
@@ -2868,7 +2875,11 @@ async def _show_usage(session: Session, command: str) -> None:
     `_handle_help`, instead of each handler carrying its own
     independently-maintained copy of the same text."""
     syntax, _ = _COMMAND_INFO[command]
-    await session.write_line(colored(f"Usage: {syntax}", fg_color=MUTED_COLOR))
+    command_text, parameters = _help_syntax_parts(syntax)
+    await session.write_line(
+        colored(f"Usage: {command_text}", fg_color=MUTED_COLOR)
+        + _styled_command_parameters(parameters)
+    )
 
 
 async def _resolve_target(session: Session, lane: DatabaseLane, username: str) -> User | None:

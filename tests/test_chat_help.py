@@ -30,6 +30,7 @@ from netbbs.net.node_theme import (
 from netbbs.rendering import (
     ACCENT_COLOR,
     LABEL_COLOR,
+    MUTED_COLOR,
     VALUE_COLOR,
     colored,
     strip_ansi,
@@ -168,7 +169,9 @@ def test_help_colors_commands_parameters_and_descriptions_separately(
         )
     )
     assert colored("/finger", fg_color=ACCENT_COLOR, bold=True) in output
-    assert colored(" <user>", fg_color=LABEL_COLOR) in output
+    assert colored("<", fg_color=MUTED_COLOR) in output
+    assert colored("user", fg_color=LABEL_COLOR) in output
+    assert colored(">", fg_color=MUTED_COLOR) in output
     assert colored("Show a user's public profile.", fg_color=VALUE_COLOR) in output
 
 
