@@ -15303,6 +15303,66 @@ load unchanged.
 Resize stays a NetBBS-only feature: other hosts neither rewrite a drop file
 nor signal, so the door keeps its starting size there.
 
+### Issue #1223 — Retro Trivia and War Dialer as standalone doors — decided
+
+The issue asked whether the other two bundled games can follow Voidrunner
+(#1214, #1216): each in its own repository, vendored into NetBBS as tagged
+releases, and runnable under other BBS software. The maintainer decided on
+2026-10-11.
+
+**Starting point.**
+- **Retro Trivia** imports nothing outside the standard library, and NetBBS
+  imports nothing from it. It keeps no state between launches, so there are
+  no saves, backups or migrations to carry.
+- **War Dialer** is standard-library only too, but it is coupled to NetBBS in
+  three places:
+  - It refuses to launch without `war_dialer_owner` and binds its world to
+    that ID.
+  - Its SysOp administration and backup checks live in NetBBS
+    (`netbbs.doors.war_dialer_admin`, `netbbs.backup`), and both import its
+    internals.
+  - Its idle detection uses `select()`, which Windows pipes do not support.
+
+  Its shared SQLite world (WAL, `WAR_DIALER_DB_PATH`) works unchanged under
+  any host whose nodes run on one machine.
+
+**Decision 1 — one repository per game.** The games live in Thiesi/RetroTrivia
+and Thiesi/WarDialer, shaped like Thiesi/Voidrunner: own issues, CI, tags and
+releases. Each stays one self-contained file. The drop-file parser and the
+CP437 table are copied into each one rather than shared (#1214 Decision 4).
+Rejected: one shared repository for the doors, where releases and issues would
+have to say which game they mean.
+
+**Decision 2 — Retro Trivia gets full portability.** It is extracted and
+vendored, then gains DOOR32.SYS/DOOR.SYS, CP437 and Windows socket mode,
+following Voidrunner's implementation.
+
+**Decision 3 — outside NetBBS, a War Dialer world owns itself.** The first
+launch against a new world writes a random owner ID into it, and later
+launches trust that ID. Each BBS points `WAR_DIALER_DB_PATH` at its own
+world, so the file's location already keeps one BBS's user numbers out of
+another's world. Under NetBBS, `war_dialer_owner` still wins. Rejected:
+- an ID the SysOp must set, which is one more setup step for no added safety;
+- an ID derived from the drop file's BBS name, which a rename would turn into
+  a lockout.
+
+**Decision 4 — administration moves into the door, and NetBBS wraps it.**
+`war_dialer.py --admin` will offer `status`, `maintenance`, `close-season`
+and `reset`. Its backup is a file copy taken under the door's own maintenance
+lock. NetBBS's `war_dialer_admin` calls these commands and keeps its own
+requirement of a verified node backup before a destructive operation.
+Rejected: administration that only NetBBS provides, which would leave
+another BBS's SysOp no season or reset tools.
+
+**Decision 5 — narrow the boundary, then pin what is left.** NetBBS goes
+through the `--admin` commands wherever it can. The few names it still
+imports, such as the world inspection backup needs, are pinned by a test,
+as Voidrunner's three are (#1216).
+
+**Decision 6 — Retro Trivia first.** Retro Trivia is extracted, vendored
+and made portable first. War Dialer follows in three steps: the admin
+entry point, then extraction and vendoring, then portability.
+
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
