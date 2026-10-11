@@ -16431,8 +16431,11 @@ names a character set. The door picks its encoding as follows:
   terminal profile.
 - **Under a foreign drop file:** CP437 by default, because that is what
   classic BBS callers' terminals expect.
-- **Either way:** the player can switch encodings in Display Options, and
-  the choice is saved with the career, as the colour preset is.
+- **Either way:** the player can override the encoding with a new setting,
+  saved with the career as the colour preset is. The setting is separate
+  from the colour and artwork presets. Those presets still never change
+  the encoding, as the presentation contract says; `plain` stays an
+  artwork fallback, not a transport change.
 
 **Decision 5 — Synchronet is the test target.** Synchronet runs native
 doors on both platforms: stdio mode on Linux and DOOR32 sockets on Windows.
