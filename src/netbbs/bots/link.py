@@ -14,7 +14,7 @@ import logging
 from netbbs.bots.registry import BotError, active_labels, allowed_channel, bot_for_label, list_bots, channel_readers
 from netbbs.chat.bots import remote_bot_visible
 from netbbs.link.channels import channel_origin_fingerprint, is_channel_linked
-from netbbs.link.events import CHAT_BOTS_CAPABILITY, CHAT_BOT_READERS_CAPABILITY, descriptor_has_capability
+from netbbs.link.events import CHAT_BOTS_CAPABILITY, CHAT_BOT_READERS_CAPABILITY, CHAT_BOT_CALLERS_CAPABILITY, descriptor_has_capability
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
 from netbbs.link.protocol import (
@@ -105,13 +105,13 @@ class BotLink:
                                                     "caller": user.username, "text": text})
         except LinkProtocolError:
             return "That bot request is too long or has an invalid address."
-        task = asyncio.create_task(self._request(channel, participant_id, fingerprint, label, frame),
+        task = asyncio.create_task(self._request(channel, participant_id, fingerprint, label, frame, user_id=user.id),
                                    name="remote-bot-request")
         self.requests.add(task)
         task.add_done_callback(self.requests.discard)
         return None
 
-    async def _request(self, channel, participant_id, fingerprint, label, frame):
+    async def _request(self, channel, participant_id, fingerprint, label, frame, *, user_id=None):
         reason = ""
         try:
             async with asyncio.timeout(75):
@@ -122,6 +122,10 @@ class BotLink:
                 session = await self.direct.ensure_session(fingerprint)
                 if not self.capable(fingerprint):
                     raise BotError("That node does not advertise live bot support.")
+                if user_id is not None and self.capable(fingerprint, CHAT_BOT_CALLERS_CAPABILITY):
+                    from netbbs.bots.model import caller_access
+                    access = await self.lane.run(caller_access, user_id)
+                    frame = build_bot_frame("bot_request", {**frame.payload, "access": access})
                 done = asyncio.get_running_loop().create_future()
                 self.pending[frame.message_id] = (fingerprint, done)
                 await session.send(frame)
@@ -150,6 +154,8 @@ class BotLink:
             if pending and pending[0] == session.remote_fingerprint and not pending[1].done():
                 pending[1].set_result(frame.payload["error"])
         elif frame.type == "bot_request":
+            if "access" in frame.payload and not self.capable(session.remote_fingerprint, CHAT_BOT_CALLERS_CAPABILITY):
+                raise LinkProtocolError("Peer has not advertised chat_bot_callers_v1")
             key = (session.remote_fingerprint, frame.message_id)
             if key in self.seen:
                 return
@@ -189,7 +195,8 @@ class BotLink:
             allowed_channel(db, bot.id, channel.name, check_rate=True)
             home = identity_for_fingerprint(db, session.remote_fingerprint).label
             return bot, channel, {"id": f"link:{session.remote_fingerprint}:{caller}",
-                                  "name": link_address_label(caller, home)}
+                                  "name": link_address_label(caller, home),
+                                  "access": p.get("access")}
 
         try:
             bot, channel, caller = await self.lane.run(authorize)

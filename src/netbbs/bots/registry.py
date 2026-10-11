@@ -49,6 +49,7 @@ class Bot:
     announcement_channel: str | None = None
     announce_posts: bool = False
     announce_files: bool = False
+    model_conversation: bool = False
 
     @property
     def label(self) -> str:
@@ -81,7 +82,7 @@ def list_bots(db: Database) -> list[Bot]:
                           tuple(g["name"] for g in grants if g["channel_read"]),
                           tuple(g["name"] for g in grants if g["presence_events"]), bool(row["greetings"]),
                           boards, areas, destination[0] if destination else None,
-                          bool(row["announce_posts"]), bool(row["announce_files"])))
+                          bool(row["announce_posts"]), bool(row["announce_files"]), bool(row["model_conversation"])))
     return result
 
 
@@ -119,7 +120,8 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
              queries: list[str] | None = None, reading_channels: list[str] | None = None,
              event_channels: list[str] | None = None, greetings: bool = False,
              board_sources: list[str] | None = None, file_sources: list[str] | None = None,
-             announcement_channel: str | None = None, announce_posts: bool = False, announce_files: bool = False) -> Bot:
+             announcement_channel: str | None = None, announce_posts: bool = False, announce_files: bool = False,
+             model_conversation: bool = False) -> Bot:
     require_sysop(db, actor)
     name = name.strip()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}", name):
@@ -180,6 +182,7 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
                 )
             db.connection.execute("UPDATE chat_bots SET queries_json=? WHERE id=?", (json.dumps(queries), bot_id))
             db.connection.execute("UPDATE chat_bots SET greetings=? WHERE id=?", (int(greetings), bot_id))
+            db.connection.execute("UPDATE chat_bots SET model_conversation=? WHERE id=?", (int(model_conversation), bot_id))
             db.connection.execute(
                 "UPDATE chat_bots SET announcement_channel_id=?, announce_posts=?, announce_files=? WHERE id=?",
                 (destination.id if destination else None, int(announce_posts), int(announce_files), bot_id),

@@ -18,8 +18,8 @@ Board and file-area event sources are separately granted, with one allowed
 including inherited Community gates; restricted mappings are refused. This
 conservative audience rule also holds for Linked destinations. **Baud post
 announcements** and **Baud file announcements** are separate, default-off
-abilities requiring their corresponding source grants. Model requests remain
-unavailable in this slice.
+abilities requiring their corresponding source grants. Model conversation has
+its own default-off grant and a separate node-wide provider switch.
 Linked channels also need an explicit per-channel **Linked approvals** entry,
 confirmed on Save. MRC channels are refused, even with a paused bridge.
 A grant is checked again on dispatch and
@@ -39,7 +39,7 @@ Each line is one UTF-8 JSON object, at most 32 KiB including the newline.
 `BOT_API_VERSION = 1`. The host sends:
 
 ```json
-{"type":"hello","version":1,"name":"Baud.bot","scope":"addressed","channels":["lobby"],"temperament":"friendly","state":{},"queries":["stats","seen"],"reading_channels":[],"event_channels":[],"greetings":false,"board_sources":[],"file_sources":[],"announcement_channel":null,"announce_posts":false,"announce_files":false}
+{"type":"hello","version":1,"name":"Baud.bot","scope":"addressed","channels":["lobby"],"temperament":"friendly","state":{},"queries":["stats","seen"],"reading_channels":[],"event_channels":[],"greetings":false,"board_sources":[],"file_sources":[],"announcement_channel":null,"announce_posts":false,"announce_files":false,"model_conversation":false}
 ```
 
 The bot must answer within five seconds with exactly:
@@ -262,6 +262,9 @@ from one to 60 seconds. Kill controls disable the instance persistently.
 Commands: `help`, `remind <1s-30d> <text>`, `reminders`, `cancel <id>`.
 With the corresponding grants, Baud also offers `stats` and
 `seen <local-account>` and lists them in `help`. Both replies are public.
+With **Grant model conversation**, other addressed text requests the host's
+model service; `reset` clears this caller's temporary context here. Ordinary
+commands stay local and remain responsive during a provider request.
 The separate **Baud greetings** toggle greets live joins in presence-event
 channels. Greetings obey the same mutes, channel policy and hourly output limit
 as replies and reminders, and require no whole-channel reading grant.
@@ -281,3 +284,94 @@ destination and cannot migrate to another channel automatically.
 
 Baud's standalone implementation in `src/netbbs/bots/baud.py` is an API example:
 it uses standard input/output only and has no database or filesystem access.
+
+## Optional model conversation
+
+Under **Chat bots > Model settings**, the initial API base URL is
+`http://127.0.0.1:11434/v1` for an operator-managed Ollama server. A local
+llama.cpp server or another OpenAI-compatible endpoint can be configured
+instead. Set an installed/available model name; NetBBS does not install or
+download models. The optional `netbbs[bots]` extra supplies aiohttp (also used
+by `netbbs[web]`); ordinary bots need neither it nor a model server. No HTTP
+request occurs while editing settings. Enable the model service and each
+instance's **Grant model conversation** separately. Save confirms where
+addressed conversation goes. Use HTTPS for a remote provider.
+The handshake's `model_conversation` reflects both switches. Changing the
+node-wide switch restarts granted instances so their help and command handling
+track availability; their persisted grants and reminder state remain intact.
+
+The API base URL gets `/chat/completions` appended. Calls are non-streaming
+with `messages`, `model`, `store: false` and a bounded output limit. Select
+`max_completion_tokens` for current OpenAI models; the default `max_tokens`
+matches [Ollama's documented fields](https://docs.ollama.com/api/openai-compatibility).
+NetBBS accepts text from
+`choices[0].message.content` and usage from `prompt_tokens`,
+`completion_tokens`, `total_tokens`. See the
+[official Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+Provider retention policies still apply; `store: false` is not a promise that
+the provider retains nothing. Tools, images, attachments and automatic retries
+are not used. Redirects are refused, responses are capped at 64 KiB and requests
+time out after 40 seconds. At most two model requests run on a node at once.
+
+External programs use the same actions as Baud:
+
+```json
+{"id":"7","action":"model","request":"opaque-token"}
+{"id":"8","action":"model.reset","request":"opaque-token"}
+```
+
+These return an immediate `result` with `value: {"pending": true}`. The host
+then publishes the reply or sends a refusal to the requesting caller. The
+request token fixes the original input, caller and channel: program-supplied
+prompts, identities or destinations cannot substitute them. Observations and
+source-event tokens cannot request a model. API keys stay in the host; they
+never enter the program's handshake, environment or result. Installed programs
+remain trusted OS-user code, as described above.
+
+The first conversational request only publishes a notice naming the provider,
+context allowance and prompt-logging policy. It is not forwarded or added to
+context. Submit again to proceed. Disclosure repeats after settings changes,
+context expiry, reset or restart. Model input consists of the host's configured
+persona with the active bot's chat identity, this addressed message and at most
+0-20 prior lines of this caller's exchange with this bot in this channel. It
+never includes ordinary conversation
+or another caller's exchange, even if the bot has a whole-channel reading grant.
+Only successfully published replies enter context. Context is memory-only,
+limited to 256 caller/bot/channel entries, expires after 30 idle minutes, and
+clears on bot restart. Eviction requires a new disclosure. Reset does not erase
+channel history, existing backups, optional prompt logs or provider records.
+Replies remain public, sanitized and capped at the configured 80-500 characters.
+Disclosure and reset notices have their own fixed wording and the ordinary
+500-character chat limit.
+
+Guests are excluded by default using the designated guest account, regardless
+of its name. If explicitly admitted they share that account's quota and context.
+Link's optional `chat_bot_callers_v1` capability adds bounded `access` fields
+to `bot_request`: `level` (integer 0-255) and `authenticated` (boolean). Only
+the caller's authenticated home node supplies them, directly to the bot host;
+they authorize model admission only and grant no local account privileges.
+Peers lacking this extension retain ordinary bot commands, but their model
+requests receive an explicit refusal rather than assuming authentication.
+Current local account state and remote node/user trust are rechecked.
+
+Limits apply across bot instances: UTC daily/monthly node token budgets,
+per-caller daily requests and cooldown, and per-channel requests per minute.
+Normal bot output rates, mutes and channel policy also apply. Before HTTP, a
+SQLite transaction reserves UTF-8 input bytes plus framing allowance and the
+configured maximum output tokens. Reported usage replaces this conservative
+estimate. Unmetered, failed or interrupted calls retain their reservation;
+restarting cannot refund potentially charged work. Actual provider usage can
+exceed an estimate; it is still counted and blocks further calls as appropriate.
+
+Optional money accounting uses operator-entered prices per million input and
+output tokens, in one operator-chosen currency, with optional day/month caps.
+Prices are never fetched and this is not a provider invoice. Zero monetary
+budgets disable the extra money limit; token budgets always apply. **Usage**
+shows counts, reported/reserved tokens and cost, distinct callers, the top 20
+callers and limits hit. The ledger admits at most 20,000 calls per UTC month.
+Hourly cleanup keeps the current month and one prior day for rollover cooldowns.
+API keys use the same protected SQLite/backup boundary as FTN passwords and are
+masked in the editor. Prompt logging defaults off. If enabled, only submitted
+inputs are stored with the bounded ledger; disclosure inputs and unrelated chat
+are never logged by the model service. Turning logging off stops new logging;
+existing entries age out normally and existing backups may retain them.

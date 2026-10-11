@@ -37,6 +37,8 @@ class BotRuntime:
         self.task: asyncio.Task | None = None
         self.link = None
         self.disclosures = {}
+        from netbbs.bots.model import ModelService
+        self.model = ModelService(lane)
 
     @property
     def running_ids(self) -> frozenset[int]:
@@ -51,11 +53,14 @@ class BotRuntime:
                 self.link.start()
 
     async def _run(self) -> None:
+        from netbbs.bots.model import settings as model_settings
         try:
             await self.lane.run(reset_runtime_status)
             while True:
                 try:
+                    await self.model.upkeep()
                     desired = {b.id: b for b in await self.lane.run(list_bots) if b.enabled}
+                    model_enabled = (await self.lane.run(model_settings)).enabled
                     disclosures = {}
                     for bot in desired.values():
                         for name in bot.reading_channels:
@@ -67,12 +72,13 @@ class BotRuntime:
                             await self.hub.broadcast(name, "[BOT] " + notice)
                     self.disclosures = disclosures
                     for bot_id, worker in list(self.workers.items()):
-                        if desired.get(bot_id) != worker.bot or worker.task.done():
+                        if (desired.get(bot_id) != worker.bot or worker.task.done() or
+                                worker.model_enabled != (worker.bot.model_conversation and model_enabled)):
                             await worker.stop()
                             del self.workers[bot_id]
                     for bot_id, bot in desired.items():
                         if bot_id not in self.workers:
-                            worker = _Worker(self, bot)
+                            worker = _Worker(self, bot, model_enabled=bot.model_conversation and model_enabled)
                             self.workers[bot_id] = worker
                             worker.task = asyncio.create_task(worker.run(), name=f"bot-{bot.name}")
                 except Exception:
@@ -118,7 +124,7 @@ class BotRuntime:
         if len(worker.pending) >= MAX_PENDING or worker.events.full():
             raise BotError(f"{bot.label} is busy; try again shortly.")
         request = uuid.uuid4().hex
-        worker.pending[request] = (channel.name, participant_id, time.monotonic() + REQUEST_SECONDS, completed, dict(caller))
+        worker.pending[request] = (channel.name, participant_id, time.monotonic() + REQUEST_SECONDS, completed, dict(caller), text)
         worker.events.put_nowait({"type": "message", "request": request, "channel": channel.name,
                                  "caller": caller, "text": text})
 
@@ -151,8 +157,9 @@ class BotRuntime:
 
 
 class _Worker:
-    def __init__(self, owner: BotRuntime, bot: Bot):
+    def __init__(self, owner: BotRuntime, bot: Bot, *, model_enabled: bool = False):
         self.owner, self.bot = owner, bot
+        self.model_enabled = model_enabled
         self.events: asyncio.Queue = asyncio.Queue(maxsize=64)
         self.pending: dict[str, tuple] = {}
         self.announcements = {}
@@ -161,6 +168,7 @@ class _Worker:
         self.proc = None
         self.task = None
         self.actions = deque()
+        self.model_tasks = {}
 
     async def status(self, state: str, error: str = "") -> None:
         await self.owner.lane.run(set_runtime_status, self.bot.id, state, error)
@@ -243,7 +251,8 @@ class _Worker:
                                "event_channels": self.bot.event_channels, "greetings": self.bot.greetings,
                                "board_sources": self.bot.board_sources, "file_sources": self.bot.file_sources,
                                "announcement_channel": self.bot.announcement_channel,
-                               "announce_posts": self.bot.announce_posts, "announce_files": self.bot.announce_files})
+                               "announce_posts": self.bot.announce_posts, "announce_files": self.bot.announce_files,
+                               "model_conversation": self.model_enabled})
             ready = await asyncio.wait_for(self._read(), 5)
             if ready != {"type": "ready", "version": BOT_API_VERSION}:
                 raise BotError("Bot did not acknowledge BOT_API_VERSION 1.")
@@ -263,6 +272,11 @@ class _Worker:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            for task in list(self.model_tasks.values()):
+                task.cancel()
+            await asyncio.gather(*list(self.model_tasks.values()), return_exceptions=True)
+            self.model_tasks.clear()
+            self.owner.model.clear_bot(self.bot.id)
             await self._reap()
 
     async def _reap(self) -> None:
@@ -362,7 +376,8 @@ class _Worker:
     async def _ticks(self) -> None:
         while True:
             await asyncio.sleep(1)
-            for request, (_, _, deadline, _, _) in list(self.pending.items()):
+            for request, pending in list(self.pending.items()):
+                deadline = pending[2]
                 if time.monotonic() >= deadline:
                     await self.notify(request, "The bot did not reply within 60 seconds.")
             for token, (_, deadline) in list(self.announcements.items()):
@@ -399,6 +414,21 @@ class _Worker:
     async def _action(self, value: dict):
         action = value.get("action")
         lane = self.owner.lane
+        if action in {"model", "model.reset"}:
+            request = value.get("request")
+            pending = self.pending.get(request) if isinstance(request, str) else None
+            if pending is None or pending[2] <= time.monotonic():
+                raise BotError("Model actions need this bot's live addressed request token.")
+            if request in self.model_tasks:
+                raise BotError("This request is already being handled by the model.")
+            task = asyncio.create_task(self._model_reply(request, pending, reset=action == "model.reset"), name="bot-model-reply")
+            self.model_tasks[request] = task
+            def finished(done):
+                self.model_tasks.pop(request, None)
+                if not done.cancelled() and done.exception() is not None:
+                    _logger.warning("%s: model reply delivery failed", self.bot.label)
+            task.add_done_callback(finished)
+            return {"pending": True}
         if action == "state.get":
             return await lane.run(read_state, self.bot.storage_name)
         if action == "state.set":
@@ -445,3 +475,17 @@ class _Worker:
         if action == "reply":
             await self.notify(request, "", message)
         return {"message_id": message.id}
+
+    async def _model_reply(self, request, pending, *, reset):
+        try:
+            text, accept = await self.owner.model.respond(self.bot.id, pending[0], pending[4], pending[5], reset=reset)
+            if self.pending.get(request) is not pending or pending[2] <= time.monotonic():
+                return
+            await self._action({"action": "reply", "request": request, "text": text})
+            accept()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, BotError) else "Model request failed; ask the SysOp to check its settings."
+            await self.status("running", reason)
+            await self.notify(request, reason)

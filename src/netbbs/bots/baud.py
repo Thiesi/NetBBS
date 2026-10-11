@@ -21,6 +21,7 @@ class Baud:
         self.greetings = hello.get("greetings", False)
         self.announce_posts = hello.get("announce_posts", False)
         self.announce_files = hello.get("announce_files", False)
+        self.model_conversation = hello.get("model_conversation", False)
         self.state = hello.get("state") or {"next": 1, "reminders": []}
         if not isinstance(self.state, dict) or not isinstance(self.state.get("reminders", []), list):
             raise ValueError("Invalid Baud reminder state")
@@ -103,7 +104,9 @@ class Baud:
             self.reply(event, greeting + "help; remind <1s-30d> <text>; reminders; cancel <id>. "
                        + ("stats; " if "stats" in self.queries else "")
                        + ("seen <local-account>; " if "seen" in self.queries else "") +
-                       "Reminders appear publicly in this channel, including after a restart. No language model is enabled.")
+                       "Reminders appear publicly here, including after restart. " +
+                       ("Conversation is enabled; reset clears your temporary context here. Replies are public." if self.model_conversation
+                        else "No language model is enabled."))
         elif command in {"stats", "seen"}:
             if command not in self.queries:
                 self.reply(event, "The SysOp has not enabled this query ability.")
@@ -135,6 +138,10 @@ class Baud:
                             "channel": event["channel"], "due": time.time() + seconds, "text": text.strip()}
                 self.store({"next": ordinal + 1, "reminders": [*self.state["reminders"], reminder]},
                            event, f"Saved reminder #{ordinal}; it will appear publicly here.")
+        elif command == "reset" and self.model_conversation:
+            self.action("model.reset", request=event["request"])
+        elif self.model_conversation:
+            self.action("model", request=event["request"])
         else:
             self.reply(event, "I know help, remind, reminders and cancel. Conversation and other abilities are not enabled.")
 

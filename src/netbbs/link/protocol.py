@@ -889,8 +889,14 @@ def _validate_direct_message_payload(payload: dict, *, path: str) -> None:
 
 
 def _validate_bot_request_payload(payload: dict, *, path: str) -> None:
-    if set(payload) != {"channel_id", "bot", "caller", "text"}:
+    if set(payload) not in ({"channel_id", "bot", "caller", "text"}, {"channel_id", "bot", "caller", "text", "access"}):
         raise LinkProtocolError(f"{path} needs channel_id, bot, caller and text")
+    if "access" in payload:
+        access = payload["access"]
+        if (not isinstance(access, dict) or set(access) != {"level", "authenticated"} or
+                type(access["level"]) is not int or not 0 <= access["level"] <= 255 or
+                type(access["authenticated"]) is not bool):
+            raise LinkProtocolError(f"{path}.access needs level 0-255 and authenticated boolean")
     for field in ("channel_id", "bot", "caller"):
         _validate_bounded_id(payload[field], path=f"{path}.{field}")
     _validate_bounded_text(payload["text"], path=f"{path}.text", max_bytes=4000)

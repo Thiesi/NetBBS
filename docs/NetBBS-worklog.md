@@ -6546,6 +6546,24 @@ Fetching known metadata is not another new-file event. Worker startup begins
 at the journal head; this prevents restart/restore from replaying old notices.
 The journal and pending tokens are bounded and do not promise durable delivery.
 
+Model requests bind to the original addressed input in the host's pending
+request, not a program-supplied prompt. Disclosure/context must stay separate
+from API-managed bot state and backups. Commit context only after publication,
+and invalidate a provider response if its configuration or reset context changed
+while awaiting HTTP. Owned model tasks run beside the protocol reader so a slow
+provider cannot prevent help, reminders or shutdown. `BotError` subclasses
+`ValueError`; catch it before generic JSON/value errors to preserve actionable
+provider refusals without exposing response bodies or credentials.
+
+Model budget reservation precedes I/O and survives restart; absent usage is
+not a refund. Reported usage is counted even when reply publication is later
+refused. The bounded ledger and optional submitted-input log share retention;
+context remains memory-only. A fake loopback HTTP provider plus real bot and
+Noise sessions proves disclosure suppression, caller isolation, cancellation,
+accounting and public delivery without credentials or paid requests. Link
+caller access is a capability-gated assertion from the direct authenticated
+home node, solely for model admission; older peers cannot imply authentication.
+
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,

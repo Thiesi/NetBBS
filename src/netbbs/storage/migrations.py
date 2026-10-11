@@ -4380,4 +4380,29 @@ MIGRATIONS = [
         END;
         """,
     ),
+    Migration(
+        description="Issue #1210: opt-in model grants and bounded host-owned usage accounting.",
+        sql="""
+        ALTER TABLE chat_bots ADD COLUMN model_conversation INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE bot_model_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at REAL NOT NULL,
+            caller TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            tokens INTEGER NOT NULL,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cost_micros INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'reserved',
+            prompt TEXT
+        );
+        CREATE INDEX idx_bot_model_usage_at ON bot_model_usage(at);
+        CREATE INDEX idx_bot_model_usage_caller ON bot_model_usage(caller, at);
+        CREATE TABLE bot_model_limits (
+            reason TEXT PRIMARY KEY,
+            hits INTEGER NOT NULL,
+            last_at REAL NOT NULL
+        );
+        """,
+    ),
 ]
