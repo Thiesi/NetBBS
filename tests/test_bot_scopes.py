@@ -218,14 +218,26 @@ def test_reader_roster_relay_withdrawal_and_old_peer_compatibility(tmp_path):
 def test_editor_warns_and_persists_explicit_scopes(db, lane, sysop, channel, monkeypatch):
     from netbbs.net import bot_flow
     from netbbs.net.admin_flow import _load_chrome
+    from netbbs.bots.registry import list_bots
+    answers = iter((False, True))
+    prompts = []
+    async def confirm(session, prompt, **kwargs):
+        prompts.append(prompt)
+        assert not list_bots(db) and kwargs["default"] is False
+        return next(answers)
     async def editor(session, lane, **kwargs):
         draft = kwargs["draft"]
         assert draft["reading"] == draft["events"] == "" and not draft["greetings"]
         assert "other callers' conversation" in kwargs["preamble"]
         draft.update(channels=channel.name, reading=channel.name, events=channel.name, greetings=True)
+        with pytest.raises(BotError, match="draft has been kept"):
+            await kwargs["save"](draft)
+        assert not list_bots(db)
         return await kwargs["save"](draft)
     monkeypatch.setattr(bot_flow, "edit_resource_draft", editor)
+    monkeypatch.setattr(bot_flow, "prompt_yes_no", confirm)
     async def run():
         bot = await bot_flow.bot_editor(FakeSession(), lane, sysop, await _load_chrome(lane, sysop))
         assert bot.reading_channels == bot.event_channels == (channel.name,) and bot.greetings
+        assert len(prompts) == 2 and "every live human message" in prompts[0]
     asyncio.run(run())

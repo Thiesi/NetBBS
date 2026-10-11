@@ -109,13 +109,20 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         if not isinstance(command, list):
             raise BotError("Command must be a JSON array; [] selects bundled Baud.")
         linked = [n.strip().lstrip("#") for n in values["linked"].split(",") if n.strip()]
+        reading = [n.strip().lstrip("#") for n in values["reading"].split(",") if n.strip()]
         added = set(linked) - set(bot.linked_channels if bot else ())
-        if added and not await prompt_yes_no(
-            session, "Allow this bot to participate across Link in " +
-            ", ".join("#" + sanitize_text(n) for n in sorted(added)) +
-            "? Its replies and reminders will be visible on other nodes.", default=False,
-        ):
-            raise BotError("Linked approval was not granted. Your draft has been kept.")
+        added_reading = set(reading) - set(bot.reading_channels if bot else ())
+        approvals = []
+        if added:
+            approvals.append("Participate across Link in " +
+                             ", ".join("#" + sanitize_text(n) for n in sorted(added)) +
+                             "; replies, reminders and greetings are visible on other nodes.")
+        if added_reading:
+            approvals.append("Receive every live human message in " +
+                             ", ".join("#" + sanitize_text(n) for n in sorted(added_reading)) +
+                             ", including other callers' conversation not addressed to this program.")
+        if approvals and not await prompt_yes_no(session, " ".join(approvals) + " Grant this access?", default=False):
+            raise BotError("Bot access approval was not granted. Your draft has been kept.")
         return await lane.run(
             save_bot, actor=actor, bot_id=bot.id if bot else None, name=values["name"],
             enabled=values["enabled"], command=command, temperament=values["temperament"],
@@ -123,7 +130,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
             defaults=[n.strip() for n in values["defaults"].split(",") if n.strip()], lines_per_hour=values["rate"],
             linked_channels=linked,
             queries=[key for key in ("stats", "seen") if values[key]],
-            reading_channels=[n.strip() for n in values["reading"].split(",") if n.strip()],
+            reading_channels=reading,
             event_channels=[n.strip() for n in values["events"].split(",") if n.strip()],
             greetings=values["greetings"],
         )

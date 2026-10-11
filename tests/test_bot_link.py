@@ -236,7 +236,8 @@ def test_editor_requires_explicit_link_approval_before_persisting(tmp_path, monk
             return next(answers)
 
         async def editor(session, lane, **kwargs):
-            draft = {**kwargs["draft"], "channels": channel.name, "linked": channel.name, "enabled": True}
+            draft = {**kwargs["draft"], "channels": channel.name, "linked": channel.name,
+                     "reading": channel.name, "enabled": True}
             with pytest.raises(BotError, match="draft has been kept"):
                 await kwargs["save"](draft)
             assert list_bots(origin.db) == []
@@ -249,6 +250,7 @@ def test_editor_requires_explicit_link_approval_before_persisting(tmp_path, monk
                                             await _load_chrome(origin.lane, origin.sysop))
             assert bot.linked_channels == (channel.name,)
             assert len(prompts) == 2 and "other nodes" in prompts[0]
+            assert "every live human message" in prompts[0]  # one combined final prompt, not a chain
         finally:
             await peer.close()
             await origin.close()
