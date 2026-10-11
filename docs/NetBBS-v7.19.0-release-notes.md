@@ -167,7 +167,10 @@ is lost with it. In particular:
   backup brings back the careers as they were then, so progress made since
   is lost. War Dialer worlds are unaffected: 7.18.6's War Dialer ignores the
   new preference.
-- **Bots and their reminders** go with the restore.
+- **MANUAL — delete the bot state directory, `<db>.bots/`,** after the
+  restore. 7.18.6's restore predates bots and leaves it in place, and a bot
+  created under the same name after a later upgrade would pick up its old
+  reminders. The bots themselves go with the restored database.
 
 ## Verification boundaries
 
