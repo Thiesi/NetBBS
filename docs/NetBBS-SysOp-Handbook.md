@@ -1433,27 +1433,40 @@ enable or authorize a bot.
 **Content > Open chat bots** installs and edits bot instances. Create Baud,
 choose its local channels, optionally select it as their default, enable it
 and Save. It reads only messages addressed to it. Its replies and reminders
-are public in the channel. No language model is involved. Friendly, terse
-and retro temperaments change its fixed phrases.
+are public in the channel. Friendly, terse and retro temperaments change its
+fixed phrases. Everything else is a separate grant in the editor, off until
+you set it: reading whole channels, joins and leaves (for greetings),
+statistics and last-seen queries, board and file-area announcements, Linked
+participation and model conversation. The [bot API guide](NetBBS-bot-api.md)
+describes each.
 
 The catalogue shows each bot's last runtime status and error. **Kill selected**
-stops one bot; **Stop all** stops every bot. Both persist across node restarts;
+stops one bot; **Stop all** stops every bot; **Delete selected** removes a
+stopped bot and its state directory, while channel history and existing
+backups remain. Both persist across node restarts;
 enable an instance again in its editor to resume. Changes are applied within
 about a second. Moderators can `/mute Baud.bot [duration] [reason]` and
 `/unmute Baud.bot`. Output limits apply per bot and channel and survive a
 restart. `/who`, `/names` and the status line distinguish bots from people.
 
-This runtime supports local channels only. Linked and MRC channels are
-refused, including a channel that becomes Linked or bridged after a grant.
-See the [bot API guide](NetBBS-bot-api.md) to install an external bot. External
+A Linked channel also needs its own **Linked approvals** entry, confirmed on
+Save; callers on other nodes then address it as `Baud.bot@Node`. MRC channels
+are refused, even while the bridge is paused. See the [bot API guide](NetBBS-bot-api.md) to install an external bot. External
 programs run as the NetBBS OS user; the API is not an operating-system sandbox.
 
 Reminders survive process and node restarts in `<db>.bots/<original-name>/`.
-Renaming an instance keeps its original state directory. Automatic inclusion
-of these directories in node backups is pending; copy `<db>.bots/` alongside
-the database while the node is stopped. Reminders can be delayed by mutes,
+Renaming an instance keeps its original state directory. Node backups include
+these directories and restore them with the database. Reminders can be delayed by mutes,
 disabled channels or output limits. A crash just after delivery may repeat
 a reminder; delivery is not an exactly-once guarantee.
+
+Model conversation is optional and stays off until you set up a provider
+under **Chat bots > Model settings** (any OpenAI-compatible endpoint, such as
+a local Ollama server) and grant it to an instance. Install `netbbs[bots]` or
+`netbbs[web]` for its HTTP client. A caller's first request only shows a
+notice naming the provider; replies are public. Token and optional money
+budgets, per-caller quotas and channel rates bound it, and **Usage** shows
+what was spent. Prompt logging is off by default.
 
 ## MRC chat bridge
 

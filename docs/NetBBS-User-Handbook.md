@@ -520,8 +520,14 @@ When it is the channel's default bot, `!help` works too. Use
 prefix those commands with `Baud.bot:` instead of `!`. Reminders and replies
 are public in that channel. Reminders survive restarts, though mutes or
 limits can delay them. Ordinary conversation is not sent to an addressed-only
-bot, and this version of Baud does not use a language model. `/who` and
-`/names` show which bots are running here.
+bot. Depending on what your SysOp allows, Baud may also answer `stats` and
+`seen <account>`, greet people who join, or announce new posts and files; its
+`help` lists what it offers here. In a Linked channel, `Baud.bot@Node: help`
+asks a bot on another node. If your SysOp has enabled model conversation,
+other text addressed to Baud goes to a language model: your first such
+message only shows a notice naming the service, the replies are public, and
+`reset` clears your conversation. `/who` and `/names` show which bots are
+running here, and which bots read the whole channel.
 
 Channels marked **MRC** connect to a separate public chat network. Your handle
 and messages are visible there. MRC private messages are optional in your
