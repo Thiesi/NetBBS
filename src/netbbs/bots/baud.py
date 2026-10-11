@@ -17,6 +17,7 @@ class Baud:
     def __init__(self, hello, emit):
         self.emit = emit
         self.temperament = hello.get("temperament", "friendly")
+        self.queries = frozenset(hello.get("queries", []))
         self.state = hello.get("state") or {"next": 1, "reminders": []}
         if not isinstance(self.state, dict) or not isinstance(self.state.get("reminders", []), list):
             raise ValueError("Invalid Baud reminder state")
@@ -45,7 +46,9 @@ class Baud:
             if self.waiting and event["id"] == self.waiting[0]:
                 _, kind, value, request, text = self.waiting
                 self.waiting = None
-                if kind == "store":
+                if kind == "query":
+                    self.reply(request, event["value"]["text"] if event["ok"] else event.get("error", "Query unavailable."))
+                elif kind == "store":
                     if event["ok"]:
                         self.state = value
                     if request:
@@ -83,7 +86,15 @@ class Baud:
         if command in {"", "help"}:
             greeting = {"friendly": "Happy to help! ", "terse": "", "retro": "Carrier detected. "}[self.temperament]
             self.reply(event, greeting + "help; remind <1s-30d> <text>; reminders; cancel <id>. "
+                       + ("stats; " if "stats" in self.queries else "")
+                       + ("seen <local-account>; " if "seen" in self.queries else "") +
                        "Reminders appear publicly in this channel, including after a restart. No language model is enabled.")
+        elif command in {"stats", "seen"}:
+            if command not in self.queries:
+                self.reply(event, "The SysOp has not enabled this query ability.")
+            else:
+                identity = self.action("query", query=command, request=event["request"], target=rest.strip())
+                self.waiting = (identity, "query", None, event, None)
         elif command == "reminders":
             # Do not reveal reminder text from a different, possibly private channel.
             here = [r for r in own if r["channel"] == event["channel"]]

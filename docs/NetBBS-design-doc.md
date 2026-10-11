@@ -16215,8 +16215,13 @@ so an offline channel origin does not swallow that reply. Node backups now
 capture bounded API-managed state files with checksums before the database
 snapshot, and restore the matching generation, including absence. SysOps may
 delete a stopped instance and its state after explicit confirmation; channel
-history and existing backups remain. Channel/event scopes, node queries and
-model conversation remain subsequent slices.
+history and existing backups remain. Separate, default-off statistics and
+last-seen query grants now serve Baud and external programs through the same
+host-bound request API. Statistics expose node name, uptime and online human
+count. Last-seen exposes public online status or the latest recorded login or
+logout on the bot's host, respecting hidden session history even for SysOp
+requests because replies are public. No private activity is queried.
+Channel/event scopes and model conversation remain subsequent slices.
 See `NetBBS-bot-api.md` for the implemented protocol and limits.
 
 **Grounding.** Door output already speaks in chat without being a person

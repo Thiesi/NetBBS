@@ -6512,6 +6512,15 @@ home covers an unavailable channel origin; normal live dedup hides the relayed
 copy. Verify these behaviors with real multi-node Noise sessions and a real
 bot subprocess, alongside signed-message materialization.
 
+Node queries bind to the host's pending request caller and channel, never
+identity supplied in a bot action. Query grants and caller admission are
+rechecked on the database lane. Results are safe for a public reply: a SysOp's
+ability to inspect hidden session history is not permission to publish it.
+An interrupted session's restart-detection time is not a logout time; last-seen
+uses its recorded login instead. Presence counts distinct human accounts and
+does not include bots. Exercise both Baud and an independent subprocess against
+the same query API so the bundled bot cannot acquire an accidental privilege.
+
 A VM guest can write its node directory, so the drop directory is guest-
 controlled: `outbound` or any request in it may be a symlink to a host path.
 `_DropDir` opens it once with `O_DIRECTORY|O_NOFOLLOW` and makes every scan,

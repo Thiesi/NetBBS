@@ -40,6 +40,7 @@ class Bot:
     channels: tuple[str, ...]
     defaults: tuple[str, ...]
     linked_channels: tuple[str, ...] = ()
+    queries: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
@@ -62,7 +63,8 @@ def list_bots(db: Database) -> list[Bot]:
         result.append(Bot(row["id"], row["name"], row["storage_name"], bool(row["enabled"]),
                           tuple(json.loads(row["command_json"])), row["temperament"], row["lines_per_hour"],
                           tuple(g["name"] for g in grants), tuple(g["name"] for g in grants if g["is_default"]),
-                          tuple(g["name"] for g in grants if g["linked_approved"])))
+                          tuple(g["name"] for g in grants if g["linked_approved"]),
+                          tuple(json.loads(row["queries_json"]))))
     return result
 
 
@@ -96,7 +98,8 @@ def local_channel(db: Database, name: str, *, allow_linked: bool = False) -> Cha
 
 def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defaults: list[str],
              enabled: bool = False, command: list[str] | None = None, temperament: str = "friendly",
-             lines_per_hour: int = 60, bot_id: int | None = None, linked_channels: list[str] | None = None) -> Bot:
+             lines_per_hour: int = 60, bot_id: int | None = None, linked_channels: list[str] | None = None,
+             queries: list[str] | None = None) -> Bot:
     require_sysop(db, actor)
     name = name.strip()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}", name):
@@ -105,6 +108,10 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
         raise BotError("That label belongs to an existing human account. Choose another name.")
     if temperament not in TEMPERAMENTS:
         raise BotError("Choose friendly, terse or retro.")
+    queries = [] if queries is None else queries
+    if not isinstance(queries, list) or any(q not in ("stats", "seen") for q in queries):
+        raise BotError("Query grants may contain only stats and seen.")
+    queries = sorted(set(queries))
     if type(lines_per_hour) is not int or not 1 <= lines_per_hour <= 120:
         raise BotError("Choose 1-120 lines per hour per channel.")
     command = [] if command is None else command
@@ -140,6 +147,7 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
                     "UPDATE chat_bots SET name=?, enabled=?, command_json=?, temperament=?, lines_per_hour=? WHERE id=?",
                     (name, int(enabled), json.dumps(command), temperament, lines_per_hour, bot_id),
                 )
+            db.connection.execute("UPDATE chat_bots SET queries_json=? WHERE id=?", (json.dumps(queries), bot_id))
             keep = []
             for channel_name in allowed:
                 channel = get_channel(db, channel_name)
@@ -161,7 +169,7 @@ def save_bot(db: Database, *, actor: User, name: str, channels: list[str], defau
                 if row[0] not in keep:
                     db.connection.execute("DELETE FROM bot_channels WHERE bot_id=? AND channel_id=?", (bot_id, row[0]))
             record_action(db, actor=actor, action="bot_configure", object_type="bot", object_id=bot_id,
-                          detail=f"{name}.bot enabled={enabled}; addressed channels={allowed}; defaults={sorted(default_names)}; Linked approvals={sorted(approved)}")
+                          detail=f"{name}.bot enabled={enabled}; addressed channels={allowed}; defaults={sorted(default_names)}; Linked approvals={sorted(approved)}; queries={queries}")
     except sqlite3.IntegrityError as exc:
         raise BotError("A bot with that name or state directory already exists.") from exc
     return get_bot(db, bot_id)

@@ -694,7 +694,7 @@ async def run(
     # ends it lives in that finally.
     door_services = DoorServiceManager()
     from netbbs.bots.runtime import BotRuntime
-    bot_runtime = BotRuntime(background_lane, hub)
+    bot_runtime = BotRuntime(background_lane, hub, presence=presence)
     throttle = _build_throttle(config)
     throttle_config = config.throttle
     if session_registry is None:

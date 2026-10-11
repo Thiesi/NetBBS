@@ -28,8 +28,10 @@ _logger = logging.getLogger(__name__)
 
 
 class BotRuntime:
-    def __init__(self, lane, hub, *, poll_seconds: float = 1.0, restart_seconds: float = 1.0):
+    def __init__(self, lane, hub, *, presence=None, poll_seconds: float = 1.0, restart_seconds: float = 1.0):
         self.lane, self.hub = lane, hub
+        self.presence = presence
+        self.started_at = time.monotonic()
         self.poll_seconds, self.restart_seconds = poll_seconds, restart_seconds
         self.workers: dict[int, _Worker] = {}
         self.task: asyncio.Task | None = None
@@ -41,6 +43,7 @@ class BotRuntime:
 
     def start(self) -> None:
         if self.task is None:
+            self.started_at = time.monotonic()
             self.hub.bot_runtime = self
             self.task = asyncio.create_task(self._run(), name="bot-manager")
             if self.link is not None:
@@ -104,7 +107,7 @@ class BotRuntime:
         if len(worker.pending) >= MAX_PENDING or worker.events.full():
             raise BotError(f"{bot.label} is busy; try again shortly.")
         request = uuid.uuid4().hex
-        worker.pending[request] = (channel.name, participant_id, time.monotonic() + REQUEST_SECONDS, completed)
+        worker.pending[request] = (channel.name, participant_id, time.monotonic() + REQUEST_SECONDS, completed, dict(caller))
         worker.events.put_nowait({"type": "message", "request": request, "channel": channel.name,
                                  "caller": caller, "text": text})
 
@@ -192,7 +195,7 @@ class _Worker:
             tasks.append(asyncio.create_task(self._drain_stderr()))
             await self._write({"type": "hello", "version": BOT_API_VERSION, "name": self.bot.label,
                                "scope": "addressed", "channels": self.bot.channels,
-                               "temperament": self.bot.temperament, "state": state})
+                               "temperament": self.bot.temperament, "state": state, "queries": self.bot.queries})
             ready = await asyncio.wait_for(self._read(), 5)
             if ready != {"type": "ready", "version": BOT_API_VERSION}:
                 raise BotError("Bot did not acknowledge BOT_API_VERSION 1.")
@@ -276,7 +279,7 @@ class _Worker:
     async def _ticks(self) -> None:
         while True:
             await asyncio.sleep(1)
-            for request, (_, _, deadline, _) in list(self.pending.items()):
+            for request, (_, _, deadline, _, _) in list(self.pending.items()):
                 if time.monotonic() >= deadline:
                     await self.notify(request, "The bot did not reply within 60 seconds.")
             if not self.events.full():
@@ -301,7 +304,7 @@ class _Worker:
                 result.update(ok=False, error=str(exc)[:300])
                 await self.status("running", str(exc))
                 request = value.get("request")
-                if isinstance(request, str):
+                if isinstance(request, str) and value.get("action") != "query":
                     await self.notify(request, str(exc))
             if self.events.full():
                 raise BotError("Bot stopped consuming host events.")
@@ -315,8 +318,21 @@ class _Worker:
         if action == "state.set":
             await lane.run(write_state, self.bot.storage_name, value.get("value"))
             return None
+        if action == "query":
+            from netbbs.bots.queries import run_query
+            request = value.get("request")
+            pending = self.pending.get(request) if isinstance(request, str) else None
+            if pending is None or pending[2] <= time.monotonic():
+                raise BotError("A node query needs this bot's live request token.")
+            if self.owner.presence is None:
+                raise BotError("Node presence is not available for bot queries.")
+            return await lane.run(
+                run_query, self.bot.id, pending[0], value.get("query"), value.get("target"),
+                caller=pending[4], online=self.owner.presence.online_usernames(),
+                uptime_seconds=int(time.monotonic() - self.owner.started_at),
+            )
         if action not in {"say", "reply"}:
-            raise BotError("Unknown action or missing grant. Available: say, reply, state.get, state.set.")
+            raise BotError("Unknown action or missing grant. Available: say, reply, state.get, state.set, query.")
         body = value.get("text")
         request = value.get("request")
         if action == "reply":

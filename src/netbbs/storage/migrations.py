@@ -4315,4 +4315,8 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description="Issue #1210: explicit optional bot statistics and last-seen query grants.",
+        sql="ALTER TABLE chat_bots ADD COLUMN queries_json TEXT NOT NULL DEFAULT '[]';",
+    ),
 ]

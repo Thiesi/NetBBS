@@ -92,6 +92,8 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         "channels": ", ".join(bot.channels) if bot else "",
         "defaults": ", ".join(bot.defaults) if bot else "",
         "linked": ", ".join(bot.linked_channels) if bot else "",
+        "stats": "stats" in bot.queries if bot else False,
+        "seen": "seen" in bot.queries if bot else False,
         "command": json.dumps(bot.command) if bot else "[]",
         "temperament": bot.temperament if bot else "friendly", "rate": bot.lines_per_hour if bot else 60,
     }
@@ -117,6 +119,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
             channels=[n.strip() for n in values["channels"].split(",") if n.strip()],
             defaults=[n.strip() for n in values["defaults"].split(",") if n.strip()], lines_per_hour=values["rate"],
             linked_channels=linked,
+            queries=[key for key in ("stats", "seen") if values[key]],
         )
 
     def text_spec(key, label, help):
@@ -129,6 +132,10 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         text_spec("channels", "Allowed channels", "Comma-separated channel names. This grants addressed messages and replies there."),
         text_spec("linked", "Linked approvals", "A subset of allowed channels. Explicit approval to publish across Link; confirmed on Save. MRC is never allowed."),
         text_spec("defaults", "Default in channels", "A subset of allowed channels. !help and other !commands go only to the default bot."),
+        FieldSpec("stats", "Grant statistics query", lambda d: "on" if d["stats"] else "off", bool_field("stats"),
+                  step=bool_step("stats"), help="Allows node name, uptime and online human count. Replies are public; no board, file or channel activity is queried."),
+        FieldSpec("seen", "Grant last-seen query", lambda d: "on" if d["seen"] else "off", bool_field("seen"),
+                  step=bool_step("seen"), help="Allows online status and public login/logout times for this node's accounts. Respects hidden session history and never exposes private-channel activity."),
         FieldSpec("temperament", "Temperament", lambda d: d["temperament"], choice_field("temperament", list(TEMPERAMENTS)),
                   step=choice_step("temperament", list(TEMPERAMENTS))),
         FieldSpec("rate", "Lines per hour per channel", lambda d: str(d["rate"]), choice_field("rate", [10, 30, 60, 120]),
@@ -140,7 +147,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         session, lane, title="Edit chat bot" if bot else "Create chat bot", breadcrumb=("SysOp", "Content", "Chat bots"),
         fields=fields, draft=draft, save=save, error_type=BotError, save_menu_text=menu_key("S", "ave"),
         back_menu_text=menu_key("B", "ack"), preamble=status + "Addressed messages only; replies and reminders are public in their channel. "
-        "Baud supports help, remind, reminders and cancel. No language model. "
+        "Baud supports help, remind, reminders and cancel; stats and seen require their own query grants. No language model. "
         "Node backups include API-managed bot state. Kill a bot before using Delete selected to remove it and its state.",
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         collapsed=chrome.collapsed, header_color=chrome.header_color,

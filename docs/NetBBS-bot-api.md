@@ -9,7 +9,8 @@ script paths. The working directory is the instance's state directory.
 
 Baud and external bots have identical host permissions. This slice grants
 `addressed` only, for explicitly allowed channels. It does not provide
-channel-wide reads, source events, statistics/seen queries or model requests.
+channel-wide reads, source events or model requests. Statistics and last-seen
+queries have separate, default-off grants in the instance editor.
 Linked channels also need an explicit per-channel **Linked approvals** entry,
 confirmed on Save. MRC channels are refused, even with a paused bridge.
 A grant is checked again on dispatch and
@@ -29,7 +30,7 @@ Each line is one UTF-8 JSON object, at most 32 KiB including the newline.
 `BOT_API_VERSION = 1`. The host sends:
 
 ```json
-{"type":"hello","version":1,"name":"Baud.bot","scope":"addressed","channels":["lobby"],"temperament":"friendly","state":{}}
+{"type":"hello","version":1,"name":"Baud.bot","scope":"addressed","channels":["lobby"],"temperament":"friendly","state":{},"queries":["stats","seen"]}
 ```
 
 The bot must answer within five seconds with exactly:
@@ -70,6 +71,8 @@ events can arrive between a request and its result. Flush each output line.
 {"id":"2","action":"say","channel":"lobby","text":"alice: reminder #1: check the oven"}
 {"id":"3","action":"state.get"}
 {"id":"4","action":"state.set","value":{"reminders":[]}}
+{"id":"5","action":"query","request":"opaque-token","query":"stats"}
+{"id":"6","action":"query","request":"opaque-token","query":"seen","target":"alice"}
 ```
 
 `reply` publishes one line in the original request's channel; it is **public**,
@@ -116,6 +119,28 @@ channel before retrying.
 {"type":"result","id":"2","ok":false,"error":"Baud.bot is muted here."}
 ```
 
+`query` requires a live request token belonging to that instance. The host
+uses the caller and channel attached to the token, checks the current query
+grant and channel policy, and rechecks the local account or remote Link trust.
+A successful query returns an object in `value`, including a public-safe
+`text` suitable for a reply. Query success or refusal does not consume the
+token; the bot can still send its one public `reply`. No arbitrary database
+access is exposed.
+
+- `stats`: node display name (`node`), count of online human accounts
+  (`online_humans`) and uptime in seconds (`uptime_seconds`). Bots and multiple
+  sessions of one account do not inflate the count. Uptime starts with the
+  node's bot runtime. No private resource counts are included.
+- `seen`: one local account name on the bot's host, including when requested
+  over Link. An available result has `available: true`, `username` and
+  `online`. Offline results add `at` (UTC timestamp) and `basis` (`login` or
+  `logout`) for the latest recorded visit boundary. An interrupted visit
+  reports its actual login, never the later restart's detection time.
+  Hidden session history, disabled/pending accounts and unknown names return
+  the same `available: false` response. Online status is already public node
+  presence. Even a SysOp request cannot publish hidden history; private-channel
+  names and activity are never returned.
+
 `state.get` returns the instance's JSON value. `state.set` atomically replaces
 it, up to 16 KiB encoded JSON; success returns `null`. A bot cannot select a
 different instance's state through the API. Wait for success before promising
@@ -153,6 +178,8 @@ from one to 60 seconds. Kill controls disable the instance persistently.
 ## Bundled Baud
 
 Commands: `help`, `remind <1s-30d> <text>`, `reminders`, `cancel <id>`.
+With the corresponding grants, Baud also offers `stats` and
+`seen <local-account>` and lists them in `help`. Both replies are public.
 Reminder text is capped at 160 characters. Baud holds up to eight reminders
 per caller and 48 per instance, also subject to the state byte limit. Listing
 and cancelling work only for the caller's reminders in the current channel,
