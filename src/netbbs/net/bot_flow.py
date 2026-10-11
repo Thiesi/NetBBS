@@ -41,6 +41,16 @@ async def bot_menu(session, lane, actor):
     async def create():
         return await bot_editor(session, lane, actor, chrome)
 
+    async def model_settings():
+        from netbbs.net.bot_model_flow import model_editor
+        await model_editor(session, lane, actor, chrome)
+        return await refresh()
+
+    async def model_usage():
+        from netbbs.net.bot_model_flow import model_usage as show_usage
+        await show_usage(session, lane, actor)
+        return await refresh()
+
     def description(bot):
         state, error = statuses.get(bot.id, ("stopped", ""))
         return (f"{'enabled' if bot.enabled else 'off'}; last runtime status: {state}; "
@@ -53,11 +63,13 @@ async def bot_menu(session, lane, actor):
             stable_id_of=lambda b: b.id,
             description_of=description, title="Chat bots", breadcrumb=("SysOp", "Content"),
             empty_message="No bots installed. Create an instance of Baud to get started.",
-            refresh=refresh, on_create=create, live_keys={"x": stop_all}, item_keys={"k": stop_one, "d": delete_one},
+            refresh=refresh, on_create=create, live_keys={"x": stop_all, "m": model_settings, "u": model_usage}, item_keys={"k": stop_one, "d": delete_one},
             live_nav=(MenuEntry(label=menu_key("K", "ill selected"), brief="Stop this bot persistently"),
                       MenuEntry(label=menu_key("D", "elete selected"), brief="Delete a stopped bot and its state"),
-                      MenuEntry(label=menu_key("X", " Stop all"), brief="Stop every bot persistently")),
-            masthead="Bots read addressed messages only. Linked channels require explicit approval. Changes apply within a second.",
+                      MenuEntry(label=menu_key("X", " Stop all"), brief="Stop every bot persistently"),
+                      MenuEntry(label=menu_key("M", "odel settings"), brief="Optional provider, privacy and budgets"),
+                      MenuEntry(label=menu_key("U", "sage"), brief="Model spending, callers and limits hit")),
+            masthead="Bots read addressed messages by default. Broader access and Linked channels require explicit grants. Changes apply within a second.",
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             collapsed=chrome.collapsed, header_color=chrome.header_color,
         )
@@ -102,6 +114,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         "announcement_channel": (bot.announcement_channel or "") if bot else "",
         "announce_posts": bot.announce_posts if bot else False,
         "announce_files": bot.announce_files if bot else False,
+        "model": bot.model_conversation if bot else False,
         "command": json.dumps(bot.command) if bot else "[]",
         "temperament": bot.temperament if bot else "friendly", "rate": bot.lines_per_hour if bot else 60,
     }
@@ -118,6 +131,9 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         added = set(linked) - set(bot.linked_channels if bot else ())
         added_reading = set(reading) - set(bot.reading_channels if bot else ())
         approvals = []
+        if values["model"] and not (bot and bot.model_conversation):
+            from netbbs.bots.model import settings, disclosure
+            approvals.append("Allow host-managed model conversation. " + disclosure(await lane.run(settings)))
         if added:
             approvals.append("Participate across Link in " +
                              ", ".join("#" + sanitize_text(n) for n in sorted(added)) +
@@ -142,6 +158,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
             file_sources=[n.strip() for n in values["files"].split(",") if n.strip()],
             announcement_channel=values["announcement_channel"].strip() or None,
             announce_posts=values["announce_posts"], announce_files=values["announce_files"],
+            model_conversation=values["model"],
         )
 
     def text_spec(key, label, help):
@@ -169,6 +186,8 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
                   step=bool_step("stats"), help="Allows node name, uptime and online human count. Replies are public; no board, file or channel activity is queried."),
         FieldSpec("seen", "Grant last-seen query", lambda d: "on" if d["seen"] else "off", bool_field("seen"),
                   step=bool_step("seen"), help="Allows online status and public login/logout times for this node's accounts. Respects hidden session history and never exposes private-channel activity."),
+        FieldSpec("model", "Grant model conversation", lambda d: "on" if d["model"] else "off", bool_field("model"),
+                  step=bool_step("model"), help="Off by default. Also requires the node's Model settings to be enabled. Only the caller's addressed input and isolated temporary context go to the configured provider, after disclosure. Public replies; reset clears context."),
         FieldSpec("temperament", "Temperament", lambda d: d["temperament"], choice_field("temperament", list(TEMPERAMENTS)),
                   step=choice_step("temperament", list(TEMPERAMENTS))),
         FieldSpec("rate", "Lines per hour per channel", lambda d: str(d["rate"]), choice_field("rate", [10, 30, 60, 120]),
@@ -180,7 +199,7 @@ async def bot_editor(session, lane, actor, chrome, *, bot=None):
         session, lane, title="Edit chat bot" if bot else "Create chat bot", breadcrumb=("SysOp", "Content", "Chat bots"),
         fields=fields, draft=draft, save=save, error_type=BotError, save_menu_text=menu_key("S", "ave"),
         back_menu_text=menu_key("B", "ack"), preamble=status + "Addressed-only by default. Read whole channels shares other callers' conversation with the program; grant only deliberately. Replies, reminders and greetings are public. "
-        "Baud supports help, remind, reminders and cancel; stats and seen require their own query grants. No language model. "
+        "Baud supports help, remind, reminders and cancel; stats, seen and model conversation require their own grants. "
         "Node backups include API-managed bot state. Kill a bot before using Delete selected to remove it and its state.",
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         collapsed=chrome.collapsed, header_color=chrome.header_color,

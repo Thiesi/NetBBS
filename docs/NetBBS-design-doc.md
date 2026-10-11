@@ -16236,7 +16236,13 @@ Restricted mappings are refused. Only public metadata is delivered; source,
 content, trust and destination are rechecked inside publication. Events are
 bounded, best-effort notices of new approvals/arrivals while the program runs,
 not replay on startup. Edits and fetching already-catalogued files do not
-reannounce them. Optional model conversation remains subsequent work.
+reannounce them. Optional model conversation is implemented behind separate
+default-off node and instance switches. The host owns provider credentials,
+initial disclosure, isolated temporary context/reset and persistent budget
+accounting; programs may request it only using a live addressed-message token.
+The optional `chat_bot_callers_v1` extension supplies the caller home node's
+authenticated/guest classification and level solely for model admission. Older
+peers retain ordinary bot commands but cannot assume authenticated model access.
 See `NetBBS-bot-api.md` for the implemented protocol and limits.
 
 **Grounding.** Door output already speaks in chat without being a person
