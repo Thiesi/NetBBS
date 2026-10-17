@@ -13,7 +13,7 @@ per-message trust-filtered scrollback (issue #164) shipped in v5.3.0.
 
 Read these in order before substantial work:
 
-1. `docs/NetBBS-design-doc.md` — current product and architecture decisions.
+1. `docs/NetBBS-design-doc.md` — index for the current product and architecture decisions; follow its area link for the topic you need.
 2. Current GitHub issues — active work, dependencies, and acceptance criteria.
 3. `docs/NetBBS-worklog.md` — curated engineering invariants, implementation
    traps, operational constraints, and durable lessons.
@@ -31,6 +31,12 @@ what users or nodes may rely on, or how a future protocol must behave. Keep one
 current normative answer per topic. Explain important rationale and rejected
 alternatives, but replace superseded wording rather than piling corrections
 under it.
+
+The design document path is the stable index. Store normative text in the
+area document which owns the topic under `docs/design/`, keep the original
+section numbers, and update the index when adding or moving a top-level
+section. Keep §16 as the decisions and extension reference log; the area
+document remains authoritative for the meaning of the decision.
 
 ### Engineering record
 

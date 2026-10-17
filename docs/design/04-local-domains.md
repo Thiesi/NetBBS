@@ -1,0 +1,2019 @@
+# NetBBS design — 6. Local product domains
+
+This is the normative design reference for this area of NetBBS. Section numbers are preserved from the design index so existing `§n.n` references remain stable.
+
+---
+
+## 6. Local product domains
+
+### 6.1 Message boards
+
+Local boards provide:
+
+- categories and stable navigation IDs;
+- posts and replies;
+- moderation and pending approval;
+- expiry, pinning, and exemption;
+- immutable revision history for edits;
+- simple and fullscreen composition.
+
+Read/unread state, follows, activity discovery, and local search across
+boards, file areas, channels, and Communities are specified together in
+§6.6, not per-domain.
+
+A visible edit is a revision, not destructive replacement of history. Any
+threading or revision semantics which affect Link event IDs or propagation must
+be settled in Phase 3; only presentation refinements may wait until Phase 7.
+
+**A board is a list of posts; a post is read on its own screen** (issue #679).
+
+The list:
+- Shows one row per post: number, subject, a `new` marker, author and date.
+- Fits as many rows as the terminal holds and pages with `<` (older) and `>`
+  (newer), PgUp/PgDn or ←→ (§3.5); `[R]ecent` jumps to the newest page.
+- Has a cursor: Up/Down, and Enter or a digit to open a post.
+- Follows §3.6: display-width columns. Below readable width, a row becomes
+  "subject -- author". Author gives way to subject first, because the reader
+  shows the author in full.
+- Has a header that says where the caller is and what they can do: the path
+  they came through (Community, "Message boards", category), newest or older
+  posts, how many were new on arrival, and "Linked" or "linked from X".
+- Shows the board's description and, for a caller who can read but not post,
+  why: the gate they do not meet is marked on its "Requires:" line (issue
+  #1115). Only a reason that is not a gate -- a Linked board whose origin
+  keeps posting to its own callers -- still gets a line of its own.
+- Marks a post `new` until the caller opens it (§6.6, issue #710): showing
+  a post in the list does not count as reading it. `[M]ark all read` counts
+  everything on the board as read; it is offered only while something is
+  unread.
+- Opens a `[N]ew scan` or `[/] Find` jump with the cursor on its target.
+
+A post opens on `show_detail`:
+- The title, a byline (author, date, `edited`, `new`, the post it replies to)
+  and the action bar stay on screen while a long body pages with PgUp/PgDn.
+- The post's own actions live there, offered only when they would succeed:
+  `[R]eply`, `[H]istory`, `[E]dit`, `[W]ithdraw`, `Remove pos[t]`,
+  `P[i]n`/`[K]eep` (§5.3), and `[N]ext post`/`[P]revious post`, which cross
+  page boundaries. These move to another post, not another page of this one,
+  so they are the screen's own actions rather than the paging keys of §3.5.
+- `[B]ack` returns to the list with the cursor on the post last read.
+
+**Revision history** (issue #675). `[H]istory` lists a post's versions,
+newest first. Each opens read-only on the same reader. A version is marked
+"current", "original", "edit" or "withdrawn", plus "by a moderator" where one
+wrote it.
+- **Who:** moderators only, meaning holders of the board's edit permission,
+  which a moderator edit needs. A reader, and the author, see no history,
+  only the `edited` badge. The earlier rule, where readers saw back to the
+  last moderator edit, was replaced. It depended on working out after the
+  fact who made each edit, and deleted accounts made that unreliable in the
+  direction that shows readers what a moderator edited away.
+- **What moderators see:** every approved version, those of a removed or
+  withdrawn post included. Expired and pending revisions are left out, and so
+  is the removal placeholder.
+- **Order:** the chain's own links (`edit_of_post_id`), not `created_at`,
+  which for a carried revision is another node's clock (§7.2).
+- **Limit:** at most the 50 most recent versions, because a carried post's
+  chain is written by another node.
+- **Expiry:** swept before listing.
+
+**Withdrawal** (issue #675). The author's `[W]ithdraw` replaces the post's
+text with "[withdrawn by author]" and keeps its subject, so replies still read
+as answers to something.
+- **Not final.** It is a revision the author may edit past later, not a
+  removal.
+- **Hidden, not deleted.** A moderator can still read the withdrawn text in
+  the history, and every node keeps the signed original. The confirmation
+  says so.
+- **Not held for moderation.** It only takes text away. Held, a moderated
+  board would go on showing what its author took back until a moderator got
+  to it.
+- **Pin and keep.** It clears both, as a removal does.
+- **On the Link:** a `board_post_edit` with `"withdrawn": true` (§16). A
+  carrying node that knows the field applies it the same way, without local
+  moderation or a trust hold.
+
+**Replying** (issue #675). A reply is a post with the replied-to post as its
+parent, listed on the board like any other post. There is no threaded view.
+- **Who:** `[R]eply` is offered to anyone who may post on the board, on any
+  post that has not been removed.
+- **Subject:** starts as "Re: <subject>". A subject that already starts with
+  "Re:" gets no second prefix, and the prefix never pushes a subject over its
+  limit.
+- **Body:** starts as the post quoted, with the cursor under the quote:
+  "<author> wrote:", then each line of the post before its signature with
+  `> ` in front. A line that was already quoted becomes `> > `.
+- **Attribution line:** "<author> wrote:" is always a line of its own. The
+  board reader used to reflow prose, and joined the text a replier wrote
+  straight under a trimmed quote onto it, so their words read as the quoted
+  author's (#837). Posts now keep their lines (see **How a post reads**),
+  which keeps the attribution apart for any author, as mail always did.
+- **How a post reads** (issue #837): a board post keeps the lines its author
+  wrote, as a letter does (issue #809): the reader, the review screen, the
+  pending-post screen and a post's history show every line as written and
+  wrap only a line wider than the terminal, at a word
+  (`netbbs.rendering.post_body.lined_body_rows`), in every display mode and
+  for posts carried over Link alike. Posts used to be reflowed into
+  paragraphs, which merged bullet lists, sign-offs ("73, Harold") and short
+  separate lines into one, in both editors' output. The line editor's blank
+  line is a paragraph break and the fullscreen editor's lines are the
+  author's, so neither needs a reader to rejoin lines. A post written before
+  this that relied on reflow -- a paragraph typed as several short lines --
+  shows those lines as typed. Rejected: reflowing only posts from the line
+  editor (the reader cannot tell the editors apart, and a carried post has
+  no editor at all) and a per-post "keep lines" flag (a second layout for
+  the same text).
+- **Files in a post** (issue #842, F086): a post points at files in this
+  node's file areas exactly as a letter does (**Files in a letter**, issue
+  #830), reusing `netbbs.file_refs` and `netbbs.net.file_ref_view`.
+  - *Stored per revision:* `post_file_refs` rows keyed by the revision's
+    content-addressed `posts.post_id`, so an edit can attach or remove a file
+    and a held edit's files wait with it. `edit_post` keeps the current
+    revision's files unless it is given a list: a moderator's edit keeps
+    them, a withdrawal and a tombstone drop them. A file newly attached must
+    be one the writer can open; one already on the post stays, shown as no
+    longer available if it has gone. The reader and the edit take the files
+    of the newest approved revision (`shown_post_refs`), a held post its own.
+  - *Readers:* the reader lists them under the byline and `[G]et file`
+    downloads one after `open_ref` checks again. A reader who may not read
+    the file's area sees "A file in a file area you can't open", no names.
+    Unlike a letter, nothing is refused at Publish when some of the board's
+    readers cannot open the area -- a board has no recipient list to check.
+    The review screen says so instead (`refs_some_readers_cannot_open`:
+    the area's effective read level or age is stricter than the board's).
+    The moderation queue shows a held post's files, and a held edit's
+    proposed and current files where they differ.
+  - *Over Link:* no reference crosses. `board_post`, `board_post_edit` and
+    `board_post_moderator_edit` events carry `carried_post_body`: the body
+    with one `link_text_line` per file after a blank line, the same line as
+    mail's. The review screen counts those lines toward the length limit on
+    a Linked board. A carried post never gets rows, so a remote moderator's
+    edit of a local post leaves the new revision with its files as text only.
+  - *Removal:* no foreign keys, for mail's reason (`posts` is rebuilt by
+    migrations too). Every hard delete of posts rows -- `delete_post`, the
+    expiry sweep, `delete_board` and purging a hidden carried board -- calls
+    `forget_orphaned_post_refs_without_commit`, which removes rows whose
+    revision is gone.
+  - A post draft keeps its text, not its files: board drafts are plain text
+    files, unlike a letter's.
+- **Quote limits:** a quote is at most 40 lines and 8 KB, and a cut quote
+  ends with `> [...]`, so a reply to a long post stays writable in the line
+  editor.
+- **Color boards:** where color is allowed, the quote is the text a reader
+  with color off sees.
+- **Art posts:** an art post is answered without a quote.
+- **Parent:** the reply's parent is the replied-to post's root, which every
+  revision and every carrying node shares. The reader's byline names it, and
+  `[N]ew scan`'s "replies to you" pass finds it.
+- **Mail:** mail's Reply starts its body with the same quote and its subject
+  with the same rule (`netbbs.quoting`).
+- The mail message view and the SysOp's pending-post review use the same
+  reader. Mail keeps its writer's lines (§6.4).
+
+The board picker adds an activity column ("N new", "caught up", "not visited
+yet", in §6.6's terms) and an "about" column that leads with a name-gate note
+before the description. A Linked board shows by its name's colour (§3.6).
+
+**Color in posts** (issue #711). A board's SysOp may allow color in its
+posts ("Color in posts", off by default). A carried board follows the
+carrying node's setting. Authors color a body with Mystic pipe codes
+(`|00`-`|15` foreground, `|16`-`|23` background). A body is stored and
+carried exactly as written and filtered on output
+(`netbbs.rendering.post_body`):
+- **What survives:** text, line breaks, and SGR limited to foreground,
+  background, bold, underline and blink. Every other escape sequence is
+  removed whole: cursor movement, clears, mode changes, titles,
+  OSC/DCS/APC/PM/SOS strings and their 8-bit forms, and the bell. A post can
+  never clear the screen, move the cursor, hide text or fake a prompt.
+- **Where:** bodies only. Subjects stay plain in lists, search and
+  breadcrumbs, and search indexes a body's plain text.
+- **Who sees what:** where color is allowed, a reader with "Post colors" on
+  (Profile, on by default) sees it; with it off, plain text without the codes.
+  Where it is not allowed, a body shows as text, pipe codes as typed.
+- **Layout:** a colored body keeps its lines like any other. Every row
+  restates the color it inherits and ends with a reset, because the reader
+  pages by rows.
+  The state is kept normalized, so a flood of codes costs each row one short
+  prefix. The review screen and the SysOp's pending-post screen show a body
+  the same way.
+- **Art posts:** on a board that allows color, `[A]rt post` opens the ANSI art
+  editor (`netbbs.net.ansi_editor`) on a canvas as wide as the terminal, up to
+  80 columns, on a terminal of at least 40x12. A drawn post keeps its lines: each line stays a line, and only a
+  line wider than the reader's terminal wraps, cut at the column, with its color
+  carried over. The layout belongs to the post, set by the editor that drew it:
+  editing an art post reopens the art editor, and a carried post brings its
+  layout along (§9.2).
+- **Pasted color** (issue #754): the post editors show color as pipe codes, so
+  that is how pasted color arrives. On a board that allows color, the line and
+  fullscreen prose editors type a pasted SGR (`ESC [ <digits;> m`) in at the
+  cursor as the equivalent pipe codes. Bold becomes the bright foreground, a
+  bright background its base color, and a return to the default foreground
+  `|07`. Underline, blink, 256-color and truecolor have no pipe code and are
+  dropped. The editors have no notation of their own for bold, underline or
+  blink. The author sees and edits the codes as text, and the stored body stays
+  in the one notation the editors show. On a board without color, and at every
+  other prompt, a pasted SGR is dropped as before. A post with SGR of its own
+  (carried over the Link, or written by another client) still shows it through
+  the filter above.
+
+### 6.2 File areas
+
+Local file metadata lives in SQLite; file bytes use content-addressed filesystem
+storage. Areas support permissions, moderation, expiry, and two transfer paths
+(issue #475).
+
+**Zmodem** on byte-capable transports, for terminals that implement it —
+SyncTERM, NetRunner, Qodem, Tera Term, ZOC, MobaXterm, minicom. It is a protocol
+*inside* the terminal stream, so the emulator must drive it; PuTTY, Windows
+Terminal, an ordinary OpenSSH client and this project's own browser terminal
+cannot, which for most callers meant no transfer at all.
+
+NetBBS speaks Zmodem the way lrzsz does, because that is what terminals are
+built against (issue #963; the first version only ever talked to itself and
+no real client could complete a transfer). A download opens with `rz\r` and a
+ZRQINIT in the hex header form, an upload with a hex ZRINIT: those are the
+patterns a terminal's auto-start watches for. Every header read accepts hex,
+CRC-16 and CRC-32 binary headers. ZCRCW ends a frame, and the next one opens
+with a fresh ZDATA header. The sender streams when the receiver says it can
+(CANFDX and CANOVIO) and honours ZRPOS at any point, which covers both resume
+and error recovery; the receiver asks for data again after a CRC error or a
+frame at the wrong offset, up to a fixed number of times. A transfer ends with
+ZFIN both ways and `OO`, and what the terminal still sends is read off the line
+so it can't arrive as keystrokes. Five Ctrl-X from the caller cancel; a
+transfer NetBBS gives up on sends CAN×10, BS×10 so the terminal stops too.
+Deliberately left out: sending with CRC-32 (not asked for, since TCP already
+checks every byte), run-length encoding, compression, encryption, remote
+commands, and more than one file per transfer (later files in a batch get
+ZSKIP). `tests/test_zmodem_lrzsz.py` runs real `sz`/`rz` where lrzsz is
+installed and is skipped otherwise.
+
+**A session-bound HTTP link** for everyone else, served by the same aiohttp
+application as the web terminal. The file screen adapts to the transport: Zmodem
+where it can be carried, a link where it cannot, and `[W]eb transfer` for a
+terminal whose own emulator lacks Zmodem. A caller already in the browser is
+handed the transfer rather than the URL — the page opens a drop target or starts
+the download itself.
+
+A transfer grant is not a capability. It records who asked for what; every gate
+the terminal path applies — level, age, name requirement, Community inheritance,
+moderation state, maximum upload size — is applied again when the link is
+redeemed, against live rows. It is single-use, expires in minutes, names its area
+and file by content-addressed ids that no deletion can recycle, and lives in
+memory only. A node that cannot say how it is reached (`[web] public_url` unset,
+listener on a wildcard address) says so rather than printing a URL that fails.
+
+`max_upload_bytes` bounds the *file*, identically over Zmodem and HTTP. An HTTP
+upload as a whole may cost the node that plus a small fixed framing allowance,
+whatever its shape: preamble, part headers and every part before or after the
+file count, and a request past the bound is refused (issue #511).
+
+A finished upload is reported both ways (issue #842). The terminal that minted
+the link is told when the file is stored, and whether it waits for approval,
+as an outcome on its next screen; Ctrl-L on the file list looks again, and the
+browser page sends it once its upload is done. The HTTP answer is JSON for the
+browser terminal's own `fetch()` and for scripts, and a short page for a form
+submitted from a browser tab (a request that accepts `text/html`), which used
+to be left on raw JSON. A failed Zmodem transfer leaves the caller on the file
+list and names `[W]eb transfer` when the node can mint links.
+
+A `HEAD` on a transfer link answers with the status a `GET` would, the reason in
+`X-NetBBS-Transfer-Message`, and spends nothing. The browser page relies on it:
+it probes a download first and starts it only on a yes, so a refused download is
+shown to the caller rather than saved under the filename. The answer is advice,
+not a reservation. The page addresses the link on its own origin, under the path
+it was loaded from, so a `public_url` naming another origin or a reverse-proxy
+prefix does not break the transfer (issue #511).
+
+**A JavaScript Zmodem implementation for the browser terminal is not planned.**
+It was listed as a possible follow-on while issue #475 was open, on the reasoning
+that keeping one transfer protocol everywhere would be simpler than maintaining
+two. What shipped answers the same need better: a browser caller gets a drop
+target and a download the page performs itself, which is what their environment
+is actually good at, and the bytes never pass through the terminal stream. A
+Zmodem implementation in the page would add a second protocol to maintain, in
+JavaScript, to reach exactly the callers already served — and it would put file
+transfer back inside the byte stream it was moved out of. Zmodem remains the
+right answer on terminals that already implement it, which is where it stays.
+
+**SysOp uploads** (issue #728) reuse both routes to put one file at one fixed
+place on the node: a banner or masthead piece's own file (**[U]pload** on its
+screen), or a named file in the doors folder (**Content → Doors → [U]pload**).
+The contract:
+
+- The destination is chosen before any transfer is offered. The name the
+  sending side reports is recorded but never decides where bytes land. A door
+  file's name is a plain name: no folder part, no leading dot, no control
+  characters or colon.
+- Replacing an existing file is confirmed first. The consent is re-checked when
+  the bytes arrive, and a file that has appeared since is not overwritten. A
+  symlink or directory at the destination is refused, never followed. The
+  replacement keeps the old file's permission bits.
+- Caps: 256 KiB for banner art (what **[E]nable** accepts). For a door file, the
+  node's `max_upload_bytes`, read live when the link is redeemed.
+- The grant is redeemed like any other. Its account must still be an enabled,
+  unblocked SysOp when the link is used and again once the body is in.
+- The file is written beside the destination and renamed over it, so a failed
+  upload leaves the previous file in place. Every upload that lands is
+  audit-logged with its size and destination, even if the session that
+  started it is torn down mid-install.
+- An upload never enables a piece, registers a door, or sets an execute bit.
+  Those stay separate, explicit steps (**[E]nable**, **[F]rom disk**).
+
+This adds no trust boundary: a SysOp can already run any program on the host
+through a door's **Test as SysOp**. It removes the need for a separate OS-level
+account just to place a file.
+
+File bytes are node-local. NetBBS Link will distribute catalogue/descriptor
+information and fetch content on demand in bounded resumable chunks. It will
+not replicate every file to every node.
+
+Every file carries an optional description, and the two ways one is written
+are deliberate (issue #463).
+
+An uploaded archive is read for a `FILE_ID.DIZ` member, the BBS-era convention
+where the archive's own author, not its uploader, supplies the catalogue text;
+finding one fills the description in with no further interaction. ZIP is read
+in-process and recognised by content rather than by the uploader's chosen
+extension. Legacy formats (`.lzh`/`.lha`/`.arj`/`.rar`/`.7z`) are read through
+whichever external unpacker the SysOp has installed, and installing one *is*
+the opt-in — NetBBS never installs an unpacker, and a node without them simply
+gets no description from those formats. Because every such tool parses hostile
+input, extraction reads the member from the tool's stdout and never writes to
+disk, passes argv lists with a fixed member name and no shell, applies POSIX
+CPU/memory/process rlimits, bounds the read and the wall clock, and kills and
+reaps on every exit path. No archive, no DIZ, no unpacker, or a corrupt member
+are all "no description", never a failed upload.
+
+Every description, whether extracted, typed, or carried in a peer's
+`file_descriptor`, is stored as plain text. Whole ANSI escape sequences are
+removed, not only their ESC byte, which would leave `[0m`-style remains from a
+colour DIZ (issue #1000). Control and bidi-override characters are stripped
+after that. A DIZ's SAUCE record, and anything after its DOS end-of-file byte,
+is dropped before decoding. Colour in a DIZ is not kept: descriptions have no
+colour markup.
+
+A description may also be written by hand, from the file listing, by the
+uploader themselves or by anyone holding `EDIT` on the area. Hand-written
+edits are local-only: a `file_descriptor` (§11.2) is immutable and single-shot,
+so a file whose descriptor has already been signed keeps the description its
+peers were told about. In a Linked area that is most edits — an approved
+upload's descriptor is signed and queued the moment it lands (§11.2) — so the
+caller is told the change stays local rather than left to assume it travels.
+The exceptions are files no descriptor was ever built for: one approved before
+its area was promoted (pre-Link history is never backfilled), one in a carried
+area, and one whose name or size no descriptor may carry. The interface asks
+the file itself, not its area, before saying anything about what peers hold.
+
+Either way a description is stored already normalized — control and bidi
+characters stripped, at most 10 lines (the DIZ format's own limit, and what
+keeps a listing page bounded), and within the same byte ceiling §11.2's
+`file_descriptor` accepts, so a locally valid description is always one Link
+can carry. The area listing renders every line of it, because a DIZ's line
+layout is content.
+
+### 6.3 Real-time chat
+
+Local chat is typed event traffic, not preformatted strings. Initial event types
+include:
+
+- ordinary message;
+- `/me` action;
+- online private message;
+- join/leave;
+- alias change;
+- system notice.
+
+An optional `/nick` alias is presentation metadata only. Every context retains
+the authenticated canonical identity, and permissions, moderation, blocking,
+reputation, and addressing always use canonical identity.
+
+An alias is always shown with the username beside it, as `alias (username)`,
+in the live stream as in `/who`, `/whois` and `/names` (issue #843). In the
+live stream the alias leads in its own color and `(username)` follows muted
+(issue #899): the username is there so no alias stands alone, not to compete
+with the name its owner chose. It may not contain `( ) | [ ] < > * ~`: the
+parentheses that hold the account, a status-bar tag's brackets, the angle
+brackets around a speaker, the `*` of actions and notices, and the two earlier
+alias markers -- nor any character that reads as one of these (one that
+compatibility-folds to it, like a fullwidth `（`) or any other Unicode bracket. It may not read as another local account's username, or, unless its
+owner is a SysOp, as a staff title: a reserved name from §4.2 or anything
+containing `sysop`. "Reads as" is §4.2's skeleton, applied after accents are
+dropped, Cyrillic and Greek look-alikes become Latin letters, and everything but
+letters and digits is removed, so "Ink Well", "InkWeII" and "InkWell[sysop]"
+are all refused while `InkWell` is the SysOp. An alias that already exists and
+reads as another name is left alone; the username beside it keeps it honest. One
+holding a character reserved since it was set is not shown at all: an old
+`Ann (bob)` would otherwise read as a second, forged account (issue #899). A display name follows the
+same rule, but protects only SysOp names and staff titles, since it is meant to
+be a person's own name and two people can share one. The rule covers aliases
+this node grants. A Link or MRC name always shows its node or network, and is
+not an alias.
+
+Local chat includes bounded persistent channel scrollback, presence, away
+state, invitations/membership, `/who`, `/whois`, `/names`, `/list`, `/join`,
+`/leave`, `/topic`, completion, and online private conversation.
+
+Chat's input row -- in a channel, an MRC room and a direct chat -- scrolls a
+line wider than the terminal within the row, with `<` and `>` marking text out
+of view, as every other prompt does since issue #546 (issue #926). The row is
+the terminal's last, outside the scroll region, so a soft wrap there has no row
+to go to and overwrote the line. Tab completion edits the line and the window
+redraws, and the repaint after an incoming message or a status update draws the
+same window around the cursor, not the head of the line.
+
+A resize keeps the conversation on screen. When the height changes, chat clears
+the screen to rebuild its scroll region and pinned rows at the new size, and
+then draws again the newest lines it has shown, rewrapped at the new width, as
+many as the content area holds. It keeps the last 500 lines for this, with
+their colour but without cursor moves, clears or the bell. Before, the clear
+left the content area blank: a caller who maximized the window saw the status
+line move and the chat vanish.
+
+A line from MRC is marked by an `[MRC]` badge in front of it, and its sender is
+`nick@site`: the nick in its MRC color, the `@` muted, the site in a color of
+its own that a linked node never uses (`MRC_SITE_COLOR`). Stored rows keep
+`user@site (MRC)`; screens drop the suffix, since a parenthesis after a name
+holds an account (§16, issue #899): `/names` and Find say `(on MRC)`, and
+`/who` says `on MRC` in the column beside the name.
+
+Chat `/help` is a width- and height-aware command table. It aligns descriptions
+in one column, colors command names, parameters, and descriptions as distinct
+fields, and paginates within the scrolling region while preserving chat's three
+pinned rows. The bare list remains permission-aware; `/help <command>` may
+explain a command outside that list without granting permission to run it.
+
+Every other command that answers with more than a line -- `/list`, `/who`,
+`/names`, `/whois`, `/finger`, `/members`, `/bots`, `/mrc` -- answers with one
+block in the scrolling area: a rule in the rule color with the title in the
+header color set into it and, at its right end, the count of what it lists.
+Rows follow one space in, their columns aligned and the last one wrapping under
+itself; prose (a comma-separated roster, a closing note) wraps at the same
+indent. The block is at most 78 columns wide. Flat lines read as a wall of text
+between conversation; a titled block is told apart from it at a glance. A
+one-line answer (a refusal, "No one is here.", a toggle's new state) stays one
+muted line.
+
+`/list` counts everyone this node can see in a channel, not only its own
+callers: `2 here · 3 on MRC` for a bridged room, from the room's roster while a
+caller here is in it and from the hub's room listing otherwise (marked with its
+age when it is not current), and `4 on Vertigo` for a linked channel's callers
+on other nodes (`5 on 2 linked BBSes` when they are on several). A subscriber
+knows them while a caller here holds a live subscription -- the roster goes with
+the last one -- and the origin knows every subscriber's (§8.10.2, issue #1281).
+`/who` names each one's node.
+
+The hub's answer to an `/mrc` question carries no request id and no end
+marker, so the reply lines that follow the question (its first within ten
+seconds) are collected until the hub has been quiet for a second, then drawn as
+one block titled `MRC hub · /mrc <question>` with the time the answer began.
+Its rows keep the hub's own colors and alignment and carry no badge or time of
+their own. Other traffic is shown as it arrives meanwhile; a second question
+asked before the first answer went quiet gets its own block. An answer taller
+than the chat area is paged (the hub may push 300 lines at once, and `/mrc
+bbses` names every board on the network): each page ends `page 1 of 4 · Enter
+shows more`, an empty Enter shows the next, and any other line drops the pages
+left. The pager is not modal -- unlike `/help`'s, it reads no key of its own,
+since the answer arrives while the caller's input line already owns the
+keyboard. A reply line arriving once its answer is drawn stands alone with its
+`[MRC]` badge, as a CTCP answer always does.
+
+Chat lines carry a per-user display timestamp, **on by default** and toggled
+with `/timestamps`. The default is the answer for an account that has never
+expressed a preference, so it applies to existing accounts as well as new
+ones; an account holding an explicit `off` keeps it. Knowing when a line was
+said is most of what makes scrollback readable, and a caller entering a quiet
+channel cannot otherwise tell whether the last line is a minute or a week old.
+The stamp is time-only, in the node's configured display timezone -- NetBBS has
+one clock, and a per-user timezone is reserved for a future preferences system
+rather than implemented here -- and in the metadata shade rather than the muted
+one, since it is chrome attached to the line beside it and not a system message.
+
+Because the stamp renders on every line of replayed scrollback, a carried
+message's `created_at` is a field every channel entry now formats. It is
+validated at the Link protocol boundary before the event is accepted, and an
+already-stored value that cannot be parsed costs its own line's stamp and
+nothing more: rendering must never be able to shut a caller out of a channel.
+
+`/msg` and `/private` remain ephemeral and online-only. They never silently
+fall back to asynchronous mail.
+
+A separate mutual invite/accept direct chat also exists, alongside `/msg`/
+`/private` rather than replacing either: unlike both (one-off, or a one-sided
+redirect the target never agrees to), both sides must explicitly be in the
+same room at the same time. Reachable from the Who screen (`[I]nvite to
+chat`) or `/dm <user>` from an active channel. Exclusive with channel chat --
+one active chat screen per session, the same scope Phase 2's one-channel-at-
+a-time limit already establishes below. Fully ephemeral, the same as `/msg`/
+`/private`: no persistence, no scrollback. An invite interrupts the main
+menu live only when the recipient is idle there; otherwise it is shown the
+next time they return to it. A recipient who is on any other screen is told
+in a one-line notice, delivered the way a SysOp's message is, to go back to
+the main menu to answer, and the inviter's waiting screen says the
+invitation opens there (issue #843). A door or a file transfer that owns the
+recipient's terminal gets no notice, only the waiting-screen line. The main
+menu is drawn again after the invitation is handled, with a decline carried
+above its prompt, because a direct chat clears the screen on its way out. The
+Who screen never pauses either: an invitation that ends without a chat is
+announced above its redrawn list (issue #1124).
+An unanswered invite expires automatically after a short fixed window, with
+an explicit accepted/declined/timed-out outcome always shown to the inviter
+-- never a silent no-op.
+
+While the inviter waits, only `C` cancels; unsupported keys are rejected and
+the invite remains live. If acceptance and local cancellation become ready in
+the same scheduler turn, the already-committed acceptance wins so the accepting
+peer is never stranded. Entering from `/dm` fully unwinds the channel screen
+before direct chat takes ownership of session input/output, then reauthorizes
+and re-enters the channel afterward. A peer-leave notice is a mandatory
+lifecycle signal and uses priority delivery rather than lossy chat-traffic
+overflow behavior.
+
+The direct-chat pinned status row permanently exposes the leave command (with
+a compact narrow-terminal fallback). Submitting a line clears/redraws the input
+row before the committed chat line is rendered, so the sender sees one message,
+not the input echo plus a second room copy. Identity labels and message bodies
+are sanitized and styled as separate spans using semantic theme colors.
+
+Phase 2 uses one active channel per session. Multiple simultaneous memberships,
+background delivery, and Link-wide presence wait for Phase 5.
+
+A channel may additionally be bridged, per channel and only by explicit
+SysOp choice, to one room on the external MRC (Multi Relay Chat) network
+(§16, issue #165 / #275); and, where the SysOp allows it, a caller may
+open any MRC room by name, which materializes a channel `mrc:<room>` of
+its own — a real row with the node-wide open-room gates, listed in the
+picker's own "Multi Relay Chat" section, never Link-able, and retired
+once idle (§16, issue #300). Bridging changes nothing about the channel's
+own model: local traffic is recorded and delivered exactly as before and
+then relayed; inbound MRC lines are recorded as external, unverifiable
+authors (stored as `user@site (MRC)`, shown badged `[MRC]`, §6.3) that never enter trust evaluation; private
+MRC messages are never delivered. The caller is told on joining that
+their handle becomes visible on that network, and a caller already inside
+a channel when the SysOp maps or remaps it is told before anything they
+say leaves the node. An inbound MRC line is stored with an explicit
+external-source marker: it is never exported in a trusted-scrollback
+snapshot under the origin's identity and never signed for Link
+propagation, and a locally recorded message is always re-read by its own
+row id so a concurrent bridge write cannot be mistaken for it.
+
+Live membership is keyed by channel name, and a session inside a channel keeps
+that name for everything it sends, receives, and leaves with. A channel is
+therefore not renamed while callers are inside it: the SysOp screen refuses
+with the occupant count until it is empty, and the standalone admin CLI, which
+cannot see occupancy, states what a rename does to anyone inside.
+
+A channel that closes while callers are inside it — the SysOp deletes it, hides
+a carried Link channel (§16, issue #683), or retires an MRC room a caller
+opened — moves every one of them back to the channel list at once, where the
+line "#name was closed by the SysOp." is shown above its prompt; no keypress is
+asked for (issue #716). Their live Link subscription and MRC presence end the
+way `/leave` ends them. A closed channel gets no `leave` line: a deleted one has
+nowhere to hold it, and a hidden one keeps its scrollback exactly as it was for
+Restore. A close the running node cannot push (the standalone admin CLI) is
+caught by the session itself the next time it sends, with the same result.
+
+### 6.4 Personal mail
+
+Local asynchronous mail is a persistent domain distinct from chat `/msg`.
+Messages have sender/recipient views, subject, body, read state, and independent
+delete state. The row is removed when neither side retains it. A side with no
+local account behind it -- mail received over Link, mail from the system --
+is deleted from the start, so the other side's delete removes the row.
+
+**Deleting an account** (issue #818) deletes that account's view of each of
+its letters, as if its owner had deleted them: a letter nobody else can see
+goes at once, and a letter the other side still has stays theirs. A sender's
+Sent copy survives its recipient's deletion (`recipient_user_id` is ON DELETE
+SET NULL, like `sender_user_id`), and the Sent list names the recipient as it
+was then, "bob (deleted account)", from `recipient_label`, which the deletion
+writes. Link mail always names its remote address instead. Outbound Link mail
+of a deleted sender keeps its row, so its delivery is still tracked. Before
+#818 the recipient's deletion cascaded and took the sender's copy, and a
+deleted sender (or a Link sender) left rows its recipient could delete from
+view but never remove. The table's CHECK still refuses a row with neither a
+local nor a remote recipient unless its recipient side is deleted.
+
+Recipient mailboxes are bounded (`MAX_MAIL_PER_RECIPIENT`, 500, counting the
+Inbox). When full:
+
+- the oldest already-read message may be evicted to make room;
+- unread mail is never silently discarded;
+- a kept message (below, issues #828 and #921) is never evicted, read or not,
+  and is not counted: Kept has its own limit, `MAX_KEPT_PER_RECIPIENT` (100);
+- if no safe eviction exists, delivery fails explicitly.
+
+The owner can see the cap coming (issue #818): the Inbox header counts
+"N of 500", and from 450 (nine in ten) the Inbox says what happens at the
+cap; a mailbox full of unread mail says new mail is turned away. Each
+eviction is counted (`mail_eviction_notices`), and the owner is told once,
+at their next main menu, how many old read messages were removed -- a count,
+never which ones, since the notice outlives them. A warning at the main menu
+before anything is removed was considered and left out: the Inbox is where
+the owner can act on it.
+
+Local mail is the domain extended by Link messages; Link mail does not create a
+parallel mailbox UI.
+
+**Telling a caller that mail arrived** (issue #823). Three places, all only
+for a caller mail is open to (`caller_mail_refusal`):
+
+- *At login.* The first main menu after login says what waits, above its
+  prompt, with two counts (issue #917): the unread letters that arrived
+  since the caller's last call, and every unread letter -- "3 new since
+  your last call, 7 unread in all -- [E]-mail to read them.", short enough
+  to stay on one row at 80 columns. Both are given even when they are
+  equal, which says that nothing older waits; with nothing new it reads
+  "Nothing new since your last call, 7 unread in all". "The last call" is the start of the caller's previous
+  session: the newest of their `session_history` rows before the current
+  one (by id, so a second session of the same account open meanwhile
+  counts). A caller with no earlier row -- a first call, or one whose rows
+  the bounded table has pruned (twenty per account within a node-wide
+  budget) -- gets the unread count alone, "You have 7 unread messages".
+  Nothing unread, no line. A letter's arrival is when this node stored it:
+  `created_at` for local and system mail, and for Link mail the receipt
+  time kept in `sender_deleted_at`, since its `created_at` is the sender's
+  signed time (#808) and a letter a relay held for a day is still new to
+  its reader. The main menu's mail notices are told together in one order:
+  that count, then the cap's eviction count (#818), then the
+  caller's own Link mail that bounced or expired (#806). Moderation outcomes
+  come before them, and a drain warning (§13.8) before those; the count of
+  pending chat channel invitations and any queued `/msg` lines follow them
+  (issue #923). Ahead of all of these is the outcome of a question answered
+  during login (the character-set check, a first-run choice), which answers
+  the last thing the caller did. First of all is the login line itself,
+  "Welcome, <name> › level N › Ctrl-L redraws" (issue #949). Like every
+  notice there it is shown once and not again after Ctrl-L, and it is
+  written nowhere before the menu, in either redraw mode: with
+  redraw-in-place on the menu's clear wiped it unseen, and with it off it
+  would be shown twice. It is built after the login questions, so the
+  character-set answer decides its separator.
+- *In New scan.* A `Mail:` line heads the summary above the list with the
+  login notice's two counts ("Mail: 3 new since your last call, 7 unread
+  in all"; on a first call `Mail: N unread`), counted from the same
+  previous call, so the scan -- which
+  is "activity since your last visit" -- and the login notice never
+  disagree; `[E]-mail` opens the mailbox from there, and the counts are
+  brought up to date on the way back. A line with a key, like the
+  replies to the caller, not a row: the list is places, and a mailbox row
+  would renumber every board beneath it.
+- *While online.* A per-session watcher (`netbbs.net.mail_arrivals`, started
+  next to the account watcher) compares the Inbox's unread letters with the
+  ones it has seen. It polls every five seconds, so every way a letter
+  arrives is covered -- local, Link, system, another process -- without a
+  hook in each delivery path; a local send also wakes the recipient's
+  watchers at once. It tells the caller the way `/msg` does: through
+  `Session.pinned_notice_hook` when a screen has one (chat, the SysOp's live
+  monitor), so the line appears at once; otherwise as a notice for the next
+  screen drawn, never written into a door (`door_active`) or an editor. An
+  idle main menu or Inbox races the watcher's arrival event against its key
+  read and redraws at once, so its counts and rows are current; the Inbox
+  keeps its pending key read across that redraw rather than cancelling it.
+  Letters are told apart by `(id, created_at)`, not by id, because the table
+  has no AUTOINCREMENT; a letter marked unread again is not new. Up to three
+  arrivals are named ("New mail from bob: Lunch?"), more are counted.
+
+News of mail is drawn in the good-news colour, `theme.GOOD_NEWS_COLOR`
+(issues #917, #944): the live "New mail from ..." lines, the login notice,
+New scan's `Mail:` line, and the unread counts in the main menu's header and
+the mailbox's, "N unread in Kept" included. New mail is good news, not a
+problem, so none of these uses the warning colour; that stays for what is
+one -- a mailbox nearly at its cap, the cap's eviction count, and bounced
+or expired Link mail (in the error colour). #917 first drew them in the
+node's accent, but its gold is a shade off the warning amber and the change
+barely showed, and the main menu's unread count sits beside the caller's
+name in that same gold. Good news is the palette's success green (82)
+under its own name: green already means "good" in NetBBS, so a second green
+would only be a shade to tell apart. Like the other semantic colours it is
+not a SysOp branding slot, so a node's accent override never moves it. It
+reads on a dark background as the rest of the palette does; the palette as
+a whole targets dark terminals (a light background already washes out its
+soft-white body text), and a client that folds 256 colours down to 16
+maps it to green, still apart from the yellow the accent and the amber fold
+to. In a session without colour the lines read the same, uncoloured.
+
+There is no preference to turn the live notice off: it is one line per
+letter, and callers already choose who may write to them (blocked senders,
+below). A `/msg` queued for a caller outside chat is carried above the main
+menu's prompt in the same way; before #823 it was written above the menu,
+where a redraw in place cleared it unseen.
+
+**Who may use mail** (issue #816). Mail has a node-wide level, `mail_min_level`
+(Settings > Limits & retention, default 0, so open to every account). It
+covers reading, writing and replying, to this node and over Link, as one
+level: a caller who could read but not write could not answer, and one who
+could write but not read would never see the reply. Below it the main menu
+offers no `[E]-mail` and its header no mail count. It gates the caller, not
+the recipient: mail to an account below the level still arrives, and waits
+until the SysOp raises the account's level, as a board's posts wait for a
+caller who cannot read them yet.
+
+**Accounts that take no mail** (issues #816, #818). Three accounts are sent
+nothing: the guest account, a disabled account and a signup still awaiting
+approval. Neither of the last two can sign in to read mail, and its sender
+would never learn it went unread. Local mail to one is refused at the To
+prompt and at Send, in plain words ("bob's account is disabled, so it can't
+receive mail."); Link mail bounces `recipient_unavailable` (§10.3), whose
+wording, "that account is not taking mail at the moment", says neither which
+state nor why: whether an account is disabled is this node's business, and
+both states can end. The refusing node's SysOp sees the plain reason in
+Refused Link mail. Mail already in an account when it is disabled stays
+there for the day it is enabled again. A retired username (#594) has no
+account and bounces `unknown_recipient` like any unknown name.
+
+The guest account (§4.6) never has mail, whatever its level and whatever the
+mail level says, and nothing is delivered to it. Local mail to it is refused
+at the To prompt and by `send_mail` and `send_system_mail`
+(`MailRecipientRefused`), Link mail to it bounces `no_mailbox` (§10.3), and a
+moderator's rejection of a guest's post sends no rejection mail -- the
+main-menu notice still tells whoever signs in next. A session that signed in
+through guest login stays refused for as long as it lasts, even if the SysOp
+turns guest login off or moves it meanwhile: the account's check reads the
+current setting, so the session's login route (`authenticated_without_credential`)
+is checked too. `netbbs.mail.mail_access_refusal` is the one check for the
+account, `netbbs.net.mail_flow.caller_mail_refusal` adds the session's, and
+`mail_recipient_refusal` is the one for the recipient; `browse_mail` makes the
+caller's check itself, so no way into mail can skip it.
+
+**Mail from the system** (issue #819). Some mail is sent by the BBS itself,
+not by a person: today, a moderation rejection (§6.1). Such a message has no
+sender account (`sender_user_id` NULL) and is marked `from_system`, and:
+- the mailbox shows it as from **System**, in the list and on the From line,
+  and its view says it is a notice from the BBS with no one to reply to. It
+  has no `[R]eply` key.
+- It is told apart by the flag, never by the name stored with it. "System"
+  is a name self-service signup refuses, and an account a SysOp names
+  "System" is still a person: its mail has Reply and never reads as the
+  BBS's notice.
+- It is in nobody's Sent, so the recipient's delete removes the row.
+- It is local by construction -- no remote address, no Link event -- and is
+  never carried over the Link.
+- It counts toward the recipient's cap like any mail, but when the cap must
+  make room, a read system message is evicted before any read letter, so a
+  notice never pushes out mail a person wrote. Unread mail of either kind is
+  never evicted; a system message that finds the mailbox full of unread mail
+  is not stored (a rejection's main-menu notice still tells its author).
+
+The alternative was a reserved account that cannot log in. It was rejected:
+it would own rows (ON DELETE, quotas, an account list entry to hide), Reply
+would open a letter to it, and its name would be one more thing a
+look-alike could imitate. A NULL sender plus a flag fits the table's
+existing "no local sender" shape. Mail from before the change that a
+moderator's account sent stays theirs.
+
+**SysOp tools, and what they do not show (issue #820).** Operations → Mail
+shows how full each inbox is -- letters, unread, read, kept (#828) and system notices per
+account, the Inbox against `MAX_MAIL_PER_RECIPIENT` (Kept is outside it, #921),
+fullest first -- and the Link mail
+this node refused (§12.4). Both show counts, account names, senders and reasons
+only: no SysOp screen shows a letter's subject or body, and a refused letter's
+record does not name its recipient. Mail is private between its writer and its
+reader. The home node can technically read tier-1 Link mail and local mail in
+its database (§4.5); the console does not turn that into a feature, and the
+SysOp Handbook says so.
+
+Mail about Link delivery (#806's bounces) is told at the main menu and on the
+sent message's Delivery line, not by a system message; a bounce letter in
+the Inbox could use this sender later.
+
+**Blocked people** (issues #817, #925, #948). An account can refuse mail,
+live messages and chat channel invitations from one person. A block names a local account by id, so it survives a rename, or a
+Link sender by the `user@<home-node-fingerprint>` address its mail came
+from (user part compared case-insensitively), never by the node's display
+name, which can change. Blocks live in `mail_blocks`; deleting the blocking
+account or the blocked local account removes the row; the table keeps its
+#817 name although it now holds the one block list. A caller blocks from a
+received letter's view (`Bloc[k] sender`, a toggle labelled by what it will
+do), from a caller picked on Who's online (`Bloc[k]`, the same toggle, for a
+local caller by account and for one on a linked node by
+`user@<fingerprint>`), or by name from Profile > Blocked people, which lists
+the blocks and unblocks them. A block affects mail from then on; mail
+already received stays.
+
+- The sender is told. Local mail from a blocked sender is refused at the
+  To prompt and by `send_mail` (`MailSenderBlocked`) with "<name> does not
+  accept mail from you"; Link mail bounces `blocked_by_recipient` (§10.3).
+  Accepting and silently dropping the letter was rejected: mail promises
+  nothing is lost without a word (§10.5), a silent drop would be the one
+  refusal the sender never hears of, and it would split local and Link mail,
+  whose refusal is a signed bounce either way. Being told reveals the block
+  to the blocked person; that is the price of the honest answer, and the
+  blocker loses nothing by it.
+- `netbbs.mail.mail_sender_refusal` is the one sender-specific check, made
+  beside `mail_recipient_refusal` (which says whether the account takes mail
+  at all) by `send_mail`, the To prompt and `deliver_link_message`.
+- Two senders cannot be blocked. System mail (`send_system_mail`) has no
+  sender and never consults blocks. A SysOp of this node (a usable level-255
+  account) cannot be blocked either: the SysOp answers for the node's
+  accounts and has to reach them, and a block would buy no privacy from the
+  person who runs the database it is stored in. The check reads the sender's
+  current level, so a blocked account that later becomes SysOp gets through
+  (the Blocked people list marks the block as not applied),
+  and is blocked again if it stops being one. Staff below 255 are blockable.
+- One list covers mail and live messages (issue #925). Before it a block
+  stopped mail only, and the one tool against someone harassing a caller
+  live was the direct-message opt-out, which silences everyone.
+  `netbbs.messaging_preferences.live_message_refusal` is the one check every
+  live path makes before delivering: `/msg`, `/private` (at entry and again
+  for each line, so a block made mid-conversation ends it), `/dm` and Who's
+  online's `[I]nvite to chat` (`run_direct_chat_invite_flow`), Who's online's
+  one-off `[M]essage`, and an inbound Link direct message
+  (`build_direct_message_deliverer`, by the sender's `user@<fingerprint>`).
+  It answers the opt-out first -- the recipient's general choice, which says
+  nothing about the sender -- and then the block, with the same SysOp
+  exemption as mail. `/msg` and `/private` now respect the opt-out too;
+  before #925 they were the one live path that did not.
+- A blocked live sender on this node is told, as a blocked letter's sender
+  is: "<name> does not accept messages from you". An inbound Link direct
+  message from a blocked sender is dropped without an answer, as one to an
+  opted-out or offline recipient already was (§8.10.3): the
+  `direct_message` frame has no reply on the wire, and adding one is a
+  protocol change this does not make. The remote sender sees their usual
+  "(sent to ...)"; their mail, which does have a bounce, tells them.
+- A block stops a chat channel invitation too (issue #948). `/invite` to
+  someone who has blocked the inviter writes no `channel_invitations` row
+  and sends no live notice, and tells the inviter "<name> does not accept
+  messages from you", `/msg`'s words
+  (`netbbs.messaging_preferences.invitation_refusal`). The inviter's right
+  to invite is answered first, so a caller who may not invite anyone hears
+  that rather than learning of a block. The direct-message opt-out does not
+  stop an invitation, as it never has: an invitation waits in the invitee's
+  pending list and asks nothing of them, where a live message interrupts.
+  The SysOp exemption is the same as mail's. `/invite` is the only path that
+  creates an invitation; Link carries none. An invitation made before the
+  block stays pending until it expires or is revoked.
+- Who's online offers only what can succeed (issue #948, after #920's
+  picker); so do the other places mail is offered from (issue #953, see
+  "Mail from where callers meet"). For a local caller who has blocked the viewer it offers neither
+  live action nor `[E]-mail`, since the letter would be refused, and its
+  subtitle says "<name> does not accept messages or mail from you." The
+  screen is still drawn, with `Bloc[k]` where the viewer may block them back
+  (their block does not stop their own mail) and `[B]ack`. A caller on a
+  linked node keeps `[E]-mail`: their node's block list is not known here,
+  and the To prompt or the bounce answers.
+- What a block does not cover. Public chat channels: a block does not hide a
+  blocked person's lines in a shared room, and there is no per-caller ignore
+  in chat; channel moderation (mute, kick, ban) is the tool there. An
+  invitation into a channel is covered (above). MRC
+  private messages come from another network's users, not accounts or Link
+  addresses, and are not covered. SysOp messages (the console's message to a
+  caller) and system notices never pass the check.
+
+**The mailbox is a list; a message is read on its own screen** (issue #810),
+the shape the board post list has (§6.1, issue #679). `[E]-mail` opens the
+Inbox directly. Before #810 it opened a four-option menu (Inbox, Sent,
+Compose, Back), so every visit cost a keystroke before any mail showed.
+
+The list:
+- Is a table: number, a `new` column, From, Subject and Date. Sent's is
+  number, To, Subject, a Delivery column (pending, with relay, delivered,
+  bounced, expired) when any listed message went over Link,
+  and Date. Each row is numbered once. The generic picker it replaced
+  numbered rows twice (`01. (#5) ...`) and prefixed unread subjects with
+  `[NEW] `.
+- Follows §3.6: columns are measured in display width and cut with an
+  ellipsis. The name takes up to two fifths of what the fixed columns
+  leave. It has no fixed cap, because a Link address carries its node's
+  name, and the message view shows it in full. Below 60 columns a row
+  becomes prose: "N new name: subject".
+- Fits as many rows as the terminal holds and pages with `<` `>`, PgUp/PgDn
+  or ←→ (§3.5). A mailbox is bounded (§14), so the whole folder
+  is loaded and paged in memory. Below 16 rows the blank rows and rules go,
+  and each note above the list is cut to one row, so the 40x12 floor keeps
+  three rows of mail.
+- Has a cursor: Up/Down, and Enter or a digit to open a message. `[B]ack`
+  from a message returns with the cursor on it.
+- Has a header that says how many messages are unread and how many there
+  are in all, the Inbox order, and any `[F]ind` filter. The prompt is the
+  main menu's, clock and node-status tags included.
+- Keeps every action the menu had on its action bar: `[S]ent` (whose
+  `[B]ack` returns to the Inbox), `[C]ompose`, and `[D]raft` with the kept
+  letter's notice (issue #814).
+- `[O]rder` switches the Inbox between newest first and unread first
+  (newest first within each), and since #828 by conversation (below). It is
+  a per-caller preference (`mail_order`).
+- `[F]ind` narrows the folder to mail with a word in the name or the
+  subject, as the row shows them. The picker's `[S]earch` said "by name"
+  but matched the subject, `[NEW] ` prefix included, so "new" matched every
+  unread message. The main menu's Find searches bodies too, across both
+  folders (issue #824, §6.6).
+- `[U]nread` on the list marks the highlighted message unread, or read if
+  it is unread; the reader's `[U]nread` marks the open message unread and
+  returns to the list. Opening a message is still what marks it read.
+  Marked-unread mail is kept by the mailbox cap, like any unread mail.
+- Flags a sender whose node's identity changed (`_link_mail_identity_warning`)
+  with `!` before the name, and says what it means above the list. The
+  message view carries the full caution.
+
+**Managing a mailbox** (issues #828, #921). The list manages letters in bulk,
+keeps letters out of the cap, and lists by conversation:
+- `[M]ark` (or Space) toggles a mark on the highlighted letter and moves the
+  cursor down, so a run is marked key by key. The mark is a `*` in the column
+  after the cursor's (before the number in prose rows), and the header counts
+  the marks. Marks belong to the folder on screen and go when it changes.
+- `De[l]ete` deletes the marked letters, or with none marked the highlighted
+  one, behind one yes/no that names the count (or the subject). `Delete [r]ead`
+  in the Inbox deletes every read letter there, behind one yes/no with the
+  count; unread and kept mail stays. Both delete the caller's own side only,
+  with the one-letter rule (`netbbs.mail.delete_letters`): a letter whose
+  other side is gone is removed with its `mail_search` entry (§6.6), one the
+  other side still has is marked deleted.
+- **Kept** is a third folder beside the Inbox and Sent (`[K]ept` from the
+  Inbox, `[B]ack` returns). A folder rather than a filter: kept mail is mail
+  the caller has dealt with and wants out of the way but safe, and a filter
+  would leave it in the Inbox. `K[e]ep` in the Inbox, on the list (marked or
+  highlighted) or in a letter's view, moves letters there;
+  `Mov[e] to Inbox` moves them back. Nothing is lost either way, so nothing
+  is asked. `mail_messages.kept_at` records it; it is the recipient's alone,
+  since Sent is never evicted.
+- A kept letter is never evicted by the cap (`make_room` skips it) and does
+  not count toward `MAX_MAIL_PER_RECIPIENT` (issue #921). Kept has its own
+  limit instead, `MAX_KEPT_PER_RECIPIENT` (100), so each caller holds at most
+  600 letters, and a mailbox cannot grow without bound (§14) one kept letter
+  at a time. #828 first counted Kept toward the 500; that made the cap about
+  "unread and kept mail", a limit the caller could not see coming from the
+  Inbox and one that kept letters quietly ate into, so the operator chose a
+  separate, visible limit. The cap is about unread mail again: the Inbox
+  header's "N of 500" counts the Inbox alone (and says how many are in Kept),
+  a mailbox full of unread mail refuses new mail (`mailbox_full`), and moving
+  a letter to Kept makes room in the Inbox. The Kept folder's header counts
+  "N of 100", and a full Kept says so above its list.
+- Keeping when Kept is full is refused in place, with nothing moved: "Kept is
+  full (100 letters) -- move some back to the Inbox or delete them first."
+  (`netbbs.mail.KeptFullError`, raised by `set_kept`). A bulk keep of marked
+  letters is all or none: when they do not all fit, none move, the marks stay,
+  and the caller is told how many more Kept has room for. Keeping as many as
+  fit was rejected: it would split the marked letters between the folders by
+  list order, leaving the caller to find which went where -- the same reason a
+  letter to several people is all or none (#827). Moving letters back to the
+  Inbox is never refused. It can take the Inbox past 500 by what was kept;
+  nothing is removed for that, and new mail then arrives only in place of a
+  read letter, so the account still holds no more than the two limits
+  together. Kept counts are local: no Link payload carries them. The SysOp's
+  Mailboxes screen has a Kept column (flagged at 100), and its "Of the cap"
+  and fullest-first order count the Inbox alone.
+- `[O]rder` cycles newest first, unread first and by conversation (Sent:
+  newest first and by conversation), one per-caller preference. Replies record
+  no parent letter, so a conversation is the correspondent (the sender in the
+  Inbox and Kept, the recipient in Sent; the system is its own) plus the
+  subject with every leading `Re:`, `Fwd:` or `Fw:` removed -- the prefixes
+  `netbbs.quoting` writes -- compared case-insensitively
+  (`netbbs.mail.thread_key`). Conversations are listed by their newest letter,
+  and each one's later rows are indented under it. A reply-to id would group
+  a renamed subject too; it was left out as not worth a schema change and a
+  Link payload field while subjects carry the conversation.
+- At the 40x12 floor the action bar takes four rows, so below 16 rows the
+  notes above the list share one row, the most urgent (the cap's, then a kept
+  letter's, then the identity note); what the others say is on screen in brief
+  (the `[D]raft` key, "N of 500" or "N of 100", a row's `!`). Below 60 columns the header
+  uses short counts and leaves out the order and the Kept count.
+
+A received message's view names its recipient: `From:`, `To:` (the reader)
+and `Date:`, as a sent message's view has `To:`.
+
+**One letter to several people** (issue #827). The To field takes up to
+`MAX_MAIL_RECIPIENTS` (20) addresses, local and Link mixed, separated by
+commas; a comma inside double quotes (a quoted node name) does not separate.
+Each address gets the To prompt's checks as it is typed, and a refused one is
+named, with the typed list given back to fix. Tab completes the address after
+the last comma, and `?` as the last address opens the list for it.
+- **One copy per recipient.** Send writes one ordinary letter per recipient:
+  a local row by `send_mail`'s rules, a Link row by `compose_link_message`'s.
+  Each copy has its own delivery state, bounce, cap handling, block and
+  refusal, and every rule of this section applies to it unchanged. The
+  alternative -- one letter row with a recipient table -- was rejected: every
+  per-side rule (deletion, Kept, read state, the cap, delivery, search) is
+  per row today and would have had to learn about recipients.
+- **The copies are linked** by `mail_messages.mail_group_id`, and each
+  carries the whole To in `mail_group_to` (JSON: an account by id and name,
+  shown by its current name; a Link address; or `{"all": true}`). The list
+  is stored with every copy rather than read back from the others, because a
+  copy both sides deleted is gone and the To must not lose a name with it.
+  There is no blind copy: everyone sees everyone.
+- **All or none at Send.** Every copy is checked -- the account takes mail,
+  has not blocked the sender, has room; the Link node has keys on file --
+  before any is written, and all are written in one transaction
+  (`netbbs.mail_groups.send_letter`). A recipient who cannot take it is named
+  on the review screen and nothing is sent; `[T]o` drops or fixes them.
+  Sending to the others anyway was rejected: the copies already written would
+  list someone who never got the letter, and a second Send would reach the
+  others twice. Link delivery is later and per copy, so a Link copy can still
+  bounce on its own.
+- **Never twice.** The group id is chosen when the letter is started and
+  kept with its draft; a group id already sent is refused
+  (`letter_already_sent`), so a draft sent again after a dropped connection
+  reaches nobody twice.
+- **Over Link** the To goes inside the sealed plaintext beside the subject
+  and body: `"to"`, everyone as `user@<home-node-fingerprint>` (this node's
+  own accounts by its own fingerprint), and `"group"`, the group id. It is
+  not a signed payload field, so no capability is needed: a node that does
+  not know the keys reads the subject and body and shows a letter to one
+  person. The receiving node keeps the list only if it reads cleanly (at
+  most `MAX_MAIL_RECIPIENTS` well-formed addresses and a short alphanumeric
+  id); anything else is dropped, not bounced, since the list is only
+  something to show. Its own accounts become local entries, and the group
+  id is stored as `<id>@<sender fingerprint>`, so no other node's letter
+  can share it.
+- **Reading.** Each copy's `To:` is the whole list. `Reply [a]ll` on a
+  received copy writes to its sender and everyone else on it but the reader;
+  `[R]eply` stays the sender alone. Sent lists the letter once, by its newest
+  copy, with the list under To and the status of the copy that needs the
+  caller most (bounced, expired, resent, pending, with relay, delivered;
+  issue #919). Its view
+  gives each Link copy a `Delivery to <name>:` line; `[R]eply` writes to them
+  all again, `Re[s]end` only to the copies that bounced or expired, and
+  `[D]elete` (on the view or the list) removes every copy from Sent. Find
+  shows it once in Sent, matched by anyone on it. A follow-up the caller did
+  not type (Reply all, Reply, Resend) checks each address first and leaves
+  out, by name, anyone who can no longer be written to.
+- **Mail to all callers.** A SysOp writes to every account that takes mail
+  from Operations → Mail in the console: `[W]rite to all callers` from their
+  own account, signed, repliable and in their Sent as one letter, or
+  `[N]otice to all callers` from the system (issue #819), unsigned and not
+  repliable. The recipients are the address book's: every account
+  `mail_recipient_refusal` and `mail_sender_refusal` let through, but the
+  sender's own (the system's notice reaches the SysOp too). Unlike a letter
+  to several people, a full mailbox does not stop it: that recipient is
+  skipped and named in the outcome, with the count of accounts left out.
+  All copies go in one transaction, and the group id makes it never-twice
+  like any group. Each copy's To reads `Everyone on this BBS`, and it has no
+  `Reply all`. It is local only. It lives in the console rather than the
+  mailbox because it is the SysOp acting for the BBS, as the console's other
+  mail tools are; a To-prompt keyword for everyone would be one no caller
+  could find and a SysOp could type by accident.
+
+**Read receipts** (issue #829). The sender of local mail sees in Sent when
+each recipient first opened it.
+- **On by default, opt-out, reciprocal.** Profile's `E[x]change read
+  receipts` ("Let senders see when I've read their mail", the user
+  preference `mail_read_receipts`, default on) is one switch for both
+  directions: off, no sender sees when the caller read their mail, and the
+  caller sees no one's receipts. Opt-in was rejected as a feature nobody
+  would turn on; one-way opt-out (hide mine, still see theirs) was rejected
+  as unfair, the model most messengers use too.
+- **The opted-out marker.** A recipient who does not share receipts is
+  always named as such in the sender's view (`Read: not shown, as bob
+  doesn't share read receipts`, or on a letter to several people `Don't
+  share read receipts: bob`) -- also to a sender who has opted out
+  themselves -- and Sent's list says `no receipt`. It reveals only a
+  setting, and without it a letter never reported as read would be taken for
+  one not read yet. A sender who does not share receipts is told everything
+  else only as "not shown" in the view, and their list has no read states at
+  all (the list's column would otherwise say nothing but `no receipt`).
+- **What a receipt says**: the time of the *first* reading
+  (`mail_messages.first_read_at`, set by `mark_read`, kept through Mark
+  unread and later readings -- a receipt once given is not taken back by
+  hiding the letter from oneself), or `not yet`. A letter the recipient
+  deleted unopened is `not yet` too (issue #922): their deletion is theirs,
+  and "deleted unread" told the sender more than whether it was read. A copy
+  whose recipient's account was deleted shows none.
+- **Shared then and shared now** (issue #922). The first reading records
+  whether the sender and the recipient both shared receipts at that moment
+  (`mail_messages.first_read_shared`). `netbbs.mail.read_receipts` shows a
+  receipt only if both shared then *and* both share now. So turning
+  receipts off hides those already given and turning them on again shows
+  them again, but a reading made while either side had them off never
+  becomes a receipt: a sender who keeps receipts off cannot switch them on
+  for a moment to see what was read in the meantime, and a recipient who
+  reads while opted out does not hand that reading over by opting back in.
+  Such a reading shows as `not yet`. Deciding purely at display time (the
+  #829 model) was rejected for exactly that peek. Letters read before the
+  upgrade keep their reading as their receipt: the migrations copy
+  `read_at` and count it as shared, as receipts were on for everyone by
+  default, and a caller who minds turns them off. (A reading whose sender or
+  recipient has receipts off at the upgrade is not counted as shared: only
+  a database that ran the unreleased #829 code can hold one, and it keeps
+  no record of when the switch was made, so the backfill errs toward not
+  showing.)
+- **Local mail only.** Link mail carries no receipt (nothing goes over
+  Link), and neither does mail from the system, which has no sender to tell.
+- **Sent.** A letter to one person has a `Read:` line under its To. A
+  letter to several people groups its local copies by receipt -- `Read by:`
+  (each with its time), `Not read yet:`, `Don't share read receipts:` --
+  which keeps its twenty recipients to three lines beside
+  the Link copies' Delivery lines. Mail to all callers only counts: `Read:
+  by N of the M who share read receipts (K more don't share them)`. The
+  list's Delivery column, headed Status once it shows a receipt, says
+  `read`, `not read`, `some read` (a group, of the copies that report) or
+  `no receipt`; a Link copy that bounced, expired, was resent (#919) or is
+  on its way still wins, as the more urgent state.
+
+**Files in a letter** (issue #830). A letter can point at files already in
+this node's file areas; there are no attachments of new files and no new
+storage. The model is `netbbs.file_refs`, meant to be reused as it is by a
+board post that points at a file (issue #842 F086); the screens are
+`netbbs.net.file_ref_view`.
+- **What is stored.** One `mail_file_refs` row per file per letter row:
+  the file's content-addressed `file_id` (which no later upload reuses;
+  `files.id` can be), and its name, area name and size as they were when
+  attached. A file deleted since is still named. At most `MAX_FILE_REFS`
+  (5) per letter. The body is left as the writer wrote it.
+- **Attaching.** `[A]ttach file` on the review screen picks a file area the
+  writer may read, then a file in it (approved, not past its age);
+  `[R]emove file` takes one off. The files are kept with the draft. A
+  forward carries the files of the letter it passes on, those the forwarder
+  can open; a reply, Reply all and Resend carry none.
+- **Who may be sent it.** Every local recipient must be able to read the
+  file area of every file: its read level or grant, and its age requirement
+  (`may_read_area`, the file areas' own gate). Checked for each copy by
+  `mail_groups.recipient_problem` before anything is written, so a letter to
+  several people refuses at Send, naming who cannot open which area, and
+  sends nothing -- the same all-or-none rule as a full mailbox. Sending to the
+  others with the file left out for one was rejected: every copy has the same
+  body, and a reader would read about a file they were never given. Mail to
+  all callers instead skips and names callers who cannot open a file, as it
+  does full mailboxes: a letter to everyone must not be held back by a few.
+  The writer must be able to open each file at Send too.
+- **Who may download it.** The letter's view lists the files under Date and
+  `[G]et file` downloads one through the file areas' own download
+  (`file_flow.send_file_to_caller`: Zmodem, else a browser link, and a
+  browser link when a Zmodem send fails), after `open_ref` checks again. A
+  reader who may no longer read the area -- its level raised after sending --
+  sees "A file in a file area you can't open", never the file's or area's
+  name. A file deleted, expired (by status or already past its area's age),
+  in an area removed or hidden (issue #683), or with its content gone shows
+  as "no longer available".
+- **Local only.** Nothing about a file crosses Link but text. A Link copy has
+  no reference rows; its body ends, after a blank line, with one line per
+  file: `File: <filename> (<size>) in file area "<area name>" on <node
+  display name>` (`link_text_line`), size as the file areas show it (B, KiB,
+  MiB, GiB). Those are the facts a reader on another node can use to find the
+  file by hand; the `file_id` is left out as meaningless to them. Received
+  Link mail never has references.
+- **Removal.** `mail_file_refs` has no foreign keys. One to `mail_messages`
+  would make that table a foreign-key parent, and a rebuild of it (as
+  migration 97 was) would then cascade through the references on DROP
+  TABLE's implicit DELETE. Rows go with their letter in
+  `netbbs.mail._remove_letters_without_commit`, the one place a letter is
+  deleted for good, beside its `mail_search` entry.
+
+**How a body reads** (issue #809). A letter keeps its writer's lines: the
+message view, Sent's view and the review screen show every line as written,
+and wrap only a line wider than the terminal, at a word
+(`netbbs.rendering.post_body.lined_body_rows`). Mail used to reflow a body the
+way a board post then reflowed. That ran a greeting into the first sentence, a list
+into one line and a signature into `-- Alice of Q Pen club treasurer`. A
+letter's short lines are its form, not text to rewrap. `>` quote lines are
+muted and keep their marker when they wrap. Board posts read the same way
+since issue #837.
+
+A body is filtered exactly as a post on a board that allows color (§6.1,
+"Color in posts"): pipe codes and SGR color show, and every other escape
+sequence is removed whole. Local mail and mail carried from another node take
+the same path, so a peer can no more clear a reader's screen through mail than
+through a post. There is no SysOp switch for mail: a letter is between its
+writer and its reader, and the filter is what makes color safe to show. The
+reader's own "Post colors" preference covers mail too. With it off, a letter
+shows as plain text, the codes removed. Both mail editors keep pasted color
+as pipe codes, as a board that allows color does. A reply quotes the plain
+text, without codes, as a board reply does. Stripping codes on display was the
+alternative. It was rejected because boards already show them safely, and a
+writer who typed `|12` meant color.
+
+**Mail from where callers meet** (issue #821). A caller writes to someone from
+the screen where they found them, without typing an address:
+- the Directory's member card, `[M]ail`;
+- Who's online, `[E]-mail` on a selected caller (`[M]` there is the live
+  message), for a local caller and for one on a linked node;
+- Previous callers, `[M]ail a caller`, which asks for the row's number;
+- the board reader, `[M]ail author`: a private reply to the post's author, with
+  the post's `Re:` subject and quote, as a board reply has (§6.1). It is offered
+  to anyone who may read the post, whether or not they may post there, and has
+  a draft slot of its own per post, apart from mail replies.
+
+All four open the compose screen (§3.5, issue #813) with To filled in, through
+one entry point (`netbbs.net.mail_flow.mail_someone`) that makes the mailbox's
+own checks: `caller_mail_refusal` for the caller, `mail_recipient_refusal` for
+a local recipient, and for someone on another node the check a Link reply's
+address gets (issue #805) -- the address is their stable
+`user@<home-node-fingerprint>` (Who's online's presence, a carried post's
+author label), shown by the node's current name. The action is not offered
+while mail is closed to the caller, on the caller's own card, post or call,
+for a deleted account, or for a carried post's author while Link is off; a
+recipient-side refusal (the guest account, a peer on probation, a node this one
+is not linked with) is said when the key is pressed. Opting out of direct
+messages (§6.3) does not close mail: Who's online still offers `[E]-mail` for
+such a caller. A Previous callers row whose name the roll hides is not
+mailable, since To would show the name; a SysOp, who sees every name there,
+may write to any. After the letter is sent, kept or given up, the caller is
+back on the screen they came from with the outcome above its prompt.
+
+Nor is mail offered to a local account that has blocked the caller (§6.4
+Blocked people; issues #948, #953), since the letter would be refused.
+`netbbs.net.mail_flow.mail_blocked_notice` decides it for every screen, from
+`mail_sender_refusal`, so a SysOp of this node is never refused. Where the
+screen has room it says "<name> does not accept messages or mail from you.":
+Who's online as its subtitle, the member card above its action bar. The board
+reader has no line for it and simply leaves `[M]ail author` off. Previous
+callers keeps `[M]ail a caller`, which belongs to the whole roll, and refuses
+that caller's row with the sentence when its number is typed. Hiding the key
+only when no row is mailable was rejected: every other row would have to be
+checked for the rare roll of callers who all blocked the viewer, and the
+refusal already comes before any compose screen. Someone on a linked node is
+offered mail as before: their node's block list is not visible here, and the
+To prompt or a bounce answers.
+
+A letter started from the Directory, Who's online or Previous callers is the
+caller's new letter, the same slot `[C]ompose` uses: a kept new letter is
+offered first, and resuming it keeps its own recipient.
+
+**Finding a recipient** (issue #826, `netbbs.net.mail_recipients`). The To
+prompt helps without leaving it. Tab completes the field (the line editor's
+completion, as chat's): a member's name, the address of a recent
+correspondent, and after `@` the name of a linked BBS; several matches are
+listed under the prompt, wrapped, and more than 24 are counted instead. `?`
+and Enter opens a list (`pick_item`) of everyone the caller can write to:
+recent correspondents first, then the members, then the linked BBSes. On a
+node with Link on, `name@?` lists just the linked BBSes for that name, and a
+BBS chosen from the full list asks for the user name there. `?` works at the
+review screen's `[T]o` too.
+- Recent correspondents are the last ten people named by letters still in the
+  caller's own Inbox and Sent (`netbbs.mail.recent_correspondents`), local and
+  Link. System mail, a deleted sender and letters to oneself name no one.
+- The list also shows who the caller can't write to right now, with the
+  reason, and does not let them be picked (issue #920): someone who blocked
+  the caller, "doesn't accept your mail" (`mail_sender_refusal`); a disabled
+  account, "account disabled", and a signup awaiting approval, "awaiting
+  approval" (`mail_recipient_refusal`); and on Link a met node still on
+  probation (§12.4), "not linked yet". Such a row is muted, has `-` where
+  the number goes and takes no number, so the numbers count only what can be
+  picked; the highlight steps over it, and a search whose one match it is
+  shows it rather than choosing it (`pick_item`'s `selectable_of`). Each row
+  is one line either way, so the page budget is unchanged at 80x24 and
+  40x12. Still left out: the caller, the guest account, which has no mailbox
+  rather than a state that can change, and a node whose mail the SysOp closed
+  (quarantined or blocked). Leaving people out made a missing name look like
+  a typo or a missing account; the operator accepted that the list tells
+  callers about blocks and account states, which the To prompt's refusal
+  already said to anyone who typed the name.
+- The reason is the same check's: `MailRefusal` carries the To prompt's
+  sentence and the list's words together (`mail_recipient_refusal_detail`,
+  `mail_sender_refusal_detail`, `link_mail_refusal`), so the two can't drift
+  apart.
+- Tab offers only what can be picked: a completion is an address the To
+  prompt would take. The list is where a caller learns why someone is
+  missing from it.
+- A pick is only text in To: the To prompt checks it exactly as a typed
+  address, and Send checks again. Nothing new is checked, so `mail_someone`
+  keeps the same checks as the To prompt.
+- The book is gathered once as the prompt opens: completion runs inside the
+  line editor, which cannot reach the database lane.
+- A Link address is kept by its node's technical identity once the To prompt
+  has resolved it (a pick from the list is one already), so Send and a
+  resumed draft reach the node the caller chose even if another node takes
+  its name meanwhile. `[T]o` opens on the name the caller reads, and
+  leaving it unchanged keeps that identity. Tab types the shortest name that
+  names only that node: its friendly name, else its DNS name, else its
+  fingerprint.
+
+**Forwarding** (issue #822). `[F]orward` on a received letter's view and on a
+sent letter's view starts a new letter titled "Forward": Subject gets `Fwd: `
+unless it already starts with `Fwd:` or `Fw:` (the `Re:` rule, one helper in
+`netbbs.quoting`), and the body is the letter under a header --
+`---------- Forwarded message ----------`, then `From:`, `To:`, `Date:` and
+`Subject:` as the view names them (a Link address by its node's current name,
+system mail as **System**, the date in the forwarder's format), a blank line,
+and the body. The caller types the recipient at the To prompt, which makes
+every check a new letter's does, so any letter goes to a local account or a
+Link address alike. Both editors start above the letter, where a note goes
+(the line editor as after `/insert 1`; `/end` leaves it), and the forwarder's
+signature closes that note, above the rule (`netbbs.quoting.sign_forward`):
+appended at the end, it would read as the forwarded letter's writer's. A
+reply to a forward quotes it without that signature, so the quote still stops
+only at the forwarded letter's own.
+- The body is carried verbatim, not quoted. A forward passes a letter on for
+  someone else to read: `>` would mark it as text being answered, and the
+  quote's bounds (40 lines, 8,000 bytes, stop at the signature) would cut what
+  the forward exists to carry. Escape sequences are removed; color pipe codes
+  stay, so it reads as the original did.
+- Nothing extra bounds it: a letter at the body limit is over it once the
+  header is added, and the review screen says so in characters and refuses
+  Send until `[E]dit body` shortens it (issue #812), as for any over-limit letter.
+- System mail can be forwarded. Passing a moderation notice on -- to the SysOp,
+  say -- harms no one, and the header says it came from System.
+- `caller_mail_refusal` is checked when the key is pressed. Each letter's
+  forward has its own draft slot, apart from a reply to it.
+- Where it returns (issue #919): a forward sent from a Sent letter closes
+  the view as Reply and Resend there do (below) -- the Sent list, on the
+  letter, or Find's results, with "Message sent." above the prompt. The
+  new letter is in Sent, and a view left open would stand on the old one
+  as though nothing had happened. A forward from the Inbox comes back to
+  the letter's view, as a reply to it does.
+
+**Reply and Resend on Sent** (issue #825). A sent letter's view is
+`[R]eply Re[s]end [F]orward [D]elete [B]ack`; both new keys write to the
+letter's recipient through `mail_someone`, so the checks a letter started from
+a meeting place gets are made when the key is pressed, and Send makes them
+again (`send_mail`'s recipient and block checks, `_check_link_reply_address`
+for a Link address). A recipient whose account was deleted since (#818) is
+refused at the key, by the name Sent shows. After a letter is sent the view
+closes and the screen it was opened from -- the Sent list, the new letter on
+it, or the main menu's Find results (#824) -- shows "Message sent." above its
+prompt; a cancelled, kept or refused one comes back to the view.
+- `[R]eply` is a follow-up: `Re:` by the reply rule, and the caller's own
+  letter quoted under "<caller> wrote:" as a reply to a received letter is
+  quoted. Quoting one's own letter was chosen over an empty body: the
+  recipient may have deleted it, and the quote is one keystroke to remove. It
+  shares the reply draft slot scheme (`_reply_key`), so it is offered only for
+  that letter.
+- `Re[s]end` is offered only on Link mail that bounced or expired (any
+  reason, `no_answer` included). Mail that was delivered, is pending or is
+  with a relay may reach its reader, and local mail cannot fail after Send, so
+  a second copy there would only be a duplicate; the caller can still forward
+  it or write anew. The new letter is titled "Resend", goes to the stored
+  `recipient_remote_address`, and carries the subject and body verbatim --
+  not quoted, not `Fwd:` -- with escape sequences removed and color pipe codes
+  kept, as a forward's body is. The signature it was sent with is part of the
+  body, so none is appended again. It has a draft slot of its own per letter
+  (`mail_resend_<user>_<key>.draft`), apart from a reply to or a forward of
+  it. The failed row keeps its status and reason, and opening it still
+  clears its notice flag (#806).
+- A resent letter says so (issue #919). Once the new letter is sent, the
+  failed row gets `mail_messages.resent_at` (`netbbs.link.mail.
+  record_resend`); a second resend moves it to the later time. Sent's
+  Delivery column then reads `resent`, the view adds `Resent: <date> (the
+  new copy is in Sent)` under its Delivery line, and the key reads
+  `Re[s]end again`. Only a bounced or expired Link row of the sender's is
+  marked, and only when the new letter went to that row's recipient: the
+  review screen's `[T]o` can send the resend to someone else, and then the
+  old letter did not go again. The marker is a display over the stored
+  state, not a new `link_delivery_status`, so every delivery path, expiry
+  and notice keeps treating the row as the failure it is; a late answer
+  that makes it `delivered` (a relay's `no_answer` expiry, #874) shows as
+  delivered, with its `Resent:` line kept. Recorded after the send, in a
+  write of its own: a crash between the two leaves a sent resend unmarked,
+  which a second Resend would repeat, and nothing worse.
+- A letter to several people records the resend on each copy the new
+  letter reached, by the same address rule. `Re[s]end` goes to the failed
+  copies not yet resent; once every failed copy was, the key reads
+  `Re[s]end again` and goes to them all. The view gives each resent copy a
+  `Resent to <name>: <date>` line under its own Delivery line.
+- `resent` ranks as a failed letter. In a group's one row the order is
+  bounced, expired, resent, pending, with relay, then a read receipt
+  (#829), then delivered: a failure still waiting on the caller comes
+  first, so the row reads `resent` only when every failed copy was resent,
+  and a failure the caller already dealt with still outranks a copy on
+  its way and a local copy's receipt. It is shown muted, as pending is.
+  Receipts never meet it on one copy: only local copies have receipts,
+  and only Link copies can be resent.
+
+### 6.5 Communities
+
+A Community is a topic-oriented coordination/container object above boards,
+channels, and file areas. It does not merge those domains or change their
+behavior.
+
+Each board, channel, or file area has zero or one Community. “Uncategorized” is
+the absence of a Community, not a synthetic row. Categories remain a separate
+layer below Communities.
+
+The SysOp orders Communities (issue #838): the callers' Communities list
+follows each one's `position`, not its name, and a new Community goes last. A
+Community's console screen moves it up or down and shows its place. Nodes
+upgraded from before this keep the alphabetical order they showed. The first
+field test's SysOp named a Community "The Clubhouse -- Start here" and watched
+it sort last, with nothing she could do about it.
+
+Boards and file areas have a SysOp order too (issue #839), and it is what a
+caller's list shows unless the caller picks another under `[O]rder`. The old
+default re-sorted by latest activity on every visit, so the field test's
+caller found another board at the "03" he remembered a minute later. A new
+board or area goes last, including one carried over the Link. The console's
+`[U]p`/`[D]own` move it among the boards or areas that share its category,
+Community and pinned flag -- a swap with any of those shows in every caller's
+list that holds both, where a swap with a board of another Community would
+change nothing in that Community's list -- and its screen shows its place; `[R]emove` deletes it, as on a
+Community's or a category's screen. The console's own lists follow the same
+order. Activity, name, newest and volume stay available as a caller's
+`[O]rder` choice. Channels keep their alphabetical default: they have no
+stored order to follow.
+
+Categories (for boards, file areas and chat channels, each kind independent)
+are at most two levels deep. The SysOp orders them: every listing follows a
+category's `position` among its siblings, not its name (issue #681). The
+console lists each sub-category under its parent. Picking a category lets the
+SysOp rename it, change its description, move it under another top-level
+category or to the top level, move it up or down, or remove it. The two-level
+rule holds on every edit: a new parent must itself be top-level, and a category
+with sub-categories stays top-level.
+
+Communities provide:
+
+- topic-first navigation;
+- description and visibility;
+- inherited level, age, and name-verification defaults;
+- Community-scoped blanket moderator grants;
+- a future unit for Link carry and governance.
+
+The main menu (issue #838) offers content two ways:
+
+- **By kind:** `[M]essage boards`, `[C]hat`, `[F]iles` and `[G]ames` open
+  the whole node's list of that kind, whichever Community each item belongs
+  to. They come first, because they are what callers who know other BBSes
+  look for. M, C and F are always shown; Games only while a door is visible.
+- **By topic:** `C[o]mmunities`, shown while at least one Community is
+  visible, lists them; picking one opens its page -- its description and an
+  entry per kind it holds, with how many -- which leads to the same board,
+  channel, area or door browsers scoped to that Community. Back from a
+  Community's page returns to the Communities list.
+
+"Uncategorized" (no Community) is a data-model term only. A resource with no
+Community is listed under its kind like any other, so there is no menu entry
+for "resources outside a Community". The earlier design had one, next to a
+`[J]ump to...` type picker; a first-time SysOp created a Community only to
+escape the word, and callers read Jump as a name search (field test, #831).
+Both were removed. `[/] Find` holds the slash because `[F]` is Files, and `[?]`
+is kept for the main menu's help entry (#840).
+
+A SysOp on a node with no boards, channels or file areas at all sees, and
+nobody else does, where to create the first one. Resources unrelated to
+Communities—mail, directory, profiles, preferences, and administration—retain
+their own navigation.
+
+Community-scoped category views must filter at the query layer so a category
+used by resources in several Communities does not leak another Community’s
+resources into the current view.
+
+Deleting a Community:
+
+- sets member resources to no Community;
+- revokes Community-scoped blanket grants;
+- shows the blast radius before confirmation.
+
+Existing nodes migrate safely because the nullable Community reference leaves
+all existing resources without a Community until a SysOp assigns them.
+
+#### Link Communities
+
+A Link Community is the same Community object announced through a signed Link
+event, not a separate table or local type.
+
+Two same-named Link Communities from different origins remain distinct.
+Existing local Communities may be promoted into Link scope.
+
+Carrying a Link Community is intended to carry its present and future member
+resources by default, while retaining visible per-resource and whole-Community
+local exclusions. Origin defaults are recommendations; carrying-node overrides
+win locally.
+
+Actual Link Community event schemas, signed membership changes, and advanced
+governance are Phase 6 work.
+
+### 6.6 Activity, unread state, follows, and search (issue #56)
+
+A topic-first Community hierarchy is only more useful than a plain directory if
+a user can tell what changed since their last visit. This section is the
+complete answer to issue #56: read/unread semantics, follow state, a
+new-activity surface, and local search. It replaces §6.1's earlier vague
+"local search/navigation foundations" phrase.
+
+#### Read/unread state
+
+Local mail already has a complete, working model: a per-message `read_at`
+timestamp, a live `unread_count` query, and independent sender/recipient
+deletion. A delivered Link message is a normal row in the same table, so it
+already has full read tracking the moment it lands in a mailbox. Nothing new
+is needed for mail; issue #56's mail bullet is already satisfied.
+
+Boards, file areas, and channels need a per-user, per-container **read
+cursor**, not an unbounded per-item flag — per-item read state for a
+potentially unbounded board would itself be an unbounded table. One table,
+`user_read_cursors`, holds the cursors, with an
+`(user_id, object_type, object_id)` primary key, where `object_type` is
+`board`/`channel`/`file_area` and `object_id` is that resource's own local
+integer id (the same id `community_id`/category columns already reference —
+never the content-addressed `post_id`/`file_id`, which only identifies one
+item, not a container). Its payload is the newest item's ordering key the
+user has already seen:
+
+- **boards** work differently since issue #710: a post is read once opened,
+  so a board cursor's arrival id is a *floor* and a second, bounded table
+  (`user_board_opened_posts`) holds the posts opened above it. The model is
+  "Boards: a post is read once it is opened" below; the rest of this list
+  describes file areas and channels;
+- file areas already page with a stable `(created_at, file_id)` keyset
+  cursor (the existing file-listing implementation) — the read cursor
+  stores exactly that same tuple shape, so "what's unread" is the identical
+  tuple comparison keyset pagination already performs for `after=`, just
+  anchored at the user's own cursor instead of a page boundary;
+- channel scrollback has no revision concept and is already ordered by a
+  plain monotonic message id, so a channel's cursor is just that id.
+
+An **edit never resets read state**: an edit's root post keeps the original
+`created_at`/`post_id` and row id (§6.1), which is exactly what the read
+state keys on — a post a user has already read stays "read" after a later
+typo fix, matching normal reader expectance. **Expiry and deletion cannot
+corrupt a cursor**: an expired post keeps its `post_id` reachable until
+nothing references it, and even final hard-deletion only ever removes an
+already-fully-dereferenced row — a stored cursor value is a stable position
+marker being compared against, never a live foreign key, so it cannot dangle
+or resurrect deleted content.
+
+A resource with no cursor row for a user has never been visited by them.
+First visit — not a retroactive backfill — establishes the baseline: viewing
+a file-area page or a channel's current scrollback advances that user's
+cursor to the newest item they were just shown, and entering a board counts
+every post already on it as read (issue #710). This is also the complete
+migration story for existing accounts (issue #56's last acceptance
+criterion): the read-cursor table starts empty for everyone, including
+existing users, at upgrade time. Nobody's history is scanned or backfilled;
+the first real visit after upgrade sets the baseline, so only genuinely new
+activity from that point forward counts as unread — never a flood of
+years-old "unread" content on the first login after this ships.
+
+A never-visited resource is surfaced as **not yet visited**, not as a
+specific (and potentially enormous, meaningless) unread count — a real
+numeric unread count only exists once a baseline cursor is established.
+
+Channel scrollback is a bounded ring buffer (§6.3): a channel's cursor can
+only ever express "unread among what's still retained." A message trimmed
+out of scrollback before a user's next visit is simply gone, the same as it
+already is for a session that was never connected to see it live — this is
+an existing, accepted limitation of chat's ephemeral model, not a new gap
+introduced here.
+
+**Replies and mentions** need no new schema. A board post's existing
+`parent_post_id` already names the post it replies to; "replies to me,
+unread" is the same cursor-filtered query further restricted to posts whose
+`parent_post_id` belongs to one of the user's own posts, run across every
+board the user can read rather than one at a time. A channel "mention" is a
+lightweight, unverified `@username` substring match against
+`channel_messages.body` for messages newer than the user's channel cursor —
+a convenience heuristic, not a structured or security-relevant feature; a
+literal `@alice` typed with no intended addressee is an accepted false
+positive, and a message directed at someone without using their exact
+username is an accepted false negative.
+
+**Node-local arrival order for carried content (issue #72).** The
+model above compares a post/file's own `created_at` against the
+cursor. That is correct for locally originated content, created in the
+same order it becomes visible, but not for a Link-carried post: a
+remote author's claimed `created_at` can be arbitrarily old if the post
+only reaches this node after a partition or a delayed catch-up, and
+comparing against it can let a genuinely new arrival silently sort
+behind an already-advanced cursor. `posts`/`files` rows already carry a
+second, distinct ordering with no schema addition needed: SQLite's own
+`INTEGER PRIMARY KEY` rowid, assigned in strict insertion order
+regardless of whether a row was created locally or materialized from a
+carried Link event (the same property GitHub issue #68 already relies
+on for edit-chain tie-breaking). `user_read_cursors` gains
+`last_seen_arrival_id`, populated from that rowid; `unread_post_count`/
+`unread_file_count`/`unread_replies_to` compare against it instead of
+`created_at`, while `file_area_read_cursor` (feed-position jump-to)
+still compares `created_at` -- the two concerns use different orderings
+on purpose, per this section's own distinction between authored
+chronology and node-local availability. (`board_read_cursor` was the
+same until issue #710, which computes a board's jump from its unread
+posts instead; see "Boards: a post is read once it is opened" below.)
+Unread counting for boards has also moved on since: #710 makes the
+arrival id a floor with an opened set above it.
+Existing cursors are backfilled from the post/file their existing
+`last_seen_stable_id` already names, so an upgrade preserves exactly
+what a user had already read rather than resetting anyone to
+all-unread.
+
+**Accepted scope boundary (file areas):** jump-to-first-unread can
+still land on a file area's ordinary newest page rather than navigating
+precisely to an out-of-order arrival buried elsewhere in feed history,
+since that jump cursor stays `created_at`-based. Unread *counting* and
+`[N]ew scan`'s "has unread" detection are correct either way. Boards no
+longer have this gap: issue #710's jump is computed from the unread
+posts themselves (below).
+
+**Boards: a post is read once it is opened (issue #710).** Showing a post
+in the board list does not mark it read; opening it in the reader does. A
+board cursor's `last_seen_arrival_id` is a **floor**: every post at or below
+it, in arrival order, is read. `user_board_opened_posts` holds the posts a
+user opened *above* the floor, one row per `(user, board, post row id)`.
+Unread means above the floor and not in the set, and every surface that
+reports unread uses that one rule: the list's `new` markers,
+`unread_post_count` (`[N]ew scan`, the board picker) and
+`unread_replies_to`.
+
+The set stays small by construction:
+- It only ever holds **out-of-order reads**. When the opened posts run
+  unbroken up from the floor, the floor advances past them and their rows
+  are deleted, so a caller reading in order never stores a row at all.
+  "Unbroken" is over the posts a reader may see: a post pending approval,
+  hidden by trust (§12) or deleted is not a gap anyone could read, so it does
+  not hold the floor back.
+- It is **capped** at 500 rows per user and board. Past the cap the floor
+  moves up to the oldest kept row, and the oldest gaps are given up as read.
+  Reaching the cap takes more than 500 posts opened while skipping others on
+  one board.
+
+`[M]ark all read` (on the list, and per board in `[N]ew scan`) moves the
+floor to the newest visible post and drops the set. A post still pending
+approval above it stays unread, so it is new when it appears. A caller's
+own new post is recorded as opened when it is written.
+
+The jump to the first unread post (`board_read_cursor`, used by `[N]ew
+scan`) is computed rather than stored: the feed position just before the
+oldest unread post by feed order, so an unread post below others already
+opened is where the jump lands, and a late carried post is found wherever
+its authored date puts it. With nothing unread it is the newest post, and
+the jump shows the ordinary newest page. Both lookups stream newest or
+oldest first and stop at the first visible row.
+
+A trigger deletes a post's opened rows when the post is deleted, since
+`posts.id` can be reused once the newest row is gone. The migration makes
+existing cursors the floors, so nobody's history is reset. A legacy cursor
+without an arrival id (issue #72's backfill found its post deleted) read by
+feed position: its floor is set just below the first root past that
+position, and the roots above the floor it had read become opened rows.
+
+#### Follows and favourites
+
+Follow state is a new, separate table — `(user_id, object_type, object_id)`
+where `object_type` is `community`/`board`/`channel`/`file_area` — deliberately
+independent of every existing access concept it sits beside:
+
+- **not** channel membership/invitations (`netbbs.chat.membership`), which
+  govern *whether you may enter*, never *whether you care about it*;
+- **not** node carry policy (`netbbs.link.boards.materialize_carried_board`),
+  which is a per-node, all-or-nothing decision about whether Linked content
+  exists locally at all, made with no per-user awareness whatsoever today;
+- **not** Community membership, since a Community has no membership concept
+  to begin with — it is a browsing/navigation container, not a joined group.
+
+Following an object a user can no longer read (level raised, Community/
+channel access changed, or — for a Linked board — this node stopping carrying
+it) is never actively revoked; it simply stops being resolvable and is
+filtered out of every follows-aware view at display time, the same
+lazy-filter approach category/board listings already use elsewhere for
+resources no longer visible.
+
+**Following, as a caller does it** (issue #675):
+- **From `[N]ew scan`:** `[F]ollow` follows the highlighted board, channel or
+  file area, or stops following it. `[V]iew followed` switches between only
+  what the caller follows and everything; it is refused while nothing is
+  followed. Followed rows are listed first and marked `*`.
+- **From a resource's own screen:** a board's post list and a file area's
+  screen each have a `[F]ollow`/`Un[f]ollow` toggle, and a chat channel has
+  the `/follow` command, which toggles the same way.
+- **Communities:** a Community is not followed yet. The table allows it, but
+  nothing would show the difference: `[N]ew scan` has no Community rows, and
+  a Community's boards, channels and areas are followed one by one.
+
+#### Activity summary and direct jump ("new scan")
+
+A single new main-menu entry — `[N]ew scan`, the traditional BBS term for
+exactly this feature — is the fast, always-shown surface issue #56 asks
+for, always shown like `[M]essage boards`, `[C]hat` and `[F]iles`.
+
+New scan covers **every board, channel, and file area the user can currently
+access**, not only followed ones — matching the traditional meaning of a
+new-scan pass, and avoiding a chicken-and-egg problem where a brand-new
+account has followed nothing yet and a "new scan" would show nothing at all.
+Followed objects are surfaced first / distinguished within that same list; a
+follows-only filtered view remains one keystroke away for a user who wants to
+narrow it. Within new scan, a dedicated "replies to you" pass (described
+above) runs across every board regardless of follow state, since a reply is
+always worth surfacing.
+
+Selecting an item from new scan jumps directly into that resource
+pre-positioned at the first unread item — mechanically, calling the
+resource's own existing keyset-pagination entry point with `after=` set to
+the user's stored cursor, not a new navigation primitive. When that item is
+on the newest page, the jump opens the newest page with the cursor on it
+(issue #839): a page starting at the first unread left out every read post
+and numbered the rest from 01, so the number a caller remembered from an
+ordinary visit picked nothing. Only a caller with more unread than a page
+holds gets the page that starts at the first one. `[/] Find` jumps the same
+way.
+
+New scan is a walk, not a one-shot list (issue #839). Back from a board,
+channel or area opened from it comes back to it, reloaded in place, with the
+cursor on the next row that has something waiting, and a line above the
+prompt naming it, so Enter after Enter goes through everything new. A board
+or area never visited counts as having something when it holds anything, and
+its row says how much ("not yet visited, 3 posts") rather than only "not yet
+visited". `[R]eplies` lists the replies to the caller's posts, one to a row;
+picking one opens its board with the cursor on it.
+
+Back from a board or file area opened from a list returns to that list, on
+the row left, and Back from a category's list to the list above it (issue
+#839). They used to return past the list, to whichever menu had opened it.
+
+#### Local search
+
+Implemented (issue #56's last piece). Local search is a new, separate
+capability from the item picker's simple, per-call substring name match
+(`pick_item`'s own search command, unrelated and unchanged — see below):
+
+- **scope**: only this node's own already-stored content — approved board
+  posts (subject/body), approved file entries (filename/description),
+  retained channel scrollback (message body), and the searching caller's own
+  mail (issue #824, below). Never content this node does not itself carry —
+  there is no Link-wide query protocol, and this design does not imply or
+  require one;
+- **mechanism**: SQLite FTS5 virtual tables (`post_search`, `file_search`,
+  `channel_message_search`), kept in sync with `posts`/`files`/
+  `channel_messages` by explicit calls from `netbbs.boards.posts`/
+  `netbbs.files.entries`/`netbbs.chat.scrollback` at every write path
+  (create/edit/approve/delete/expire/trim) — deliberately not SQL
+  triggers, matching this schema's existing convention of zero triggers
+  anywhere else and keeping the sync logic visible in Python. `post_search`
+  holds only the *resolved current* approved revision of a post's edit
+  chain (mirroring `_resolve_current_version`'s own "newest approved row
+  for this root" query) — a superseded revision, a still-pending edit, or
+  a root with no approved revision left is never indexed.
+  `channel_message_search` is pruned in the same statement that trims
+  scrollback's own ring buffer, so a search can never surface a message
+  already gone from retained scrollback. `mail_search` mirrors
+  `mail_messages` one-to-one, keyed by the letter's id as its rowid, and
+  is written and removed in the same transaction as the row
+  (`netbbs.mail`, `netbbs.link.mail`);
+  FTS5 availability was traced, not just assumed, for this project's actual
+  NetBSD/pkgsrc target: `lang/python312`'s Makefile buildlinks against
+  `databases/sqlite3` (not an amalgamation bundled into Python itself), and
+  that package's own Makefile passes `--fts5` unconditionally in
+  `CONFIGURE_ARGS` — so pkgsrc's Python `sqlite3` module should always have
+  it. A build lacking it fails the schema migration loudly
+  (`sqlite3.OperationalError: no such module: fts5`) rather than degrading
+  silently, consistent with this project's "fail clearly" convention;
+- **authorization**: a search result set passes through the exact same
+  visibility rules (level/age/Community gates for boards and file areas,
+  `netbbs.net.chat_flow.list_visible_channels_for` for channels) normal
+  browsing already enforces — search can never be a side-channel that
+  reveals a restricted resource's existence or content;
+- **privacy, explicit**: a user's search query text is never transmitted to
+  any peer or broadcast over Link, by default and without exception in this
+  design. Searching a Linked board only ever searches this node's own
+  locally carried copy of it. A future Link-wide search capability, if ever
+  built, is a distinct protocol extension requiring its own explicit design
+  (rate limits, query exposure, opt-in) — never an implied consequence of
+  local search existing;
+- **UI**: a new, always-shown `[/] Find` main-menu entry (`netbbs.net.
+  scan_and_find._find_screen`), alongside `[N]ew scan` — prompts for one
+  free-text query, matches it against all three content types at once, and
+  jumps straight to a selected hit: a post/file lands on the exact matched
+  item (`netbbs.search.post_jump_cursor`/`file_jump_cursor` compute the
+  `after=` cursor that makes it the first item shown, reusing the same
+  `initial_cursor` parameter `[N]ew scan` already threads through
+  board/file-area viewing) rather than just opening its board/area at the
+  default newest page. A channel message instead just enters its channel —
+  channels have no "jump to one message" concept, the same limitation
+  `[N]ew scan`'s own channel dispatch already accepts.
+- **the caller's own mail (issue #824)**: Find searches the caller's Inbox
+  and Sent folder, never anyone else's mail and never a letter the caller
+  deleted from their side (the other party's copy stays theirs). System
+  mail is in the Inbox, so it is searched too. A letter matches when each
+  typed word is in its subject, its body as plain text (color codes and
+  escapes removed, as the post index does), or the From/To name the mailbox
+  shows. Those names are resolved when shown — a Link node can rename, a
+  local recipient is looked up by id — so they are matched at query time,
+  word by word the way FTS5's `unicode61` tokenizer matches, rather than
+  indexed; the subject and body come from `mail_search`. Mail results are
+  listed first, ahead of posts, files and chat (issue #918: the caller's
+  own mail is often what they are looking for), under `[MAIL]`, "from" or
+  "to" the name, newest first, capped at 20 like every other kind, with the
+  same "top 20 per category" notice when more matched. The main menu's
+  Find entry and the Find screen's subtitle name mail first too ("Search
+  mail, posts, files, chat"), in the order the results come. Nobody mail is
+  closed to (issue #816: the guest, including a session that came in as the
+  guest, and callers below the mail level) gets mail results, and the main menu's
+  Find entry then names only posts, files and chat. A letter opens in the
+  mailbox's own message view with all its actions, and opening an Inbox
+  letter marks it read as in the mailbox; `[B]ack` returns to the results,
+  and a letter deleted there leaves them. The gate is checked again when a
+  letter is opened, since the SysOp can close mail meanwhile.
+
+  An index rather than a scan of the caller's rows: the Inbox is capped at
+  500 but each letter may be 20 KB, Sent is not capped, and the scan runs
+  on the node's single database lane, so a mailbox full of long letters
+  would have held every other caller's queries for seconds. The index is
+  one more copy of private text, which is why its entries go with the row
+  and why the integrity check covers it.
+
+Local, in-page substring matching over a short list (`pick_item`'s own
+search command) is unrelated and unchanged — it is not "search" in this
+section's sense, just incremental filtering of an already-open, already
+access-checked list.
+
+**Integrity checking and rebuild (issue #74).** Because the four FTS
+tables above are synced by explicit per-write-path calls rather than one
+shared transaction with the authoritative write, a crash between the two,
+a future write path that forgets to call the right reindex function, or a
+restored older backup can leave them stale with no prior way to detect or
+repair it. `netbbs.search.check_index_integrity(db)` reports drift
+(missing/stale/extra entries, by id only — never the drifted content
+itself) for all four tables against authoritative `posts`/`files`/
+`channel_messages`/`mail_messages` data; `netbbs.search.rebuild_indexes(db)` replaces
+their contents outright, using the exact same "what should be indexed"
+computation the check compares against, so a rebuild always converges to
+a clean check immediately after. Exposed as a standalone maintenance
+command, `python -m netbbs.search check|rebuild --db PATH`, mirroring
+`python -m netbbs.backup`'s own subcommand shape.
+
+**Explicit decision: startup detects nothing automatically.** Unlike
+`Database.check_integrity`'s `PRAGMA integrity_check` (a full-database
+scan run once at every node startup, §13's startup/crash-recovery
+rules), FTS drift checking is *not* wired into node startup. The
+database-corruption check is cheap relative to node startup and guards
+against a failure mode (disk-level corruption) that can occur at any
+time regardless of how careful this codebase's own write paths are; FTS
+drift is a narrower, rarer failure (a missed reindex call, a crash in
+one specific window) whose check cost scales with indexed content
+rather than staying close to constant. Treat it as an operator-run
+maintenance action for now — after a crash, an interrupted migration,
+or a restored backup — rather than a mandatory gate on every start.
+Wiring a summary into the `[D]iagnostic log`/SysOp status surface is
+possible future follow-up, not required by this decision.
+
+### 6.7 Self-update
+
+Release discovery uses explicit GitHub Releases over HTTPS rather than an
+arbitrary branch HEAD. NetBBS checks once at startup and then daily by default;
+a SysOp can also check immediately from `[S]ettings` -> `[U]pdate`. Automatic
+checks only record their result. They do not download, install, or restart
+NetBBS, and they do not send an unsolicited in-session notification. The result
+is visible on the SysOp dashboard and update-settings screen. The
+operator-visible switch controls the startup/daily checks only; manual checks
+remain available when it is off.
+
+**Installing from the console (issue #731).** When the last check found a newer
+release, a SysOp on the live node can press `[I]nstall vX` on the Update screen.
+The screen shows the plan first and does nothing until `[I]nstall now` and a
+final yes. The steps run in order, and each one that fails stops the rest and
+records why:
+
+1. **Download.** The node asks the release API for that tag and takes the one
+   asset named `netbbs-<version>-py3-none-any.whl`. It refuses a draft or
+   pre-release, an asset whose address is not under the project's
+   `releases/download/<tag>/`, an implausible size, and an asset without a
+   published `sha256:` digest. The download is HTTPS end to end, redirects
+   included. It is bounded by the announced size (64 MiB at most) and 300
+   seconds. It is written under a temporary name and kept, beside the
+   database in `<db-stem>_updates/`, only when its SHA-256 matches the digest.
+2. **Back up.** A complete live backup, exactly as Backup's Create does. A
+   refused backup, for example with a War Dialer world in use, stops the
+   install.
+3. **Install.** `pip install` of the verified wheel into the interpreter the
+   node runs on, with the extras this installation has. An extra counts when
+   every requirement it names is installed; `dev` never counts. pip resolves
+   dependencies as usual, so a release that needs a newer dependency fetches
+   it from the package index. The node refuses to install:
+   - outside a virtual environment;
+   - from an editable or VCS install;
+   - where the service account cannot write the environment.
+
+   pip runs as an owned subprocess, bounded at 900 seconds, and only the tail
+   of its output is kept, for the failure screen. A fresh interpreter then
+   reports the installed version. Anything other than the target counts as a
+   failed install.
+4. **Restart.** The node records the install, then does one of two things:
+   - It shuts down gracefully: callers are warned and the configured delay
+     applies. It then exits with status 75, so the service manager starts the
+     new build.
+   - It stops there and tells the SysOp to restart the service.
+
+   Which one is the SysOp's declaration under `[R]estart after install`. The
+   setting is `auto` by default, which trusts detection: systemd's
+   `INVOCATION_ID` counts as a supervisor that restarts NetBBS, and NetBSD
+   rc.d, which does not restart a stopped node, is not detected. The request
+   for status 75 holds only while that restart shutdown is the one in
+   charge. A SysOp who cancels it, or a SIGTERM that replaces it, withdraws
+   it, because a service manager stopping the node must leave it stopped.
+   The shipped systemd unit restarts on 75 under `Restart=on-failure`, and
+   also lists 75 under `RestartForceExitStatus=` and `SuccessExitStatus=`.
+
+The next start compares the version it runs with the recorded target and
+records the outcome for the Update screen: "installed vX and restarted into
+it", or "installed vX, but this node started as vY".
+
+Between the install and the restart, the old process keeps running with the
+new files on disk. A module imported for the first time in that window would
+come from the new release. That is why the restart path follows the install
+immediately, and why the no-restart outcome says plainly to restart now.
+
+**Not automated:** rolling back. Going back means reinstalling the previous
+release's wheel and then restoring the pre-upgrade backup the install just
+made, so that code and schema roll back together. The operator-driven
+procedure remains fully supported: back up, stop the service, install the
+release wheel into the same environment with the same extras, start.
+
+`netbbs.selfupdate` also still contains tarball extraction, database snapshot
+and pending/confirm/rollback primitives from an earlier re-exec design. No
+command, menu or lifecycle path calls them.
+
+HTTPS and GitHub are the update trust boundary. The digest the install checks
+comes from the same release API over the same TLS. It proves the bytes are the
+ones GitHub holds for that asset, so a truncated, corrupted or swapped download
+fails. It does not prove that a maintainer signed them. An asset without a
+digest is refused rather than installed on TLS alone. Release signing remains
+a possible hardening step and is not required by the present design. GitHub
+computes asset digests on upload, so the release recipe needs no extra step;
+it must attach the wheel under its standard name.
+
+GitHub Releases and tagged source are the only official NetBBS distribution
+and update channel. `pip` is used to install an official release wheel; it is
+not an independently maintained source of NetBBS packages. External package
+managers may supply dependencies, but a PyPI, pkgsrc, apt, or other independently
+managed NetBBS package is not supported because it would introduce a second
+owner and release channel for the installed application files.
+
+### 6.8 FidoNet-technology networks (issue #166)
+
+A node can join FidoNet or an FTN othernet (fsxNet, AgoraNet, Micronet, ...)
+as an ordinary FTN node. The node carries echomail on boards and netmail in
+Mail. This is a **gateway at the boundary**. Link's protocol, events and trust
+model do not change, and FTN content never enters them. Decisions and the
+alternatives rejected for each are in §16, "Issue #166".
+
+**Networks.** A SysOp adds one network record per FTN network:
+
+- the network's name and 5D domain;
+- this node's address in it (`zone:net/node`, or `.point` for a point);
+- the uplink's address and its BinkP `host:port`;
+- the session password, plus optional packet and AreaFix passwords;
+- the poll interval, and whether this node answers incoming calls.
+
+Every network is off until the SysOp enables it, and settings take effect
+without a restart, as MRC's do (§6.3).
+
+**Transport: native BinkP, both directions.** The node speaks binkp/1.0
+(FTS-1026) in-process, with CRAM-MD5 (FTS-1027) and NR mode (FTS-1028). Two
+roles:
+
+- **Originating.** The node polls each network's uplink on its interval, at
+  least once a day, as hubs ask, and calls out sooner when mail is waiting.
+- **Answering.** The node listens on a configurable port (24554 by default)
+  for an uplink or a direct caller. The port is one for the whole node, and
+  the node listens only while some enabled network answers calls.
+  - **Secure sessions.** Only a session whose address and password match a
+    configured link is *secure*, and only a secure caller is handed that
+    network's waiting mail. A caller presenting an uplink's address with the
+    wrong password is refused.
+  - **Unsecure sessions.** Packets from an unsecure session are held for the
+    SysOp rather than tossed.
+  - **Limit.** At most a few calls run at once; another caller is told the
+    node is busy (`M_BSY`).
+
+No external mailer or tosser is needed or supported. Packets are Type 2+
+(FSC-0048) when written, and Type 2, 2+ or FSC-0039 are accepted when read.
+Bundles are ZIP, identified by content rather than by name. Outbound mail is
+queued in the database, modelled on §13.7's work items, not in BSO
+directories.
+
+**Echomail on boards.** A board is either local, Linked or FTN; it cannot be
+two of these. One echo area maps to one board, and the SysOp sets the mapping
+per board. Nothing is mapped by default.
+
+- *Inbound.* An echomail message becomes a post on its board:
+  - **Author.** It is labelled `Name (zone:net/node[.point])`, never with `@`,
+    which names a Link identity. It has no local account and no fingerprint.
+  - **Moderation.** It goes through the board's own moderation (§5.3). It is
+    never trust-evaluated (§12): FTN has no identity a node can verify.
+  - **Threading and date.** `^AREPLY` threads it under the post carrying the
+    matching `^AMSGID`. The message's own date, corrected by `^ATZUTC`, is
+    kept as the post's date.
+  - **Duplicates.** A message whose MSGID (or, without one, content hash) was
+    seen on that area before is dropped.
+- *Outbound.* A local post on an FTN board is exported to the uplink:
+  - the `AREA:` line, `^AMSGID` (a persisted serial, unique across restores),
+    `^AREPLY`, `^APID`, `^ATZUTC` and `^ACHRS`;
+  - a tear line and an Origin line;
+  - SEEN-BY and `^APATH` as FTS-0004 sets them.
+
+  A post that arrived from FTN is never exported again. SEEN-BY and PATH on
+  tossed messages are kept intact, so loop detection works.
+- *Edits and deletions* have no FTN equivalent. A local edit is not
+  re-exported, and removing an FTN-sourced post removes only the local copy.
+
+**Netmail in Mail.** Netmail is personal mail (§6.4) with an FTN address:
+
+- **Addressing.** A caller writes to `Name (zone:net/node[.point])` on the
+  To line. It is the same form an FTN author is shown with on a board, and
+  replying to an FTN post or netmail fills it in. The compose screen names
+  the network and says that netmail is not private: every system it passes
+  through can read it.
+- **Senders.** Each network has a minimum level for sending netmail. It
+  defaults to SysOp only until the SysOp lowers it, because netmail goes out
+  under the node's address. No level gates receiving it.
+- **Routing.** A netmail goes **direct when possible**. The node processes
+  the network's nodelist (FTS-5000) and calls the destination over BinkP when
+  its entry lists a BinkP host (`IBN`/`INA` flags). Otherwise the netmail
+  goes to the uplink for routing, and so does one whose direct call fails
+  after its retries.
+- **Kludges.** INTL, FMPT and TOPT (FTS-4001) are written whenever zones or
+  points need them.
+- **Inbound delivery.** Netmail is delivered by matching the To name,
+  case-insensitively, against a username: addressing uses the canonical
+  identity (§6.3), never a chat alias. A netmail matching no account, or an
+  account that takes no mail, goes to the SysOp, marked as addressed to
+  someone else. It is not bounced.
+- **Robots.** AreaFix is netmail too. The console's Areas screen sends `+TAG`,
+  `-TAG` and `%LIST` to the uplink's AreaFix and shows the replies.
+
+**Character sets.** Text is decoded by its `^ACHRS` kludge (FTS-5003). Without
+one, the network's default is used, CP437 unless the SysOp sets another.
+Outbound text is written in CP437 when every character fits, and in UTF-8
+otherwise. The kludge always names the set used. To, From and Subject are cut
+on character boundaries to FTS-0001's 35 and 71 bytes. Inbound text is
+sanitized before display like any other external content.
+
+**Not part of this design:** file echoes (TIC), file requests, acting as a
+hub for downlinks (AreaFix robot, SEEN-BY fan-out to other nodes), nodelist
+publishing, and QWK. Each needs its own decision.
+
+---
