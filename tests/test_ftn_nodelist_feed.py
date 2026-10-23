@@ -373,3 +373,13 @@ def test_the_network_editor_sets_the_nodelist_echo(db):
     assert "needs the nodelist's name" in _visible(_written_text(session))
     saved = get_network(db, existing.id)
     assert (saved.nodelist_echo, saved.nodelist_name, saved.nodediff_name) == ("NIX_LIST", "NIXLIST", "NIXDIFF")
+
+
+def test_a_zip_with_a_broken_member_is_refused_and_held(db, network, tmp_path):
+    good = _zip("TESTLIST.289", LIST_289)
+    start = good.index(b"TESTLIST.289") + len("TESTLIST.289")  # the local header's name, then the data
+    broken = good[:start] + bytes(b ^ 0x5A for b in good[start:start + 40]) + good[start + 40:]
+    assert _arrive(db, network, tmp_path, "TESTLIST.Z89", broken)
+    assert "cannot unpack" in nodelist_status(db, network.id).failure or "damaged" in (
+        nodelist_status(db, network.id).failure)
+    assert len(queue.list_held(db)) == 1

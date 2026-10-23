@@ -36,6 +36,7 @@ import io
 import logging
 import re
 import zipfile
+import zlib
 from pathlib import Path
 
 from netbbs.ftn.bundle import MAX_MEMBERS, archive_kind
@@ -118,7 +119,8 @@ def unpack(data: bytes, base_name: str | None) -> tuple[str | None, bytes]:
                     content += chunk
                     if len(content) > MAX_NODELIST_BYTES:
                         raise NodelistError(f"{name} unpacks to more than {_MIB} MiB")
-        except (zipfile.BadZipFile, NotImplementedError, OSError, EOFError) as exc:
+        # RuntimeError: an encrypted member; zlib.error: a broken deflate stream.
+        except (zipfile.BadZipFile, RuntimeError, zlib.error, OSError, EOFError) as exc:
             raise NodelistError(f"cannot unpack {name}: {exc}") from None
         return name, bytes(content)
 
@@ -173,7 +175,7 @@ def _refuse(db: Database, network: FtnNetwork, kind: str, file_name: str, data: 
         full_reason += "; waiting for a full list"
     record_failure(db, network.id, full_reason, waiting_for_full=kind == DIFF)
     _logger.warning("FTN %s: %s", network.name, full_reason)
-    if not data:
+    if not data:  # unreadable, or over the limit: TIC holds a file over 64 MiB before it gets here
         return
     if not hold_inbound(db, network_id=network.id, remote_address=str(network.uplink_address),
                         file_name=file_name, content=data, reason=full_reason):
