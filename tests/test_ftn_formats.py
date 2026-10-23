@@ -17,7 +17,15 @@ import pytest
 
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, find_address, parse_address
-from netbbs.ftn.bundle import MAX_UNPACKED_BYTES, archive_kind, build_bundle, bundle_name, extract_packets, packet_name
+from netbbs.ftn.bundle import (
+    MAX_UNPACKED_BYTES,
+    archive_kind,
+    build_bundle,
+    bundle_name,
+    extract_packets,
+    packet_name,
+    unpack_bundle,
+)
 from netbbs.ftn.chrs import _IDENTIFIERS, CP437, UTF8, choose_outbound_charset, codec_for_kludge, kludge_for_codec, truncate_encoded
 
 _IDENTIFIER_CODECS = list(_IDENTIFIERS.values())
@@ -411,6 +419,25 @@ def test_archive_kinds_are_recognised_by_content():
 def test_a_zip_bundle_yields_its_packets_by_base_name():
     bundle = build_bundle([("0000002a.pkt", b"one"), ("../../evil/0000002b.PKT", b"two"), ("readme.txt", b"no")])
     assert extract_packets(bundle) == [("0000002a.pkt", b"one"), ("0000002b.PKT", b"two")]
+
+
+def test_a_bundle_hands_back_its_other_members_apart():
+    bundle = build_bundle([("readme.txt", b"no"), ("0000002a.pkt", b"one"), ("dir/file.diz", b"diz")])
+    assert unpack_bundle(bundle) == ([("0000002a.pkt", b"one")], [("readme.txt", b"no"), ("file.diz", b"diz")])
+
+
+def test_a_zip_with_no_packet_is_not_read_as_a_bundle():
+    assert unpack_bundle(build_bundle([("nodelist.z23", b"x" * 100), ("file_id.diz", b"d")])) == ([], [])
+    assert unpack_bundle(build_bundle([])) == ([], [])
+
+
+def test_other_members_count_against_the_unpacked_bound():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("0000002a.pkt", b"one")
+        archive.writestr("big.bin", b"\x00" * (MAX_UNPACKED_BYTES + 1))
+    with pytest.raises(FtnFormatError, match="more than"):
+        unpack_bundle(buffer.getvalue())
 
 
 def test_a_non_zip_bundle_is_refused_by_name():

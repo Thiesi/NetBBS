@@ -124,6 +124,54 @@ def test_a_zip_bundle_is_unpacked_and_another_file_is_held(db, setup):
     assert "not a packet" in held.reason
 
 
+def test_a_zip_with_no_packets_is_held_whole_with_a_reason(db, setup):
+    _, network, _ = setup
+    archive = build_bundle([("nodelist.z23", b"nodelist"), ("file_id.diz", b"NIX nodelist")])
+
+    async def call(mailer, network):
+        return await mailer.poll(network)
+
+    status, _ = asyncio.run(_with_hub(db, network, call, files=[OutgoingFile("nodelist.zip", archive)]))
+
+    (held,) = queue.list_held(db)
+    assert held.file_name == "nodelist.zip"
+    assert "ZIP archive with no mail packets" in held.reason
+    assert queue.held_content(db, held.id) == archive
+    assert "1 held" in status.last_summary
+
+
+def test_a_bundles_packets_are_tossed_and_its_other_members_held_each(db, setup):
+    _, network, _ = setup
+    bundle = build_bundle([("0000abcd.pkt", _hub_mail("one", "two")), ("readme.txt", b"hello"),
+                           ("extra/file.diz", b"diz")])
+
+    async def call(mailer, network):
+        return await mailer.poll(network)
+
+    status, _ = asyncio.run(_with_hub(db, network, call, files=[OutgoingFile("00020063.we0", bundle)]))
+
+    assert db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 2
+    held = queue.list_held(db)
+    assert [(h.file_name, queue.held_content(db, h.id)) for h in held] == [
+        ("readme.txt", b"hello"), ("file.diz", b"diz")]
+    assert all(h.reason == "not a mail packet, found in bundle 00020063.we0" for h in held)
+    assert "2 posts" in status.last_summary and "2 held" in status.last_summary
+
+
+def test_a_bundle_member_the_full_held_store_cannot_keep_is_counted_lost(db, setup, monkeypatch):
+    _, network, _ = setup
+    monkeypatch.setattr(queue, "MAX_HELD_PACKETS", 1)
+    bundle = build_bundle([("0000abcd.pkt", _hub_mail("one")), ("a.txt", b"a"), ("b.txt", b"b")])
+
+    async def call(mailer, network):
+        return await mailer.poll(network)
+
+    status, _ = asyncio.run(_with_hub(db, network, call, files=[OutgoingFile("00020063.we0", bundle)]))
+
+    assert [h.file_name for h in queue.list_held(db)] == ["a.txt"]
+    assert "1 held, 1 lost (held store full)" in status.last_summary
+
+
 def test_a_remote_that_is_not_the_uplink_is_refused_before_anything_moves(db, setup):
     sysop, network, board = setup
     export_post_if_ftn(db, create_post(db, board, sysop, "Out", "Going out"), board)

@@ -8,12 +8,14 @@ archive is recognised by its first bytes (`archive_kind`). Only ZIP is
 unpacked; ARC, ARJ, LHA, RAR and 7-Zip are recognised so the refusal can
 name them, and a hub can be asked to send ZIP or bare packets instead.
 
-`extract_packets` is bounded against a hostile or broken archive: at most
+`unpack_bundle` is bounded against a hostile or broken archive: at most
 `MAX_MEMBERS` members, and `MAX_UNPACKED_BYTES` unpacked in total,
 counted while reading rather than trusted from the archive's own
-directory, since a zip bomb lies there. Only members named `*.pkt` are
-returned, by base name: nothing is written to disk here, so a member's
-path cannot escape anywhere.
+directory, since a zip bomb lies there. It returns the `*.pkt` members
+and, apart, every other member, so the caller can hold those rather than
+drop them; a ZIP with no packet at all is not a mail bundle and is not
+read. Members are returned by base name: nothing is written to disk here,
+so a member's path cannot escape anywhere.
 """
 
 from __future__ import annotations
@@ -59,6 +61,16 @@ def extract_packets(data: bytes) -> list[tuple[str, bytes]]:
     """The `.pkt` members of a ZIP bundle as `(base name, bytes)`, in archive
     order. Raises `FtnFormatError` for another archive kind, a damaged ZIP,
     or one over the bounds."""
+    return unpack_bundle(data)[0]
+
+
+def unpack_bundle(data: bytes) -> tuple[list[tuple[str, bytes]], list[tuple[str, bytes]]]:
+    """`(packets, others)`: the `.pkt` members of a ZIP bundle and every other
+    member, each as `(base name, bytes)` in archive order. A ZIP with no
+    `.pkt` member gives `([], [])` without reading a member: it is not a
+    bundle, and the caller keeps it whole. Every member read counts against
+    the bounds. Raises `FtnFormatError` for another archive kind, a damaged
+    ZIP, or one over the bounds."""
     kind = archive_kind(data)
     if kind != "zip":
         raise FtnFormatError(f"bundle is {kind or 'not a recognised archive'}; only ZIP bundles can be unpacked")
@@ -70,12 +82,12 @@ def extract_packets(data: bytes) -> list[tuple[str, bytes]]:
         members = [info for info in archive.infolist() if not info.is_dir()]
         if len(members) > MAX_MEMBERS:
             raise FtnFormatError(f"bundle holds {len(members)} members, more than {MAX_MEMBERS}")
-        packets = []
+        named = [(info.filename.replace("\\", "/").rsplit("/", 1)[-1], info) for info in members]
+        if not any(_is_packet(name) for name, _ in named):
+            return [], []
+        packets, others = [], []
         total = 0
-        for info in members:
-            name = info.filename.replace("\\", "/").rsplit("/", 1)[-1]
-            if not name.lower().endswith(".pkt"):
-                continue
+        for name, info in named:
             content = bytearray()
             try:
                 with archive.open(info) as member:
@@ -86,8 +98,12 @@ def extract_packets(data: bytes) -> list[tuple[str, bytes]]:
                         content += chunk
             except (zipfile.BadZipFile, NotImplementedError, OSError, EOFError) as exc:
                 raise FtnFormatError(f"cannot unpack {name!r} from the bundle: {exc}") from exc
-            packets.append((name, bytes(content)))
-        return packets
+            (packets if _is_packet(name) else others).append((name, bytes(content)))
+        return packets, others
+
+
+def _is_packet(name: str) -> bool:
+    return name.lower().endswith(".pkt")
 
 
 def build_bundle(packets: list[tuple[str, bytes]]) -> bytes:
