@@ -455,6 +455,21 @@ async def _browse_boards_in_category(
         activity, _ = _activity(item)
         return about_separator.join(part for part in (activity, _about(item)) if part) or None
 
+    # Issue #1389 (design doc §6.10): offline mail is an action of the
+    # top-level list, under the key its label starts with -- [O] is this
+    # list's [O]rder already.
+    offline_keys: dict = {}
+    offline_nav: list[MenuEntry] = []
+    if category_id is None and not community_scoped:
+        async def _offline_mail() -> None:
+            from netbbs.net.qwk_flow import offline_mail
+
+            await offline_mail(session, db, user, link_context=link_context, transfers=transfers)
+            return None
+
+        offline_keys = {"q": _offline_mail}
+        offline_nav = [MenuEntry(label=menu_key("Q", "WK offline mail"), brief="Packets to read offline")]
+
     # Back from a board or a category comes back to this list, on the row
     # left (issue #839): it used to return past it, to the menu the list
     # was opened from. Reloaded each time, since reading changes what is new.
@@ -505,6 +520,8 @@ async def _browse_boards_in_category(
                 art_limit=board_art_limit,
                 art_once=BOARD_LIST,
                 linked_of=_linked,
+                live_keys=offline_keys or None,
+                live_nav=offline_nav,
             )
             if board is None:
                 return
@@ -556,6 +573,8 @@ async def _browse_boards_in_category(
             art_limit=board_art_limit,
             art_once=BOARD_LIST,
             linked_of=_linked,
+            live_keys=offline_keys or None,
+            live_nav=offline_nav,
         )
         if selected is None:
             return
