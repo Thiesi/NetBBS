@@ -50,7 +50,7 @@ from netbbs.ftn.binkp import MAX_FILE_BYTES
 from netbbs.ftn.networks import FtnNetwork, get_network
 from netbbs.ftn.outbound import KILL, MAX_PENDING_FILES_PER_NETWORK, queue_file_without_commit, spool_dir
 from netbbs.ftn.queue import FtnQueueFullError
-from netbbs.ftn.tic import Tic, dos_name, name_problem, write_tic
+from netbbs.ftn.tic import Tic, dos_name, name_problem, replaces_pattern_problem, write_tic
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import parse_utc_iso, utc_now_iso
@@ -249,7 +249,14 @@ def hatch_file(
     send_name = dos_name(entry.filename)
     replaces: tuple[str, ...] = ()
     if target.previous is not None:
-        replaces = tuple(dict.fromkeys(n for n in (target.previous.send_name, target.previous.file_name)))
+        # A receiver reads `Replaces` as a pattern: a name with `*` or `?`
+        # (a caller may upload one) would remove other files there, so only
+        # names that match nothing but themselves are written. The 8.3 name
+        # never has either.
+        replaces = tuple(dict.fromkeys(
+            n for n in (target.previous.send_name, target.previous.file_name)
+            if "*" not in n and "?" not in n and replaces_pattern_problem(n) is None
+        ))
     lines = _description_lines(entry)
     now = datetime.datetime.now(datetime.timezone.utc)
     us = network.our_address

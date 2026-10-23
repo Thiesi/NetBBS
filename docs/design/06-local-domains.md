@@ -2617,7 +2617,8 @@ cursor and confirmed with one yes/no, since it goes to the network.
   names, CRC-32, size, who, when) and audit-logged on the area. A file
   already hatched into a network is hatched again only when the SysOp
   confirms that on purpose; that TIC carries `Replaces` with the earlier
-  copy's names.
+  copy's names. A name containing `*` or `?` is left out, since receivers
+  read `Replaces` as a pattern; the 8.3 name never contains either.
 - **Refused**, with the reason and nothing queued: a file not approved; a
   file that came over FTN (by TIC, as a netmail's file, or saved from the
   held store, which records its sender for this), so nothing echoes back;

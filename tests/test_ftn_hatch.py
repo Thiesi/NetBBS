@@ -228,7 +228,15 @@ def test_a_file_is_hatched_once_unless_hatched_again_with_replaces(db, sysop, ne
     assert len(_hatches(db)) == 2
 
 
-@pytest.mark.parametrize("problem", ["by_tic", "held", "no_password", "too_big", "pending", "no_echo", "tic_name"])
+def test_a_wildcard_in_a_callers_name_never_reaches_replaces(db, sysop, network, area):
+    entry = _upload(db, area, sysop, name="every*.zip")
+    hatch_file(db, entry.file_id, actor=sysop)
+    again = hatch_file(db, entry.file_id, actor=sysop, again=True)
+    assert again.replaces == (dos_name("every*.zip"),)
+    assert all("*" not in value and "?" not in value for value in again.replaces)
+
+
+@pytest.mark.parametrize("problem",["by_tic", "held", "no_password", "too_big", "pending", "no_echo", "tic_name"])
 def test_what_is_not_hatched_says_why(db, sysop, network, area, problem):
     name = "x.tic" if problem == "tic_name" else "NETBBS.ZIP"
     target_area = area
