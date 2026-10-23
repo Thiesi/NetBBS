@@ -5047,4 +5047,18 @@ MIGRATIONS = [
           );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1463 (design doc §6.8, §16 \"Issue #1154\", Decision 6): the FTN robots' names "
+            "and FileFix's password. `ftn_networks.areafix_robot` and `filefix_robot` are the names "
+            "AreaFix and FileFix requests are addressed to, `AreaFix` and `FileFix` by default and on "
+            "upgrade. `filefix_password` is FileFix's own password; empty, as on upgrade, means the "
+            "AreaFix password is used, so nothing changes."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN areafix_robot TEXT NOT NULL DEFAULT 'AreaFix';
+        ALTER TABLE ftn_networks ADD COLUMN filefix_robot TEXT NOT NULL DEFAULT 'FileFix';
+        ALTER TABLE ftn_networks ADD COLUMN filefix_password TEXT NOT NULL DEFAULT '';
+        """,
+    ),
 ]
