@@ -85,7 +85,7 @@ MAX_SEGMENT_NODES = 5_000
 MAX_NODE_NUMBER = 32767
 
 _LIST_NAME = re.compile(r"[A-Z0-9_-]{1,8}")
-_PHONE = re.compile(r"\d+(-\d+)+")
+_PHONE = re.compile(r"\d+(-\d+)+", re.ASCII)
 _FLAG = re.compile(r"[\x21-\x2b\x2d-\x7e]+")  # printable ASCII but space and comma
 
 
@@ -140,7 +140,7 @@ def clean_phone(value: str) -> str:
 
 def clean_speed(value: str) -> str:
     text = value.strip() or DEFAULT_SPEED
-    if not text.isdigit() or len(text) > 6:
+    if not text.isascii() or not text.isdigit() or len(text) > 6:
         raise PublishError(f"Speed is a number; {DEFAULT_SPEED} for a system without a phone line.")
     return text
 
@@ -489,7 +489,10 @@ def header_line(title: str, day: datetime.date, crc: int) -> str:
 
 
 def _assemble(title: str, day: datetime.date, body: list[str]) -> bytes:
-    lines = [line.encode("ascii") for line in body]
+    try:
+        lines = [line.encode("ascii") for line in body]
+    except UnicodeEncodeError:  # every field is checked on save; this is the backstop
+        raise PublishError("A line has a character outside ASCII; edit it and publish again.") from None
     crc = list_crc([b"", *lines])
     head = header_line(title, day, crc).encode("ascii")
     return b"".join(line + b"\r\n" for line in [head, *lines]) + b"\x1a"
@@ -521,7 +524,7 @@ def build_segment(db: Database, network: FtnNetwork, settings: PublishSettings, 
         host = data_line("Host", net, clean_fields(settings.host))
     except PublishError as exc:
         raise PublishError(f"The Host line: {exc}") from None
-    body = [";A", f";A Net {net} of {network.name}, made by NetBBS {__version__}", ";A", host]
+    body = [";A", f";A Net {net} of {_ascii(network.name)}, made by NetBBS {__version__}", ";A", host]
     for node in list_segment_nodes(db, network.id):
         try:
             body.append(segment_line(node))

@@ -399,3 +399,20 @@ def test_the_points_screen_edits_a_points_line(db, network, points, sysop):
     assert "Saved point 21:1/199.1's line" in text
     pat = list_point_entries(db, network)[0]
     assert pat.fields.location == "Auckland"
+
+
+@pytest.mark.parametrize("fields", [
+    ListFields("A", "X", "Y", phone="1-８００-555"),
+    ListFields("A", "X", "Y", speed="３００"),
+])
+def test_non_ascii_digits_are_refused(db, network, fields):
+    with pytest.raises(PublishError):
+        save_segment_node(db, network, SegmentNode(network.id, 5, fields))
+
+
+def test_a_network_name_outside_ascii_still_publishes(db, network, tmp_path):
+    named = save_network(db, replace(network, name="FidoNet Südwest"))
+    _segment_settings(db, named, folder=str(tmp_path))
+    data = build_segment(db, named, get_settings(db, named.id), FRIDAY.date())
+    assert b"FidoNet S?dwest" in data
+    check_crc(list_lines(data), required=True)
