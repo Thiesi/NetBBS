@@ -5245,6 +5245,39 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #1476 (design doc §6.8, §16 \"Issue #1154\", Decision 14): TIC hatching. "
+            "`ftn_hatches` records each file this node hatched into a file echo -- the file "
+            "(`file_id`, the content id), its network, area and tag, the names it went under, its "
+            "CRC-32 and size, who hatched it (NULL for an automatic hatch) and the Replaces values "
+            "a deliberate second hatch carried -- so a file is hatched once unless the SysOp hatches "
+            "it again on purpose. A file area hatches its approved uploads automatically when "
+            "`file_areas.ftn_auto_hatch` is set: off by default and on upgrade. No foreign key "
+            "points at `files` or `file_areas`, which later migrations may rebuild."
+        ),
+        sql="""
+        ALTER TABLE file_areas ADD COLUMN ftn_auto_hatch INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE ftn_hatches (
+            id              INTEGER PRIMARY KEY,
+            network_id      INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            file_id         TEXT NOT NULL,
+            area_id         INTEGER NOT NULL,
+            tag             TEXT NOT NULL,
+            file_name       TEXT NOT NULL,
+            send_name       TEXT NOT NULL,
+            tic_name        TEXT NOT NULL,
+            crc32           TEXT NOT NULL,
+            size_bytes      INTEGER NOT NULL,
+            replaces        TEXT,
+            automatic       INTEGER NOT NULL DEFAULT 0,
+            hatched_by      INTEGER,
+            hatched_at      TEXT NOT NULL
+        );
+        CREATE INDEX idx_ftn_hatches_file ON ftn_hatches(file_id, network_id);
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #1389 (design doc §6.10, §16 \"Issue #1154\", Decisions 21-23): QWK offline mail "
             "for callers. `qwk_conferences` gives each board a caller has taken in a packet a "
             "conference number that stays theirs (0, their mail, has no row), keyed by the board's "
