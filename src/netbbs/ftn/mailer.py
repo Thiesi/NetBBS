@@ -110,6 +110,13 @@ MAINTENANCE_INTERVAL = 24 * 3600.0
 DIRECT_ATTEMPTS = 3
 
 
+def retry_after(failures: int, ceiling: float) -> float:
+    """Seconds before the next try after `failures` failed calls in a row:
+    1, 2, 4 ... minutes, never more than `ceiling`. The exponent is capped,
+    so a node unreachable for weeks never overflows the float."""
+    return min(60.0 * 2 ** min(max(failures - 1, 0), 16), ceiling)
+
+
 @dataclass
 class PollStatus:
     last_attempt: float | None = None  # monotonic seconds
@@ -195,7 +202,7 @@ class FtnMailer:
                 continue  # it calls in for its mail
             status = self.link_status.setdefault(link.id, PollStatus())
             if status.last_attempt is not None:
-                gap = min(60.0 * 2 ** (status.failures - 1), MIN_CALL_GAP) if status.failures else MIN_CALL_GAP
+                gap = retry_after(status.failures, MIN_CALL_GAP) if status.failures else MIN_CALL_GAP
                 if now - status.last_attempt < gap:
                     continue
             await self.call_link(network, link)
@@ -296,7 +303,7 @@ class FtnMailer:
             return True
         interval = network.poll_minutes * 60.0
         if status.failures:
-            retry = min(60.0 * 2 ** (status.failures - 1), interval)
+            retry = retry_after(status.failures, interval)
             return now - status.last_attempt >= retry
         if now - (status.last_success or status.last_attempt) >= interval:
             return True

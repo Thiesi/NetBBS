@@ -638,3 +638,11 @@ def test_the_status_screen_counts_links(db, setup):
     sysop, network, _board, _point = setup
     send_netmail(db, sysop, "Pat (21:1/199.1)", "Hi", "Waiting")
     assert links_summary(db, network).startswith("1 points, 0 downlinks; 1 messages waiting")
+
+
+def test_the_retry_gap_never_overflows_after_weeks_of_failures():
+    from netbbs.ftn.mailer import MIN_CALL_GAP, retry_after
+
+    assert [retry_after(n, 3600.0) for n in (1, 2, 3)] == [60.0, 120.0, 240.0]
+    assert retry_after(5000, MIN_CALL_GAP) == MIN_CALL_GAP
+    assert retry_after(5000, 24 * 3600.0) == 24 * 3600.0
