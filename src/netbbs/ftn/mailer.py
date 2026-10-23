@@ -32,6 +32,21 @@ uplink instead.
 
 Once a day it prunes the dupe history and the sent-message record
 (`netbbs.ftn.queue`).
+
+**Transport** (issues #1467, #1468, #1469; `netbbs.ftn.transport`). A call
+dials the host over IPv6 or IPv4, whichever answers first. A network with
+TLS on calls its uplink over TLS: pinned, the first call that completes
+learns the hub's certificate and a later call to another one is refused;
+verified, the system's certificate authorities and the host name decide.
+Direct netmail calls stay plain: a nodelist says nothing of TLS. A call that
+fails part way still keeps what moved before it failed: files received
+whole (each confirmed to the remote, which has let go of it) are tossed,
+and messages in a packet the remote confirmed are marked sent.
+
+**Later batches.** `batch_hook(network, context)` -- None until a later
+stage sets one -- is asked for more files before each batch after the
+first of a binkp/1.1 multi-batch session (`netbbs.ftn.binkp.BatchContext`):
+the place where file requests received in the session get their answers.
 """
 
 from __future__ import annotations
@@ -45,10 +60,10 @@ import time
 from dataclasses import dataclass, replace
 
 from netbbs.ftn.address import FtnAddress, parse_address
-from netbbs.ftn.binkp import BinkpError, OutgoingFile, SessionResult, SystemInfo, run_session
+from netbbs.ftn.binkp import BatchContext, BinkpError, OutgoingFile, SessionResult, SystemInfo, run_session
 from netbbs.ftn.bundle import packet_name
 from netbbs.ftn.exchange import MAX_MESSAGES_PER_PACKET, outbound_packet, summary, system_info, toss_received
-from netbbs.ftn.networks import FtnNetwork, list_networks
+from netbbs.ftn.networks import FtnNetwork, list_networks, set_uplink_tls_pin
 from netbbs.ftn.nodelist import direct_route
 from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
 from netbbs.ftn.queue import (
@@ -60,6 +75,7 @@ from netbbs.ftn.queue import (
     prune_sent_outbound,
     reroute_outbound_to_uplink,
 )
+from netbbs.ftn.transport import TLS_OFF, TLS_PINNED, dial, format_host_port, show_fingerprint
 
 _logger = logging.getLogger(__name__)
 
@@ -81,9 +97,12 @@ class PollStatus:
 
 
 class FtnMailer:
-    def __init__(self, lane, *, connect=None, clock=time.monotonic, check_interval: float = CHECK_INTERVAL):
+    def __init__(self, lane, *, connect=None, clock=time.monotonic, check_interval: float = CHECK_INTERVAL,
+                 batch_hook=None):
         self._lane = lane
-        self._connect = connect or asyncio.open_connection
+        self._connect = connect  # None: asyncio.open_connection
+        # (network, BatchContext) -> files for a later batch (issue #1469).
+        self.batch_hook = batch_hook
         self._clock = clock
         self._check_interval = check_interval
         self._task: asyncio.Task | None = None
@@ -161,24 +180,29 @@ class FtnMailer:
             packet = OutgoingFile(packet_name(secrets.randbits(32)),
                                   build_packet_from_packed(header, [m.packed for m in waiting]))
             system = await self._lane.run(system_info)
+            ids = [m.id for m in waiting]
             try:
-                result = await self._call(host, port, network, system, [packet], password="", expected=node)
+                result, _ = await self._call(host, port, network, system, [packet], password="", expected=node)
             except (OSError, asyncio.TimeoutError, BinkpError) as exc:
                 status.failures += 1
                 status.last_error = str(exc) or type(exc).__name__
-                _logger.warning("FTN %s: direct call to %s (%s:%s) failed: %s", network.name, node.four_d, host,
-                                port, status.last_error)
+                _logger.warning("FTN %s: direct call to %s (%s) failed: %s", network.name, node.four_d,
+                                format_host_port(host, port), status.last_error)
+                partial = getattr(exc, "result", None)
+                if partial is not None and (partial.received or partial.sent):
+                    await self._settle(network, replace(partial, secure=False), packet, ids)
+                    if packet.name in partial.sent:
+                        status.failures = 0  # delivered before the call broke
+                        continue
                 if status.failures >= DIRECT_ATTEMPTS:
-                    to_uplink.extend(m.id for m in waiting)
+                    to_uplink.extend(ids)
                     status.failures = 0
                 continue
-            if packet.name in result.sent:
-                await self._lane.run(mark_outbound_sent, [m.id for m in waiting])
             status.failures = 0
             status.last_error = None
             # What a node hands over on a call this node made unasked is held:
             # nothing proved who it is.
-            await toss_received(self._lane, network, replace(result, secure=False))
+            await self._settle(network, replace(result, secure=False), packet, ids)
         if to_uplink:
             await self._lane.run(reroute_outbound_to_uplink, to_uplink)
             _logger.info("FTN %s: %d netmail could not go direct and goes via the uplink", network.name,
@@ -216,38 +240,65 @@ class FtnMailer:
         packet, message_ids = await outbound_packet(self._lane, network)
         outgoing = [packet] if packet is not None else []
         system = await self._lane.run(system_info)
+        where = format_host_port(network.uplink_host, network.uplink_port)
         try:
-            result = await self._call(network.uplink_host, network.uplink_port, network, system, outgoing,
-                                      password=network.session_password, expected=network.uplink_address)
+            result, fingerprint = await self._call(
+                network.uplink_host, network.uplink_port, network, system, outgoing,
+                password=network.session_password, expected=network.uplink_address,
+                tls=network.uplink_tls, pin=network.uplink_tls_pin)
         except (OSError, asyncio.TimeoutError, BinkpError) as exc:
             status.failures += 1
             status.last_error = str(exc) or type(exc).__name__
-            _logger.warning("FTN %s: call to %s:%s failed: %s", network.name, network.uplink_host,
-                            network.uplink_port, status.last_error)
+            partial = getattr(exc, "result", None)
+            if partial is not None and (partial.received or partial.sent):
+                moved = await self._settle(network, partial, packet, message_ids)
+                status.last_error += f" (before that: {moved})"
+            _logger.warning("FTN %s: call to %s failed: %s", network.name, where, status.last_error)
             return status
         if result.plaintext_password:
             _logger.warning("FTN %s: the uplink offered no CRAM-MD5, so the session password crossed unhashed",
                             network.name)
-        sent = len(message_ids) if packet is not None and packet.name in result.sent else 0
-        if sent:
-            await self._lane.run(mark_outbound_sent, message_ids)
-        tossed = await toss_received(self._lane, network, result)
+        # --- transport (issue #1468): trust on first use ---
+        if fingerprint and network.uplink_tls == TLS_PINNED and not network.uplink_tls_pin:
+            if await self._lane.run(set_uplink_tls_pin, network.id, fingerprint):
+                _logger.info("FTN %s: pinned the uplink's TLS certificate %s", network.name,
+                             show_fingerprint(fingerprint))
+        # --- end transport ---
+        status.last_summary = await self._settle(network, result, packet, message_ids)
         status.failures = 0
         status.last_error = None
         status.last_success = status.last_attempt
         status.last_success_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-        status.last_summary = summary(sent, len(result.received), tossed)
-        _logger.info("FTN %s: call to %s done -- %s", network.name, network.uplink_host, status.last_summary)
+        _logger.info("FTN %s: call to %s%s done -- %s", network.name, where,
+                     " over TLS" if network.uplink_tls != TLS_OFF else "", status.last_summary)
         return status
 
+    async def _settle(self, network: FtnNetwork, result: SessionResult, packet: OutgoingFile | None,
+                      message_ids: list[int]) -> str:
+        """Mark the packet's messages sent if the remote confirmed it, toss
+        what was received; the summary line."""
+        sent = len(message_ids) if packet is not None and packet.name in result.sent else 0
+        if sent:
+            await self._lane.run(mark_outbound_sent, message_ids)
+        tossed = await toss_received(self._lane, network, result)
+        return summary(sent, len(result.received), tossed)
+
     async def _call(self, host: str, port: int, network: FtnNetwork, system: SystemInfo,
-                    outgoing: list[OutgoingFile], *, password: str, expected: FtnAddress) -> SessionResult:
-        reader, writer = await asyncio.wait_for(self._connect(host, port), CONNECT_TIMEOUT)
+                    outgoing: list[OutgoingFile], *, password: str, expected: FtnAddress, tls: str = TLS_OFF,
+                    pin: str = "") -> tuple[SessionResult, str | None]:
+        """One session; `(result, the hub's certificate fingerprint under TLS)`."""
+        reader, writer, fingerprint = await dial(host, port, tls=tls, pin=pin, connect=self._connect,
+                                                 timeout=CONNECT_TIMEOUT)
+        hook = self.batch_hook
+
+        def next_batch(context: BatchContext):
+            return hook(network, context) if hook is not None else []
+
         try:
             return await run_session(
                 reader, writer, originating=True, our_addresses=[network.our_address], system=system,
-                password=password, outgoing=outgoing, expected_remote=expected,
-            )
+                password=password, outgoing=outgoing, next_batch=next_batch, expected_remote=expected,
+            ), fingerprint
         finally:
             writer.close()
             with contextlib.suppress(OSError, asyncio.TimeoutError):

@@ -1700,6 +1700,38 @@ session needs the same treatment.
   advance between them. The development hub's TLS port is self-signed and
   its handshake refuses a client version below `1.2.9` with `OLDVERSION`.
 
+### BinkP sessions: batches, partial results, TLS pins (issues #1467-#1469)
+
+- **Multi-batch bookkeeping is per batch number, both ways.** `_Transfer`
+  keeps this side's `batch` and the remote's `rx_batch` apart, because a
+  remote that has seen this side's `M_EOB` may start its next batch before
+  this side has noted its own `M_EOB` as written (the drain is still
+  pending). A file or `M_EOB` arriving after the remote's `M_EOB` is the
+  remote's next batch. The end rule both sides must reach independently: a
+  batch is over once both `M_EOB`s are in and every file sent in it is
+  confirmed; another follows only if a file moved in it either way. Test
+  against hand-written remotes that read the node's frames in any order
+  (`_node_batch` in `tests/test_ftn_binkp_multibatch.py`): the node's
+  `M_GOT` and its own batch interleave.
+- **A remote claiming binkp/1.1 may hang up after one batch.** End of file
+  while nothing of this side is in flight and a batch has completed is a
+  completed session, and a failed write of the next `M_EOB` to it is
+  ignored. Without that, every call to such a mailer would fail after the
+  mail had moved.
+- **`BinkpError.result` carries what moved once the session was
+  established.** A file received whole was confirmed with `M_GOT`, so the
+  remote deleted it; the mailer and listener toss it even when the session
+  then fails. Callers must not drop a failed session's received files.
+- **ND/NDA is deliberately not offered** (§6.8): implementing it without
+  binkd to test against risks the mail-losing direction.
+- **TLS pins are learned only after a completed call**, and only into an
+  empty pin (`set_uplink_tls_pin`'s `WHERE uplink_tls_pin = ''`), so a pin
+  the SysOp pasted is never overwritten. The console lets a learned pin go
+  when the uplink's host changes.
+- **asyncio's `start_server` sets `IPV6_V6ONLY` on every IPv6 socket**, so
+  `ftn_listen_host = "::"` would answer IPv6 only. Every address is `host=None`
+  (both families); named addresses are passed as a list.
+
 ### Read cursors and follows (issue #56)
 
 A per-user read cursor is a position marker `(user_id, object_type,

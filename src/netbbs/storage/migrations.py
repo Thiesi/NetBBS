@@ -5154,4 +5154,18 @@ MIGRATIONS = [
         ALTER TABLE boards ADD COLUMN ftn_origin_text TEXT NOT NULL DEFAULT '';
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1468: BinkP over TLS for calls out. `ftn_networks.uplink_tls` says how a "
+            "network's uplink is called: '' plain, 'pin' over TLS with the hub's certificate "
+            "pinned on first use, 'ca' over TLS checked against the system's certificate "
+            "authorities and the host name. `uplink_tls_pin` holds the pinned certificate's "
+            "SHA-256 in hex. Every network stays plain on upgrade."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN uplink_tls TEXT NOT NULL DEFAULT ''
+            CHECK (uplink_tls IN ('', 'pin', 'ca'));
+        ALTER TABLE ftn_networks ADD COLUMN uplink_tls_pin TEXT NOT NULL DEFAULT '';
+        """,
+    ),
 ]
