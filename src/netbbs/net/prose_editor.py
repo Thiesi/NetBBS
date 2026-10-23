@@ -57,8 +57,17 @@ from netbbs.rendering import (
     truncate,
 )
 from netbbs.rendering.pipe_codes import PastedColor
-from netbbs.rendering.prose_buffer import ProseBuffer, logical_position, rewrap_quote, visual_position, wrap_lines
-from netbbs.rendering.width import char_width, display_width
+from netbbs.rendering.prose_buffer import (
+    ProseBuffer,
+    VisualRow,
+    cell_width,
+    cells,
+    logical_position,
+    paint_char,
+    rewrap_quote,
+    visual_position,
+    wrap_lines,
+)
 
 DEFAULT_AUTOSAVE_INTERVAL_SECONDS = 30.0
 
@@ -112,6 +121,19 @@ class _EditorState:
     # again straight after adds the next line to them, as in nano.
     cut_lines: list[str] = field(default_factory=list)
     cutting: bool = False
+    # Each line's soft-wrapped rows, for `_rows`: a keystroke changes one
+    # line, and wrapping a 200 KB text whole several times per key made
+    # typing into a long reply visibly lag.
+    wrap_cache: dict[str, list[str]] = field(default_factory=dict)
+    wrap_width: int = 0
+
+
+def _rows(state: _EditorState, width: int) -> list[VisualRow]:
+    """The text's soft-wrapped rows at `width`."""
+    if state.wrap_width != width:
+        state.wrap_cache.clear()
+        state.wrap_width = width
+    return wrap_lines(state.buffer.lines, width, state.wrap_cache)
 
 
 def _header_rows(header: EditorHeader | None, *, width: int, rows: int, unicode_style: bool) -> list[list[_Run]]:
@@ -264,9 +286,9 @@ async def edit_prose(
         every other in-loop redraw (`_redraw`), which can assume the
         real terminal still matches `previous`."""
         await session.write(clear_screen())
-        current = _render(state, width, height)
-        await session.write(full_render_ansi(current))
-        await _flush(session, state, width, height)
+        rows = _rows(state, width)
+        current = _render(state, width, height, rows)
+        await session.write(full_render_ansi(current) + _status_and_cursor(state, width, height, rows))
         return current
 
     try:
@@ -381,9 +403,7 @@ async def edit_prose(
                 return result
 
             rejected = _dispatch(state, key, width, height)
-            if rejected:
-                await session.write("\a")
-            previous = await _redraw(session, state, previous, width, height)
+            previous = await _redraw(session, state, previous, width, height, bell=rejected)
     finally:
         # GitHub issue #38: same fix as netbbs.net.ansi_editor's -- every
         # exit path above returns from mid-loop with the status line
@@ -518,20 +538,21 @@ def _move_visual_row(state: _EditorState, width: int, *, delta: int) -> None:
     editor behaves, not one keypress per logical line regardless of
     how many screen rows it spans."""
     buffer = state.buffer
-    pos = visual_position(buffer.lines, width, buffer.cursor_line, buffer.cursor_col)
-    rows = wrap_lines(buffer.lines, width)
+    rows = _rows(state, width)
+    pos = visual_position(buffer.lines, width, buffer.cursor_line, buffer.cursor_col, rows)
     buffer.cursor_line, buffer.cursor_col = logical_position(rows, pos.row_index + delta, pos.col)
 
 
 def _scroll_into_view(state: _EditorState, width: int, height: int) -> None:
-    pos = visual_position(state.buffer.lines, width, state.buffer.cursor_line, state.buffer.cursor_col)
+    rows = _rows(state, width)
+    pos = visual_position(state.buffer.lines, width, state.buffer.cursor_line, state.buffer.cursor_col, rows)
     if pos.row_index < state.scroll_row:
         state.scroll_row = pos.row_index
     elif pos.row_index >= state.scroll_row + height:
         state.scroll_row = pos.row_index - height + 1
 
 
-def _render(state: _EditorState, width: int, height: int) -> Snapshot:
+def _render(state: _EditorState, width: int, height: int, rows: list[VisualRow] | None = None) -> Snapshot:
     """Paint the current viewport (scroll_row .. scroll_row+height) of
     soft-wrapped text into a `ScreenBuffer`, reusing the same diffed-
     render primitives `netbbs.net.ansi_editor` does -- the only place
@@ -557,7 +578,8 @@ def _render(state: _EditorState, width: int, height: int) -> Snapshot:
         col = 0
         for text, fg, bold in runs:
             col = _paint(canvas, header_row, col, text, width=width, fg=fg, bold=bold)
-    rows = wrap_lines(state.buffer.lines, width)
+    if rows is None:
+        rows = _rows(state, width)
     for viewport_row in range(height):
         row_index = state.scroll_row + viewport_row
         if row_index >= len(rows):
@@ -570,10 +592,12 @@ def _paint(
     canvas: ScreenBuffer, row: int, col: int, text: str, *, width: int, fg: _Color | None = None, bold: bool = False
 ) -> int:
     """Write `text` into `row` from `col` by display width, stopping at
-    `width`; returns the column after it."""
+    `width`; returns the column after it. A control character (a tab in
+    loaded text) is drawn as a blank (`paint_char`)."""
     last_col: int | None = None
     for char in text:
-        w = char_width(char)
+        w = cell_width(char)
+        char = paint_char(char)
         if w == 0:
             if last_col is not None:
                 existing = canvas.get_cell(row, last_col)
@@ -593,29 +617,45 @@ def _paint(
     return col
 
 
-async def _redraw(session: Session, state: _EditorState, previous: Snapshot, width: int, height: int) -> Snapshot:
-    current = _render(state, width, height)
-    diff = diff_ansi(previous, current)
-    if diff:
-        await session.write(diff)
-    await _flush(session, state, width, height)
+async def _redraw(
+    session: Session, state: _EditorState, previous: Snapshot, width: int, height: int, *, bell: bool = False
+) -> Snapshot:
+    """One keystroke's repaint: the changed cells, the status line and the
+    cursor, sent as one write. Sent as five, each its own TCP segment
+    (Telnet sets TCP_NODELAY), SSH packet or websocket message, the caret
+    visibly visited the status line between a letter and its echo."""
+    rows = _rows(state, width)
+    current = _render(state, width, height, rows)
+    prefix = "\a" if bell else ""
+    await session.write(prefix + diff_ansi(previous, current) + _status_and_cursor(state, width, height, rows))
     return current
 
 
 async def _flush(session: Session, state: _EditorState, width: int, height: int) -> None:
-    """Redraws the status line and repositions the terminal's real
-    cursor to the logical edit position, mirroring
-    `netbbs.net.ansi_editor._flush` in shape -- except the cursor's
-    real terminal column, unlike the ANSI editor's fixed-width CP437
-    grid, has to be measured in display columns, not `pos.col`'s
-    character offset within the row (design doc, dogfood feature
-    request: international users found non-ASCII handling poor) -- an
-    East Asian Wide/Fullwidth character before the cursor pushes it two
-    columns right, not one."""
-    rows = wrap_lines(state.buffer.lines, width)
-    pos = visual_position(state.buffer.lines, width, state.buffer.cursor_line, state.buffer.cursor_col)
+    """Redraws the status line and repositions the terminal's real cursor
+    to the logical edit position (`_status_and_cursor`), in one write."""
+    await session.write(_status_and_cursor(state, width, height))
+
+
+def _status_and_cursor(state: _EditorState, width: int, height: int, rows: list[VisualRow] | None = None) -> str:
+    """The status line, then the terminal's real cursor moved to the
+    logical edit position, mirroring `netbbs.net.ansi_editor._flush` in
+    shape -- except the cursor's real terminal column, unlike the ANSI
+    editor's fixed-width CP437 grid, has to be measured in display
+    columns, not `pos.col`'s character offset within the row (design doc,
+    dogfood feature request: international users found non-ASCII handling
+    poor) -- an East Asian Wide/Fullwidth character before the cursor
+    pushes it two columns right, not one.
+
+    A cursor after a word that ends exactly at the edge, before the space
+    hanging there (`soft_wrap`), is one past the last column: it is drawn
+    on the last column, where a terminal leaves its own cursor after
+    writing there."""
+    if rows is None:
+        rows = _rows(state, width)
+    pos = visual_position(state.buffer.lines, width, state.buffer.cursor_line, state.buffer.cursor_col, rows)
     row_text = rows[pos.row_index].text if rows else ""
-    display_col = display_width(row_text[: pos.col])
+    display_col = min(cells(row_text[: pos.col]), width - 1)
     top = len(state.header)
     screen_row = pos.row_index - state.scroll_row
     text = state.buffer.to_text()
@@ -633,10 +673,12 @@ async def _flush(session: Session, state: _EditorState, width: int, height: int)
         f"Ctrl+O save  Ctrl+X exit  Ctrl+G help"
     )
     status = truncate(status, width)
-    await session.write(move_cursor(top + height + _STATUS_ROW_OFFSET, 1))
-    await session.write(clear_line())
-    await session.write(colored(status, fg_color=MUTED_COLOR))
-    await session.write(move_cursor(top + max(1, screen_row + 1), display_col + 1))
+    return (
+        move_cursor(top + height + _STATUS_ROW_OFFSET, 1)
+        + clear_line()
+        + colored(status, fg_color=MUTED_COLOR)
+        + move_cursor(top + max(1, screen_row + 1), display_col + 1)
+    )
 
 
 async def _confirm_erase(session: Session) -> bool:

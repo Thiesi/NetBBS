@@ -10,7 +10,9 @@ import pytest
 from netbbs.rendering.prose_buffer import (
     ProseBuffer,
     VisualRow,
+    cells,
     logical_position,
+    soft_wrap,
     visual_position,
     wrap_lines,
 )
@@ -80,15 +82,18 @@ def test_wrap_lines_does_not_crash_on_a_double_space_between_words():
     # (or any other multi-character whitespace run) between them in
     # the original line is nowhere a literal substring of that line --
     # the old `line.index(segment, col)` full-segment search raised.
+    # The row is the line itself, double space and all: the editor draws
+    # what was typed (a squeezed row put the cursor a column short after
+    # every double space).
     line = "hello  world this is a test line"
     rows = wrap_lines([line], width=80)
-    assert rows == [VisualRow(line_index=0, start_col=0, text="hello world this is a test line")]
+    assert rows == [VisualRow(line_index=0, start_col=0, text=line)]
 
 
 def test_wrap_lines_does_not_crash_on_a_tab_between_words():
     line = "a\tb\tc word here"
     rows = wrap_lines([line], width=80)
-    assert rows == [VisualRow(line_index=0, start_col=0, text="a b c word here")]
+    assert rows == [VisualRow(line_index=0, start_col=0, text=line)]
 
 
 def test_wrap_lines_start_col_is_correct_after_a_double_space_forces_a_wrap():
@@ -302,3 +307,81 @@ def test_clamp_cursor_pulls_line_back_after_lines_shrank():
     buf = ProseBuffer(lines=["only"], cursor_line=5, cursor_col=0)
     buf.clamp_cursor()
     assert buf.cursor_line == 0
+
+
+# -- soft_wrap keeps every typed character (the eaten-space report) --------
+
+
+def test_a_trailing_space_is_part_of_the_row():
+    # Typing a space showed nothing until the next letter: the row dropped
+    # the trailing space, so the cursor, measured against the row, stayed.
+    rows = wrap_lines(["hello "], width=80)
+    assert rows == [VisualRow(line_index=0, start_col=0, text="hello ")]
+    pos = visual_position(["hello "], 80, 0, 6)
+    assert (pos.row_index, pos.col) == (0, 6)
+
+
+def test_leading_and_repeated_spaces_are_kept():
+    assert soft_wrap("  indented  twice ", 80) == ["  indented  twice "]
+
+
+def test_a_word_that_does_not_fit_moves_down_whole():
+    assert soft_wrap("one two three", 9) == ["one two ", "three"]
+
+
+def test_the_space_after_a_word_ending_at_the_edge_hangs_there():
+    # No stray space at the start of the next row; a full last row is
+    # followed by an empty one, where the cursor after it is.
+    assert soft_wrap("hello world", 5) == ["hello ", "world", ""]
+    assert soft_wrap("hello ", 5) == ["hello ", ""]
+    # Only one character hangs; the rest of the run shows on the next row.
+    assert soft_wrap("hello   x", 5) == ["hello ", "  x"]
+
+
+def test_a_space_typed_at_the_edge_moves_the_cursor_to_the_next_row():
+    lines = ["hello "]
+    rows = wrap_lines(lines, 5)
+    pos = visual_position(lines, 5, 0, 6, rows)
+    assert (pos.row_index, pos.col) == (1, 0)
+
+
+def test_a_word_wider_than_the_row_is_cut_at_the_edge():
+    assert soft_wrap("abcdefghij", 4) == ["abcd", "efgh", "ij"]
+
+
+def test_a_combining_mark_stays_with_its_character_at_a_cut():
+    assert soft_wrap("abc" + "é" + "fg", 4) == ["abcé", "fg"]
+
+
+@pytest.mark.parametrize("width", [1, 2, 3, 5, 8, 13])
+def test_soft_wrap_rows_join_back_to_the_text(width):
+    samples = [
+        "", " ", "     ", "a", "one two three four", "  lead", "trail  ", "a  b   c    d",
+        "hello world", "x" * 30, "tab\there", "你好 世界", "word " * 9,
+    ]
+    for text in samples:
+        rows = soft_wrap(text, width)
+        assert "".join(rows) == text, (text, width)
+        for row in rows:
+            # A row fits, except for the one whitespace character that may
+            # hang past the edge.
+            body = row[:-1] if row and row[-1].isspace() else row
+            assert cells(body) <= max(width, 2), (text, width, rows)
+
+
+def test_round_trip_with_spaces_at_every_position():
+    lines = ["a  b   c    d    e", "hello ", "  x", "word word word "]
+    for width in (3, 5, 7, 80):
+        rows = wrap_lines(lines, width)
+        for line_index, line in enumerate(lines):
+            for col in range(len(line) + 1):
+                pos = visual_position(lines, width, line_index, col, rows)
+                back = logical_position(rows, pos.row_index, pos.col)
+                assert back == (line_index, col), (width, line_index, col)
+
+
+def test_the_wrap_cache_only_keeps_the_current_lines():
+    cache: dict[str, list[str]] = {}
+    wrap_lines(["first version", "other"], 80, cache)
+    wrap_lines(["first version!", "other"], 80, cache)
+    assert set(cache) == {"first version!", "other"}

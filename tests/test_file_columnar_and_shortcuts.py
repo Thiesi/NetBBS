@@ -105,19 +105,20 @@ def _setup_area(db, count: int = 3, monkeypatch = None):
 
 def test_column_widths_geometry_on_standard_80_col():
     idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(80)
-    assert idx_w == 4
-    assert name_w == 18
+    assert idx_w == 5  # the cursor marker and "[01]"
+    assert name_w == 17
     assert size_w == 9
     assert date_w == 16
     assert uploader_w == 28
-    # Total with 1-char gutter between 5 columns: 4 + 1 + 18 + 1 + 9 + 1 + 16 + 1 + 28 = 79 <= 80
+    # Total with 1-char gutter between 5 columns: 5 + 1 + 17 + 1 + 9 + 1 + 16 + 1 + 28 = 79,
+    # keeping the last column free.
     total = idx_w + 1 + name_w + 1 + size_w + 1 + date_w + 1 + uploader_w
-    assert total <= 80
+    assert total == 79
 
 
 def test_column_widths_geometry_on_wide_terminals():
     idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(100)
-    assert idx_w == 4
+    assert idx_w == 5
     assert name_w > 20
     assert uploader_w > 26
     total = idx_w + 1 + name_w + 1 + size_w + 1 + date_w + 1 + uploader_w
@@ -130,7 +131,7 @@ def test_column_widths_geometry_on_wide_terminals():
 
 def test_column_widths_geometry_on_narrow_terminals():
     idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(70)
-    assert idx_w == 4
+    assert idx_w == 5
     assert size_w == 9
     assert date_w == 16
     total = idx_w + 1 + name_w + 1 + size_w + 1 + date_w + 1 + uploader_w

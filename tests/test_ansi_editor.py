@@ -17,7 +17,7 @@ import pytest
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.session import Session, SessionClosedError
-from netbbs.rendering import clear_screen
+from netbbs.rendering import clear_line, clear_screen
 from netbbs.rendering.ansi_art import decode_ansi_bytes
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
 from netbbs.rendering.screen_buffer import ScreenBuffer
@@ -106,7 +106,10 @@ def _status_line_texts(session: FakeSession) -> list[str]:
     codes stripped so what's left is exactly the on-screen column count
     -- the thing that must never exceed the canvas width, on pain of
     wrapping onto the row below (see the regression test below)."""
-    stripped = [_ANSI_ESCAPE_RE.sub("", text) for text in session.written]
+    # A keystroke's redraw is one write: its changed cells, then the status
+    # line after the line clear.
+    pieces = [text.rsplit(clear_line(), 1)[-1] for text in session.written]
+    stripped = [_ANSI_ESCAPE_RE.sub("", text) for text in pieces]
     return [text for text in stripped if text.startswith("Row ")]
 
 

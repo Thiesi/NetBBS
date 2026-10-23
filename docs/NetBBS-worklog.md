@@ -1921,6 +1921,16 @@ standalone but apply the same ANSI-aware bound in their local
 `out_line`/`out_prompt` boundary, including combining-mark width and reapplying
 active content styling after colored borders on wrapped box continuations.
 
+Text that is still being typed is the exception to consuming whitespace at
+wrap points. The fullscreen prose editor and the break-in chat's typing line
+wrap with `netbbs.rendering.prose_buffer.soft_wrap`, whose rows are exact,
+back-to-back slices of the text: a cursor is placed by measuring the row, so a
+row that dropped or squeezed whitespace (`wrap_to_width`) left the cursor
+behind every typed space until the next letter arrived. The single whitespace
+character after a word ending at the edge hangs past it undrawn, so a
+continuation does not start with a blank; further whitespace shows. Keep
+`wrap_to_width` for finished text.
+
 Shared semantic roles (`LABEL_COLOR`, `VALUE_COLOR`, `METADATA_COLOR`,
 `SUCCESS_COLOR`, and `ERROR_COLOR`) are the presentation contract for mature
 line-oriented surfaces. Caller and SysOp Who use the same picker palette;
