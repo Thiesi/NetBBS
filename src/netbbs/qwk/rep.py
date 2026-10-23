@@ -39,9 +39,13 @@ from netbbs.qwk.format import (
     BLOCK,
     QwkFormatError,
     body_lines,
+    build_headers_dat,
+    decode_text,
     encode_text,
     from_cp437,
+    header_flag,
     pack_header,
+    parse_headers_dat,
     qwke_lines,
     split_qwke,
 )
@@ -78,6 +82,10 @@ class RepMessage:
     private: bool
     claimed_from: str = ""
     when: datetime.datetime | None = None
+    #: QWKnet (#1482): its HEADERS.DAT fields (keys lower case) and the
+    #: header's status character. A caller's reply is read without them.
+    headers: dict[str, str] = field(default_factory=dict)
+    status: str = " "
 
 
 @dataclass(frozen=True)
@@ -116,15 +124,16 @@ def _todoor(text: str) -> tuple[list[int], list[int]]:
     return dropped, added
 
 
-def _msg_bytes(data: bytes, bbs_id: str, limits: RepLimits) -> tuple[bytes, bytes | None]:
-    """The .MSG inside a reply packet (and TODOOR.EXT, if any). A bare .MSG,
-    not zipped, is accepted too: its first block says whose it is."""
+def _msg_bytes(data: bytes, bbs_id: str, limits: RepLimits) -> tuple[bytes, bytes | None, bytes | None]:
+    """The .MSG inside a reply packet, TODOOR.EXT and HEADERS.DAT (each
+    `None` when missing). A bare .MSG, not zipped, is accepted too: its
+    first block says whose it is."""
     if len(data) > limits.archive_bytes:
         raise RepError(f"the reply packet is larger than {limits.archive_bytes // 1024} KiB")
     if not data.startswith(b"PK"):
         if len(data) > limits.msg_bytes:
             raise RepError(f"the reply packet is larger than {limits.msg_bytes // 1024} KiB")
-        return data, None
+        return data, None, None
     try:
         archive = open_archive(data, max_bytes=limits.archive_bytes, max_members=limits.members)
         msg = read_member(archive, f"{bbs_id}.MSG", limits.msg_bytes)
@@ -139,13 +148,14 @@ def _msg_bytes(data: bytes, bbs_id: str, limits: RepLimits) -> tuple[bytes, byte
                 )
             raise RepError(f"there is no {bbs_id}.MSG in the reply packet")
         todoor = read_member(archive, "TODOOR.EXT", 64 * 1024)
+        headers = read_member(archive, "HEADERS.DAT", limits.msg_bytes)
     except QwkFormatError as exc:
         raise RepError(str(exc)) from exc
     except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, RuntimeError, EOFError, OSError, zlib.error) as exc:
         # A damaged or encrypted member, or a compression method this
         # Python lacks.
         raise RepError(f"the reply packet could not be unpacked: {exc}") from exc
-    return msg, todoor
+    return msg, todoor, headers
 
 
 def parse_rep(data: bytes, *, bbs_id: str, limits: RepLimits = DEFAULT_LIMITS) -> RepPacket:
@@ -155,9 +165,10 @@ def parse_rep(data: bytes, *, bbs_id: str, limits: RepLimits = DEFAULT_LIMITS) -
     bbs_id = bbs_id.upper()
     if not valid_bbs_id(bbs_id):
         raise ValueError(f"{bbs_id!r} is not a QWK BBS ID")
-    msg, todoor = _msg_bytes(data, bbs_id, limits)
+    msg, todoor, headers_dat = _msg_bytes(data, bbs_id, limits)
+    all_headers = parse_headers_dat(headers_dat) if headers_dat else {}
     try:
-        first, walked, stopped = parse_messages(msg, limit=limits.messages)
+        first, walked, stopped = parse_messages(msg, limit=limits.messages, raw=True)
     except QwkFormatError as exc:
         raise RepError(str(exc)) from exc
     claimed = first[:8].decode("ascii", errors="replace").strip(" \x00").upper()
@@ -165,9 +176,12 @@ def parse_rep(data: bytes, *, bbs_id: str, limits: RepLimits = DEFAULT_LIMITS) -
         raise RepError(f"this reply packet is for {claimed or 'an unnamed BBS'!r}, not {bbs_id}")
     messages: list[RepMessage] = []
     problems: list[RepProblem] = []
-    for index, (header, lines) in enumerate(walked, start=1):
+    for index, (header, lines, offset, raw_text) in enumerate(walked, start=1):
         if not header.active:
             continue
+        fields = all_headers.get(offset, {})
+        if header_flag(fields, "utf8"):
+            lines = decode_text(raw_text, utf8=True)
         qwke = split_qwke(lines, {"to": header.to, "from": header.sender, "subject": header.subject})
         body = "\n".join(qwke.lines).rstrip("\n")
         if len(body.encode("utf-8")) > limits.body_bytes:
@@ -183,6 +197,8 @@ def parse_rep(data: bytes, *, bbs_id: str, limits: RepLimits = DEFAULT_LIMITS) -
             private=header.private,
             claimed_from=qwke.values.get("from", header.sender),
             when=header.when,
+            headers=fields,
+            status=header.status,
         ))
     problems += [RepProblem(None, reason) for reason in stopped]
     dropped, added = _todoor(from_cp437(todoor)) if todoor else ([], [])
@@ -201,11 +217,19 @@ class OutgoingReply:
     reference: int | None = None
     private: bool = False
     when: datetime.datetime | None = None
+    #: QWKnet (#1481): HEADERS.DAT fields, and the network tagline flag.
+    headers: dict[str, str] | None = None
+    tagline: bool = False
 
 
-def build_msg(bbs_id: str, replies: list[OutgoingReply]) -> bytes:
-    """A reply packet's .MSG: the BBS ID block, then each reply."""
+def build_msg(
+    bbs_id: str, replies: list[OutgoingReply], headers: list[tuple[int, dict[str, str]]] | None = None,
+) -> bytes:
+    """A reply packet's .MSG: the BBS ID block, then each reply. Each
+    reply's HEADERS.DAT fields, keyed by its header's byte offset, are added
+    to `headers` when given."""
     out = [bbs_id.upper().encode("ascii").ljust(BLOCK, b" ")]
+    offset = BLOCK
     for reply in replies:
         lines = qwke_lines(to=reply.to, sender=reply.sender, subject=reply.subject)
         text = encode_text([*lines, *body_lines(reply.body)])
@@ -217,8 +241,12 @@ def build_msg(bbs_id: str, replies: list[OutgoingReply]) -> bytes:
             reference=reply.reference,
             blocks=1 + len(text) // BLOCK,
             conference=reply.conference,
+            tagline=reply.tagline,
         ))
         out.append(text)
+        if headers is not None and reply.headers:
+            headers.append((offset, reply.headers))
+        offset += BLOCK + len(text)
     return b"".join(out)
 
 
@@ -228,7 +256,10 @@ def build_rep(bbs_id: str, replies: list[OutgoingReply], *, todoor: list[str] | 
         raise ValueError(f"{bbs_id!r} is not a QWK BBS ID")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(f"{bbs_id.upper()}.MSG", build_msg(bbs_id, replies))
+        headers: list[tuple[int, dict[str, str]]] = []
+        archive.writestr(f"{bbs_id.upper()}.MSG", build_msg(bbs_id, replies, headers))
+        if headers:
+            archive.writestr("HEADERS.DAT", build_headers_dat(headers))
         if todoor:
             archive.writestr("TODOOR.EXT", "".join(f"{line}\r\n" for line in todoor))
     return buffer.getvalue()
