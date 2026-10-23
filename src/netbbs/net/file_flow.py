@@ -166,6 +166,8 @@ from netbbs.rendering import (
     colored_truncate,
     cut_to_width,
     empty_state,
+    horizontal_rule,
+    list_width,
     menu_grid,
     menu_key,
     sanitize_text,
@@ -535,16 +537,18 @@ def _file_column_widths(terminal_width: int, *, uploader_need: int | None = None
     "copperplate-minuscules-week1.png" lost its week and its extension
     beside an uploader column holding "Copperplate". A verified name in
     `(=...=)` still gets the full width it had."""
-    idx_w = 4
+    # The index label: the cursor marker and "[01]".
+    idx_w = 5
     size_w = 9
     date_w = 16
     uploader_max = 16 if terminal_width < 80 else 28 + min(10, (terminal_width - 80) // 4)
     uploader_w = uploader_max if uploader_need is None else max(len("Uploader"), min(uploader_max, uploader_need))
-    # The row is the index label (five columns with its cursor marker),
-    # the other four cells and four single-space gutters.
-    name_w = terminal_width - (5 + size_w + date_w + uploader_w + 4)
-    if terminal_width < 80:
-        name_w = max(12, name_w - 1)
+    # The row is the index label, the other four cells and four
+    # single-space gutters, in `list_width`: the terminal less the last
+    # column, which a row that reached it would make many terminals wrap
+    # the cursor from. The column heading and the rules under it are as
+    # wide as the row.
+    name_w = max(12, list_width(terminal_width) - (idx_w + size_w + date_w + uploader_w + 4))
     return idx_w, name_w, size_w, date_w, uploader_w
 
 
@@ -2057,14 +2061,14 @@ async def _render_file_page(
     )
 
     header_cols = [
-        f"{'#':^4}",
+        f"{'#':^{idx_w}}",
         f"{'Filename':<{name_w}}",
         f"{'Size':>{size_w}}",
         f"{'Date':<{date_w}}",
         f"{'Uploader':<{uploader_w}}",
     ]
     divider_cols = [
-        rule_char * 4,
+        rule_char * idx_w,
         rule_char * name_w,
         rule_char * size_w,
         rule_char * date_w,
@@ -2078,10 +2082,9 @@ async def _render_file_page(
         if page.pinned_count and position == 1:
             # The pinned files under their own labelled rule, as a board's
             # pinned posts are (issue #675).
-            label = f"{rule_char * 2} Pinned "
-            await session.write_line(colored(
-                label + rule_char * max(0, sum(len(c) for c in divider_cols) + 4 - visible_width(label)),
-                fg_color=divider_color,
+            await session.write_line(horizontal_rule(
+                visible_width(" ".join(divider_cols)), unicode_style=unicode_style, color=divider_color,
+                label="Pinned",
             ))
         if page.pinned_count and position == page.pinned_count + 1:
             await session.write_line(colored(" ".join(divider_cols), fg_color=divider_color))

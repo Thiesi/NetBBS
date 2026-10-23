@@ -241,7 +241,7 @@ def test_scrollback_divider_rule_rendered_between_history_and_live(db, lane, hub
     text = "".join(session.written)
 
     # Scrollback separator rule with unicode '─'
-    rule_unicode = colored("─" * 78, fg_color=RULE_COLOR)
+    rule_unicode = colored("─" * 79, fg_color=RULE_COLOR)
     assert rule_unicode in text
 
     # Separator rule appears after history and before LIVE
@@ -270,7 +270,7 @@ def test_scrollback_divider_rule_ascii_when_unicode_disabled(db, lane, hub, pres
     text = "".join(session.written)
 
     # Scrollback separator rule with ASCII '-'
-    rule_ascii = colored("-" * 78, fg_color=RULE_COLOR)
+    rule_ascii = colored("-" * 79, fg_color=RULE_COLOR)
     assert rule_ascii in text
 
 

@@ -183,6 +183,8 @@ from netbbs.rendering import (
     badge,
     colored,
     empty_state,
+    list_rule,
+    list_width,
     menu_key,
     menu_row,
     reflow,
@@ -665,9 +667,9 @@ _MARKER_WIDTH = max(len(_NEW_MARKER), len(_PIN_MARKER), len(_HELD_MARKER))
 # the dated posts (its labelled "Pinned" rule replaces the top rule).
 _PINNED_BLOCK_ROWS = 1
 # The two-column lead ("> " or "  ") and the four two-space gaps between
-# the five columns, plus one column kept free: a row that reaches the
-# last column makes many terminals wrap the cursor onto the next row.
-_ROW_FURNITURE = 2 + 4 * 2 + 1
+# the five columns. The rows fill `list_width`, which keeps the terminal's
+# last column free, and the rules around them are drawn as wide.
+_ROW_FURNITURE = 2 + 4 * 2
 _AUTHOR_MAX_WIDTH = 24
 _SUBJECT_MIN_WIDTH = 8
 _HINT_MIN_HEIGHT = 20
@@ -729,7 +731,7 @@ def _column_widths(
     if width < _TABLE_MIN_WIDTH:
         return None
     date_width = max([display_width(w) for _, _, w in cells] + [len("Posted")])
-    available = width - ROW_NUMBER_WIDTH - _MARKER_WIDTH - date_width - _ROW_FURNITURE
+    available = list_width(width) - ROW_NUMBER_WIDTH - _MARKER_WIDTH - date_width - _ROW_FURNITURE
     author_width = min(
         _AUTHOR_MAX_WIDTH,
         max([display_width(a) for _, a, _ in cells] + [len("Author")]),
@@ -764,7 +766,7 @@ def _post_list_rows(
             marker = f"{marker} " if marker else ""
             # The date goes first when the row is this narrow: subject and
             # author say which post it is, and the reader shows the date.
-            plain = cut_to_width(f"{row_number_label(index + 1)} {marker}{subject} -- {author}", width - 1)
+            plain = cut_to_width(f"{row_number_label(index + 1)} {marker}{subject} -- {author}", list_width(width))
             rows.append(
                 colored(plain, reverse=True) if index == highlighted
                 else colored(plain, fg_color=MUTED_COLOR if _dimmed(post) else None)
@@ -798,14 +800,6 @@ def _post_list_rows(
             + colored(date_cell, fg_color=METADATA_COLOR)
         )
     return rows
-
-
-def _labelled_rule(label: str, *, width: int, unicode_style: bool, color) -> str:
-    """A rule with `label` set into it: "-- Pinned ------"."""
-    char = "─" if unicode_style else "-"
-    lead = char * 2
-    text = f"{lead} {label} "
-    return colored(text + char * max(0, width - display_width(text)), fg_color=color)
 
 
 def _row_marker(post: Post, new_ids: set[int], held_edits: frozenset[str] = frozenset()) -> str:
@@ -1259,10 +1253,9 @@ async def _board_screen(
     async def _render(current_page: PostPage, highlighted: int | None) -> None:
         width = session.terminal_width
         above, below = _frame(current_page)
-        rule = colored(
-            ("─" if unicode_style else "-") * min(width, 78),
-            fg_color=238 if truecolor else RULE_COLOR,
-        )
+        # As wide as the rows, which fill the terminal less its last column.
+        rule_color = 238 if truecolor else RULE_COLOR
+        rule = list_rule(width, unicode_style=unicode_style, color=rule_color)
         lines = [above, ""]
         heading = _post_list_heading(current_page.posts, width=width, db=db, name_requirement=name_requirement)
         if heading is not None:
@@ -1278,8 +1271,7 @@ async def _board_screen(
             # dated posts by a plain one (issue #675). The labelled rule
             # takes the place of the plain top rule, so the block costs one
             # row -- `_PINNED_BLOCK_ROWS`, which the page budget reserves.
-            lines.append(_labelled_rule("Pinned", width=min(width, 78), unicode_style=unicode_style,
-                                        color=238 if truecolor else RULE_COLOR))
+            lines.append(list_rule(width, unicode_style=unicode_style, color=rule_color, label="Pinned"))
             lines.extend(rows[:pinned])
             if rows[pinned:]:
                 lines.append(rule)
