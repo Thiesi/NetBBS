@@ -3484,6 +3484,75 @@ told. At most 2,000 messages and 50 files wait for one link.
 > then a downlink gets its netmail from you, and its echomail is posted here
 > and goes no further.
 
+### Publish a pointlist and a nodelist segment
+
+Your BBS can publish two lists for a network:
+
+- a **pointlist** of your points, in the "Boss" format networks collect
+  (FTS-5002);
+- a **nodelist segment** for the net you coordinate, to send to your zone or
+  region coordinator (FTS-5000).
+
+| Publishing | |
+| --- | --- |
+| **Where** | **Settings ▸ Echomail & netmail (FTN)**, highlight the network, <kbd>P</kbd> **Publishing** |
+| **Files** | `POINTS.296`, `NET549.296` ...: the name you set and the day of the year. With **ZIP** on, also `POINTS.Z96`. |
+| **Folder** | The folder you set, or the BBS's own (shown on the screen). Earlier editions stay there. |
+| **Hatch into** | The file echo a list goes out in, if you set one. |
+
+Both lists are off until you switch them on. The screen shows each list's
+last edition, with its day number and CRC-16, and the last failure.
+
+#### List your points
+
+1. On the **Publishing** screen, press <kbd>E</kbd> **Entries for points**. Each point
+   from your **Links** screen is listed with its line.
+2. Pick a point to fill in its line: **System name**, **Location**,
+   **Sysop**, **Phone**, **Speed** and **Flags**. An empty name or sysop
+   uses the link's name, so a point you never edit is still listed.
+3. Set **Listed** to **no** for a point that shouldn't appear. A disabled
+   link is always left out.
+4. Under <kbd>S</kbd> **Settings**, switch **Pointlist** on.
+
+The list starts with `Boss,` and your address, and each point follows as
+`,1,Pat_Point,Auckland,Pat_Smith,-Unpublished-,300,IBN`.
+
+#### Keep a nodelist segment for your net
+
+1. Under <kbd>S</kbd> **Settings**, fill in the **Host line**: your net's
+   name, location and coordinator, and its flags, such as
+   `IBN,INA:bbs.example.org`. Switch **Nodelist segment** on.
+2. Press <kbd>N</kbd> **Nodes**, then <kbd>C</kbd> **Create** for each node
+   in your net. A new line starts from your first downlink in the net that
+   isn't listed yet, with its name and BinkP host filled in. Add its
+   location and sysop.
+3. **Listed as** is a plain node, or **Pvt**, **Hold** or **Down**.
+
+The segment is checked the way your BBS checks a nodelist it receives: its
+first line carries the CRC-16 of the rest.
+
+#### Publish
+
+- Press <kbd>P</kbd> **Publish now**. Today's edition of each list that is
+  on is written, and hatched where a file echo is set. You are asked first
+  only when something goes to the network.
+- Or set **Schedule** to **daily**, or **weekly** on a **Weekday** (Friday
+  by default). A scheduled edition comes out on the first check of that
+  day, while the network is on.
+
+A hatched list goes to your hub with a TIC, as a hatched file does, and
+tells the receiving systems that it replaces your previous edition. It
+needs the network's **TIC password**.
+
+Fields are plain ASCII. Spaces become underscores, and a comma is refused,
+since commas separate the fields. A line longer than 157 characters is
+refused too, since some list processors drop it.
+
+> [!NOTE]
+> A list that can't be built (no point listed, say) is not written, and the
+> other one still is. A list written but not hatched stays in the folder;
+> the screen says why it wasn't hatched.
+
 ### Not supported
 
 - sending echomail and file echoes on to points and downlinks, and an

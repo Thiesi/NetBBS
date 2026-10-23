@@ -100,8 +100,9 @@ MAX_SESSION_FILE_BYTES = 256 * 1024 * 1024
 MAX_MESSAGES_PER_PACKET = 500
 CRASH_ATTEMPTS = 5
 HOLD_DAYS = 30
-# Rows of these reference kinds travel together: a hatch's file and TIC.
-_PAIRED_KINDS = frozenset({"hatch"})
+# Rows of these reference kinds travel together: a hatch's file and TIC,
+# and a published list's (issue #1480).
+_PAIRED_KINDS = frozenset({"hatch", "publish"})
 
 
 @dataclass(frozen=True)

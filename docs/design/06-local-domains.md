@@ -2164,7 +2164,8 @@ import, unknown echoes and the held-item actions. They are described below as
 they are to be built, and so are stage B's netmail extras: file attach,
 crash and hold flavours, and bounces (#1470-#1472), and stage C's file
 requests (#1475). Stage D's points and the hub's records, sessions and
-transit netmail (#1478, #1479) are under "Points and downlinks". The
+transit netmail (#1478, #1479) are under "Points and downlinks", and its
+publishing (#1480) under "Publishing". The
 round's later stages are listed under "Planned" at the end of this
 section.
 
@@ -2449,6 +2450,54 @@ names the link in its reference), and SEEN-BY and PATH are merged by
 `netbbs.ftn.route.merge_seen_by_path`. Until then a downlink's echomail is
 tossed here and goes no further, and a TIC from a link is held (check 3
 below).
+
+**Publishing** (issue #1480; §16, "Issue #1154", Decision 18). A network's
+SysOp can publish a **pointlist** of this node's points and a **nodelist
+segment** for the net it coordinates, from the network's **Publishing**
+screen (**Settings ▸ Echomail & netmail (FTN) ▸ [P]ublishing**). Both are
+off by default; a node that is itself a point publishes nothing.
+
+- **The pointlist** is FTS-5002's Boss format: `Boss,zone:net/node` for
+  this node, then a line per point with an empty first field,
+  `,point,name,location,sysop,phone,speed,flags`. The points are the
+  network's point links. Each one's line is kept beside the link
+  (`ftn_publish_points`, so the link record is unchanged): whether it is
+  listed, and its fields, where an empty system name or sysop takes the
+  link's name and an empty location is `Unknown`. A disabled link is
+  left out. No point listed, no pointlist.
+- **The segment** is FTS-5000's format for a net (§7): a `Host` line for
+  this node's net, whose fields the SysOp sets, then the node lines the
+  SysOp keeps (`ftn_segment_nodes`), plain or `Pvt`, `Hold` or `Down`, by
+  node number. `Hub` branches are not offered. A new node line starts from
+  the first downlink in the net not listed yet, its name and `IBN`/`INA`
+  flags filled in.
+- **The format.** Both start with FTS-5000's first line, `;A <network>
+  pointlist for <address> -- <weekday, date> -- Day number ddd : ccccc`,
+  whose CRC-16 is computed by the same code that checks a received list
+  (above), so a published segment imports through the nodelist importer
+  with its check required. Lines end CR LF and the file ends with Ctrl-Z.
+  Fields are 7-bit printable ASCII with underscores for spaces; a comma, a
+  sysop over 36 characters, a phone that is not `-Unpublished-` or dashed
+  digits, and a line over 157 characters are refused when the line is
+  saved.
+- **An edition** is written to `<NAME>.ddd` (`ddd` the day of the year in
+  the node's time zone; the names are `POINTS` and `NET<net>` unless the
+  SysOp sets others, up to 8 characters) in the SysOp's folder, else
+  `<files>/ftn-publish/<domain>`, and with **ZIP** on also to
+  `<NAME>.Zdd` (FTS-5000 §4) holding it. Earlier editions stay. The day,
+  CRC-16 and file of each list's last edition, and the last failure, are
+  shown on the screen.
+- **Hatching.** With a file echo set for a list, the edition (the ZIP when
+  there is one) is hatched there as a file of this node's is ("Hatching",
+  below), under the same guards, written to the spool folder and deleted
+  once sent; its TIC carries `Replaces` with the previous edition's file.
+  The echo needs no file area. A refused hatch leaves the written file and
+  says why; one list that can't be built doesn't stop the other.
+- **When.** **[P]ublish now** publishes every list that is on, with one
+  yes/no when something is hatched. A schedule (off, daily, or weekly on a
+  weekday, Friday by default) publishes on the first check of the mailer
+  that day, for an enabled network, once: the day is marked before the
+  edition is made, so a failing one is not retried every minute.
 
 **What a session received** is sorted once the session ends (issue #1458):
 
@@ -2969,8 +3018,7 @@ this section; until then the text above is what holds.
 
 - **Stage D:**
   - the hub's second part: echomail fan-out, an AreaFix/FileFix server and
-    TIC forwarding (#1479), on the link records above;
-  - pointlist and nodelist segment publishing (#1480).
+    TIC forwarding (#1479), on the link records above.
 - **Stage E:**
   - QWK offline mail for callers (#1389) -- built, see §6.10;
   - QWKnet as a node (#1481) and as a hub (#1482), reusing §6.10's packet
