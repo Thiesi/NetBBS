@@ -766,8 +766,11 @@ def test_a_typed_space_moves_the_cursor_at_once(tmp_path):
 
 
 def test_a_space_typed_at_the_right_edge_moves_the_cursor_to_the_next_row(tmp_path):
-    positions, _ = _cursor_after_each_key([" "], tmp_path, initial_text="x" * 40, width=40)
-    assert positions == [(1, 0)]
+    # 39 letters leave the cursor in the last column; the space fills it, and
+    # the cursor moves down (claude review on #1451: with 40 letters it was
+    # already there before the space).
+    positions, _ = _cursor_after_each_key(["x", " "], tmp_path, initial_text="x" * 38, width=40)
+    assert positions == [(0, 39), (1, 0)]
 
 
 def test_a_keystroke_is_echoed_in_a_single_write(tmp_path):
