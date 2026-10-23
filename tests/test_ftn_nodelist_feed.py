@@ -366,7 +366,7 @@ def test_the_network_editor_sets_the_nodelist_echo(db):
     existing = save_network(db, FtnNetwork(name="nixNet", domain="nixnet", our_address=NODE, uplink_address=HUB))
     lane = DatabaseLane(db.path)
     try:
-        session = FakeSession(["1", "7", "nix_list", "s", "1", "8", "nixlist", "1", "9", "nixdiff", "s"])
+        session = FakeSession(["2", "0", "nix_list", "s", "2", "1", "nixlist", "2", "2", "nixdiff", "s"])
         asyncio.run(edit_network(session, lane, sysop, existing))
     finally:
         lane.close()

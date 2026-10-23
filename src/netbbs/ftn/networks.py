@@ -32,6 +32,10 @@ MAX_ORIGIN_TEXT = 60
 MAX_SESSION_PASSWORD = 40
 MAX_PACKET_PASSWORD = 8
 MIN_POLL_MINUTES = 5
+# A robot's name is the To of a netmail: FTS-0001's 35 bytes (issue #1463).
+MAX_ROBOT_NAME = 35
+DEFAULT_AREAFIX_ROBOT = "AreaFix"
+DEFAULT_FILEFIX_ROBOT = "FileFix"
 MAX_POLL_MINUTES = 24 * 60
 
 _AREA_TAG = re.compile(r"[\x21-\x60\x7b-\x7e]{1,60}")
@@ -61,12 +65,23 @@ class FtnNetwork:
     default_charset: str = DEFAULT_CHARSET
     origin_text: str = ""
     netmail_min_level: int = SYSOP_LEVEL
+    # --- robots (issue #1463) ---
+    areafix_robot: str = DEFAULT_AREAFIX_ROBOT
+    filefix_robot: str = DEFAULT_FILEFIX_ROBOT
+    filefix_password: str = ""  # empty: FileFix uses the AreaFix password
+    # --- end robots ---
     # --- the nodelist echo (issue #1464) ---
     nodelist_echo: str = ""  # the file echo's tag; empty: lists are imported by hand
     nodelist_name: str = ""  # the full list's base name (NODELIST for NODELIST.289)
     nodediff_name: str = ""  # its diffs' base name (NODEDIFF); empty: diffs are not applied
     # --- end nodelist echo ---
     id: int | None = None
+
+    @property
+    def effective_filefix_password(self) -> str:
+        """The password a FileFix request carries: FileFix's own, else
+        the AreaFix password (design doc §6.8)."""
+        return self.filefix_password or self.areafix_password
 
 
 def validate_network(network: FtnNetwork) -> FtnNetwork:
@@ -93,6 +108,7 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
         (network.session_password, MAX_SESSION_PASSWORD, "Session password"),
         (network.packet_password, MAX_PACKET_PASSWORD, "Packet password"),
         (network.areafix_password, MAX_SESSION_PASSWORD, "AreaFix password"),
+        (network.filefix_password, MAX_SESSION_PASSWORD, "FileFix password"),
     ):
         if len(value) > limit or not _PRINTABLE.fullmatch(value):
             raise FtnNetworkError(f"{label} must be at most {limit} printable characters without spaces.")
@@ -124,9 +140,21 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
     if nodelist_name and nodelist_name == nodediff_name:
         raise FtnNetworkError("The nodelist and its diffs need different names (e.g. NODELIST and NODEDIFF).")
     # --- end nodelist echo ---
+    robots = {label: validate_robot_name(value, label)
+              for value, label in ((network.areafix_robot, "AreaFix"), (network.filefix_robot, "FileFix"))}
     return replace(network, name=name, domain=domain, our_address=our, uplink_address=uplink,
-                   uplink_host=host, origin_text=origin_text, nodelist_echo=nodelist_echo,
-                   nodelist_name=nodelist_name, nodediff_name=nodediff_name)
+                   uplink_host=host, origin_text=origin_text,
+                   areafix_robot=robots["AreaFix"], filefix_robot=robots["FileFix"],
+                   nodelist_echo=nodelist_echo, nodelist_name=nodelist_name, nodediff_name=nodediff_name)
+
+
+def validate_robot_name(value: str, label: str) -> str:
+    """A robot's name as stored: 1-35 printable ASCII characters, inner
+    spaces collapsed (issue #1463). `label` names the robot in the error."""
+    name = " ".join(value.split())
+    if not name or len(name) > MAX_ROBOT_NAME or not all(" " <= character <= "~" for character in name):
+        raise FtnNetworkError(f"The {label} robot's name must be 1-{MAX_ROBOT_NAME} printable ASCII characters.")
+    return name
 
 
 def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
@@ -137,6 +165,7 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
         validated.uplink_host, validated.uplink_port, validated.session_password, validated.packet_password,
         validated.areafix_password, validated.poll_minutes, int(validated.answers_calls), int(validated.enabled),
         validated.default_charset, validated.origin_text, validated.netmail_min_level,
+        validated.areafix_robot, validated.filefix_robot, validated.filefix_password,
         validated.nodelist_echo, validated.nodelist_name, validated.nodediff_name,
     )
     try:
@@ -144,9 +173,10 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
             cursor = db.connection.execute(
                 "INSERT INTO ftn_networks (name, domain, our_address, uplink_address, uplink_host, uplink_port, "
                 "session_password, packet_password, areafix_password, poll_minutes, answers_calls, enabled, "
-                "default_charset, origin_text, netmail_min_level, nodelist_echo, nodelist_name, "
+                "default_charset, origin_text, netmail_min_level, "
+                "areafix_robot, filefix_robot, filefix_password, nodelist_echo, nodelist_name, "
                 "nodediff_name, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (*values, utc_now_iso()),
             )
             validated = replace(validated, id=cursor.lastrowid)
@@ -155,8 +185,9 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
                 "UPDATE ftn_networks SET name = ?, domain = ?, our_address = ?, uplink_address = ?, "
                 "uplink_host = ?, uplink_port = ?, session_password = ?, packet_password = ?, "
                 "areafix_password = ?, poll_minutes = ?, answers_calls = ?, enabled = ?, default_charset = ?, "
-                "origin_text = ?, netmail_min_level = ?, nodelist_echo = ?, nodelist_name = ?, "
-                "nodediff_name = ? WHERE id = ?",
+                "origin_text = ?, netmail_min_level = ?, "
+                "areafix_robot = ?, filefix_robot = ?, filefix_password = ?, nodelist_echo = ?, "
+                "nodelist_name = ?, nodediff_name = ? WHERE id = ?",
                 (*values, validated.id),
             )
             if cursor.rowcount == 0:
@@ -202,6 +233,8 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
         answers_calls=bool(row["answers_calls"]), enabled=bool(row["enabled"]),
         default_charset=row["default_charset"], origin_text=row["origin_text"],
         netmail_min_level=row["netmail_min_level"],
+        areafix_robot=row["areafix_robot"], filefix_robot=row["filefix_robot"],
+        filefix_password=row["filefix_password"],
         nodelist_echo=row["nodelist_echo"], nodelist_name=row["nodelist_name"],
         nodediff_name=row["nodediff_name"],
     )
