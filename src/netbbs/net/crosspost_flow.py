@@ -226,6 +226,7 @@ def publish_crosspost(
     from netbbs.boards.posts import CrosspostRefused, PostError
     from netbbs.ftn.scanner import export_post_if_ftn
     from netbbs.net.shared_account import note_created_this_call
+    from netbbs.qwknet.exchange import queue_post_if_qwknet
     from netbbs.link.boards import queue_board_post_if_linked
 
     files = list(files or [])
@@ -252,6 +253,7 @@ def publish_crosspost(
         if link_context is not None:
             queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
         export_post_if_ftn(db, post, board)
+        queue_post_if_qwknet(db, post, board)  # issue #1481
     posted = [sanitize_text(board.name) for board, post in zip(targets.boards, posts) if post.status != "pending"]
     held = [sanitize_text(board.name) for board, post in zip(targets.boards, posts) if post.status == "pending"]
     if not held:

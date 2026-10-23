@@ -5430,4 +5430,119 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issues #1481 and #1482 (design doc §6.11, §16 \"Issue #1154\", Decision 24): QWKnet, as a node "
+            "and as a hub. `qwknet_networks` holds each QWK network this node is on: the QWK ID it goes by "
+            "there, its hub's QWK ID, host, transport (FTP, FTPS, HTTP or HTTPS, the last two as "
+            "Synchronet's qnet-http speaks them) and password (`hub_id` empty: this node is the network's "
+            "top hub), the poll interval, the tagline, whether node accounts may call, and `uplink_seq`, "
+            "the last outgoing message the hub took. `qwknet_conferences` maps a conference number to one "
+            "board, by its content id, never the reusable row id: a board carries one conference of one "
+            "network, and is then neither Linked nor FTN. `qwknet_nodes` are the systems this node serves "
+            "as a hub: their QWK ID (the login), an Argon2id hash of their password, limits, the packet "
+            "built for them and not yet confirmed, and `sent_seq`; `qwknet_node_conferences` the "
+            "conferences each carries. `qwknet_outbound` numbers every message that leaves on a mapped "
+            "board -- local, from the hub, or from a node -- so each destination keeps one cursor. "
+            "`qwknet_posts` records a post's QWKnet Message-ID and the route it came by, `qwknet_seen` "
+            "the Message-IDs (or digests) already imported, and `qwknet_held` messages for unmapped "
+            "conferences and packets that could not be read, bounded. No foreign key points at "
+            "`boards` or `posts`, which migrations rebuild. Empty on upgrade, so nothing changes."
+        ),
+        sql="""
+        CREATE TABLE qwknet_networks (
+            id                 INTEGER PRIMARY KEY,
+            name               TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            our_id             TEXT NOT NULL,
+            hub_id             TEXT NOT NULL DEFAULT '',
+            transport          TEXT NOT NULL DEFAULT 'https'
+                                   CHECK (transport IN ('https', 'http', 'ftp', 'ftps')),
+            host               TEXT NOT NULL DEFAULT '',
+            port               INTEGER NOT NULL DEFAULT 0 CHECK (port BETWEEN 0 AND 65535),
+            password           TEXT NOT NULL DEFAULT '',
+            poll_minutes       INTEGER NOT NULL DEFAULT 240,
+            tagline            TEXT NOT NULL DEFAULT '',
+            enabled            INTEGER NOT NULL DEFAULT 0,
+            serve_nodes        INTEGER NOT NULL DEFAULT 0,
+            uplink_seq         INTEGER NOT NULL DEFAULT 0,
+            last_poll_at       TEXT,
+            last_poll_outcome  TEXT NOT NULL DEFAULT '',
+            created_at         TEXT NOT NULL
+        );
+
+        CREATE TABLE qwknet_conferences (
+            network_id  INTEGER NOT NULL REFERENCES qwknet_networks(id) ON DELETE CASCADE,
+            number      INTEGER NOT NULL CHECK (number BETWEEN 1 AND 65535),
+            board_key   TEXT NOT NULL UNIQUE,
+            mapped_at   TEXT NOT NULL,
+            PRIMARY KEY (network_id, number)
+        );
+
+        CREATE TABLE qwknet_nodes (
+            id               INTEGER PRIMARY KEY,
+            network_id       INTEGER NOT NULL REFERENCES qwknet_networks(id) ON DELETE CASCADE,
+            qwk_id           TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            name             TEXT NOT NULL DEFAULT '',
+            password_hash    TEXT NOT NULL,
+            enabled          INTEGER NOT NULL DEFAULT 1,
+            packet_messages  INTEGER NOT NULL DEFAULT 2000,
+            rep_kib          INTEGER NOT NULL DEFAULT 4096,
+            sent_seq         INTEGER NOT NULL DEFAULT 0,
+            pending_packet   BLOB,
+            pending_seq      INTEGER,
+            pending_at       TEXT,
+            last_fetch_at    TEXT,
+            last_upload_at   TEXT,
+            last_outcome     TEXT NOT NULL DEFAULT '',
+            created_at       TEXT NOT NULL
+        );
+
+        CREATE TABLE qwknet_node_conferences (
+            node_id  INTEGER NOT NULL REFERENCES qwknet_nodes(id) ON DELETE CASCADE,
+            number   INTEGER NOT NULL,
+            PRIMARY KEY (node_id, number)
+        );
+
+        CREATE TABLE qwknet_outbound (
+            seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+            network_id      INTEGER NOT NULL REFERENCES qwknet_networks(id) ON DELETE CASCADE,
+            post_id         TEXT NOT NULL,
+            number          INTEGER NOT NULL,
+            source_node_id  INTEGER,
+            from_uplink     INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL,
+            UNIQUE (network_id, post_id)
+        );
+
+        CREATE TABLE qwknet_posts (
+            post_id         TEXT PRIMARY KEY,
+            network_id      INTEGER NOT NULL REFERENCES qwknet_networks(id) ON DELETE CASCADE,
+            msgid           TEXT NOT NULL,
+            route           TEXT NOT NULL DEFAULT '',
+            hub_number      INTEGER,
+            source_node_id  INTEGER,
+            from_uplink     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_qwknet_posts_msgid ON qwknet_posts(network_id, msgid);
+        CREATE INDEX idx_qwknet_posts_number ON qwknet_posts(network_id, hub_number) WHERE hub_number IS NOT NULL;
+
+        CREATE TABLE qwknet_seen (
+            network_id  INTEGER NOT NULL REFERENCES qwknet_networks(id) ON DELETE CASCADE,
+            key         TEXT NOT NULL,
+            seen_at     TEXT NOT NULL,
+            PRIMARY KEY (network_id, key)
+        );
+
+        CREATE TABLE qwknet_held (
+            id          INTEGER PRIMARY KEY,
+            network_id  INTEGER NOT NULL REFERENCES qwknet_networks(id) ON DELETE CASCADE,
+            source      TEXT NOT NULL,
+            conference  INTEGER,
+            reason      TEXT NOT NULL,
+            content     BLOB NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX idx_qwknet_held_conference ON qwknet_held(network_id, conference);
+        """,
+    ),
 ]

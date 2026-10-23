@@ -32,6 +32,15 @@ written as '?', and pi itself, which would end a line, as "pi".
 the whole value on a `To:`, `From:` or `Subject:` line at the top of the
 text, followed by a blank line, when the field is too short for it. Those
 lines are written only for a field that does not fit.
+
+**HEADERS.DAT** (Synchronet 3.15 and later, used by QWKnet, #1481 and
+#1482) is an INI file beside MESSAGES.DAT (or a reply packet's .MSG): one
+section per message, named by the byte offset of its header block in hex
+(`[c80]`), holding `Key: value` lines -- `Message-ID`, `In-Reply-To`,
+`Sender`, `To`, `Subject`, `SenderNetAddr` (the QWKnet route it came by),
+`Utf8` and more. A field there overrides the header's. Synchronet's older
+body kludges -- `@VIA:`, `@MSGID:`, `@REPLY:`, `@TZ:` at the top of the
+text -- carry the same things for systems without it (`split_kludges`).
 """
 
 from __future__ import annotations
@@ -62,6 +71,10 @@ _QWKE_LINE = re.compile(r"^(to|from|subject):[ \t]?(.*)$", re.IGNORECASE)
 # packet is untrusted, and an escape sequence in it would reach other
 # callers' terminals through the post.
 _CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+# Synchronet's colour codes, Ctrl-A and one character (`^Ah` bright): a hub
+# that leaves them in its packets (QWKnet, #1481) would otherwise leave the
+# letter behind once the control character is gone.
+_CTRL_A = re.compile(r"\x01.?", re.DOTALL)
 
 
 class QwkFormatError(ValueError):
@@ -79,8 +92,9 @@ def from_cp437(data: bytes) -> str:
 
 
 def clean_line(text: str) -> str:
-    """One line of untrusted text with its control characters removed."""
-    return _CONTROL.sub("", text)
+    """One line of untrusted text with its control characters removed, and
+    Synchronet's Ctrl-A colour codes with them."""
+    return _CONTROL.sub("", _CTRL_A.sub("", text))
 
 
 def field(text: str, width: int = FIELD) -> bytes:
@@ -241,12 +255,17 @@ def body_lines(body: str) -> list[str]:
     return lines
 
 
-def decode_text(data: bytes) -> list[str]:
+def decode_text(data: bytes, *, utf8: bool = False) -> list[str]:
     """Text blocks as lines: split at 0xE3 (a reader writing CR/LF instead
-    is tolerated), the padding after the last line dropped, controls out."""
+    is tolerated), the padding after the last line dropped, controls out.
+    `utf8` reads a message HEADERS.DAT marks `Utf8`: UTF-8 text whose lines
+    end in LF (0xE3 can be part of a UTF-8 character there)."""
     data = data.rstrip(b" \x00")
     if not data:
         return []
+    if utf8:
+        text = data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        return [clean_line(line).rstrip() for line in text.split("\n")]
     if LINE_END in data:
         raw_lines = data.split(bytes([LINE_END]))
         if raw_lines and raw_lines[-1].strip(b" \x00") == b"":
@@ -289,3 +308,94 @@ def split_qwke(lines: list[str], header: dict[str, str]) -> QwkeFields:
     if values and index < len(lines) and not lines[index].strip():
         index += 1
     return QwkeFields(values=values, lines=lines[index:])
+
+
+# -- HEADERS.DAT and Synchronet's body kludges (QWKnet, #1481 and #1482) ----
+
+#: A HEADERS.DAT value is at most this long (Synchronet's own limit); a
+#: longer one is cut, and a file with more sections than a packet can
+#: hold messages is read only that far.
+MAX_HEADER_VALUE = 1024
+MAX_HEADER_SECTIONS = 65536
+MAX_HEADER_FIELDS = 64
+
+_SECTION = re.compile(r"^\[([0-9a-fA-F]{1,9})\]$")
+_HEADER_LINE = re.compile(r"^([A-Za-z0-9@][A-Za-z0-9_.@-]{0,63})\s*[:=]\s?(.*)$")
+_KLUDGE_LINE = re.compile(r"^@(VIA|MSGID|REPLY|TZ|REPLYTO):\s?(.*)$", re.IGNORECASE)
+
+
+def parse_headers_dat(data: bytes) -> dict[int, dict[str, str]]:
+    """HEADERS.DAT as `{header block offset: {lower-case key: value}}`.
+    Untrusted: lines that are neither a section nor a `Key: value` are
+    skipped, values are cut to `MAX_HEADER_VALUE` and have control
+    characters removed, and the counts are bounded. Text is UTF-8 where it
+    decodes, else CP437."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = from_cp437(data)
+    out: dict[int, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw.strip()
+        if not line or line.startswith(";"):
+            continue
+        section = _SECTION.match(line)
+        if section is not None:
+            if len(out) >= MAX_HEADER_SECTIONS:
+                break
+            current = out.setdefault(int(section.group(1), 16), {})
+            continue
+        match = _HEADER_LINE.match(line)
+        if current is None or match is None or len(current) >= MAX_HEADER_FIELDS:
+            continue
+        current[match.group(1).lower()] = clean_line(match.group(2))[:MAX_HEADER_VALUE].strip()
+    return out
+
+
+def build_headers_dat(sections: list[tuple[int, dict[str, str]]]) -> bytes:
+    """HEADERS.DAT for `(header block offset, fields)` pairs, as UTF-8 with
+    CRLF line ends. A value loses its line breaks and is cut to
+    `MAX_HEADER_VALUE`; empty values are left out."""
+    lines: list[str] = []
+    for offset, fields in sections:
+        kept = {key: " ".join(str(value).split())[:MAX_HEADER_VALUE] for key, value in fields.items()}
+        kept = {key: value for key, value in kept.items() if value}
+        if not kept:
+            continue
+        lines.append(f"[{offset:x}]")
+        lines += [f"{key}: {value}" for key, value in kept.items()]
+        lines.append("")
+    return "".join(f"{line}\r\n" for line in lines).encode("utf-8")
+
+
+def header_flag(fields: dict[str, str], key: str) -> bool:
+    """A HEADERS.DAT yes/no field (`Utf8: true`)."""
+    return fields.get(key, "").strip().lower() in ("true", "yes", "1", "on")
+
+
+@dataclass(frozen=True)
+class Kludges:
+    """Synchronet's `@VIA:`/`@MSGID:`/`@REPLY:`/`@TZ:` lines found at the top
+    of a text (keys lower case, without the `@`), and the text after them."""
+
+    values: dict[str, str]
+    lines: list[str]
+
+
+def split_kludges(lines: list[str]) -> Kludges:
+    """Take Synchronet's body kludges off the top of `lines`, and the blank
+    lines after them. Only the first run counts; a line further down that
+    happens to start `@VIA:` is text."""
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(lines) and index < 8:
+        match = _KLUDGE_LINE.match(lines[index])
+        if match is None:
+            break
+        values.setdefault(match.group(1).lower(), match.group(2).strip()[:MAX_HEADER_VALUE])
+        index += 1
+    if values:
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+    return Kludges(values=values, lines=lines[index:])

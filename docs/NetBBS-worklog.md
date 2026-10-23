@@ -1768,6 +1768,28 @@ session needs the same treatment.
   INTL/FMPT/TOPT) so a forwarded message keeps its character set and
   kludges exactly; `decode_message`/`encode_message` would normalise them.
 
+### QWKnet: one queue, one cursor per destination (issues #1481, #1482)
+
+- **Every visible post on a mapped board gets one `qwknet_outbound` row,
+  and destinations only move cursors over it.** The hub has `uplink_seq`,
+  each node `sent_seq`. A new hook site that makes a post visible (a new
+  posting path, an approval path) must call `queue_post_if_qwknet` beside
+  `export_post_if_ftn`, or the post never leaves. The row records where the
+  post came from (`source_node_id`, `from_uplink`), and that is what keeps
+  a post from going back to its source; the route check is the second line.
+- **A cursor moves only on the far end's word.** The uplink cursor moves
+  when the hub accepted the upload (`on_uploaded`), a node's when it
+  confirmed the exact size of the packet it was served
+  (`confirm_node_packet`). Until then the node's built packet is kept in
+  `qwknet_nodes.pending_packet` and served byte for byte again, which is
+  what makes qnet-http's size confirmation meaningful. Changing a node's
+  conferences drops the pending packet so it is rebuilt.
+- **Routes are stored nearest first, without this node.** A tossed message
+  stores `source/SenderNetAddr...`; it leaves with that whole string as
+  `SenderNetAddr`, and the receiver prefixes its own source. That is
+  Synchronet's convention: getting the direction wrong breaks loop
+  detection on every system downstream.
+
 ### Read cursors and follows (issue #56)
 
 A per-user read cursor is a position marker `(user_id, object_type,

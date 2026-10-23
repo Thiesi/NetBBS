@@ -42,6 +42,7 @@ from netbbs.files.entries import (
 )
 from netbbs.link.boards import LinkContext, queue_approved_board_post_if_linked
 from netbbs.ftn.scanner import export_post_if_ftn
+from netbbs.qwknet.exchange import queue_post_if_qwknet
 from netbbs.link.files import queue_file_descriptor_if_linked
 from netbbs.staff import moderation_scope
 from netbbs.moderation.roles import BoardPermission, has_permission
@@ -483,6 +484,7 @@ async def _post_action_screen(
                     queue_approved_board_post_if_linked, approved, board, node_identity=link_context.node_identity
                 )
             await lane.run(export_post_if_ftn, approved, board)
+            await lane.run(queue_post_if_qwknet, approved, board)  # issue #1481
             _announce_line(session, "Approved.")
             return
         if choice == "r":

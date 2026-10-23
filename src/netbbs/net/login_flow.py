@@ -239,6 +239,8 @@ async def handle_session(
     # Design doc §6.8: the node's FTN mailer and listener, for the console.
     ftn_mailer: Any = None,
     ftn_listener: Any = None,
+    # Issue #1481: the node's QWKnet mailer, for the console's poll now.
+    qwknet_mailer: Any = None,
     backup_identity_dir: Path | None = None,
     # Issue #475: this node's `netbbs.net.file_transfer.
     # TransferGrants`, or `None` on a node with no web listener --
@@ -349,6 +351,7 @@ async def handle_session(
         mrc_bridge=mrc_bridge,
         ftn_mailer=ftn_mailer,
         ftn_listener=ftn_listener,
+        qwknet_mailer=qwknet_mailer,
         chat_hub=hub,
         backup_identity_dir=backup_identity_dir,
         transfers=transfers,
@@ -1068,6 +1071,8 @@ async def handle_ssh_session(
     # Design doc §6.8: the node's FTN mailer and listener, for the console.
     ftn_mailer: Any = None,
     ftn_listener: Any = None,
+    # Issue #1481: the node's QWKnet mailer, for the console's poll now.
+    qwknet_mailer: Any = None,
     backup_identity_dir: Path | None = None,
     # Issue #475: this node's `netbbs.net.file_transfer.
     # TransferGrants`, or `None` on a node with no web listener --
@@ -1137,6 +1142,7 @@ async def handle_ssh_session(
         mrc_bridge=mrc_bridge,
         ftn_mailer=ftn_mailer,
         ftn_listener=ftn_listener,
+        qwknet_mailer=qwknet_mailer,
         chat_hub=hub,
         backup_identity_dir=backup_identity_dir,
         transfers=transfers,

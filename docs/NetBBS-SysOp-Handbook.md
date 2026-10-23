@@ -20,6 +20,7 @@ basic familiarity with your server's command line, but no Python programming.
 - [NetBBS Link](#netbbs-link)
 - [MRC chat bridge](#mrc-chat-bridge)
 - [FTN networks (FidoNet, fsxNet)](#ftn-networks-fidonet-fsxnet)
+- [QWKnet networks (DOVE-Net)](#qwknet-networks-dove-net)
 - [Daily operation](#daily-operation)
 - [State, backup, and recovery](#state-backup-and-recovery)
 - [Upgrading and removing NetBBS](#upgrading-and-removing-netbbs)
@@ -3492,6 +3493,143 @@ told. At most 2,000 messages and 50 files wait for one link.
 
 > [!NOTE]
 > Check a network's rules before gating its echoes anywhere else.
+
+## QWKnet networks (DOVE-Net)
+
+| At a glance | |
+| --- | --- |
+| **Set up under** | **Settings ▸ QWKnet networks** |
+| **Decide first** | Which network to join, and whether other systems will call yours for it |
+
+NetBBS can join a QWK network, such as DOVE-Net, the network most
+Synchronet BBSes are on, as a node of a hub. It can also be the hub other
+systems call. Each conference of the network is carried by one of your
+boards.
+
+> [!IMPORTANT]
+> It is a gateway, not NetBBS Link. A QWKnet board is never also Linked or
+> FTN, and nothing that arrives over QWKnet is trust-evaluated.
+
+In this chapter: [Join a QWK network](#join-a-qwk-network) ·
+[Carry conferences](#carry-conferences) ·
+[Held messages](#held-messages) · [Serve other systems](#serve-other-systems) ·
+[What QWKnet does not carry](#what-qwknet-does-not-carry)
+
+### Join a QWK network
+
+1. Pick your QWK ID: 2-8 letters and digits, starting with a letter, unique
+   on the network. DOVE-Net lists the IDs in use in `nodes.dat` in
+   `dove-net.zip`.
+2. At the hub's BBS, create an account whose user name is your QWK ID, and
+   say it is for QWK networking. On Vertrauen (`vert.synchro.net`), log in
+   as `New` over Telnet and answer **Yes** to "Is this account to be used for
+   QWK Networking (DOVE-Net)?". Note the password.
+3. In the account's QWK settings at the hub, turn **Include HEADERS.DAT** on.
+   Ctrl-A codes may stay in; NetBBS strips them.
+4. In **Settings ▸ QWKnet networks**, press <kbd>C</kbd> **Create**. A new
+   network starts as DOVE-Net through Vertrauen. Check **Our QWK ID**, then
+   set **Password** to the account's password and **Enabled** to yes.
+5. Press <kbd>S</kbd> **Save**, then map the conferences (below), and press
+   <kbd>P</kbd> **Poll now**.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Our QWK ID | your QWK BBS ID | Your account at the hub, and how other systems' routes name your BBS. |
+| Tagline | the BBS's name | The line under every post written on your BBS: ` ■ NetBBS ■ <tagline>`. |
+| Hub QWK ID | VERT | The hub's ID. It names the packets: `VERT.QWK` from the hub, `VERT.REP` to it. Empty when your BBS is the network's top hub. |
+| Host, Port | vert.synchro.net | Where the hub answers. Port 0 uses the transport's usual one. |
+| Transport | HTTPS | **HTTPS** or **HTTP** call the hub's web server the way Synchronet's `qnet-http` does. **FTP** and **FTPS** do what `qnet-ftp` does, in passive mode only. |
+| Poll every | 240 minutes | How often to call. Posts written on your BBS also go up within a quarter of an hour. |
+
+> [!WARNING]
+> Plain HTTP and FTP send the password readable. Use HTTPS or FTPS wherever
+> the hub offers them.
+
+Each call uploads your new posts and then fetches what waits. The network
+list shows what the last call came to; a failed call is tried again after a
+few minutes. A packet that can't be read, or that names another BBS, is held
+whole under <kbd>H</kbd> **Held**.
+
+### Carry conferences
+
+Highlight the network and press <kbd>M</kbd> **Map conferences**. The list
+shows the boards that can carry a conference: local boards, and those
+carrying one of this network's already. Pick a board and type its conference
+number, such as `2001` for DOVE-Net's General. An empty line makes the board
+local again; its posts stay.
+
+- Messages from the network are posted as `Name (ORIGIN)`, where ORIGIN is
+  the QWK ID of the BBS the message was written on.
+- A moderated board holds them for you, as it holds local posts.
+- What your callers post on the board goes to the hub, with your tagline.
+- Polls are not offered on a QWKnet board.
+- Mail the hub sends to `SYSOP` or your QWK ID reaches you; mail to one of
+  your accounts by name reaches that account.
+
+> [!NOTE]
+> A board carries one network: a Linked or FTN board can't carry a
+> conference until you make it local.
+
+### Held messages
+
+A message for a conference no board carries is held, by conference. Highlight
+the network and press <kbd>H</kbd> **Held**:
+
+- <kbd>R</kbd> **Re-toss** posts a conference's messages once a board carries
+  it.
+- <kbd>D</kbd> **Delete** drops them.
+
+The newest 2,000 messages per network are kept, for 30 days.
+
+### Serve other systems
+
+Your BBS can be the hub for other systems, NetBBS or Synchronet, for a
+network you run or for one you pass on.
+
+1. In the network's settings, turn **Serve nodes** on. For a network of your
+   own, leave **Hub QWK ID** empty; your QWK ID there is the hub's.
+2. Highlight the network, press <kbd>N</kbd> **Nodes**, then
+   <kbd>C</kbd> **Create** for each system.
+3. Set **QWK ID** to the system's QWK ID and **Password**, typed unseen.
+   **Conferences** starts with all of the network's; untick what it doesn't
+   carry.
+4. Press <kbd>S</kbd> **Save** and give the system's SysOp the details:
+
+| They need | Value |
+| --- | --- |
+| Hub ID | your QWK ID on this network |
+| User name | their QWK ID |
+| Password | the one you set |
+| A Synchronet call-out command | `?qnet-http -s %s <your host> <password>` |
+| A NetBBS network | Transport HTTPS, Host your host |
+
+Nodes call your web listener at `/qwk.ssjs`, so the web listener must be
+reachable from the internet.
+
+> [!IMPORTANT]
+> Put the web listener behind TLS, as for callers' browser logins. Nodes
+> send their password with every call, readable over plain HTTP.
+
+- Each node gets what was posted after its account was made: your callers'
+  posts, the other nodes' and, on a network you pass on, the hub's. It never
+  gets its own posts back.
+- **Packet size** (2,000 messages) and **Reply packet limit** (4,096 KiB)
+  bound each call. A packet is served again until the node confirms it.
+- The node list shows each account's last fetch, upload and outcome.
+- An address that fails 10 logins in 15 minutes is refused until the window
+  passes. A node account that is off is refused too.
+
+Your BBS serves nodes over HTTP only, never FTP: a node whose software can't
+call a hub over HTTP can't use your BBS as its hub.
+
+### What QWKnet does not carry
+
+- routed QWKnet netmail, and mail between your BBS and its nodes;
+- Synchronet's control messages, such as `ADD` and `DROP`: change a node's
+  conferences in its account;
+- polls and votes;
+- file requests and attachments;
+- messages passed from one network to another.
 
 ## Daily operation
 
