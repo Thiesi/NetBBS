@@ -1987,7 +1987,7 @@ async def _qwk_settings_screen(session: Session, lane: DatabaseLane, actor: User
             label="QWK packet size",
             render=lambda d: f"up to {d['qwk_messages']} messages",
             prompt=_int_field("qwk_messages", "Messages"),
-            brief="Most messages one offline packet holds",
+            brief="Most messages in one packet",
             help=(
                 "The most messages one QWK packet holds "
                 f"({MIN_QWK_PACKET_MESSAGES}-{MAX_QWK_PACKET_MESSAGES}). The rest wait for the caller's next "

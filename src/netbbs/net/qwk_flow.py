@@ -42,6 +42,7 @@ from netbbs.net.notices import announce, take_notices
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.session import Session
+from netbbs.net.session_activity import records_activity
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.qwk.offline import (
     REP_LIMITS,
@@ -255,6 +256,9 @@ def _outcome(built: BuiltPacket) -> str:
     return f"{built.filename}: {', '.join(parts) or 'no messages'}."
 
 
+# Marked as a transfer (issue #785): the SysOp's break-in and other overlays
+# wait while a Zmodem stream may be on the line.
+@records_activity("Downloading")
 async def _download(
     session: Session, db: Database, user: User, transfers: TransferGrants | None, *, web: bool,
 ) -> None:
@@ -373,6 +377,7 @@ def _tell_terminal(session: Session):
     return tell
 
 
+@records_activity("Uploading")
 async def _upload(
     session: Session, db: Database, user: User, transfers: TransferGrants | None, *, node_identity, web: bool,
 ) -> None:
