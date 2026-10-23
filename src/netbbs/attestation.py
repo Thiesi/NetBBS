@@ -484,6 +484,26 @@ def _store_attestation(
     verification replaces the old one rather than accumulating a
     history nothing here needs yet. See this module's docstring for why
     `verifier_fingerprint`/`signature` are never populated yet."""
+    _upsert_attestation_without_commit(
+        db, subject, attribute=attribute, attested_value=attested_value, verifier=verifier,
+    )
+    db.connection.commit()
+    record_action(
+        db, actor=verifier, action=f"attest_{attribute}", target_user_id=subject.id,
+        detail=_attest_detail(subject, attribute, verifier),
+    )
+    return get_attestation(db, subject, attribute)
+
+
+def _attest_detail(subject: User, attribute: str, verifier: User) -> str:
+    return f"attested {attribute} for {subject.username!r}" + (" (self)" if verifier.id == subject.id else "")
+
+
+def _upsert_attestation_without_commit(
+    db: Database, subject: User, *, attribute: str, attested_value: str, verifier: User
+) -> None:
+    """The one write of a verification: it replaces the old one and resets
+    Link-sharing consent, which a new value never inherits."""
     created_at = utc_now_iso()
     db.connection.execute(
         """
@@ -500,12 +520,73 @@ def _store_attestation(
         """,
         (subject.id, attribute, attested_value, verifier.id, created_at),
     )
-    db.connection.commit()
-    record_action(
-        db, actor=verifier, action=f"attest_{attribute}", target_user_id=subject.id,
-        detail=f"attested {attribute} for {subject.username!r}" + (" (self)" if verifier.id == subject.id else ""),
-    )
-    return get_attestation(db, subject, attribute)
+
+
+class AttestationChanged(AttestationError):
+    """`attest_identity` found a verification other than the one the
+    verifier was shown: someone verified or revoked it in the meantime."""
+
+
+def attest_identity(
+    db: Database,
+    subject: User,
+    *,
+    verifier: User,
+    birthdate: date | None = None,
+    real_name: str | None = None,
+    expected: dict[str, UserAttestation | None],
+) -> dict[str, UserAttestation]:
+    """
+    Record a verified birthdate, a verified real name, or both at once: the
+    Verify screen's `[S]ave`. Both land with their history entries, or
+    nothing does.
+
+    `expected` is what the verifier was shown for each attribute being
+    recorded (`None` for "not verified"). If what is stored now differs --
+    another verifier recorded or revoked it, or the subject switched its Link
+    sharing -- nothing is written and `AttestationChanged` says which, so a
+    confirmation that described one record never replaces another.
+
+    Same rules as `attest_age`/`attest_name`: who may verify whom, no future
+    birthdate, no blank name. Returns the stored attestations by attribute.
+    """
+    _require_may_attest(verifier, subject)
+    values: dict[str, str] = {}
+    if birthdate is not None:
+        if birthdate > _today():
+            raise AttestationError("attested birthdate cannot be in the future")
+        values["age"] = birthdate.isoformat()
+    if real_name is not None:
+        real_name = real_name.strip()
+        if not real_name:
+            raise AttestationError("attested real name cannot be blank")
+        values["name"] = real_name
+    if not values:
+        raise AttestationError("nothing to verify")
+    from netbbs.moderation.log import record_action_without_commit
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        for attribute in values:
+            if get_attestation(db, subject, attribute) != expected.get(attribute):
+                label = "real name" if attribute == "name" else "age"
+                raise AttestationChanged(
+                    f"the verified {label} of {subject.username!r} changed since this screen was drawn"
+                )
+        for attribute, value in values.items():
+            _upsert_attestation_without_commit(
+                db, subject, attribute=attribute, attested_value=value, verifier=verifier,
+            )
+            record_action_without_commit(
+                db, actor=verifier, action=f"attest_{attribute}", target_user_id=subject.id,
+                detail=_attest_detail(subject, attribute, verifier),
+            )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return {attribute: get_attestation(db, subject, attribute) for attribute in values}
 
 
 def revoke_attestation(db: Database, subject: User, attribute: str, *, actor: User) -> bool:

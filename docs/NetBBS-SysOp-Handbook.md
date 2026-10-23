@@ -1196,6 +1196,33 @@ a separate trust you give on its own. Applying the preset reminds you of it.
 
 Callers enter the birthdate you verify in **Your profile ▸ Name & details**.
 
+#### Record a verification
+
+1. Press <kbd>V</kbd> **Verify** on the main menu and pick the account.
+   The screen shows what the caller says about themselves (birthdate, with
+   the age it gives, and display name) and who verified what, and when.
+2. Type `01` for **Verified birthdate** or `02` for **Verified real name**,
+   or choose one with the arrow keys and <kbd>Enter</kbd>. The value is
+   edited where it stands, opened on what is on record:
+   <kbd>Enter</kbd> takes it, <kbd>Esc</kbd> leaves it as it was. The
+   birthdate is `YYYY-MM-DD`, shown with the age it gives, and a date in the
+   future is refused.
+3. Press <kbd>S</kbd> **Save**. NetBBS says what it records, what it
+   replaces and, if the caller shared the old value over Link, that their
+   sharing is switched off until they share the new one. Answer
+   <kbd>Y</kbd> to record it. Both values are recorded together, each with
+   its own **History** entry.
+
+> [!NOTE]
+> Nothing is recorded before you answer <kbd>Y</kbd>. If you answer
+> <kbd>N</kbd>, your changes stay on the screen. <kbd>B</kbd> **Back** asks
+> before it discards them. If someone else verified or revoked the same value
+> while you were typing, **Save** refuses, and the screen shows what is
+> stored now.
+
+Emptying a verified value does not withdraw it. Use <kbd>R</kbd> **Revoke**
+(below) for that.
+
 #### Require a verified name
 
 A resource's name requirement cycles through:
@@ -1246,7 +1273,7 @@ records it.
 - Anything that asks for a verified age or name refuses the caller again (a
   SysOp excepted).
 - Anyone allowed to verify can also revoke, from <kbd>R</kbd> **Revoke** on
-  the main menu's **Verify** screen.
+  the main menu's **Verify** screen, offered while nothing there is unsaved.
 - A verification the caller shared over Link is withdrawn there at the next
   sync.
 

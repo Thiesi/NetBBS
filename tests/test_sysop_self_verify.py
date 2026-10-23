@@ -65,9 +65,13 @@ def test_staff_who_may_verify_do_not_find_their_own_account(db, sysop, helper, m
 
 
 def test_a_sysop_verifies_their_own_name_on_the_verify_screen(db, sysop):
-    session = FakeSession(["n", "Jane Carrier", "x", "b"])
+    session = FakeSession(["0", "2", "Jane Carrier", "s", "y", "b"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, sysop))
-    assert "Real name attested." in _visible(session)
+    text = " ".join(_visible(session).split())
+    assert "Verifying yourself" in text
+    assert "Record for yourself: real name Jane Carrier." in text
+    assert "A verification you make of yourself is not shared over Link." in text
+    assert "Recorded the verified real name (self)." in text
     assert get_attestation(db, sysop, "name").attested_value == "Jane Carrier"
 
 

@@ -93,27 +93,28 @@ def test_a_saved_birthdate_is_confirmed_on_the_redrawn_screen(db, lane, carol):
 
 
 def test_attesting_an_age_is_confirmed_on_the_redrawn_status_without_a_pause(db, sysop, carol):
-    session = FakeSession(["a", "1980-01-01", "b"])
+    session = FakeSession(["0", "1", "1980-01-01", "s", "y", "b"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, carol))
     shown = _after_last_clear(session)
-    assert "Age attested." in shown
-    assert "Attested birthdate: 1980-01-01" in shown
+    assert "Recorded the verified age." in shown
+    assert "Verified birthdate: 1980-01-01 (age" in shown
     assert "[Enter]" not in _SGR.sub("", "".join(session.written))
 
 
 def test_revoking_is_confirmed_on_the_redrawn_status_without_a_pause(db, sysop, carol):
     attest_age(db, carol, date(1980, 1, 1), verifier=sysop)
     session = FakeSession(["r", "y", "b"])
-    asyncio.run(profile_flow._verify_user(session, db, sysop, carol))
+    asyncio.run(profile_flow._verify_user(session, db, sysop, carol))  # [R]evoke, then confirm
     shown = _after_last_clear(session)
     assert "Verified age revoked." in shown
     assert "[Enter]" not in _SGR.sub("", "".join(session.written))
 
 
-def test_a_cancelled_attestation_says_so_on_the_redrawn_status(db, sysop, carol):
-    session = FakeSession(["n", "", "b"])
+def test_a_declined_attestation_says_so_on_the_redrawn_status(db, sysop, carol):
+    session = FakeSession(["0", "2", "Carol Example", "s", "n", "b", "y"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, carol))
-    assert "Cancelled." in _after_last_clear(session)
+    text = _SGR.sub("", "".join(session.written))
+    assert "Cancelled. Nothing recorded; your changes are still here." in text
 
 
 # -- the shared classification ----------------------------------------------------

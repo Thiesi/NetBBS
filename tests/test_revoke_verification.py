@@ -167,7 +167,7 @@ def test_with_both_on_record_the_sysop_picks_one(db, lane, sysop, carol):
 
 def test_the_verify_screen_revokes_too(db, sysop, carol):
     attest_name(db, carol, "Carol Example", verifier=sysop)
-    session = ProfileSession(["r", "y", "x", "b"])
+    session = ProfileSession(["r", "y", "b"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, carol))
     assert get_attestation(db, carol, "name") is None
     assert "Verified real name revoked." in profile_visible(session)
@@ -225,7 +225,7 @@ def test_the_verify_screen_says_so_when_someone_else_revoked_first(db, sysop, ca
         return real_revoke(db_, subject, attribute, actor=actor)
 
     monkeypatch.setattr(profile_flow, "revoke_attestation", revoke_after_another)
-    session = ProfileSession(["r", "y", "x", "b"])
+    session = ProfileSession(["r", "y", "b"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, carol))
     text = profile_visible(session)
     assert "Verified real name revoked." not in text

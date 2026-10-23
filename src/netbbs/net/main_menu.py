@@ -1315,7 +1315,7 @@ async def _main_menu_loop(
                 redraw = True
             elif choice == "v" and offers_verify(user):
                 await end_choice_line(session)
-                await _verify_identity_menu(session, db, user)
+                await _verify_identity_menu(session, db, user, lane=lane)
                 redraw = True
             elif choice == "s" and meets_level(user, SYSOP_LEVEL):
                 await end_choice_line(session)
