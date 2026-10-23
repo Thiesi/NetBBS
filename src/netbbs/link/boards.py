@@ -292,6 +292,12 @@ def link_board(
         "SELECT 1 FROM boards WHERE id = ? AND ftn_network_id IS NOT NULL AND ftn_area_tag IS NOT NULL", (board.id,)
     ).fetchone() is not None:
         raise LinkBoardsError(f"board {board.name!r} carries an FTN echo; a board is Linked or FTN, not both")
+    # Issue #1481: nor a QWKnet conference -- the network would carry what
+    # Link signs as ours, and Link what the network sent.
+    from netbbs.qwknet.networks import is_board_qwknet
+
+    if is_board_qwknet(db, board):
+        raise LinkBoardsError(f"board {board.name!r} carries a QWKnet conference; a board is Linked or QWKnet, not both")
     if default_max_post_age_days is not None and usable_max_age_days(default_max_post_age_days) is None:
         raise LinkBoardsError(
             f"recommended maximum post age must be at least 1 day, got {default_max_post_age_days}"

@@ -217,13 +217,16 @@ def create_post(
 
 def _check_poll(db: Database, board: Board, poll: PollSpec, *, parent_post_id: str | None) -> None:
     """Refuse a poll `create_post` cannot write: on a reply, on a board
-    gated to an FTN network, or one `validate_poll_spec` refuses."""
+    gated to an FTN or QWKnet network, or one `validate_poll_spec` refuses."""
     from netbbs.ftn.networks import is_board_ftn
+    from netbbs.qwknet.networks import is_board_qwknet
 
     if parent_post_id is not None:
         raise PollError("a reply cannot be a poll")
     if is_board_ftn(db, board):
         raise PollError("polls are not offered on a board gated to an FTN network, which cannot carry them")
+    if is_board_qwknet(db, board):
+        raise PollError("polls are not offered on a board gated to a QWKnet network, which does not carry them")
     validate_poll_spec(poll)
 
 

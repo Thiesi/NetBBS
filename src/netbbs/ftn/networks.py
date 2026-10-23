@@ -393,6 +393,12 @@ def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> Are
     tag = normalise_area_tag(tag)
     if is_board_linked(db, board):
         raise FtnNetworkError(f"Board {board.name!r} is Linked; a board carries Link or an FTN echo, not both.")
+    # Issue #1481: a board is local, Linked, FTN or QWKnet, never two.
+    from netbbs.qwknet.networks import is_board_qwknet
+
+    if is_board_qwknet(db, board):
+        raise FtnNetworkError(f"Board {board.name!r} carries a QWKnet conference; a board carries one network, "
+                              "not two.")
     if get_network(db, network_id) is None:
         raise FtnNetworkError("That network no longer exists.")
     holder = db.connection.execute(

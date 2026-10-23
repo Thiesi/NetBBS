@@ -357,6 +357,9 @@ class NodeControls:
     # `None` from the standalone CLI, typed `Any` like `mrc_bridge`.
     ftn_mailer: Any = None
     ftn_listener: Any = None
+    # Issue #1481: the node's `netbbs.qwknet.mailer.QwknetMailer`, for the
+    # console's QWKnet screen; `None` from the standalone CLI.
+    qwknet_mailer: Any = None
     # Issue #475: the node's one `netbbs.net.file_transfer.
     # TransferGrants`, from which the file screens mint HTTP
     # transfer links for callers whose terminal cannot speak

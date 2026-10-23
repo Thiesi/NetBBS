@@ -263,6 +263,13 @@ what you post there goes out to them too.
 > In an echo, an edit or a deletion stays on this BBS, because other BBSes
 > keep the copy they already received.
 
+**QWK network conferences.** A board may instead carry a conference of a QWK
+network, such as DOVE-Net, which many Synchronet BBSes share. It works like
+an echo: what you post goes out to the other BBSes under your username, with
+a line naming this BBS at the end, and their posts are signed with a name and
+the ID of the BBS they were written on, as in `Digital Man (VERT)`. An edit or
+a deletion stays on this BBS.
+
 #### Polls
 
 A poll asks the board a question with answers to vote on.
@@ -285,6 +292,8 @@ moderators can end it early with <kbd>C</kbd> **Close poll**.
   can, with <kbd>E</kbd> **Edit**.
 - Withdrawing the post, or a moderator taking it down, closes the poll and
   hides its results.
+- A board that carries an echo or a QWK network conference offers no polls:
+  the other BBSes could not show them.
 
 > [!IMPORTANT]
 > **Who can see your vote.** No screen shows who voted what -- not to the poll's

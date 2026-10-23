@@ -35,10 +35,13 @@ from netbbs.qwk.format import (
     COPYRIGHT_BLOCK,
     QwkFormatError,
     body_lines,
+    build_headers_dat,
     decode_text,
     encode_text,
     from_cp437,
+    header_flag,
     pack_header,
+    parse_headers_dat,
     qwke_lines,
     split_qwke,
     to_cp437,
@@ -86,6 +89,10 @@ class PacketMessage:
     reference: int | None = None
     private: bool = False
     personal: bool = False
+    #: QWKnet (#1482): the message's HEADERS.DAT fields, and the header's
+    #: network tagline flag. A caller's packet has neither.
+    headers: dict[str, str] | None = None
+    tagline: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,8 +111,12 @@ class PacketInfo:
     hello: str | None = None
 
 
-def _messages_dat(messages: list[PacketMessage]) -> tuple[bytes, list[tuple[int, int, bool]]]:
-    """MESSAGES.DAT, and each message's (conference, header block, personal)."""
+def _messages_dat(
+    messages: list[PacketMessage], headers: list[tuple[int, dict[str, str]]] | None = None,
+) -> tuple[bytes, list[tuple[int, int, bool]]]:
+    """MESSAGES.DAT, and each message's (conference, header block, personal).
+    Each message's HEADERS.DAT fields, keyed by its header's byte offset,
+    are added to `headers` when given."""
     out = [COPYRIGHT_BLOCK.ljust(BLOCK, b" ")]
     block_number = 2  # the copyright block is block 1
     index: list[tuple[int, int, bool]] = []
@@ -126,8 +137,11 @@ def _messages_dat(messages: list[PacketMessage]) -> tuple[bytes, list[tuple[int,
             blocks=blocks,
             conference=message.conference,
             logical=logical,
+            tagline=message.tagline,
         ))
         out.append(text)
+        if headers is not None and message.headers:
+            headers.append(((block_number - 1) * BLOCK, message.headers))
         index.append((message.conference, block_number, message.personal))
         block_number += blocks
     return b"".join(out), index
@@ -190,7 +204,8 @@ def build_packet(info: PacketInfo, conferences: list[Conference], messages: list
     stray = {message.conference for message in messages} - numbers
     if stray:
         raise QwkFormatError(f"messages in conferences the packet does not list: {sorted(stray)}")
-    messages_dat, index = _messages_dat(messages)
+    headers: list[tuple[int, dict[str, str]]] = []
+    messages_dat, index = _messages_dat(messages, headers)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("CONTROL.DAT", _control_dat(info, conferences, len(messages)))
@@ -207,6 +222,8 @@ def build_packet(info: PacketInfo, conferences: list[Conference], messages: list
             archive.writestr("PERSONAL.NDX", _ndx(personal))
         if info.hello:
             archive.writestr("HELLO", _crlf(info.hello.splitlines()))
+        if headers:
+            archive.writestr("HEADERS.DAT", build_headers_dat(headers))
     return buffer.getvalue()
 
 
@@ -217,6 +234,7 @@ MAX_PACKET_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_PACKET_MEMBERS = 4096
 MAX_MESSAGES_DAT_BYTES = 128 * 1024 * 1024
 MAX_SMALL_MEMBER_BYTES = 1024 * 1024
+MAX_HEADERS_DAT_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -230,6 +248,11 @@ class ReadMessage:
     body: str
     reference: int | None
     private: bool
+    #: Its HEADERS.DAT fields (keys lower case), the header's status
+    #: character ('V' is a Synchronet vote) and network tagline flag.
+    headers: dict[str, str] = field(default_factory=dict)
+    status: str = " "
+    tagline: bool = False
 
 
 @dataclass(frozen=True)
@@ -271,11 +294,15 @@ def open_archive(data: bytes, *, max_bytes: int, max_members: int) -> zipfile.Zi
     return archive
 
 
-def parse_messages(data: bytes, *, limit: int | None = None) -> tuple[bytes, list, list[str]]:
+def parse_messages(
+    data: bytes, *, limit: int | None = None, raw: bool = False,
+) -> tuple[bytes, list, list[str]]:
     """Walk MESSAGES.DAT or a reply packet's .MSG: the first block's bytes,
     then `(header, lines)` per message, and problems that stopped the walk.
     A damaged header ends it: nothing after a wrong block count can be
-    found again."""
+    found again. With `raw`, each message is `(header, lines, offset,
+    text)`: its header's byte offset, which HEADERS.DAT names it by, and
+    its text blocks undecoded, for a message marked UTF-8 there."""
     if len(data) < BLOCK:
         raise QwkFormatError("too short to hold a first block")
     first = data[:BLOCK]
@@ -297,8 +324,9 @@ def parse_messages(data: bytes, *, limit: int | None = None) -> tuple[bytes, lis
         if end > len(data):
             problems.append(f"message {position} runs past the end of the file; nothing after it was read")
             break
-        lines = decode_text(data[offset + BLOCK:end])
-        messages.append((header, lines))
+        text = data[offset + BLOCK:end]
+        lines = decode_text(text)
+        messages.append((header, lines, offset, text) if raw else (header, lines))
         offset = end
     return first, messages, problems
 
@@ -335,24 +363,32 @@ def read_packet(data: bytes) -> ReadPacket:
             raise QwkFormatError("CONTROL.DAT names a conference without a number")
         number = int(number_text)
         conferences.append(Conference(number, lines[12 + 2 * i].strip(), flags.get(number, "a")))
-    _first, walked, problems = parse_messages(messages_dat)
+    headers_dat = read_member(archive, "HEADERS.DAT", MAX_HEADERS_DAT_BYTES)
+    all_headers = parse_headers_dat(headers_dat) if headers_dat is not None else {}
+    _first, walked, problems = parse_messages(messages_dat, raw=True)
     if problems:
         raise QwkFormatError("; ".join(problems))
     messages = []
-    for header, text in walked:
+    for header, text, offset, raw_text in walked:
         if not header.active:
             continue
+        fields = all_headers.get(offset, {})
+        if header_flag(fields, "utf8"):
+            text = decode_text(raw_text, utf8=True)
         qwke = split_qwke(text, {"to": header.to, "from": header.sender, "subject": header.subject})
         messages.append(ReadMessage(
             conference=header.conference,
             number=header.number,
             when=header.when,
-            to=qwke.values.get("to", header.to),
-            sender=qwke.values.get("from", header.sender),
-            subject=qwke.values.get("subject", header.subject),
+            to=fields.get("to") or qwke.values.get("to", header.to),
+            sender=fields.get("sender") or qwke.values.get("from", header.sender),
+            subject=fields.get("subject") or qwke.values.get("subject", header.subject),
             body="\n".join(qwke.lines),
             reference=header.reference,
             private=header.private,
+            headers=fields,
+            status=header.status,
+            tagline=header.tagline,
         ))
     return ReadPacket(
         bbs_name=lines[0].strip(),
