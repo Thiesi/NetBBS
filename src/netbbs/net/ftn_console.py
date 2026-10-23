@@ -647,7 +647,7 @@ async def _export_held(session: Session, lane: DatabaseLane, actor: User, networ
 
     try:
         written = await asyncio.to_thread(lambda: export_held(item.data, _resolve()))
-    except (HeldItemError, OSError) as exc:
+    except (HeldItemError, OSError, ValueError) as exc:  # ValueError: a NUL in the typed path
         return f"Not exported: {sanitize_text(str(exc))}"
     await lane.run(lambda db: record_action(
         db, actor=actor, action="export_ftn_held",

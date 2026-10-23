@@ -477,6 +477,10 @@ def held_file_for_saving(db: Database, held_id: int) -> HeldFile:
             description = fit_description(tic.description) if tic.description else None
         except FtnFormatError:
             pass
+    if name_problem(name) is not None:
+        # A bundle member keeps its own name, which nothing has cleaned:
+        # BinkP's safe form of it, so no path is ever built from the raw one.
+        name = safe_file_name(name)
     return HeldFile(name, content, description)
 
 
@@ -511,6 +515,9 @@ def export_held(data: bytes, destination: Path) -> Path:
     uploads (§6.2): written beside it and moved into place, never over a
     file that exists, never through a symbolic link. Plain file I/O: run it
     off the event loop."""
+    problem = name_problem(destination.name)
+    if problem is not None or "\x00" in str(destination):
+        raise HeldItemError(f"{destination.name!r} can't be a file's name: {problem or 'it has a NUL byte'}.")
     if destination.is_symlink():
         raise HeldItemError(f"{destination} is a symbolic link; nothing is written through it.")
     if os.path.lexists(destination):

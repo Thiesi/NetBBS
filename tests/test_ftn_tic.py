@@ -428,6 +428,19 @@ def test_export_writes_beside_and_never_overwrites(tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["file.zip"]
 
 
+def test_a_held_bundle_member_with_a_hostile_name_saves_and_exports_under_a_safe_one(db, lane, network, tmp_path):
+    queue.hold_inbound(db, network_id=network.id, remote_address="21:1/100", file_name="evil\x00name.txt",
+                       content=b"x", reason="waiting for its .TIC", kind="file", waiting=True)
+    (held,) = queue.list_held(db)
+    item = fileecho.held_file_for_saving(db, held.id)
+    assert item.name == "evil_name.txt"
+    assert fileecho.export_held(item.data, tmp_path / item.name).read_bytes() == b"x"
+    with pytest.raises(fileecho.HeldItemError, match="control characters"):
+        fileecho.export_held(b"x", tmp_path / "bad\x00name")
+    with pytest.raises(fileecho.HeldItemError, match="dot"):
+        fileecho.export_held(b"x", tmp_path / ".hidden")
+
+
 def test_export_never_writes_through_a_symlink(tmp_path):
     real = tmp_path / "real.txt"
     real.write_bytes(b"keep")
