@@ -2818,6 +2818,7 @@ In this chapter: [Join a network](#join-a-network) ·
 [AreaFix and FileFix](#areafix-and-filefix) ·
 [Join echoes from the hub's list](#join-echoes-from-the-hubs-list) ·
 [File echoes](#file-echoes) · [Netmail](#netmail) ·
+[Mail bundles](#mail-bundles) ·
 [Held items and status](#held-items-and-status) ·
 [Unknown echoes](#unknown-echoes) · [IPv6 and TLS](#ipv6-and-tls) ·
 [Not supported](#not-supported)
@@ -3133,8 +3134,9 @@ What happens to each file:
   arrives.
 
 > [!NOTE]
-> Other archive kinds (ARC, ARJ, LHA, RAR, 7-Zip) are held for now. Ask the
-> hub for ZIP.
+> A list in an LHA, ARC, 7-Zip, RAR or ARJ archive needs that format's
+> unpacker (see [Mail bundles](#mail-bundles)). Without it, the file is held
+> with the tool to install.
 
 **Node ▸ Echomail & netmail (FTN)** shows, for each network, the list's day
 number, how many nodes it lists, when it was imported and how (full list,
@@ -3147,9 +3149,47 @@ screen, or run on the host:
 python -m netbbs.admin ftn-import-nodelist fsxNet FSXNET.280
 ```
 
-Either way the file may be the list itself or a ZIP holding it. A list whose
+Either way the file may be the list itself or an archive holding it. A list whose
 first line carries a check value that doesn't match is refused. A list
 imported by hand is kept like one from the echo, so later diffs apply to it.
+
+### Mail bundles
+
+A hub sends echomail as *bundles*: archives of packets, named for the day of
+the week (such as `00000063.we0`). NetBBS opens ZIP bundles by itself. For
+other formats it uses an unpacker you install on the host. Installing one is
+all the setup there is:
+
+| Format | Tool | NetBSD (pkgsrc) | Debian, Ubuntu |
+| --- | --- | --- | --- |
+| LHA | `lha`, or 7-Zip | `archivers/lha` | `lhasa` |
+| ARC | `nomarch` | `archivers/nomarch` | `nomarch` |
+| 7-Zip, ARJ | `7z`, `7za` or `7zz` | `archivers/p7zip` or `archivers/7-zip` | `7zip` or `p7zip-full` |
+| RAR | `unrar`, or 7-Zip | `archivers/unrar` | `unrar` |
+
+On NetBSD, for example:
+
+```sh
+pkgin install lha nomarch p7zip unrar
+```
+
+The same tools read `FILE_ID.DIZ` from uploads in these formats. NetBBS runs
+them in a sandbox and reads what they unpack without writing it to disk. It
+refuses a bundle that would unpack to more than 64 MiB or hold more than 256
+files, or that has a member whose name could escape or be read as an option.
+
+A bundle that no installed tool can open is held, and the reason names the
+tool to install. Install it, then press <kbd>R</kbd> **Release** on the held
+bundle under **Held items** to toss it. A held bundle waits 7 days for this,
+like any file waiting for its TIC.
+
+#### Send bundles
+
+**Bundle outgoing mail** in the network's **Mail bundles** section sends each
+call's mail as one ZIP bundle instead of a bare packet. It is off by default,
+because every hub takes bare packets. Turn it on if your hub asks for
+bundles. The mail counts as sent only once the hub confirms it received the
+bundle.
 
 ### Held items and status
 
@@ -3159,9 +3199,11 @@ Some packets and files are held instead of tossed:
 - a packet addressed to another address;
 - a message that couldn't be stored, for example because a mailbox was full;
 - a file echo's file and TIC that failed a check, together;
-- a file waiting for its TIC, or a TIC waiting for its file. A ZIP archive
-  with no packets in it is held whole, and any other file inside a mail
-  bundle is held on its own beside the tossed packets;
+- a file waiting for its TIC, or a TIC waiting for its file. An archive with
+  no packets in it is held whole, and any other file inside a mail bundle is
+  held on its own beside the tossed packets;
+- a mail bundle that no installed tool can open (see
+  [Mail bundles](#mail-bundles));
 - a file sent with a netmail that couldn't be stored, such as when the
   network has no **Attach area** (see [Netmail](#netmail)).
 
@@ -3172,7 +3214,8 @@ Look at them under **Node ▸ Echomail & netmail (FTN)** with
 <kbd>H</kbd> **Held items**:
 
 - <kbd>R</kbd> **Release** tosses a packet as if it came from a known
-  system. It works on packets only; for a file it says why.
+  system. On a held mail bundle it opens the bundle and tosses the packets
+  inside. For any other file it says why it can't.
 - <kbd>S</kbd> **Save** stores a held file in a file area you pick, as your
   own upload. A file held with its TIC keeps the TIC's description. A name
   already in the area is refused.
@@ -3265,7 +3308,7 @@ back to binkp/1.0 by itself; there is nothing to set.
 - file requests, and sending files out to a file echo (files go out with
   netmail only);
 - acting as a hub for other nodes;
-- ARC and ARJ bundles. Ask the hub for ZIP bundles or uncompressed packets.
+- sending bundles in any format but ZIP.
 
 > [!NOTE]
 > Check a network's rules before gating its echoes anywhere else.
