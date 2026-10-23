@@ -26,6 +26,7 @@ from netbbs.files.areas import FileArea
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.chrs import DEFAULT_CHARSET, kludge_for_codec
+from netbbs.ftn.message import origin_room
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -265,6 +266,9 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
 class AreaMapping:
     network_id: int
     tag: str
+    # A board's own Origin text (issue #1474); empty uses the network's.
+    # Always empty for a file area's file echo.
+    origin_text: str = ""
 
 
 def normalise_area_tag(tag: str) -> str:
@@ -278,7 +282,9 @@ def normalise_area_tag(tag: str) -> str:
 
 def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> AreaMapping:
     """Make `board` carry echo area `tag` of the network. Refuses a Linked
-    board, a missing network, and a tag another board already carries."""
+    board, a missing network, and a tag another board already carries.
+    Moving to another network drops the board's Origin (issue #1474): it
+    was bounded by the old network's address."""
     from netbbs.link.boards import is_board_linked  # netbbs.link imports widely; keep it local
 
     tag = normalise_area_tag(tag)
@@ -293,25 +299,58 @@ def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> Are
     if holder is not None:
         raise FtnNetworkError(f"Echo {tag} is already carried by board {holder['name']!r}.")
     db.connection.execute(
-        "UPDATE boards SET ftn_network_id = ?, ftn_area_tag = ? WHERE id = ?", (network_id, tag, board.id)
+        "UPDATE boards SET ftn_origin_text = CASE WHEN ftn_network_id IS ? THEN ftn_origin_text ELSE '' END, "
+        "ftn_network_id = ?, ftn_area_tag = ? WHERE id = ?",
+        (network_id, network_id, tag, board.id),
     )
     db.connection.commit()
     return AreaMapping(network_id, tag)
 
 
 def clear_board_area(db: Database, board: Board) -> None:
-    """Make `board` local again. Its posts stay."""
-    db.connection.execute("UPDATE boards SET ftn_network_id = NULL, ftn_area_tag = NULL WHERE id = ?", (board.id,))
+    """Make `board` local again. Its posts stay; its Origin override goes,
+    as a local board has no Origin line."""
+    db.connection.execute(
+        "UPDATE boards SET ftn_network_id = NULL, ftn_area_tag = NULL, ftn_origin_text = '' WHERE id = ?",
+        (board.id,),
+    )
     db.connection.commit()
 
 
 def board_area(db: Database, board: Board) -> AreaMapping | None:
     row = db.connection.execute(
-        "SELECT ftn_network_id, ftn_area_tag FROM boards WHERE id = ?", (board.id,)
+        "SELECT ftn_network_id, ftn_area_tag, ftn_origin_text FROM boards WHERE id = ?", (board.id,)
     ).fetchone()
     if row is None or row["ftn_network_id"] is None or not row["ftn_area_tag"]:
         return None
-    return AreaMapping(row["ftn_network_id"], row["ftn_area_tag"])
+    return AreaMapping(row["ftn_network_id"], row["ftn_area_tag"], row["ftn_origin_text"])
+
+
+def set_board_origin(db: Database, board: Board, text: str) -> str:
+    """Give `board`'s echomail its own Origin text (issue #1474, §16 "Issue
+    #1154", Decision 10), or with an empty `text` go back to the network's.
+    Runs of whitespace become one space. The text is bounded by the
+    network's address: the whole ` * Origin: text (address)` line stays
+    within FTS-0004's 79 characters, so it is never cut when sent. Refuses
+    a board that carries no echo. Returns the text stored."""
+    area = board_area(db, board)
+    if area is None:
+        raise FtnNetworkError(f"Board {board.name!r} carries no echo, so it has no Origin line.")
+    network = get_network(db, area.network_id)
+    if network is None:
+        raise FtnNetworkError("That network no longer exists.")
+    text = " ".join(text.split())
+    if not text.isprintable():
+        raise FtnNetworkError("The Origin is printable characters only.")
+    room = origin_room(network.our_address)
+    if len(text) > room:
+        raise FtnNetworkError(
+            f"The Origin is at most {room} characters on {network.name}: the whole line, with this node's "
+            f"address {network.our_address}, stays within 79."
+        )
+    db.connection.execute("UPDATE boards SET ftn_origin_text = ? WHERE id = ?", (text, board.id))
+    db.connection.commit()
+    return text
 
 
 def is_board_ftn(db: Database, board: Board) -> bool:
