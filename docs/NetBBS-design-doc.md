@@ -101,6 +101,7 @@ The decisions log (§16) keeps one file per decision under [`docs/design/decisio
   - [6.7 Self-update](design/06-local-domains.md#67-self-update)
   - [6.8 FidoNet-technology networks (issue #166)](design/06-local-domains.md#68-fidonet-technology-networks-issue-166)
   - [6.9 The oneliner wall (issue #1391)](design/06-local-domains.md#69-the-oneliner-wall-issue-1391)
+  - [6.10 QWK offline mail (issue #1389)](design/06-local-domains.md#610-qwk-offline-mail-issue-1389)
 - [7. NetBBS Link: identity, events, and compatibility](design/07-link-identity-and-events.md)
   - [7.1 Phase-3 safety boundary](design/07-link-identity-and-events.md#71-phase-3-safety-boundary)
   - [7.2 Canonical event envelope](design/07-link-identity-and-events.md#72-canonical-event-envelope)

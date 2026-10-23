@@ -383,6 +383,28 @@ def unread_post_ids(db: Database, user: User, board: Board, posts: list[Post]) -
     return set(above) - _opened_ids(db, user, board.id)
 
 
+def unread_root_posts(db: Database, user: User, board: Board) -> list[tuple[int, str]] | None:
+    """`user`'s unread roots on `board` as `(row id, post_id)`, oldest
+    arrival first -- what `unread_post_count` counts, listed -- or `None`
+    for a board never visited, on which nothing is new yet. For a QWK
+    packet (issue #1389), which carries the posts themselves."""
+    cursor = _get_cursor(db, user, _BOARD, board.id)
+    if cursor is None:
+        return None
+    sweep_expired_posts(db, board)
+    return [
+        (row_id, post_id)
+        for row_id, _created_at, post_id in iter_visible_roots(
+            db, board.id, after_id=cursor.arrival_id or 0,
+            extra_sql=(
+                "AND root.id NOT IN (SELECT post_row_id FROM user_board_opened_posts "
+                "WHERE user_id = ? AND board_id = ?)"
+            ),
+            extra_params=(user.id, board.id),
+        )
+    ]
+
+
 def board_read_cursor(db: Database, user: User, board: Board) -> tuple[str, str] | None:
     """Where a jump to `user`'s first unread post on `board` should anchor,
     as a `(created_at, post_id)` for `list_posts_page`'s `after=`, or
