@@ -15,8 +15,9 @@ Configuration and operation are kept apart, as MRC's are:
   AreaFix and FileFix requests, echo-list import, nodelist import, held
   items (packets, files and TICs, with [R]elease, [S]ave, [E]xport and
   [D]elete) and unknown echoes (tags no board or file area carries, with
-  [C]reate, [M]ap and [D]elete). The robot screens live in
-  `netbbs.net.ftn_robots_console`.
+  [C]reate, [M]ap and [D]elete), and [R]equest files from another node
+  (issue #1475). The robot screens live in `netbbs.net.ftn_robots_console`,
+  the file-request pieces in `netbbs.net.ftn_freq_console`.
 - **A board's echo** (`board_echo_action`): which echo area a board carries,
   from the board's own screen, and its own Origin line
   (`board_origin_action`, issue #1474); **a file area's file echo**
@@ -109,6 +110,14 @@ from netbbs.net.admin_ui import (
     show_detail,
 )
 from netbbs.net.char_input import InputCancelled
+from netbbs.net.ftn_freq_console import (  # issue #1475
+    freq_draft,
+    freq_fields,
+    freq_settings_from_draft,
+    freq_status_rows,
+    request_files,
+    save_freq_settings_without_commit,
+)
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.ftn_robots_console import (
     change_robot_password,
@@ -584,6 +593,10 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
     fields += _transport_fields()  # issues #1467, #1468: the Transport section, after File echoes
     fields += _netmail_fields()  # issues #1470 and #1472: the Netmail section, after File echoes
     fields += _bundle_fields()  # issue #1477: the Mail bundles section, after Netmail
+    # --- file requests (issue #1475): the File requests section, after Netmail ---
+    draft.update(await lane.run(freq_draft, existing))
+    fields += freq_fields()
+    # --- end file requests ---
 
     async def save(draft: dict) -> FtnNetwork:
         candidate = _network_from_draft(draft, existing)
@@ -594,6 +607,14 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
         if not 0 < port < 65536:
             raise FtnNetworkError("The answer port must be between 1 and 65535.")
         candidate, node_wide = _transport_values(draft, candidate, port, existing)  # issues #1467, #1468
+        # --- file requests (issue #1475): checked before anything is stored ---
+        from netbbs.ftn.freq import FreqError, validate_settings
+
+        try:
+            validate_settings(freq_settings_from_draft(draft, 0))
+        except FreqError as exc:
+            raise FtnNetworkError(str(exc)) from None
+        # --- end file requests ---
 
         def _persist(db: Database) -> FtnNetwork:
             # --- netmail extras (issue #1470): a Linked area can't take netmail files ---
@@ -604,6 +625,10 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                 raise FtnNetworkError(problem)
             # --- end netmail extras ---
             saved = save_network(db, candidate)
+            # --- file requests (issue #1475) ---
+            save_freq_settings_without_commit(db, draft, saved.id)
+            db.connection.commit()
+            # --- end file requests ---
             set_config(db, PORT_CONFIG_KEY, str(port))
             for key, value in node_wide.items():  # issues #1467, #1468
                 set_config(db, key, value)
@@ -678,6 +703,7 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
             rows.append(Field("Unknown echoes", "; ".join(parts)))
         # --- end bad echoes ---
         rows.extend(_nodelist_rows(db, network))
+        rows.extend(freq_status_rows(db, network))  # issue #1475
         sections.append(Section(f"{network.name} ({network.our_address.four_d})", rows))
     if not sections:
         sections.append(Section(None, [Note("No FTN networks yet: add one under Settings → Echomail & netmail (FTN).")]))
@@ -750,7 +776,7 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
             actions=[("p", menu_key("P", "oll now")), ("a", menu_key("A", "reaFix")), ("f", menu_key("F", "ileFix")),
                      ("i", menu_key("I", "mport echo list")),
                      ("n", menu_key("N", "odelist import")), ("h", menu_key("H", "eld items")),
-                     ("u", menu_key("U", "nknown echoes")), _BACK_ACTION],
+                     ("u", menu_key("U", "nknown echoes")), ("r", menu_key("R", "equest files")), _BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Echomail & netmail help",
             help_about=(
@@ -781,6 +807,8 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
             await _held_packets(session, lane, actor, network)
         elif choice == "u":
             await _bad_echoes(session, lane, actor, network)
+        elif choice == "r":  # issue #1475
+            await request_files(session, lane, actor, network, mailer)
 
 
 async def _pick_network(session: Session, lane: DatabaseLane, actor: User) -> FtnNetwork | None:

@@ -48,10 +48,11 @@ fails part way still keeps what moved before it failed: files received
 whole (each confirmed to the remote, which has let go of it) are tossed,
 and messages in a packet the remote confirmed are marked sent.
 
-**Later batches.** `batch_hook(network, context)` -- None until a later
-stage sets one -- is asked for more files before each batch after the
-first of a binkp/1.1 multi-batch session (`netbbs.ftn.binkp.BatchContext`):
-the place where file requests received in the session get their answers.
+**Later batches.** `batch_hook(network, context)` is asked for more files
+before each batch after the first of a binkp/1.1 multi-batch session
+(`netbbs.ftn.binkp.BatchContext`): the node sets it to
+`netbbs.ftn.freq.FreqAnswerer`, which answers the file requests received in
+the session (issue #1475).
 """
 
 from __future__ import annotations

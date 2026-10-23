@@ -34,7 +34,8 @@ caller address; another caller is told the node is busy (`M_BSY`) and
 disconnected.
 
 `batch_hook(network, context)`, as on the mailer, is asked for more files
-before each batch after the first of a binkp/1.1 multi-batch session.
+before each batch after the first of a binkp/1.1 multi-batch session: file
+requests are answered there (`netbbs.ftn.freq.FreqAnswerer`, issue #1475).
 """
 
 from __future__ import annotations
