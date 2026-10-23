@@ -101,6 +101,7 @@ Each decision lives in its own file under [`decisions/`](decisions/), named afte
 | #1382 | [a help-desk mode for Baud's model conversation](decisions/1382-a-help-desk-mode-for-baud.md) | decided |
 | #1391 | [the oneliner wall](decisions/1391-the-oneliner-wall.md) | decided |
 | #1394 | [splitting the design document by area](decisions/1394-splitting-the-design-document-by-area.md) | decided and built |
+| #1395 | [SysOp configuration presets](decisions/1395-sysop-configuration-presets.md) | decided |
 | #1443 | [real names on real-name echoes](decisions/1443-real-names-on-real-name-echoes.md) | decided and built |
 | #1453 | [verified names are frozen when a record is written](decisions/1453-verified-names-frozen-when-written.md) | decided and built |
 | — | [Staff edit a member's Profile](decisions/staff-edit-a-members-profile.md) | decided |
