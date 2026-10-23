@@ -244,8 +244,10 @@ def map_conference(db: Database, board: Board, network_id: int, number: int) -> 
     ).fetchone()
     if holder is not None and holder["board_key"] != board.board_id:
         other = _board_by_key(db, holder["board_key"])
-        raise QwknetError(f"Conference {number} is already carried by board "
-                          f"{other.name if other is not None else '(removed)'!r}.")
+        if other is not None:
+            raise QwknetError(f"Conference {number} is already carried by board {other.name!r}.")
+        # The board that carried it was deleted: the number is free again.
+        db.connection.execute("DELETE FROM qwknet_conferences WHERE board_key = ?", (holder["board_key"],))
     db.connection.execute("DELETE FROM qwknet_conferences WHERE board_key = ?", (board.board_id,))
     db.connection.execute(
         "INSERT INTO qwknet_conferences (network_id, number, board_key, mapped_at) VALUES (?, ?, ?, ?)",

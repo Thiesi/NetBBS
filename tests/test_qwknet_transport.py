@@ -241,3 +241,23 @@ def test_the_ftp_client_uploads_then_downloads_in_passive_mode_to_the_hubs_own_a
     (message,) = parse_rep(server.stored["vert.rep"], bbs_id="VERT").messages
     assert message.subject == "Up"
     assert "PORT" not in server.commands and "EPRT" not in server.commands
+
+
+def test_a_confirmation_that_is_not_an_ascii_number_is_a_400_not_a_crash(hub_db):
+    hub_net = save_network(hub_db, QwknetNetwork(name="HomeNet", our_id="HOMEHUB", serve_nodes=True, enabled=True))
+    save_node(hub_db, QwknetNode(network_id=hub_net.id, qwk_id="RELINK"), password_hash=hash_password("s3cret"))
+
+    async def run():
+        lane = DatabaseLane(hub_db.path)
+        runner, port = await _serve(QwknetHub(lane))
+        good = {"Authorization": "Basic " + base64.b64encode(b"RELINK:s3cret").decode()}
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.post(f"http://127.0.0.1:{port}/qwk.ssjs?received=%C2%B2", data=b"",
+                                       headers=good) as response:
+                    return response.status
+        finally:
+            await runner.cleanup()
+            lane.close()
+
+    assert asyncio.run(run()) == 400

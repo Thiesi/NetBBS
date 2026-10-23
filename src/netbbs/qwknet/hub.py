@@ -44,6 +44,7 @@ import logging
 import time
 
 from netbbs.auth.users import verify_password_off_loop
+from netbbs.digits import is_ascii_number
 from netbbs.qwk.rep import RepError
 from netbbs.qwknet.exchange import build_node_packet, confirm_node_packet, toss_node_rep
 from netbbs.qwknet.networks import QwknetNetwork, QwknetNode, get_network, node_login, record_node_outcome
@@ -158,7 +159,7 @@ class QwknetHub:
     async def _confirm(self, node: QwknetNode, value: str):
         from aiohttp import web
 
-        if not value.isdigit() or len(value) > 12:
+        if not is_ascii_number(value) or len(value) > 12:
             return web.Response(status=400, text="received must be the packet's size in bytes")
         if await self._lane.run(confirm_node_packet, node.id, int(value)):
             await self._lane.run(record_node_outcome, node.id, "confirmed its packet")

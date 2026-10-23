@@ -28,6 +28,7 @@ from netbbs.auth.users import User, hash_password_off_loop
 from netbbs.boards import Board
 from netbbs.boards.boards import list_boards
 from netbbs.config import get_qwk_bbs_id
+from netbbs.digits import is_ascii_number
 from netbbs.moderation.log import record_action
 from netbbs.net.admin_fields import _int_field, _optional_text_field
 from netbbs.net.admin_ui import _announce, _announce_line, _load_chrome, edit_resource_draft, pick_item
@@ -381,7 +382,7 @@ async def _map_board(session: Session, lane: DatabaseLane, actor: User, network:
                 return
             await lane.run(unmap_board, board)
             outcome = f"{board.name} is a local board again; its posts stay."
-        elif not text.isdigit():
+        elif not is_ascii_number(text):
             _announce(session, "A conference number is digits only (e.g. 2001).", error=True)
             return
         else:
