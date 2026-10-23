@@ -130,6 +130,30 @@ def test_running_the_tool_again_after_the_first_start_offers_the_deferred_name(d
     assert not get_registration_deferred(db)
 
 
+def test_the_deferred_registration_from_the_tool_is_attributed_to_its_sysop(db, monkeypatch):
+    """Issue #1505 (review of #1510): the registration this tool offers
+    runs as the SysOp the session is attributed to, so its audit entry
+    names them rather than "(system)"."""
+    from netbbs.managed_dns.state import (
+        OptIn, set_node_fingerprint, set_opt_in, set_registration_deferred, set_service_url,
+    )
+
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registration_deferred(db, True)
+    set_service_url(db, "http://127.0.0.1:1")
+    set_node_fingerprint(db, "fp-1")
+    seen = []
+
+    async def registration(session, lane, *, actor=None):
+        seen.append(actor)
+        return True
+
+    monkeypatch.setattr("netbbs.net.managed_dns_flow.register_via_prompt", registration)
+    asyncio.run(run_admin_session(FakeSession(["b"]), db, None))
+    assert [actor.id for actor in seen] == [sysop.id]
+
+
 def test_bootstrap_rejects_an_unknown_credential_choice_and_retries(db, lane):
     session = FakeSession(["sysop", "z", "p", "hunter2", "hunter2", "n", "n"])
     user = asyncio.run(_bootstrap_first_sysop(session, lane))
