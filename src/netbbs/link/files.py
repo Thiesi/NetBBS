@@ -134,6 +134,11 @@ def link_file_area(
     """
     if is_area_linked(db, area):
         raise LinkFilesError(f"file area {area.name!r} is already Linked")
+    # Design doc §6.8 (issue #1462): an area is local, Linked or FTN, never
+    # two -- a file echo's files would otherwise get a Link file_descriptor.
+    row = db.connection.execute("SELECT * FROM file_areas WHERE id = ?", (area.id,)).fetchone()
+    if row is not None and "ftn_file_echo" in row.keys() and row["ftn_file_echo"]:
+        raise LinkFilesError(f"file area {area.name!r} carries an FTN file echo; an area is Linked or FTN, not both")
     if default_max_file_age_days is not None and usable_max_age_days(default_max_file_age_days) is None:
         raise LinkFilesError(
             f"recommended maximum file age must be at least 1 day, got {default_max_file_age_days}"

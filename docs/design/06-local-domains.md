@@ -2373,14 +2373,18 @@ A pair that passes goes into the area through the area's own moderation
 as an upload does. Its description comes from the `LDesc` lines, else `Desc`,
 else the archive's `FILE_ID.DIZ` (§6.2), and is normalised as every
 description is. The file is recorded as arrived by TIC, with its network,
-tag and origin address. It has no local uploader, and the listing shows the
-network and the TIC's `Origin` address in place of a username.
+tag, origin address and CRC-32. It has no local uploader, and the listing
+shows the network and the TIC's `Origin` address in place of a username, as
+`nixNet (86:549/1)`.
 
 - **Pairing.** A half whose partner hasn't arrived waits in the held store,
   with the reason "waiting for its .TIC" or "waiting for `<file>`". It is
   paired as soon as the partner comes, in any later session with the same
-  network. A half still unpaired after 7 days is deleted, with a node-log
-  line.
+  network. A TIC alone that failed one of checks 3-6 waits the same way,
+  with that reason, and the pair is checked again from the start when its
+  file comes. A half still unpaired after 7 days is deleted, with a node-log
+  line. A TIC that doesn't parse names no file: it is held, but neither
+  pairs nor expires.
 - **Replaces.** Once the new file is visible (when stored in an unmoderated
   area, or on approval in a moderated one), each `Replaces` value removes the
   files that match it. Only files in the same area that arrived by TIC can
@@ -2402,7 +2406,8 @@ its actions are:
 - **[X] export** asks for a path on the host and writes the file there with
   the rules for SysOp uploads (§6.2): written beside the destination and
   renamed, never over an existing file, no symlink followed, and
-  audit-logged.
+  audit-logged. A folder as the path writes the file into it under its own
+  name. The item stays held until it is deleted.
 - **[D]elete** throws the item away.
 
 The store holds at most 200 items and 256 MiB, enough for a file at the

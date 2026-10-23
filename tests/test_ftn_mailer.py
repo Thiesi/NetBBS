@@ -154,7 +154,8 @@ def test_a_bundles_packets_are_tossed_and_its_other_members_held_each(db, setup)
     held = queue.list_held(db)
     assert [(h.file_name, queue.held_content(db, h.id)) for h in held] == [
         ("readme.txt", b"hello"), ("file.diz", b"diz")]
-    assert all(h.reason == "not a mail packet, found in bundle 00020063.we0" for h in held)
+    assert all(h.reason == "waiting for its .TIC (not a mail packet, found in bundle 00020063.we0)" for h in held)
+    assert all(h.kind == "file" and h.waiting for h in held)
     assert "2 posts" in status.last_summary and "2 held" in status.last_summary
 
 

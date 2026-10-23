@@ -1,6 +1,7 @@
 """
 FTN gateway state that is not configuration (design doc §6.8): MSGID
-serials, the dupe history, the outbound queue and held inbound packets.
+serials, the dupe history, the outbound queue, held inbound items and bad
+echoes.
 
 Every one of these grows with what other systems send or with what
 callers write, so each has a bound and says what happens at it:
@@ -9,13 +10,18 @@ callers write, so each has a bound and says what happens at it:
 - the outbound queue holds at most `MAX_PENDING_PER_NETWORK` unsent
   messages per network and refuses more (`FtnQueueFullError`), and sent
   rows are pruned after `SENT_RETENTION_DAYS`;
-- held packets are refused once `MAX_HELD_PACKETS` or `MAX_HELD_BYTES` is
-  reached, and the session that brought them is told no.
+- held items (packets, files and TICs) are refused once `MAX_HELD_PACKETS`
+  or `MAX_HELD_BYTES` is reached, and the session that brought them is
+  told no; an unpaired file-echo half expires after `UNPAIRED_DAYS`;
+- bad echoes (echomail for a tag no board carries, issue #1466) keep at
+  most `MAX_BAD_ECHO_PER_TAG` per tag and `MAX_BAD_ECHO_MESSAGES` or
+  `MAX_BAD_ECHO_BYTES` overall, dropping the oldest and counting each drop.
 """
 
 from __future__ import annotations
 
 import datetime
+import logging
 import time
 from dataclasses import dataclass
 
@@ -23,12 +29,19 @@ from netbbs.config import get_config, set_config_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_iso, utc_now_iso
 
+_logger = logging.getLogger(__name__)
+
 MSGID_SERIAL_KEY = "ftn_msgid_serial"
 SEEN_RETENTION_DAYS = 180
 MAX_PENDING_PER_NETWORK = 10_000
 SENT_RETENTION_DAYS = 14
-MAX_HELD_PACKETS = 200
-MAX_HELD_BYTES = 64 * 1024 * 1024
+MAX_HELD_PACKETS = 200  # items: packets, files and TICs
+# Enough for a file at BinkP's 64 MiB limit with room to spare (issue #1462).
+MAX_HELD_BYTES = 256 * 1024 * 1024
+UNPAIRED_DAYS = 7
+MAX_BAD_ECHO_PER_TAG = 1_000
+MAX_BAD_ECHO_MESSAGES = 10_000
+MAX_BAD_ECHO_BYTES = 64 * 1024 * 1024
 
 
 class FtnQueueFullError(Exception):
@@ -177,11 +190,19 @@ def prune_sent_outbound(db: Database, *, now: datetime.datetime | None = None) -
     return cursor.rowcount
 
 
-# --- held inbound packets ---------------------------------------------------
+# --- held inbound items -----------------------------------------------------
+
+HELD_PACKET, HELD_FILE, HELD_TIC = "packet", "file", "tic"
 
 
 @dataclass(frozen=True)
 class HeldPacket:
+    """One held item: a packet, a file or a TIC (issue #1462). A held file
+    may carry its TIC with it (`has_tic`): the pair failed a check
+    together. `waiting` marks an unpaired half that pairs with its partner
+    when it comes and expires after `UNPAIRED_DAYS`; `bad_echo` the file
+    echo tag no file area carries."""
+
     id: int
     network_id: int | None
     remote_address: str
@@ -189,34 +210,70 @@ class HeldPacket:
     size: int
     reason: str
     received_at: str
+    kind: str = HELD_PACKET
+    has_tic: bool = False
+    waiting: bool = False
+    bad_echo: str | None = None
+
+
+HeldItem = HeldPacket
+
+
+def held_kind_of(file_name: str, content: bytes) -> str:
+    """What a held item is when the caller doesn't say: a `.tic` by name, a
+    packet by its header's packet type, any other thing a file."""
+    if file_name.lower().endswith(".tic"):
+        return HELD_TIC
+    if len(content) >= 20 and content[18:20] == b"\x02\x00":
+        return HELD_PACKET
+    return HELD_FILE
 
 
 def hold_inbound(
     db: Database, *, network_id: int | None, remote_address: str, file_name: str, content: bytes, reason: str,
+    kind: str | None = None, tic: bytes | None = None, waiting: bool = False, wants: tuple[str, ...] = (),
+    bad_echo: str | None = None, received_at: str | None = None,
 ) -> bool:
-    """Keep a packet for the SysOp to look at; False, keeping nothing, when
-    the held store is at `MAX_HELD_PACKETS` or would pass `MAX_HELD_BYTES`."""
+    """Keep an item for the SysOp to look at; False, keeping nothing, when
+    the held store is at `MAX_HELD_PACKETS` items or would pass
+    `MAX_HELD_BYTES` (a held file's TIC counts too). `received_at` keeps an
+    earlier arrival time when an item is held again, so an unpaired half's
+    seven days run from when it came."""
     count, size = db.connection.execute(
-        "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)), 0) FROM ftn_held_inbound"
+        "SELECT COUNT(*), COALESCE(SUM(LENGTH(content) + COALESCE(LENGTH(tic), 0)), 0) FROM ftn_held_inbound"
     ).fetchone()
-    if count >= MAX_HELD_PACKETS or size + len(content) > MAX_HELD_BYTES:
+    if count >= MAX_HELD_PACKETS or size + len(content) + len(tic or b"") > MAX_HELD_BYTES:
         return False
     db.connection.execute(
-        "INSERT INTO ftn_held_inbound (network_id, remote_address, file_name, content, reason, received_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (network_id, remote_address, file_name, content, reason, utc_now_iso()),
+        "INSERT INTO ftn_held_inbound (network_id, remote_address, file_name, content, reason, received_at, "
+        "kind, tic, waiting, wants, bad_echo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (network_id, remote_address, file_name, content, reason, received_at or utc_now_iso(),
+         kind or held_kind_of(file_name, content), tic, int(waiting), "\n".join(wants) or None, bad_echo),
     )
     db.connection.commit()
     return True
 
 
+_HELD_COLUMNS = (
+    "id, network_id, remote_address, file_name, LENGTH(content) AS size, reason, received_at, kind, "
+    "tic IS NOT NULL AS has_tic, waiting, bad_echo"
+)
+
+
+def _held_from_row(row) -> HeldPacket:
+    return HeldPacket(row["id"], row["network_id"], row["remote_address"], row["file_name"], row["size"],
+                      row["reason"], row["received_at"], row["kind"], bool(row["has_tic"]), bool(row["waiting"]),
+                      row["bad_echo"])
+
+
 def list_held(db: Database) -> list[HeldPacket]:
-    rows = db.connection.execute(
-        "SELECT id, network_id, remote_address, file_name, LENGTH(content) AS size, reason, received_at "
-        "FROM ftn_held_inbound ORDER BY id"
-    ).fetchall()
-    return [HeldPacket(row["id"], row["network_id"], row["remote_address"], row["file_name"], row["size"],
-                       row["reason"], row["received_at"]) for row in rows]
+    rows = db.connection.execute(f"SELECT {_HELD_COLUMNS} FROM ftn_held_inbound ORDER BY id").fetchall()
+    return [_held_from_row(row) for row in rows]
+
+
+def get_held(db: Database, held_id: int) -> HeldPacket | None:
+    row = db.connection.execute(f"SELECT {_HELD_COLUMNS} FROM ftn_held_inbound WHERE id = ?", (held_id,)).fetchone()
+    return _held_from_row(row) if row is not None else None
 
 
 def held_content(db: Database, held_id: int) -> bytes | None:
@@ -224,9 +281,182 @@ def held_content(db: Database, held_id: int) -> bytes | None:
     return bytes(row["content"]) if row is not None else None
 
 
+def held_tic(db: Database, held_id: int) -> bytes | None:
+    """The TIC held together with a file, or None."""
+    row = db.connection.execute("SELECT tic FROM ftn_held_inbound WHERE id = ?", (held_id,)).fetchone()
+    return bytes(row["tic"]) if row is not None and row["tic"] is not None else None
+
+
 def delete_held(db: Database, held_id: int) -> None:
     db.connection.execute("DELETE FROM ftn_held_inbound WHERE id = ?", (held_id,))
     db.connection.commit()
+
+
+@dataclass(frozen=True)
+class WaitingHalf:
+    id: int
+    file_name: str
+    wants: tuple[str, ...]
+    received_at: str
+
+
+def waiting_halves(db: Database, network_id: int, kind: str) -> list[WaitingHalf]:
+    """The network's unpaired halves of one kind (`HELD_FILE` or `HELD_TIC`),
+    oldest first, without their content."""
+    rows = db.connection.execute(
+        "SELECT id, file_name, wants, received_at FROM ftn_held_inbound "
+        "WHERE network_id = ? AND waiting = 1 AND kind = ? ORDER BY id",
+        (network_id, kind),
+    ).fetchall()
+    return [WaitingHalf(row["id"], row["file_name"], tuple(row["wants"].split("\n")) if row["wants"] else (),
+                        row["received_at"]) for row in rows]
+
+
+def held_bad_file_echo_ids(db: Database, network_id: int, tag: str) -> list[int]:
+    """The held items waiting because no file area carries `tag`."""
+    rows = db.connection.execute(
+        "SELECT id FROM ftn_held_inbound WHERE network_id = ? AND bad_echo = ? COLLATE NOCASE ORDER BY id",
+        (network_id, tag),
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
+@dataclass(frozen=True)
+class BadFileEcho:
+    """One file echo tag no file area carries, on one network: its held
+    items (pairs, or TICs still waiting for their file)."""
+
+    network_id: int
+    tag: str
+    count: int
+    first_seen: str
+    last_seen: str
+
+
+def list_bad_file_echoes(db: Database, network_id: int) -> list[BadFileEcho]:
+    rows = db.connection.execute(
+        "SELECT bad_echo AS tag, COUNT(*) AS count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen "
+        "FROM ftn_held_inbound WHERE network_id = ? AND bad_echo IS NOT NULL GROUP BY bad_echo COLLATE NOCASE "
+        "ORDER BY bad_echo",
+        (network_id,),
+    ).fetchall()
+    return [BadFileEcho(network_id, row["tag"], row["count"], row["first_seen"], row["last_seen"]) for row in rows]
+
+
+def expire_unpaired(db: Database, *, now: datetime.datetime | None = None) -> list[HeldPacket]:
+    """Delete the unpaired halves older than `UNPAIRED_DAYS` and return
+    them; each one gets a node-log line."""
+    cutoff = utc_iso((now or _utcnow()) - datetime.timedelta(days=UNPAIRED_DAYS))
+    rows = db.connection.execute(
+        f"SELECT {_HELD_COLUMNS} FROM ftn_held_inbound WHERE waiting = 1 AND received_at < ? ORDER BY id", (cutoff,)
+    ).fetchall()
+    expired = [_held_from_row(row) for row in rows]
+    for item in expired:
+        db.connection.execute("DELETE FROM ftn_held_inbound WHERE id = ?", (item.id,))
+        _logger.warning("FTN: held %s %s from %s expired unpaired after %d days (%s)", item.kind, item.file_name,
+                        item.remote_address, UNPAIRED_DAYS, item.reason)
+    db.connection.commit()
+    return expired
+
+
+# --- bad echoes (issue #1466) ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BadEcho:
+    """One echomail tag no board carries, on one network."""
+
+    network_id: int
+    tag: str
+    count: int
+    first_seen: str
+    last_seen: str
+
+
+def hold_bad_echo(db: Database, network_id: int, tag: str, remote_address: str, packet: bytes) -> int:
+    """Keep one message (a one-message packet) for a tag no board carries,
+    then keep the bounds: at most `MAX_BAD_ECHO_PER_TAG` per tag and
+    `MAX_BAD_ECHO_MESSAGES` or `MAX_BAD_ECHO_BYTES` overall, oldest dropped
+    first. Returns how many were dropped; each is counted on its network."""
+    tag = tag.upper()
+    db.connection.execute(
+        "INSERT INTO ftn_bad_echoes (network_id, tag, remote_address, packet, received_at) VALUES (?, ?, ?, ?, ?)",
+        (network_id, tag, remote_address, packet, utc_now_iso()),
+    )
+    dropped = 0
+    over_tag = db.connection.execute(
+        "SELECT COUNT(*) FROM ftn_bad_echoes WHERE network_id = ? AND tag = ?", (network_id, tag)
+    ).fetchone()[0] - MAX_BAD_ECHO_PER_TAG
+    if over_tag > 0:
+        rows = db.connection.execute(
+            "SELECT id, network_id FROM ftn_bad_echoes WHERE network_id = ? AND tag = ? ORDER BY id LIMIT ?",
+            (network_id, tag, over_tag),
+        ).fetchall()
+        dropped += _delete_bad_echo_rows(db, [(row["id"], row["network_id"]) for row in rows])
+    while True:
+        count, size = db.connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(packet)), 0) FROM ftn_bad_echoes"
+        ).fetchone()
+        if count <= MAX_BAD_ECHO_MESSAGES and size <= MAX_BAD_ECHO_BYTES:
+            break
+        oldest = db.connection.execute("SELECT id, network_id FROM ftn_bad_echoes ORDER BY id LIMIT 1").fetchone()
+        dropped += _delete_bad_echo_rows(db, [(oldest["id"], oldest["network_id"])])
+    db.connection.commit()
+    if dropped:
+        _logger.warning("FTN: the bad-echo store is full; dropped the %d oldest message(s)", dropped)
+    return dropped
+
+
+def _delete_bad_echo_rows(db: Database, rows: list[tuple[int, int]]) -> int:
+    for row_id, network_id in rows:
+        db.connection.execute("DELETE FROM ftn_bad_echoes WHERE id = ?", (row_id,))
+        db.connection.execute(
+            "UPDATE ftn_networks SET bad_echo_dropped = bad_echo_dropped + 1 WHERE id = ?", (network_id,)
+        )
+    return len(rows)
+
+
+def list_bad_echoes(db: Database, network_id: int) -> list[BadEcho]:
+    rows = db.connection.execute(
+        "SELECT tag, COUNT(*) AS count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen "
+        "FROM ftn_bad_echoes WHERE network_id = ? GROUP BY tag ORDER BY tag",
+        (network_id,),
+    ).fetchall()
+    return [BadEcho(network_id, row["tag"], row["count"], row["first_seen"], row["last_seen"]) for row in rows]
+
+
+def bad_echo_ids(db: Database, network_id: int, tag: str) -> list[int]:
+    """The held message ids for a tag, oldest first."""
+    rows = db.connection.execute(
+        "SELECT id FROM ftn_bad_echoes WHERE network_id = ? AND tag = ? ORDER BY id", (network_id, tag.upper())
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
+def take_bad_echo(db: Database, message_id: int) -> tuple[str, bytes] | None:
+    """Remove one held message and return `(remote address, packet)`."""
+    row = db.connection.execute(
+        "SELECT remote_address, packet FROM ftn_bad_echoes WHERE id = ?", (message_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    db.connection.execute("DELETE FROM ftn_bad_echoes WHERE id = ?", (message_id,))
+    db.connection.commit()
+    return row["remote_address"], bytes(row["packet"])
+
+
+def delete_bad_echo(db: Database, network_id: int, tag: str) -> int:
+    """Drop a tag's held messages; returns how many."""
+    cursor = db.connection.execute(
+        "DELETE FROM ftn_bad_echoes WHERE network_id = ? AND tag = ?", (network_id, tag.upper())
+    )
+    db.connection.commit()
+    return cursor.rowcount
+
+
+def bad_echo_dropped(db: Database, network_id: int) -> int:
+    row = db.connection.execute("SELECT bad_echo_dropped FROM ftn_networks WHERE id = ?", (network_id,)).fetchone()
+    return row["bad_echo_dropped"] if row is not None else 0
 
 
 def _utcnow() -> datetime.datetime:

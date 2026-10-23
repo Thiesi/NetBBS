@@ -53,6 +53,7 @@ from netbbs.ftn.nodelist import direct_route
 from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
 from netbbs.ftn.queue import (
     count_pending_outbound,
+    expire_unpaired,
     mark_outbound_sent,
     pending_outbound,
     prune_seen_msgids,
@@ -126,6 +127,7 @@ class FtnMailer:
             self._last_maintenance = now
             await self._lane.run(prune_seen_msgids)
             await self._lane.run(prune_sent_outbound)
+            await self._lane.run(expire_unpaired)  # file-echo halves whose partner never came (issue #1462)
         for network in await self._lane.run(list_networks):
             if not network.enabled or not network.uplink_host:
                 continue

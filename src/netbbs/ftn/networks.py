@@ -7,7 +7,9 @@ MRC's settings: nothing here needs a restart, and a record is off until
 the SysOp enables it.
 
 A board carries at most one echo area, and an area maps to at most one
-board per network. A board is local, Linked or FTN, never two (§16 "Issue
+board per network. A file area carries at most one file echo the same
+way (issue #1462): `set_file_area_tic` refuses a Linked area, and
+`netbbs.link.files.link_file_area` refuses an area that carries one. A board is local, Linked or FTN, never two (§16 "Issue
 #166", Decision 3): `set_board_area` refuses a Linked board, and
 `netbbs.link.boards.link_board` refuses a board that carries an area.
 """
@@ -20,6 +22,7 @@ from dataclasses import dataclass, replace
 
 from netbbs.auth.users import SYSOP_LEVEL, is_valid_level
 from netbbs.boards import Board
+from netbbs.files.areas import FileArea
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.chrs import DEFAULT_CHARSET, kludge_for_codec
@@ -60,6 +63,9 @@ class FtnNetwork:
     default_charset: str = DEFAULT_CHARSET
     origin_text: str = ""
     netmail_min_level: int = SYSOP_LEVEL
+    # --- file echoes (issue #1462) ---
+    tic_password: str = ""  # a TIC's Pw; empty: every TIC is held
+    # --- end file echoes ---
     id: int | None = None
 
 
@@ -87,6 +93,7 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
         (network.session_password, MAX_SESSION_PASSWORD, "Session password"),
         (network.packet_password, MAX_PACKET_PASSWORD, "Packet password"),
         (network.areafix_password, MAX_SESSION_PASSWORD, "AreaFix password"),
+        (network.tic_password, MAX_SESSION_PASSWORD, "TIC password"),  # issue #1462
     ):
         if len(value) > limit or not _PRINTABLE.fullmatch(value):
             raise FtnNetworkError(f"{label} must be at most {limit} printable characters without spaces.")
@@ -138,6 +145,11 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
             )
             if cursor.rowcount == 0:
                 raise FtnNetworkError("That network no longer exists.")
+        # --- file echoes (issue #1462): the TIC password, on its own ---
+        db.connection.execute(
+            "UPDATE ftn_networks SET tic_password = ? WHERE id = ?", (validated.tic_password, validated.id)
+        )
+        # --- end file echoes ---
     except sqlite3.IntegrityError:
         db.connection.rollback()
         raise FtnNetworkError(f"A network called {validated.name!r} already exists.") from None
@@ -146,10 +158,15 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
 
 
 def delete_network(db: Database, network_id: int) -> None:
-    """Remove a record. Its boards become local again and keep their posts;
+    """Remove a record. Its boards and file areas become local again and
+    keep their posts and files;
     its queue, dupe history and held packets go with it."""
     db.connection.execute(
         "UPDATE boards SET ftn_area_tag = NULL WHERE ftn_network_id = ?", (network_id,)
+    )
+    # Its file areas become local too, and keep their files (issue #1462).
+    db.connection.execute(
+        "UPDATE file_areas SET ftn_network_id = NULL, ftn_file_echo = NULL WHERE ftn_network_id = ?", (network_id,)
     )
     db.connection.execute("DELETE FROM ftn_networks WHERE id = ?", (network_id,))
     db.connection.commit()
@@ -179,6 +196,7 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
         answers_calls=bool(row["answers_calls"]), enabled=bool(row["enabled"]),
         default_charset=row["default_charset"], origin_text=row["origin_text"],
         netmail_min_level=row["netmail_min_level"],
+        tic_password=row["tic_password"] if "tic_password" in row.keys() else "",  # issue #1462
     )
 
 
@@ -258,3 +276,75 @@ def area_mappings(db: Database, network_id: int) -> dict[str, int]:
         (network_id,),
     ).fetchall()
     return {row["ftn_area_tag"]: row["id"] for row in rows}
+
+
+# --- file area <-> file echo (issue #1462) -----------------------------------
+
+
+def _network_id(network: FtnNetwork | int) -> int:
+    return network if isinstance(network, int) else network.id
+
+
+def set_file_area_tic(db: Database, area: FileArea, network: FtnNetwork | int, tag: str) -> AreaMapping:
+    """Make file `area` carry file echo `tag` of the network (a record or
+    its id), the way `set_board_area` maps a board. An area is local,
+    Linked or FTN, never two: a Linked area is refused, and so are a
+    missing network and a tag another area already carries. Normalised as
+    an echo tag is."""
+    from netbbs.link.files import is_area_linked  # netbbs.link imports widely; keep it local
+
+    tag = normalise_area_tag(tag)
+    network_id = _network_id(network)
+    if is_area_linked(db, area):
+        raise FtnNetworkError(f"File area {area.name!r} is Linked; an area carries Link or an FTN file echo, not both.")
+    if get_network(db, network_id) is None:
+        raise FtnNetworkError("That network no longer exists.")
+    holder = db.connection.execute(
+        "SELECT name FROM file_areas WHERE ftn_network_id = ? AND ftn_file_echo = ? COLLATE NOCASE AND id != ?",
+        (network_id, tag, area.id),
+    ).fetchone()
+    if holder is not None:
+        raise FtnNetworkError(f"File echo {tag} is already carried by file area {holder['name']!r}.")
+    db.connection.execute(
+        "UPDATE file_areas SET ftn_network_id = ?, ftn_file_echo = ? WHERE id = ?", (network_id, tag, area.id)
+    )
+    db.connection.commit()
+    return AreaMapping(network_id, tag)
+
+
+def clear_file_area_tic(db: Database, area: FileArea) -> None:
+    """Make file `area` local again. Its files stay, and files that came by
+    TIC keep saying so, so a later `Replaces` in the same area still
+    matches them if the echo is mapped back."""
+    db.connection.execute(
+        "UPDATE file_areas SET ftn_network_id = NULL, ftn_file_echo = NULL WHERE id = ?", (area.id,)
+    )
+    db.connection.commit()
+
+
+def file_area_tic(db: Database, area: FileArea) -> AreaMapping | None:
+    """The file echo `area` carries, or None for a local or Linked area."""
+    row = db.connection.execute(
+        "SELECT ftn_network_id, ftn_file_echo FROM file_areas WHERE id = ?", (area.id,)
+    ).fetchone()
+    if row is None or row["ftn_network_id"] is None or not row["ftn_file_echo"]:
+        return None
+    return AreaMapping(row["ftn_network_id"], row["ftn_file_echo"])
+
+
+def file_area_id_for_echo(db: Database, network_id: int, tag: str) -> int | None:
+    """The file area carrying file echo `tag` on the network, or None."""
+    row = db.connection.execute(
+        "SELECT id FROM file_areas WHERE ftn_network_id = ? AND ftn_file_echo = ? COLLATE NOCASE",
+        (network_id, tag.strip()),
+    ).fetchone()
+    return row["id"] if row is not None else None
+
+
+def file_area_tic_mappings(db: Database, network_id: int) -> dict[str, int]:
+    """Every file echo the network carries, mapped to its file area id."""
+    rows = db.connection.execute(
+        "SELECT ftn_file_echo, id FROM file_areas WHERE ftn_network_id = ? AND ftn_file_echo IS NOT NULL",
+        (network_id,),
+    ).fetchall()
+    return {row["ftn_file_echo"]: row["id"] for row in rows}

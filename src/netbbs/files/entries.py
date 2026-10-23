@@ -557,6 +557,11 @@ def approve_file(db: Database, entry: FileEntry, *, approved_by: User) -> FileEn
         detail=entry.file_id,
     )
     reindex_file(db, entry.area_id, entry.file_id)
+    # A file that arrived by TIC replaces what its `Replaces` names once it
+    # is visible, which in a moderated area is now (design doc §6.8).
+    from netbbs.ftn.fileecho import apply_replaces  # netbbs.ftn imports this module
+
+    apply_replaces(db, entry.id)
     return get_file(db, entry.file_id)
 
 
