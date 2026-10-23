@@ -15,8 +15,9 @@ that arrives by TIC in that echo and passed the TIC checks is handed to
 What the file *is* is decided by content, not by the extension: a ZIP is
 opened in-process and its member `<name>.<ddd>` read, within
 `MAX_NODELIST_BYTES`; the other archive kinds (ARC, ARJ, LHA, RAR, 7-Zip)
-are refused until the archives issue of stage C; anything else is taken as
-the text itself.
+are opened the same way through the sandboxed external tools mail bundles
+use (`netbbs.files.extract`, issue #1477), and are refused with the tool
+to install when none is; anything else is taken as the text itself.
 
 A full list is imported once its CRC-16 matches (`nodelist.import_list`); a
 diff is applied to the kept raw list and the result's CRC-16 checked
@@ -39,7 +40,8 @@ import zipfile
 import zlib
 from pathlib import Path
 
-from netbbs.ftn.bundle import MAX_MEMBERS, archive_kind
+from netbbs.files.extract import KIND_LABELS, ArchiveError, Member, run_blocking, unpack_with_tools
+from netbbs.ftn.bundle import MAX_MEMBERS, TOOL_BUDGET_SECONDS, TOOL_KINDS, archive_kind
 from netbbs.ftn.networks import FtnNetwork
 from netbbs.ftn.nodelist import (
     HOW_FULL,
@@ -84,12 +86,12 @@ def unpack(data: bytes, base_name: str | None) -> tuple[str | None, bytes]:
     """The text of a list or diff: `data` itself, or the `<base_name>.<ddd>`
     member of a ZIP (any `*.<ddd>` member when `base_name` is None, if
     there is exactly one). Returns `(member name or None, text)`. Raises
-    `NodelistError` for another archive kind, a damaged ZIP, a missing
-    member, or one over the limit."""
+    `NodelistError` for a damaged archive, one no installed tool opens, a
+    missing member, or one over the limit."""
     kind = archive_kind(data)
+    if kind in TOOL_KINDS:
+        return _unpack_with_tools(data, kind, base_name)
     if kind != "zip":
-        if kind in ("rar", "7z", "arj", "lha", "arc"):
-            raise NodelistError(f"it is a {kind.upper()} archive; only ZIP can be opened for now")
         return None, data
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
@@ -123,6 +125,38 @@ def unpack(data: bytes, base_name: str | None) -> tuple[str | None, bytes]:
         except (zipfile.BadZipFile, RuntimeError, zlib.error, OSError, EOFError) as exc:
             raise NodelistError(f"cannot unpack {name}: {exc}") from None
         return name, bytes(content)
+
+
+def _wanted(name: str, base_name: str | None) -> bool:
+    stem, dot, extension = name.rpartition(".")
+    return bool(dot and _MEMBER_DAY.fullmatch(extension) and (base_name is None or stem.upper() == base_name.upper()))
+
+
+def _unpack_with_tools(data: bytes, kind: str, base_name: str | None) -> tuple[str | None, bytes]:
+    """`unpack` for LHA, ARC, 7-Zip, RAR and ARJ (issue #1477), through the
+    sandboxed external tools. Blocking: it runs on the database lane or in a
+    worker thread, never on the event loop."""
+    label = KIND_LABELS[kind]
+    candidates: list[str] = []
+
+    def choose(members: list[Member]) -> list[Member]:
+        found = [member for member in members if _wanted(member.name, base_name)]
+        candidates.extend(member.name for member in found)
+        return found[:1] if len(found) == 1 or base_name is not None else []
+
+    try:
+        read = run_blocking(lambda: unpack_with_tools(
+            data, kind, choose=choose, max_members=MAX_MEMBERS, max_bytes=MAX_NODELIST_BYTES,
+            budget_seconds=TOOL_BUDGET_SECONDS, label="FTN nodelist"))
+    except ArchiveError as exc:
+        raise NodelistError(f"the {label} archive can't be opened: {exc}") from None
+    if not candidates:
+        wanted = f"{base_name}.nnn" if base_name else "a list named NAME.nnn"
+        raise _NoMember(f"the {label} archive holds no {wanted}")
+    if not read:
+        raise NodelistError(f"the {label} archive holds more than one list: " + ", ".join(candidates))
+    member, content = read[0]
+    return member.name, content
 
 
 def _read_bounded(path: Path) -> bytes:

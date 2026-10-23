@@ -388,7 +388,8 @@ input, extraction reads the member from the tool's stdout and never writes to
 disk, passes argv lists with a fixed member name and no shell, applies POSIX
 CPU/memory/process rlimits, bounds the read and the wall clock, and kills and
 reaps on every exit path. No archive, no DIZ, no unpacker, or a corrupt member
-are all "no description", never a failed upload.
+are all "no description", never a failed upload. The same sandbox opens FTN mail bundles in
+these formats (§6.8, "Mail bundles").
 
 Every description, whether extracted, typed, or carried in a peer's
 `file_descriptor`, is stored as plain text. Whole ANSI escape sequences are
@@ -2273,9 +2274,47 @@ screen shows the failure with what moved.
 
 No external mailer or tosser is needed or supported. Packets are Type 2+
 (FSC-0048) when written, and Type 2, 2+ or FSC-0039 are accepted when read.
-Bundles are ZIP, identified by content rather than by name. Outbound mail is
+Bundles are identified by content rather than by name. Outbound mail is
 queued in the database, modelled on §13.7's work items, not in BSO
 directories.
+
+**Mail bundles** (issue #1477; §16, "Issue #1154", Decision 16).
+
+- **ZIP** is opened in-process.
+- **LHA, ARC, 7-Zip and RAR**, and ARJ, are opened by the sandboxed external
+  tools that read `FILE_ID.DIZ` (§6.2), shared as `netbbs.files.extract`.
+  Installing a tool is the opt-in, as for DIZ reading:
+  - LHA: `lha`, else 7-Zip;
+  - ARC: `nomarch` (7-Zip has no ARC support);
+  - 7-Zip and ARJ: `7z`, `7za` or `7zz`;
+  - RAR: `unrar`, else 7-Zip.
+- **How a tool reads a bundle.** The tool lists the archive first. ARC has no
+  tool that lists reliably, so its 29-byte headers are walked instead. Then
+  each member is read from the tool's stdout, one run per member, and
+  nothing is extracted to disk. The tool runs in a private temporary folder
+  under the DIZ sandbox: rlimits on POSIX, no shell, bounded output, and a
+  kill and reap on every exit path. For ARC, `nomarch -p` prints every
+  member, and the output is split by the sizes the headers give.
+- **Limits.** A ZIP's limits apply: 256 members, 64 MiB unpacked in all, and
+  members returned by base name. Two more apply to a tool-read bundle:
+  - a member must come out at the size the listing gives, because 7-Zip
+    prints nothing, and still succeeds, for a name it can't find;
+  - a member name that isn't printable ASCII, contains `*?[]`, starts with
+    `-`, has no file name, or is a link refuses the whole bundle. A tool
+    could read such a name as a wildcard or an option, and FTN bundles hold
+    8.3 names, so nothing real is refused.
+- **Without a tool, or when one fails,** the bundle is held whole, waiting
+  for a TIC, with the reason. A missing tool's reason names the tools and
+  their pkgsrc packages. [R]elease on a held file opens it as a bundle, so
+  the SysOp can install the tool and then toss what waited.
+- **Nodelist archives** in these formats are opened the same way, on the
+  database lane, which a nodelist's rare arrival can afford.
+- **Outbound.** A network's **Bundle outgoing mail** setting (`off`, the
+  default, or `zip`) puts the session's packet into a ZIP. The ZIP is named
+  by FTS-5005: the net and node differences in hex, the weekday, and a
+  sequence character (`00000063.we4`). The sequence moves on per bundle and
+  is kept per network, so two calls on one day don't reuse a name. Messages
+  are marked sent only when the remote confirms (`M_GOT`) the bundle.
 
 **Outbound files** (issues #1470 and #1471). Files wait for a session in a
 queue of their own, beside the queued messages, and every session takes
@@ -2327,9 +2366,10 @@ files (stage C) are to use it as they are.
 2. A file a TIC names, in this session or waiting from an earlier one, is a
    file-echo file. It is never opened as a mail bundle.
 3. Bare packets are tossed.
-4. ZIPs are opened as bundles. A ZIP with no `.pkt` member is held whole, as
-   a file that may still be waiting for its TIC. A bundle's non-packet members
-   are held one by one.
+4. Archives are opened as bundles (ZIP, and LHA, ARC, 7-Zip, RAR and ARJ
+   through the external tools, above). An archive with no `.pkt` member is
+   held whole, as a file that may still be waiting for its TIC. So is one no
+   installed tool opens. A bundle's non-packet members are held one by one.
 5. Anything else is held, waiting for a TIC.
 
 Nothing a session received is dropped without being held or counted. A file
@@ -2625,9 +2665,10 @@ the status screen, as before.
   are compared case-insensitively, and a file of any other name is not the
   nodelist's.
 
-  An archive is recognised by content: ZIP now, and the other formats with
-  stage C, until which they are held. It is opened in-process within the
-  64 MiB nodelist limit. The nodelist echo needs no file area. When it is
+  An archive is recognised by content and opened within the 64 MiB nodelist
+  limit. ZIP is opened in-process, and LHA, ARC, 7-Zip, RAR and ARJ through
+  the external tools that open mail bundles (issue #1477). Without the tool,
+  the file is held with the reason. The nodelist echo needs no file area. When it is
   also mapped to one, every file in it is stored there as well, and a file of
   any other name is stored only then. Otherwise such a file is held.
 
