@@ -26,6 +26,8 @@ from netbbs.files.areas import FileArea
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.chrs import DEFAULT_CHARSET, kludge_for_codec
+from netbbs.ftn.message import origin_room
+from netbbs.ftn.transport import TLS_MODES, TLS_OFF, normalise_fingerprint, parse_host_port
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -81,9 +83,14 @@ class FtnNetwork:
     # --- file echoes (issue #1462) ---
     tic_password: str = ""  # a TIC's Pw; empty: every TIC is held
     # --- end file echoes ---
+    # --- transport (issues #1467, #1468) ---
+    uplink_tls: str = TLS_OFF  # TLS_OFF, TLS_PINNED or TLS_VERIFIED (netbbs.ftn.transport)
+    uplink_tls_pin: str = ""  # the hub's certificate's SHA-256, learned on the first TLS call
+    # --- end transport ---
     # --- netmail extras (issues #1470 and #1472) ---
     bounce_unknown: bool = True  # return netmail no account can take (Decision 26)
     attach_area_id: int | None = None  # where inbound file attaches are stored; None: held
+    give_held_unproven: bool = False  # hand held mail to a caller without a password (issue #1471)
     # --- end netmail extras ---
     id: int | None = None
 
@@ -108,11 +115,21 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
     if our.same_node(uplink):
         raise FtnNetworkError("This node's address and the uplink's must differ.")
     host = network.uplink_host.strip()
+    port = network.uplink_port
     if any(character.isspace() for character in host):
         raise FtnNetworkError("Uplink host must be a single host name or address.")
+    # --- transport (issue #1467): a port written into the host wins ---
+    if host:
+        try:
+            host, written_port = parse_host_port(host)
+        except ValueError as exc:
+            raise FtnNetworkError(f"Uplink host: {exc}. Write an IPv6 address with its port as "
+                                  f"[2001:db8::1]:24554.") from None
+        port = written_port or port
+    # --- end transport ---
     if network.enabled and not host:
         raise FtnNetworkError("An enabled network needs the uplink's host.")
-    if not 1 <= network.uplink_port <= 65535:
+    if not 1 <= port <= 65535:
         raise FtnNetworkError("Uplink port must be between 1 and 65535.")
     for value, limit, label in (
         (network.session_password, MAX_SESSION_PASSWORD, "Session password"),
@@ -151,10 +168,18 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
     if nodelist_name and nodelist_name == nodediff_name:
         raise FtnNetworkError("The nodelist and its diffs need different names (e.g. NODELIST and NODEDIFF).")
     # --- end nodelist echo ---
+    # --- transport (issue #1468) ---
+    if network.uplink_tls not in TLS_MODES:
+        raise FtnNetworkError("TLS must be off, pinned or verified.")
+    try:
+        tls_pin = normalise_fingerprint(network.uplink_tls_pin)
+    except ValueError as exc:
+        raise FtnNetworkError(str(exc)) from None
+    # --- end transport ---
     robots = {label: validate_robot_name(value, label)
               for value, label in ((network.areafix_robot, "AreaFix"), (network.filefix_robot, "FileFix"))}
     return replace(network, name=name, domain=domain, our_address=our, uplink_address=uplink,
-                   uplink_host=host, origin_text=origin_text,
+                   uplink_host=host, uplink_port=port, uplink_tls_pin=tls_pin, origin_text=origin_text,
                    areafix_robot=robots["AreaFix"], filefix_robot=robots["FileFix"],
                    nodelist_echo=nodelist_echo, nodelist_name=nodelist_name, nodediff_name=nodediff_name)
 
@@ -208,10 +233,17 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
             "UPDATE ftn_networks SET tic_password = ? WHERE id = ?", (validated.tic_password, validated.id)
         )
         # --- end file echoes ---
+        # --- transport (issue #1468): TLS for calls out, on its own ---
+        db.connection.execute(
+            "UPDATE ftn_networks SET uplink_tls = ?, uplink_tls_pin = ? WHERE id = ?",
+            (validated.uplink_tls, validated.uplink_tls_pin, validated.id),
+        )
+        # --- end transport ---
         # --- netmail extras (issues #1470 and #1472), on their own ---
         db.connection.execute(
-            "UPDATE ftn_networks SET bounce_unknown = ?, attach_area_id = ? WHERE id = ?",
-            (int(validated.bounce_unknown), validated.attach_area_id, validated.id),
+            "UPDATE ftn_networks SET bounce_unknown = ?, attach_area_id = ?, give_held_unproven = ? WHERE id = ?",
+            (int(validated.bounce_unknown), validated.attach_area_id, int(validated.give_held_unproven),
+             validated.id),
         )
         # --- end netmail extras ---
     except sqlite3.IntegrityError:
@@ -265,11 +297,34 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
         nodelist_echo=row["nodelist_echo"], nodelist_name=row["nodelist_name"],
         nodediff_name=row["nodediff_name"],
         tic_password=row["tic_password"] if "tic_password" in row.keys() else "",  # issue #1462
+        # --- transport (issue #1468) ---
+        uplink_tls=row["uplink_tls"] if "uplink_tls" in row.keys() else TLS_OFF,
+        uplink_tls_pin=row["uplink_tls_pin"] if "uplink_tls_pin" in row.keys() else "",
+        # --- end transport ---
         # --- netmail extras (issues #1470 and #1472) ---
         bounce_unknown=bool(row["bounce_unknown"]) if "bounce_unknown" in row.keys() else True,
         attach_area_id=row["attach_area_id"] if "attach_area_id" in row.keys() else None,
+        give_held_unproven=bool(row["give_held_unproven"]) if "give_held_unproven" in row.keys() else False,
         # --- end netmail extras ---
     )
+
+
+# --- transport (issue #1468) --------------------------------------------------
+
+
+def set_uplink_tls_pin(db: Database, network_id: int, fingerprint: str) -> bool:
+    """Learn the hub's certificate on the first TLS call that completes.
+    Writes only while no pin is held, so a SysOp's pin is never replaced;
+    True when this call stored it."""
+    cursor = db.connection.execute(
+        "UPDATE ftn_networks SET uplink_tls_pin = ? WHERE id = ? AND uplink_tls_pin = ''",
+        (normalise_fingerprint(fingerprint), network_id),
+    )
+    db.connection.commit()
+    return cursor.rowcount > 0
+
+
+# --- end transport ---
 
 
 # --- board <-> echo area ----------------------------------------------------
@@ -279,6 +334,9 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
 class AreaMapping:
     network_id: int
     tag: str
+    # A board's own Origin text (issue #1474); empty uses the network's.
+    # Always empty for a file area's file echo.
+    origin_text: str = ""
 
 
 def normalise_area_tag(tag: str) -> str:
@@ -292,7 +350,9 @@ def normalise_area_tag(tag: str) -> str:
 
 def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> AreaMapping:
     """Make `board` carry echo area `tag` of the network. Refuses a Linked
-    board, a missing network, and a tag another board already carries."""
+    board, a missing network, and a tag another board already carries.
+    Moving to another network drops the board's Origin (issue #1474): it
+    was bounded by the old network's address."""
     from netbbs.link.boards import is_board_linked  # netbbs.link imports widely; keep it local
 
     tag = normalise_area_tag(tag)
@@ -307,25 +367,58 @@ def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> Are
     if holder is not None:
         raise FtnNetworkError(f"Echo {tag} is already carried by board {holder['name']!r}.")
     db.connection.execute(
-        "UPDATE boards SET ftn_network_id = ?, ftn_area_tag = ? WHERE id = ?", (network_id, tag, board.id)
+        "UPDATE boards SET ftn_origin_text = CASE WHEN ftn_network_id IS ? THEN ftn_origin_text ELSE '' END, "
+        "ftn_network_id = ?, ftn_area_tag = ? WHERE id = ?",
+        (network_id, network_id, tag, board.id),
     )
     db.connection.commit()
     return AreaMapping(network_id, tag)
 
 
 def clear_board_area(db: Database, board: Board) -> None:
-    """Make `board` local again. Its posts stay."""
-    db.connection.execute("UPDATE boards SET ftn_network_id = NULL, ftn_area_tag = NULL WHERE id = ?", (board.id,))
+    """Make `board` local again. Its posts stay; its Origin override goes,
+    as a local board has no Origin line."""
+    db.connection.execute(
+        "UPDATE boards SET ftn_network_id = NULL, ftn_area_tag = NULL, ftn_origin_text = '' WHERE id = ?",
+        (board.id,),
+    )
     db.connection.commit()
 
 
 def board_area(db: Database, board: Board) -> AreaMapping | None:
     row = db.connection.execute(
-        "SELECT ftn_network_id, ftn_area_tag FROM boards WHERE id = ?", (board.id,)
+        "SELECT ftn_network_id, ftn_area_tag, ftn_origin_text FROM boards WHERE id = ?", (board.id,)
     ).fetchone()
     if row is None or row["ftn_network_id"] is None or not row["ftn_area_tag"]:
         return None
-    return AreaMapping(row["ftn_network_id"], row["ftn_area_tag"])
+    return AreaMapping(row["ftn_network_id"], row["ftn_area_tag"], row["ftn_origin_text"])
+
+
+def set_board_origin(db: Database, board: Board, text: str) -> str:
+    """Give `board`'s echomail its own Origin text (issue #1474, §16 "Issue
+    #1154", Decision 10), or with an empty `text` go back to the network's.
+    Runs of whitespace become one space. The text is bounded by the
+    network's address: the whole ` * Origin: text (address)` line stays
+    within FTS-0004's 79 characters, so it is never cut when sent. Refuses
+    a board that carries no echo. Returns the text stored."""
+    area = board_area(db, board)
+    if area is None:
+        raise FtnNetworkError(f"Board {board.name!r} carries no echo, so it has no Origin line.")
+    network = get_network(db, area.network_id)
+    if network is None:
+        raise FtnNetworkError("That network no longer exists.")
+    text = " ".join(text.split())
+    if not text.isprintable():
+        raise FtnNetworkError("The Origin is printable characters only.")
+    room = origin_room(network.our_address)
+    if len(text) > room:
+        raise FtnNetworkError(
+            f"The Origin is at most {room} characters on {network.name}: the whole line, with this node's "
+            f"address {network.our_address}, stays within 79."
+        )
+    db.connection.execute("UPDATE boards SET ftn_origin_text = ? WHERE id = ?", (text, board.id))
+    db.connection.commit()
+    return text
 
 
 def is_board_ftn(db: Database, board: Board) -> bool:

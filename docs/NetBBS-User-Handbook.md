@@ -234,6 +234,13 @@ reply, or start a topic. Follow a resource to make it easier to revisit.
 A post keeps the lines you write: a list, a short line or your sign-off stays
 as you typed it, and only a line too wide for the reader's screen wraps.
 
+**ROT-13.** Some posts hide a spoiler or a punchline in ROT-13, which turns
+each letter 13 places along the alphabet, so `Uryyb` reads `Hello`. Press
+<kbd>D</kbd> **Decode ROT-13: off** while reading one to show it decoded,
+and <kbd>D</kbd> **Decode ROT-13: on** to show it as written again. Only
+your screen changes: the post stays as its author wrote it, and the next
+post you open shows as written. A letter has the same key.
+
 On a moderated board, your post may wait for approval before others see it.
 You are told at the main menu when it is approved or rejected; a rejection
 also arrives as mail from **System**, with the reason and what you wrote.
@@ -446,9 +453,9 @@ names the network the letter goes out on.
   netmail back.
 - **How urgently:** on the review screen, <kbd>F</kbd> **Flavour** goes round
   **Normal** (the usual way, through the network), **Crash** (this BBS calls
-  the other BBS at once) and **Hold** (it waits until the other BBS calls
-  here). If a crash or held netmail can't be delivered, the BBS sends you a
-  letter saying so.
+  the other BBS at once) and **Hold** (it waits for the other BBS; the SysOp
+  decides whether it may collect it). If a crash or held netmail can't be
+  delivered, the BBS sends you a letter saying so.
 - **Files:** a file you point a netmail at reaches the other BBS as its name,
   size and file area, in text. Only the SysOp's netmail sends the file
   itself.
@@ -706,6 +713,10 @@ earlier letters indented under it.
 
 A `!` before a sender's name means their node's identity has changed. The
 message explains it when you open it.
+
+While you read a letter, <kbd>D</kbd> **Decode ROT-13: off** shows a
+letter written in ROT-13 decoded, as on a board (see
+[Read and reply](#read-and-reply)). The letter itself does not change.
 
 #### Keep letters
 

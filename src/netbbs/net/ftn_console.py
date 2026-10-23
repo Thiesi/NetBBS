@@ -5,8 +5,10 @@ Configuration and operation are kept apart, as MRC's are:
 
 - **Settings → Echomail & netmail (FTN)** (`ftn_networks_screen`): the networks, each
   edited in one draft -- addresses, uplink, passwords, polling, answering,
-  default character set, Origin line, netmail level, and the node-wide
-  answer port. A new network starts as fsxNet's main hub, the usual first
+  default character set, Origin line, netmail level, the node-wide
+  answer port, and the Transport section: the node-wide answer addresses,
+  TLS for calls to the uplink (pinned or verified), and the node-wide TLS
+  answer port with its certificate files (issues #1467, #1468). A new network starts as fsxNet's main hub, the usual first
   network for a new BBS; the SysOp fills in the address fsxNet gave them.
 - **Node → Echomail & netmail (FTN)** (`ftn_status_screen`): what the mailer and listener
   last did, what waits, and the work on a running network: poll now,
@@ -16,7 +18,8 @@ Configuration and operation are kept apart, as MRC's are:
   [C]reate, [M]ap and [D]elete). The robot screens live in
   `netbbs.net.ftn_robots_console`.
 - **A board's echo** (`board_echo_action`): which echo area a board carries,
-  from the board's own screen; **a file area's file echo**
+  from the board's own screen, and its own Origin line
+  (`board_origin_action`, issue #1474); **a file area's file echo**
   (`file_area_echo_action`) likewise, from the area's screen.
 
 Every screen follows §3.5: content first, actions on the bar, drafts that
@@ -41,8 +44,25 @@ from netbbs.ftn.address import parse_address
 from netbbs.ftn.areafix import AREAFIX, FILEFIX
 from netbbs.ftn.binkp import DEFAULT_PORT
 from netbbs.ftn.chrs import CP437
-from netbbs.ftn.listener import HOST_CONFIG_KEY, PORT_CONFIG_KEY
+from netbbs.ftn.listener import (
+    HOST_CONFIG_KEY,
+    PORT_CONFIG_KEY,
+    TLS_CERT_CONFIG_KEY,
+    TLS_KEY_CONFIG_KEY,
+    TLS_PORT_CONFIG_KEY,
+)
+from netbbs.ftn.transport import (
+    DEFAULT_TLS_PORT,
+    TLS_OFF,
+    TLS_PINNED,
+    TLS_VERIFIED,
+    parse_host_port,
+    parse_listen_hosts,
+    show_fingerprint,
+)
+from netbbs.ftn.message import origin_room
 from netbbs.ftn.networks import (
+    AreaMapping,
     FtnNetwork,
     FtnNetworkError,
     board_area,
@@ -54,6 +74,7 @@ from netbbs.ftn.networks import (
     list_networks,
     save_network,
     set_board_area,
+    set_board_origin,
     set_file_area_tic,
 )
 from netbbs.ftn.nodelist import HOW_MANUAL, ImportOutcome, NodelistError, import_list, nodelist_status
@@ -255,17 +276,117 @@ def _nodelist_fields() -> list[FieldSpec]:
 # --- end nodelist echo fields ---
 
 
+# --- transport: answer addresses and TLS (issues #1467, #1468) ---
+
+TLS_CHOICES = [TLS_OFF, TLS_PINNED, TLS_VERIFIED]
+_TLS_LABELS = {TLS_OFF: "off", TLS_PINNED: "on, certificate pinned", TLS_VERIFIED: "on, certificate verified"}
+
+
+def _transport_draft(db: Database, network: FtnNetwork | None) -> dict:
+    return {
+        "uplink_tls": network.uplink_tls if network is not None else TLS_OFF,
+        "uplink_tls_pin": network.uplink_tls_pin if network is not None else "",
+        "listen_host": get_config(db, HOST_CONFIG_KEY) or "",
+        "tls_port": get_config(db, TLS_PORT_CONFIG_KEY) or "",
+        "tls_cert": get_config(db, TLS_CERT_CONFIG_KEY) or "",
+        "tls_key": get_config(db, TLS_KEY_CONFIG_KEY) or "",
+    }
+
+
+def _pin_text(draft: dict) -> str:
+    if draft["uplink_tls"] != TLS_PINNED:
+        return "(used only when pinned)"
+    if not draft["uplink_tls_pin"]:
+        return "(learned on the first call)"
+    return show_fingerprint(draft["uplink_tls_pin"])[:23] + "..."
+
+
+def _transport_fields() -> list[FieldSpec]:
+    return [
+        FieldSpec(key="listen_host",
+                     label="Answer addresses",
+                     render=lambda d: d["listen_host"] or "(every address, IPv6 and IPv4)",
+                     prompt=_optional_text_field("listen_host"), section="Transport",
+                     brief="IP addresses to answer on, for all networks; empty for all",
+                     help="One or more IP addresses separated by spaces, such as 192.0.2.7 2001:db8::7. "
+                          "Empty answers on every address, IPv6 and IPv4."),
+        FieldSpec(key="uplink_tls", label="Call over TLS",
+                     render=lambda d: _TLS_LABELS[d["uplink_tls"]],
+                     prompt=choice_field("uplink_tls", TLS_CHOICES), step=choice_step("uplink_tls", TLS_CHOICES),
+                     section="Transport", brief="Call the hub over TLS (binkps), usually on port 24553",
+                     help="Only if the hub offers BinkP over TLS; set the uplink's port to its TLS port. "
+                          "Pinned: the first call learns the hub's certificate and a changed one is refused. "
+                          "Verified: the hub's certificate must be signed by a known authority for its host "
+                          "name. The session password proves this BBS either way."),
+        FieldSpec(key="uplink_tls_pin", label="Pinned certificate",
+                     render=_pin_text, prompt=_optional_text_field("uplink_tls_pin"), section="Transport",
+                     brief="The hub's certificate fingerprint (SHA-256); empty to learn it again",
+                     help="Empty it after the hub renews its certificate, or paste the fingerprint the hub "
+                          "published."),
+        FieldSpec(key="tls_port", label="TLS answer port",
+                     render=lambda d: (f"{d['tls_port']} (every network)" if d["tls_port"] else "(off)"),
+                     prompt=_optional_text_field("tls_port"), section="Transport",
+                     brief=f"Also answer BinkP over TLS on this port (usually {DEFAULT_TLS_PORT}); empty for off",
+                     help="Needs a certificate and its key. Callers still prove themselves with their session "
+                          "password."),
+        FieldSpec(key="tls_cert", label="Certificate file",
+                     render=lambda d: d["tls_cert"] or "(not set)", prompt=_optional_text_field("tls_cert"),
+                     section="Transport", brief="PEM file with the certificate (and chain) for the TLS port",
+                     help="A path on this machine, such as the certificate a web server already uses. "
+                          "A self-signed one is common for BinkP."),
+        FieldSpec(key="tls_key", label="Key file",
+                     render=lambda d: d["tls_key"] or "(in the certificate file)",
+                     prompt=_optional_text_field("tls_key"), section="Transport",
+                     brief="PEM file with the certificate's private key, if separate"),
+    ]
+
+
+def _transport_values(draft: dict, candidate: FtnNetwork, listen_port: int,
+                      existing: FtnNetwork | None) -> tuple[FtnNetwork, dict[str, str]]:
+    """The network's TLS settings, and the node-wide ones to store; raises
+    `FtnNetworkError` with the reason. A learned pin is let go when the
+    uplink's host changes: another host has another certificate."""
+    pin = draft["uplink_tls_pin"]
+    try:  # compared as stored: [2001:db8::1]:24554 is the same host as 2001:db8::1
+        host = parse_host_port(draft["uplink_host"])[0] if draft["uplink_host"].strip() else ""
+    except ValueError:
+        host = None  # refused by the save anyway
+    if existing is not None and pin == existing.uplink_tls_pin and host != existing.uplink_host:
+        pin = ""
+    candidate = replace(candidate, uplink_tls=draft["uplink_tls"], uplink_tls_pin=pin)
+    try:
+        hosts = parse_listen_hosts(draft["listen_host"])
+    except ValueError as exc:
+        raise FtnNetworkError(f"Answer addresses: {exc}.") from None
+    tls_port_text = draft["tls_port"].strip()
+    if tls_port_text and not (tls_port_text.isdigit() and 0 < int(tls_port_text) < 65536):
+        raise FtnNetworkError("The TLS answer port must be between 1 and 65535, or empty for off.")
+    if tls_port_text and int(tls_port_text) == listen_port:
+        raise FtnNetworkError("The TLS answer port must differ from the answer port.")
+    cert, key = draft["tls_cert"].strip(), draft["tls_key"].strip()
+    if tls_port_text and not cert:
+        raise FtnNetworkError("Answering over TLS needs a certificate file.")
+    for path, label in ((cert, "Certificate file"), (key, "Key file")):
+        if path and tls_port_text and not os.path.isfile(path):
+            raise FtnNetworkError(f"{label}: {path} is not a file on this machine.")
+    return candidate, {HOST_CONFIG_KEY: " ".join(hosts), TLS_PORT_CONFIG_KEY: tls_port_text,
+                       TLS_CERT_CONFIG_KEY: cert, TLS_KEY_CONFIG_KEY: key}
+
+
+# --- end transport ---
 # --- the Netmail section (issues #1470 and #1472) ---
 
 
 def _netmail_draft(network: FtnNetwork | None) -> dict:
     if network is None:
-        return {"bounce_unknown": True, "attach_area_id": None}
-    return {"bounce_unknown": network.bounce_unknown, "attach_area_id": network.attach_area_id}
+        return {"bounce_unknown": True, "attach_area_id": None, "give_held_unproven": False}
+    return {"bounce_unknown": network.bounce_unknown, "attach_area_id": network.attach_area_id,
+            "give_held_unproven": network.give_held_unproven}
 
 
 def _with_netmail_values(network: FtnNetwork, draft: dict) -> FtnNetwork:
-    return replace(network, bounce_unknown=bool(draft["bounce_unknown"]), attach_area_id=draft["attach_area_id"])
+    return replace(network, bounce_unknown=bool(draft["bounce_unknown"]), attach_area_id=draft["attach_area_id"],
+                   give_held_unproven=bool(draft["give_held_unproven"]))
 
 
 def _area_name(db: Database, area_id: int | None) -> str:
@@ -309,6 +430,16 @@ def _netmail_fields() -> list[FieldSpec]:
                   brief="Where files sent with a netmail are stored",
                   help="A file that comes with a netmail is stored here and listed in the letter. Who may read "
                        "this area may download it. With none, each one is held for you to look at."),
+        FieldSpec(key="give_held_unproven", label="Held mail, no password",
+                  render=lambda d: "give it" if d["give_held_unproven"] else "no: only to a proven caller",
+                  prompt=bool_field("give_held_unproven"), step=bool_step("give_held_unproven"),
+                  section="Netmail",
+                  brief="Give held mail to callers without a password",
+                  help="Off by default. Held netmail waits for its node to call. A node other than your hub "
+                       "has no password here, and anyone can claim its address, so with this on a stranger "
+                       "pretending to be that node collects its held mail and files, and the real node never "
+                       "gets them. Off, held mail goes only in a session with a password (your hub's), or "
+                       "expires after 30 days and its sender is told."),
     ]
 
 
@@ -415,6 +546,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
     ]
     fields += robot_field_specs(_secret_field)  # issue #1463: the Robots section
     fields += _nodelist_fields()  # issue #1464: the Nodelist section, after Robots
+    draft.update(await lane.run(lambda db: _transport_draft(db, existing)))  # issues #1467, #1468
     # --- file echoes (issue #1462): the File echoes section, after Nodelist ---
     fields.append(
         FieldSpec(key="tic_password",
@@ -424,6 +556,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                      help="File echoes arrive with a TIC file carrying this password. With none set, every "
                           "file echo is held for you to look at."))
     # --- end file echoes ---
+    fields += _transport_fields()  # issues #1467, #1468: the Transport section, after File echoes
     fields += _netmail_fields()  # issues #1470 and #1472: the Netmail section, after File echoes
 
     async def save(draft: dict) -> FtnNetwork:
@@ -433,6 +566,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
         port = int(draft["listen_port"])
         if not 0 < port < 65536:
             raise FtnNetworkError("The answer port must be between 1 and 65535.")
+        candidate, node_wide = _transport_values(draft, candidate, port, existing)  # issues #1467, #1468
 
         def _persist(db: Database) -> FtnNetwork:
             # --- netmail extras (issue #1470): a Linked area can't take netmail files ---
@@ -444,9 +578,12 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
             # --- end netmail extras ---
             saved = save_network(db, candidate)
             set_config(db, PORT_CONFIG_KEY, str(port))
+            for key, value in node_wide.items():  # issues #1467, #1468
+                set_config(db, key, value)
             record_action(db, actor=actor, action="set_ftn_network",
                           detail=(f"{saved.name}: {saved.our_address} via {saved.uplink_address} "
-                                  f"{saved.uplink_host}:{saved.uplink_port} enabled={saved.enabled} "
+                                  f"{saved.uplink_host}:{saved.uplink_port} tls={saved.uplink_tls or 'off'} "
+                                  f"enabled={saved.enabled} "
                                   f"answers={saved.answers_calls} netmail_level={saved.netmail_min_level}"))
             return saved
 
@@ -489,6 +626,12 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
                           + (f", {files_waiting} files" if files_waiting else "")
                           + (f" ({on_hold} on hold for their node to call)" if on_hold else "")))
         # --- end netmail extras ---
+        # --- transport (issue #1468) ---
+        if network.uplink_tls:
+            rows.append(Field("TLS", _TLS_LABELS[network.uplink_tls] + (
+                f" ({show_fingerprint(network.uplink_tls_pin)})" if network.uplink_tls == TLS_PINNED
+                and network.uplink_tls_pin else "")))
+        # --- end transport ---
         # The same items [H]eld items lists: this network's, and those a
         # deleted network left behind.
         held = [h for h in list_held(db) if h.network_id in (network.id, None)]
@@ -516,6 +659,16 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
     if listener is not None:
         where = listener.listening_on
         rows = [Field("Answering", f"port {where[1]}" if where else "no")]
+        # --- transport (issues #1467, #1468) ---
+        if where:
+            addresses = getattr(listener, "addresses", ())
+            rows.append(Field("On", ", ".join(addresses) if addresses else "every address, IPv6 and IPv4"))
+            tls_port = getattr(listener, "tls_listening_on", None)
+            if tls_port:
+                rows.append(Field("TLS", f"port {tls_port}"))
+        if getattr(listener, "tls_error", None):
+            rows.append(Field("TLS error", sanitize_text(listener.tls_error)))
+        # --- end transport ---
         if listener.last_error:
             rows.append(Field("Error", sanitize_text(listener.last_error)))
         for call in list(listener.recent)[-5:]:
@@ -951,7 +1104,8 @@ def board_echo_rows(db: Database, board: Board) -> list[Field]:
     if area is None:
         return [Field("Echo", "none (a local board)")]
     network = get_network(db, area.network_id)
-    return [Field("Echo", f"{area.tag} on {network.name if network else '?'}")]
+    return [Field("Echo", f"{area.tag} on {network.name if network else '?'}"),
+            *board_origin_rows(db, area, network)]
 
 
 async def board_echo_action(session: Session, lane: DatabaseLane, actor: User, board: Board) -> bool:
@@ -1039,5 +1193,54 @@ async def file_area_echo_action(session: Session, lane: DatabaseLane, actor: Use
         _announce(session, str(exc), error=True)
         return False
     await lane.run(lambda db: record_action(db, actor=actor, action="set_file_area_echo", detail=outcome))
+    _announce(session, outcome)
+    return True
+
+
+# --- a board's Origin line (issue #1474) ---------------------------------------
+
+
+def board_origin_rows(db: Database, area: AreaMapping, network: FtnNetwork | None) -> list[Field]:
+    """The board screen's Origin row: the board's own text, or what it
+    falls back to -- the network's Origin, else the BBS's name."""
+    if area.origin_text:
+        return [Field("Origin", area.origin_text)]
+    if network is not None and network.origin_text:
+        return [Field("Origin", f"the network's: {network.origin_text}")]
+    return [Field("Origin", "the network's: the BBS's name")]
+
+
+async def board_origin_action(session: Session, lane: DatabaseLane, actor: User, board: Board) -> bool:
+    """[O]rigin on the screen of a board carrying an echo: the text its
+    echomail's Origin line carries before this node's address, or an empty
+    line for the network's Origin. Returns whether anything changed."""
+    area = await lane.run(board_area, board)
+    network = await lane.run(get_network, area.network_id) if area is not None else None
+    if area is None or network is None:
+        _announce(session, f"{board.name} carries no echo, so it has no Origin line.", error=True)
+        return False
+    room = origin_room(network.our_address)
+    await session.write_line("")
+    await session.write_line(colored(
+        f"The Origin line this board's echomail carries on {network.name}, before this node's address: at most "
+        f"{room} characters, so the line stays within 79. An empty line uses the network's Origin.",
+        fg_color=MUTED_COLOR))
+    await write_prompt(session, "Origin: ")
+    try:
+        text = await session.read_line(cancellable=True, initial=area.origin_text)
+    except InputCancelled:
+        return False
+    try:
+        stored = await lane.run(set_board_origin, board, text)
+    except FtnNetworkError as exc:
+        _announce(session, str(exc), error=True)
+        return False
+    if stored == area.origin_text:
+        return False
+    outcome = (
+        f"{board.name}'s echomail carries the Origin {stored!r} on {network.name}." if stored
+        else f"{board.name}'s echomail carries {network.name}'s Origin again."
+    )
+    await lane.run(lambda db: record_action(db, actor=actor, action="set_board_origin", detail=outcome))
     _announce(session, outcome)
     return True

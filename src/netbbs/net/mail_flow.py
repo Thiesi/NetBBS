@@ -223,6 +223,7 @@ from netbbs.rendering import (
 from netbbs.rendering.post_body import plain_post_body, post_body_mode, post_body_rows, post_body_text
 from netbbs.rendering.charset import ellipsis_for
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.rot13 import rot13
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
@@ -1547,10 +1548,12 @@ async def _message_view(
     unicode_style: bool = False,
     collapsed: bool = False,
     copies: list[MailMessage] | None = None,
+    decoded: bool = False,
 ) -> tuple[str, list[str], list[str]]:
     """The title, the header rows (From or To, Date, any identity warning)
     and the body rows of one message, for `show_detail` to draw a page at a
-    time (issue #679: a long message used to scroll its own header away)."""
+    time (issue #679: a long message used to scroll its own header away).
+    `decoded` shows the body ROT-13 decoded (issue #1473)."""
     mailbox = "Sent" if to_label is not None else ("Kept" if message.kept_at is not None else "Inbox")
     with entered(session, mailbox):
         title = screen_title(
@@ -1626,7 +1629,8 @@ async def _message_view(
     preamble.extend(ref_rows(await open_refs(lane, user, refs), accent=accent))
     body_mode = await lane.run(_mail_body_mode, user)
     truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
-    body_rows = post_body_rows(message.body, session.terminal_width, body_mode, truecolor=truecolor, layout="lines")
+    body = rot13(message.body) if decoded else message.body
+    body_rows = post_body_rows(body, session.terminal_width, body_mode, truecolor=truecolor, layout="lines")
     return title, preamble, body_rows
 
 
@@ -1749,16 +1753,18 @@ async def _show_message(
     page: int,
     copies: list[MailMessage] | None = None,
     help_about: str | None = None,
+    decoded: bool = False,
 ) -> tuple[str, int]:
     """One message on `show_detail`: returns the action key and the page
     it was pressed on. `copies` are the Sent copies of a letter to several
-    people (issue #827). `help_about` is the sentence its help opens with."""
+    people (issue #827). `help_about` is the sentence its help opens with.
+    `decoded` shows the body ROT-13 decoded (issue #1473)."""
     unicode_style = await lane.run(unicode_style_enabled, user)
     title, preamble, body_rows = await _message_view(
         session, lane, user, message=message, to_label=to_label,
         unicode_style=unicode_style,
         collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
-        copies=copies,
+        copies=copies, decoded=decoded,
     )
     return await show_detail(
         session,
@@ -1848,6 +1854,9 @@ async def _show_inbox_message(
     # Issue #827: a copy of a letter to several people answers them all.
     reply_all = await lane.run(_reply_all_entries, user, message)
     page = 0
+    # Issue #1473: the body shown ROT-13 decoded, a toggle on this view
+    # only. The letter itself is never changed.
+    decoded = False
     while True:
         # Mail the BBS sent has nobody to answer (issue #819): no Reply key,
         # and the view says why.
@@ -1864,6 +1873,7 @@ async def _show_inbox_message(
             # from, and back; Kept has its own limit (issue #921).
             ("k", menu_key("K", "ept: yes" if message.kept_at else "ept: no")),
             ("e", menu_key("E", "rase")),
+            ("d", menu_key("D", "ecode ROT-13: on") if decoded else menu_key("D", "ecode ROT-13: off")),
         ]
         if block_target is not None:
             # Issue #817: a toggle, labelled by what it will do.
@@ -1873,9 +1883,13 @@ async def _show_inbox_message(
         choice, page = await _show_message(
             session, lane, user, message, to_label=None, actions=actions, page=page,
             help_about="A letter sent to you. Delete removes it from your mailbox; nothing reaches the sender.",
+            decoded=decoded,
         )
         if choice == "b":
             return
+        if choice == "d":
+            decoded = not decoded
+            continue
         if choice == "s":
             text, tone = await lane.run(toggle_block, user, block_target)
             announce(session, text, tone=tone)

@@ -71,8 +71,8 @@ from netbbs.link.boards import (
     offer_board_origin_transfer,
     set_board_posting,
 )
-from netbbs.ftn.networks import list_networks
-from netbbs.net.ftn_console import board_echo_action, board_echo_rows
+from netbbs.ftn.networks import board_area, list_networks
+from netbbs.net.ftn_console import board_echo_action, board_echo_rows, board_origin_action
 from netbbs.link.node_profiles import identity_for_peer
 from netbbs.link.communities import (
     LinkCommunitiesError,
@@ -1414,6 +1414,7 @@ async def _board_screen(
             # Design doc §6.8: a board is local, Linked or FTN, never two, so a
             # Linked board shows no FTN section and offers no [E]cho.
             ftn_networks = [] if linked else await lane.run(list_networks)
+            carries_echo = bool(ftn_networks) and await lane.run(board_area, board) is not None
             if ftn_networks:
                 ftn_rows = await lane.run(board_echo_rows, board)
                 after = (after + "\r\n" if after else "") + _sections_text(
@@ -1446,6 +1447,11 @@ async def _board_screen(
                 actions.append(DetailAction(
                     "e", menu_key("E", "cho (FTN)"), _act(lambda b: board_echo_action(session, lane, actor, b)),
                     brief="Carry an FTN echo area here"))
+            if carries_echo:
+                # Issue #1474: the board's own Origin line, else the network's.
+                actions.append(DetailAction(
+                    "o", menu_key("O", "rigin (FTN)"), _act(lambda b: board_origin_action(session, lane, actor, b)),
+                    brief="This board's own Origin line"))
             return DetailState(
                 draft={**_board_draft(board), **labels},
                 title=sanitize_text(board.name),

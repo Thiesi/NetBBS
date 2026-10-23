@@ -341,8 +341,10 @@ def test_forward_hotkey_is_on_both_views_and_clashes_with_nothing(people, monkey
         bar_rows = [line for line in text.replace("\r", "").split("\n") if "[F]orward" in line]
         assert bar_rows and all(len(line) <= width for line in bar_rows)
     inbox_bar, sent_bar = bars
-    assert inbox_bar == ["r", "f", "u", "k", "e", "s", "b"]
+    # `d` is [D]ecode ROT-13 (issue #1473), on received letters only.
+    assert inbox_bar == ["r", "f", "u", "k", "e", "d", "s", "b"]
     assert sent_bar == ["r", "f", "e", "b"]
+    assert len(set(inbox_bar)) == len(inbox_bar) and len(set(sent_bar)) == len(sent_bar)
     # The pager's own keys stay N and P.
     assert not {"n", "p"} & {*inbox_bar, *sent_bar}
 

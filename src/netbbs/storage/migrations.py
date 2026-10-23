@@ -5145,6 +5145,31 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #1474 (design doc §6.8, §16 \"Issue #1154\", Decision 10): a board carrying an "
+            "FTN echo can have its own Origin line text, `boards.ftn_origin_text`. Empty, the default "
+            "for every board on upgrade, uses the network's Origin, so nothing changes until the "
+            "SysOp sets one."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN ftn_origin_text TEXT NOT NULL DEFAULT '';
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #1468: BinkP over TLS for calls out. `ftn_networks.uplink_tls` says how a "
+            "network's uplink is called: '' plain, 'pin' over TLS with the hub's certificate "
+            "pinned on first use, 'ca' over TLS checked against the system's certificate "
+            "authorities and the host name. `uplink_tls_pin` holds the pinned certificate's "
+            "SHA-256 in hex. Every network stays plain on upgrade."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN uplink_tls TEXT NOT NULL DEFAULT ''
+            CHECK (uplink_tls IN ('', 'pin', 'ca'));
+        ALTER TABLE ftn_networks ADD COLUMN uplink_tls_pin TEXT NOT NULL DEFAULT '';
+        """,
+    ),
+    Migration(
+        description=(
             "Issues #1470, #1471 and #1472 (design doc §6.8, §16 \"Issue #1154\", Decisions 12 and 26): "
             "netmail extras. A network bounces netmail no account can take (`bounce_unknown`, on by "
             "default and on upgrade: Decision 26 amends #166 Decision 7) and names the file area "
@@ -5155,12 +5180,15 @@ MIGRATIONS = [
             "and hatched TIC files later -- each a file area entry (`file_id`) or a file on disk "
             "(`path`), with what happens to a spooled file once it is sent. A row is deleted once "
             "sent. `ftn_attach_waits` remembers a delivered netmail's attached file names until the "
-            "files arrive. No foreign key points at `file_areas` or `mail_messages`, which later "
-            "migrations may rebuild: a gone area or letter is checked where it is used."
+            "files arrive. `give_held_unproven` (off by default and on upgrade) lets a caller that "
+            "only presents a node's address, without a password, collect that node's held mail. No "
+            "foreign key points at `file_areas` or `mail_messages`, which later migrations may "
+            "rebuild: a gone area or letter is checked where it is used."
         ),
         sql="""
         ALTER TABLE ftn_networks ADD COLUMN bounce_unknown INTEGER NOT NULL DEFAULT 1;
         ALTER TABLE ftn_networks ADD COLUMN attach_area_id INTEGER;
+        ALTER TABLE ftn_networks ADD COLUMN give_held_unproven INTEGER NOT NULL DEFAULT 0;
 
         ALTER TABLE ftn_outbound ADD COLUMN flavour TEXT NOT NULL DEFAULT 'normal'
             CHECK (flavour IN ('normal', 'crash', 'hold'));

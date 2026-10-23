@@ -36,10 +36,12 @@ one node:
   calls at once, and after `CRASH_ATTEMPTS` failed calls the netmail is
   dropped and its sender told why.
 - `hold`: never makes this node call. It goes in the next session with
-  its node, whoever started it -- for a node that is not the uplink, when
-  it calls in (its own held items only, as the listener hands them over)
-  or when this node calls it for other mail. It is dropped, and its
-  sender told, after `HOLD_DAYS`.
+  its node that a password proved -- the uplink's, today; stage D adds
+  passwords for other nodes. A node that is not the uplink gets its held
+  items in an unproven session (calling in, or called for other mail) only
+  when its network sets `give_held_unproven`, off by default: anyone can
+  present an address. It is dropped, and its sender told, after
+  `HOLD_DAYS`.
 
 **The session interface.** `outbound_for_node` gives one node's waiting
 messages (as one packet) and files as a `SessionOutbound`. The caller
@@ -190,8 +192,19 @@ def waiting_for_node(
     a session with `node`, oldest first: every uplink row when `uplink`,
     else the direct rows whose destination is `node` or one of its points.
     `hold_only` keeps held rows only -- what a node calling in unproven is
-    handed."""
-    flavour_clause = " AND flavour = 'hold'" if hold_only else ""
+    handed.
+
+    Held rows go only in a session a password proved -- the uplink's,
+    today -- unless the network sets `give_held_unproven`: a direct
+    session, called or answered, proves nothing about who is on the other
+    end, and held mail has no other way to go, so whoever claims the
+    address first would take it."""
+    if not uplink and not network.give_held_unproven:
+        if hold_only:
+            return [], []
+        flavour_clause = " AND flavour != 'hold'"
+    else:
+        flavour_clause = " AND flavour = 'hold'" if hold_only else ""
     route = "uplink" if uplink else "direct"
     # Ids first, without the encoded messages: up to 10,000 may wait, and
     # only one packet's worth is read.

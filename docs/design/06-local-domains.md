@@ -2168,7 +2168,8 @@ are listed under "Planned" at the end of this section.
 
 - the network's name and 5D domain;
 - this node's address in it (`zone:net/node`, or `.point` for a point);
-- the uplink's address and its BinkP `host:port`;
+- the uplink's address and its BinkP `host:port`, and whether it is called
+  over TLS;
 - the session password, plus optional packet and AreaFix passwords;
 - the robots' names, `AreaFix` and `FileFix` by default, and an optional
   FileFix password, which falls back to the AreaFix password when empty;
@@ -2176,16 +2177,18 @@ are listed under "Planned" at the end of this section.
 - the nodelist echo and the nodelist's file name, with an optional diff file
   name;
 - whether netmail no account here can take is returned to its sender (on by
-  default), and the file area files sent with netmail are stored in (none by
-  default, which holds them);
+  default), the file area files sent with netmail are stored in (none by
+  default, which holds them), and whether held netmail is given to a caller
+  without a password (off by default);
 - the poll interval, and whether this node answers incoming calls.
 
 Every network is off until the SysOp enables it, and settings take effect
 without a restart, as MRC's do (§6.3).
 
-**Transport: native BinkP, both directions.** The node speaks binkp/1.0
-(FTS-1026) in-process, with CRAM-MD5 (FTS-1027) and NR mode (FTS-1028). Two
-roles:
+**Transport: native BinkP, both directions.** The node speaks binkp/1.1
+(FSP-1024) in-process, with multiple batches, falling back to binkp/1.0
+(FTS-1026) with a mailer that doesn't offer them, and with CRAM-MD5 (FTS-1027)
+and NR mode (FTS-1028) for receiving. Two roles:
 
 - **Originating.** The node polls each network's uplink on its interval, at
   least once a day, as hubs ask, and calls out sooner when mail is waiting.
@@ -2200,6 +2203,73 @@ roles:
     SysOp rather than tossed.
   - **Limit.** At most a few calls run at once; another caller is told the
     node is busy (`M_BSY`).
+
+**IPv6** (issue #1467). The node dials a host name over IPv6 or IPv4,
+whichever answers first (RFC 8305 "happy eyeballs"). An IPv6 address is
+written in brackets with a port, `[2001:db8::1]:24554`, in the uplink's host
+and in a nodelist's `IBN` and `INA` flags (FTS-5004); a port written into the
+uplink's host becomes its port. The node answers on every address, IPv6 and
+IPv4, unless the SysOp names the addresses (`ftn_listen_host`, one or more IP
+addresses): in the network editor's Transport section, or with
+`python -m netbbs.admin ftn-listen --host`. These settings and the answer
+ports are node-wide, like the answer port.
+
+**BinkP over TLS** (issue #1468). FTN has no certificate authority of its
+own, and the hubs that offer BinkP over TLS ("binkps", usually port 24553)
+mostly use self-signed certificates. TLS therefore adds privacy on the wire
+and nothing to authentication, which stays CRAM-MD5 and the secure/unsecure
+rules above, unchanged inside TLS.
+
+- **Calls out.** A network's **Call over TLS** is off, *pinned* or
+  *verified*:
+  - **Pinned** is trust on first use, as SSH does it. The first call that
+    completes stores the hub's certificate's SHA-256 fingerprint, and a later
+    call meeting another certificate is refused before any BinkP frame moves,
+    with the new fingerprint in the error. The SysOp clears the pin after the
+    hub renews its certificate, or pastes the fingerprint the hub published.
+    Changing the uplink's host lets a learned pin go.
+  - **Verified** checks the system's certificate authorities and the host
+    name, for a hub with a public certificate.
+
+  Direct netmail calls stay plain: a nodelist says nothing of TLS.
+- **Calls in.** An optional TLS answer port beside the plain one, with a
+  certificate file and an optional key file the SysOp names (NetBBS's web
+  listener has no certificate of its own: it sits behind a reverse proxy).
+  A caller's certificate is never asked for. When the files can't be loaded,
+  the plain port goes on answering and the status screen says why.
+
+Rejected: verifying against certificate authorities by default, which fails
+against nearly every hub's self-signed certificate; and TLS without any
+check, which a man in the middle defeats as easily as no TLS. CRAM-MD5 proves
+this node to the hub, not the hub to this node, so the pin is what tells a
+caller it reached the hub it reached before.
+
+**Multiple batches** (issue #1469). A session is binkp/1.1 multi-batch when
+the remote's `VER` says binkp/1.1 or later, or it sends `OPT MB`; this node
+always sends both. A batch is over once both sides have sent `M_EOB` and
+every file sent in it is confirmed. In multi-batch mode a batch in which
+either side sent a file is followed by another, and the session ends after a
+batch in which neither did. Before each batch after the first, the session
+asks a hook (`batch_hook` on the mailer and the listener) for more files,
+telling it what the remote sent since: file requests (stage C) are answered
+this way, in the same call. A remote that claims binkp/1.1 but hangs up
+between batches, with nothing outstanding, has completed the call. Every
+bound holds across batches, per session: files, bytes, the idle, handshake
+and session timeouts, and at most 64 batches.
+
+ND/NDA, binkd's no-dupes mode, is never offered, so it is never in force. It
+is not an FTSC document (FTS-1029 is data-frame compression, FSP-1024's ND
+section is empty), and its guarantee rests on both sides keeping, across
+sessions, a record of each file whose transfer is not yet settled -- state
+this node does not keep, and which an implementation tested only against
+itself could get wrong in the direction that loses mail. Duplicates are absorbed as before: a message
+is marked sent only on `M_GOT`, and the tosser's dupe check drops a repeat.
+ND waits for interop tests against a real binkd (#1493).
+
+**A call that fails part way** keeps what moved before it failed. Each file
+received whole was confirmed to the remote, which let go of it, so it is
+tossed; a packet the remote confirmed marks its messages sent. The status
+screen shows the failure with what moved.
 
 No external mailer or tosser is needed or supported. Packets are Type 2+
 (FSC-0048) when written, and Type 2, 2+ or FSC-0039 are accepted when read.
@@ -2241,11 +2311,15 @@ files (stage C) are to use it as they are.
   needs a BinkP address for the node in the nodelist, unless the node is
   the uplink. After 5 failed calls the netmail is dropped, and its sender
   is told why in a letter from the BBS.
-- **Hold**: nothing calls out. It goes in the next session with its node,
-  whoever starts it. A node that calls in without proving a password is
-  handed its own held items and nothing else, since nothing proved who it
-  is and this is mail no other path will carry. Held mail still waiting
-  after 30 days is dropped, and its sender told.
+- **Hold**: nothing calls out. It goes in the next session with its node
+  that a password proves: the uplink's, today, and other nodes' once stage
+  D gives them passwords. A session with any other node proves nothing
+  about who is at the other end -- anyone can present an address -- so it
+  carries no held mail, unless the network sets **Give held mail to callers
+  without a password** (off by default). Then a node that calls in, or that
+  this node calls for other mail, is handed its own held items, and a
+  caller that only claims the address is handed nothing else. Held mail
+  still waiting after 30 days is dropped, and its sender told.
 
 **What a session received** is sorted once the session ends (issue #1458):
 
@@ -2297,6 +2371,17 @@ per board. Nothing is mapped by default.
     `^AREPLY`, `^APID`, `^ATZUTC` and `^ACHRS`;
   - a tear line and an Origin line;
   - SEEN-BY and `^APATH` as FTS-0004 sets them.
+
+  **Origin line.** It is ` * Origin: <text> (<address>)`, within FTS-0004's
+  79 characters. The text is the board's own Origin when it has one (issue
+  #1474, §16 "Issue #1154", Decision 10), else the network's, else the
+  BBS's name. The SysOp sets a board's with **[O]rigin (FTN)** on the
+  board's screen, offered while the board carries an echo; an empty line
+  goes back to the network's. A board's Origin is bounded by this node's
+  address on its network, so that the whole line fits, and a longer one is
+  refused rather than cut. The network's text is cut to fit as before.
+  Making the board local again, or moving it to another network's echo,
+  clears its Origin.
 
   A copy of a cross-post (issue #1298) is its own message with its own
   `^AMSGID`, and its first body line is `* Crossposted in <ECHO>, <ECHO>`,
@@ -2597,6 +2682,17 @@ writes nothing and keeps the draft with the reason. Creating a board
 commits, so a failure after the first one was made removes what was made
 before the draft is shown again.
 
+**ROT-13 in the reader** (issue #1473, §16 "Issue #1154", Decision 12). The
+post reader and the reader of a received letter have **[D]ecode ROT-13**, a
+toggle that shows the body ROT-13 decoded. It is offered on every board and
+for every letter, not only FTN ones, since a spoiler in ROT-13 can be
+written anywhere; a post drawn in the ANSI art editor, and a post taken down
+or withdrawn, don't offer it. Only ASCII letters turn; escape sequences and
+pipe codes stay as they are. It is display-only: the stored body never
+changes, nothing about the toggle is stored, and a reply quotes the text as
+written. On a board it holds for the post on screen: stepping to the next or
+previous post shows that post as written.
+
 **Character sets.** Text is decoded by its `^ACHRS` kludge (FTS-5003). Without
 one, the network's default is used, CP437 unless the SysOp sets another.
 Outbound text is written in CP437 when every character fits, and in UTF-8
@@ -2610,12 +2706,6 @@ These are decided in outline and ship before the feature freeze, one stage at
 a time, each live-checked on ReLink. Each stage's PR writes its rules into
 this section; until then the text above is what holds.
 
-- **Stage B:**
-  - IPv6 listen and dial, and `ftn_listen_host` in the console (#1467);
-  - BinkP over TLS (#1468);
-  - binkp/1.1 multi-batch (#1469);
-  - a ROT-13 toggle in the reader (#1473);
-  - a per-board Origin line (#1474).
 - **Stage C:**
   - file requests, made and answered (#1475);
   - TIC hatching (#1476);

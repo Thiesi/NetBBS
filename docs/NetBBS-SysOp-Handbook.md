@@ -2803,7 +2803,7 @@ remote hub.
 | --- | --- |
 | **Set up under** | **Settings ▸ Echomail & netmail (FTN)** |
 | **Watch under** | **Node ▸ Echomail & netmail (FTN)** |
-| **From the shell** | `python -m netbbs.admin ftn-import-nodelist` |
+| **From the shell** | `python -m netbbs.admin ftn-import-nodelist`, `python -m netbbs.admin ftn-listen` |
 | **Decide first** | Which network to join; fsxNet is the usual first network for a new BBS |
 
 NetBBS can join FidoNet or an FTN othernet, such as fsxNet, as an ordinary FTN
@@ -2819,7 +2819,8 @@ In this chapter: [Join a network](#join-a-network) ·
 [Join echoes from the hub's list](#join-echoes-from-the-hubs-list) ·
 [File echoes](#file-echoes) · [Netmail](#netmail) ·
 [Held items and status](#held-items-and-status) ·
-[Unknown echoes](#unknown-echoes) · [Not supported](#not-supported)
+[Unknown echoes](#unknown-echoes) · [IPv6 and TLS](#ipv6-and-tls) ·
+[Not supported](#not-supported)
 
 ### Join a network
 
@@ -2852,6 +2853,23 @@ In this chapter: [Join a network](#join-a-network) ·
 - Edits and deletions stay on this BBS, because FTN has no way to carry them.
 - Posts go out under the author's username, except on a real-name echo
   (below).
+- Each message ends with an Origin line: the network's **Origin**, or the
+  BBS's name when that is empty, then this node's address.
+
+#### A board's own Origin line
+
+A board carrying an echo can sign its echomail with its own Origin, such as
+the name of a club that meets there. On the board's screen, press
+<kbd>O</kbd> **Origin (FTN)** and type it. The board's FTN section shows
+the Origin in use.
+
+- An empty line goes back to the network's **Origin**.
+- The whole line, ` * Origin: ` and this node's address included, stays
+  within the 79 characters FTN allows. The prompt says how much fits:
+  50 characters for the address `21:1/199@fsxnet`. A longer one is
+  refused, never cut.
+- Making the board local again with <kbd>E</kbd> **Echo (FTN)**, or giving
+  it an echo of another network, drops its Origin.
 
 #### Real-name echoes
 
@@ -3042,10 +3060,17 @@ choices:
   hub. It needs a BinkP address for the node in the nodelist, unless the node
   is your hub. After five failed calls the netmail is dropped, and its sender
   gets a letter from the BBS saying so.
-- **Hold**: nothing calls out. The netmail waits until the node calls this
-  BBS, or until this BBS calls it for other mail. A node that calls in
-  without a password gets its held mail and nothing else. Held netmail still
+- **Hold**: nothing calls out. The netmail waits for a call with the node
+  that a password proves, which today means your hub. Held netmail still
   waiting after 30 days is dropped, and its sender is told.
+
+> [!WARNING]
+> Netmail held for any other node waits, by default, until it expires: that
+> node has no password here, and anyone can call claiming its address.
+> **Held mail, no password** in the network's **Netmail** section gives held
+> netmail and files to a node that calls in, or that this BBS calls, without
+> a password. Turn it on only if you accept that a stranger pretending to be
+> that node could collect them.
 
 **Node ▸ Echomail & netmail (FTN)** counts held netmail under **Waiting**.
 
@@ -3179,6 +3204,61 @@ Tossing again goes through the board's moderation and duplicate checks, and a
 file echo's files through the checks above. At most 1,000 messages wait per
 tag and 10,000 (or 64 MiB) in all; beyond that the oldest are dropped, and
 the status screen counts them.
+
+### IPv6 and TLS
+
+The BBS calls a hub's host name over IPv6 or IPv4, whichever answers first.
+To call an IPv6 address, write it in brackets in **Host**, with the port if it
+is not 24554: `[2001:db8::1]:24554`.
+
+It answers calls on every address, IPv6 and IPv4. To answer on some addresses
+only, list them in **Answer addresses** in a network's **Transport** section,
+such as `192.0.2.7 2001:db8::7`. Like the **Answer port**, it applies to every
+network.
+
+#### Call the hub over TLS
+
+Only if the hub offers BinkP over TLS (binkps):
+
+1. Set the network's **Port** to the hub's TLS port, usually 24553.
+2. Set **Call over TLS** in **Transport**:
+   - **on, certificate pinned** for a hub with a self-signed certificate, the
+     usual case. The first call learns the certificate. If a later call meets
+     a different one, the call is refused and **Last error** shows the new
+     fingerprint.
+   - **on, certificate verified** for a hub whose certificate is signed by a
+     known authority for its host name.
+
+> [!IMPORTANT]
+> When a pinned call is refused, ask the hub whether it renewed its
+> certificate before you accept the new one. If it did, empty **Pinned
+> certificate** and save; the next call learns the new one.
+
+The session password still proves this BBS to the hub, over TLS or not.
+
+#### Answer over TLS
+
+1. Put a certificate and its private key, in PEM files, where the node can
+   read them. A self-signed certificate is common for BinkP, and the one a
+   web server on the same machine uses works too.
+2. In a network's **Transport** section, set **TLS answer port** (usually
+   24553), **Certificate file** and, if the key is in its own file, **Key
+   file**. Open the port to the internet as you did the answer port.
+
+The plain answer port goes on answering. **Node ▸ Echomail & netmail (FTN)**
+shows both ports under **Calls answered**, and a **TLS error** row if the
+files could not be loaded.
+
+From the shell, `python -m netbbs.admin ftn-listen` shows where the BBS
+answers, and sets it with `--host`, `--port`, `--tls-port` (or `off`),
+`--tls-cert` and `--tls-key`. A running node picks a change up within a
+minute.
+
+#### More than one batch per call
+
+NetBBS speaks binkp/1.1 with multiple batches, so mail and files that become
+ready during a call go out in the same call. With an older mailer it falls
+back to binkp/1.0 by itself; there is nothing to set.
 
 ### Not supported
 

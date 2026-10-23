@@ -114,6 +114,7 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
     message = _echomail(
         db, network, area.tag, to_name=to_name, from_name=from_name, subject=post.subject,
         body=_crossposted_line(db, post, area.network_id, area.tag) + post.body, date=local_time,
+        origin_text=area.origin_text,
     )
     if real_names:
         size = encoded_name_bytes(from_name, outbound_charset(message))
@@ -147,10 +148,12 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
 
 def _echomail(
     db: Database, network: FtnNetwork, tag: str, *, to_name: str, from_name: str, subject: str, body: str,
-    date: datetime.datetime | None,
+    date: datetime.datetime | None, origin_text: str = "",
 ) -> FtnMessage:
     """The echomail message a post on echo `tag` leaves as, but for its
-    kludges: everything that decides its character set."""
+    kludges: everything that decides its character set. `origin_text` is
+    the board's own Origin (issue #1474); empty, the network's is used, and
+    without one the BBS's name."""
     ours, uplink = network.our_address, network.uplink_address
     return FtnMessage(
         to_name=to_name,
@@ -160,7 +163,7 @@ def _echomail(
         area=tag,
         date=date,
         tear_line=PRODUCT,
-        origin=build_origin(network.origin_text or get_node_display_name(db), ours),
+        origin=build_origin(origin_text or network.origin_text or get_node_display_name(db), ours),
         seen_by=[uplink.net_node] if ours.point else [ours.net_node, uplink.net_node],
         path=[] if ours.point else [ours.net_node],
         orig_net=ours.net,
@@ -235,6 +238,7 @@ def real_name_refusal(
                 to_name = _reply_to_name(db, parent, real_names=True)
         charset = outbound_charset(_echomail(
             db, network, area.tag, to_name=to_name, from_name=name, subject=subject, body=body, date=None,
+            origin_text=area.origin_text,
         ))
     size = encoded_name_bytes(name, charset)
     if size <= MAX_NAME_BYTES:
