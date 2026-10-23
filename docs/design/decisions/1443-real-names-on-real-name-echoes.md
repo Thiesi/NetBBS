@@ -43,9 +43,8 @@ SysOp skips every name gate (`bypasses_identity_gates`), so the requirement
 alone would let them post without a verified name; this check applies to them
 too. As a backstop, the exporter keeps a post that still reaches it without a
 usable name local, with a node-log warning, as it does for a full queue: one
-written before the board displayed names, or one carried from elsewhere (a
-post held for a moderator goes out under the name frozen on it when it was
-written, issue #1453). Nothing goes out under the username
+whose author's verification was revoked or replaced while it waited for a
+moderator, or one carried from elsewhere. Nothing goes out under the username
 or cut short. Rejected:
 - **falling back to the username**, which breaks the echo's rule in the
   author's name;
@@ -54,8 +53,8 @@ or cut short. Rejected:
 - **refusing an over-long name when it is verified**, which would make
   verification depend on which boards the account might post on later.
 
-**Replies.** A reply's To name on such a board is the parent's frozen verified
-real name (issue #1453) when the parent is a local post, so it matches the From the network
+**Replies.** A reply's To name on such a board is the parent author's verified
+real name when the parent is a local post, so it matches the From the network
 saw; an FTN parent keeps its own name, as before. Inbound echomail is
 unaffected.
 
