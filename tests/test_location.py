@@ -124,6 +124,7 @@ _LABELS = {
     "SysOp operations console": "SysOp",
     "Manage message boards/file areas/chat channels": "Content",
     "Node management": "Node",
+    "Level Admin SysOp Tool (LAST)": "Levels",
 }
 
 

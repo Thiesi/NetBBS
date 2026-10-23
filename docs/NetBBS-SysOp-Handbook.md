@@ -331,6 +331,40 @@ real-time relay bounds, login throttle and shutdown delays, grouped.
   shows it as *set in config* and does not let you change it there. Remove it
   from the TOML file to manage it from the console.
 
+<kbd>A</kbd> **Apply capacity preset** sets the Link groups (carry caps,
+peering, Link limits and real-time relay) for the size of node you run:
+
+| Setting | Small | Default | Hub |
+| --- | --- | --- | --- |
+| Carried boards / channels / file areas | 50 each | built-in | 2,000 each |
+| Peers remembered | 200 | built-in | 5,000 |
+| Relay for others | — | built-in | on |
+| Relay clients | — | built-in | 100 |
+| Files per carried area | 1,000 | built-in | 20,000 |
+| Request burst / per minute | — | built-in | 60 / 180 |
+| Diagnostics kept (days / entries) | 14 / 2,000 | built-in | 90 / 20,000 |
+| Live bridges / pending rendezvous | — | built-in | 32 / 128 |
+| Relay bytes per second | — | built-in | 262,144 |
+
+"—" leaves the value as it is. **Default** forgets the values saved on this
+screen, so the built-in defaults apply, including any later change to them.
+
+1. Pick a tier. The preview lists each value it would change as
+   `before → after`, and under **Not changed** each key your config file or
+   command line sets.
+2. Read the warnings. Hub's say that higher caps let other nodes fill your
+   storage and that relaying spends bandwidth on nodes you do not know.
+3. Press <kbd>A</kbd> **Apply**, or <kbd>B</kbd> **Back** to write nothing.
+   The values apply at the next start, and one audit entry lists them all.
+
+> [!NOTE]
+> A preset cannot make an outgoing-only node a full peer, so on one Hub's
+> relay settings do nothing. The preview shows the TOML still to set; see
+> [Run as a full peer](#run-as-a-full-peer).
+
+The login throttle, shutdown delays, seeds and sync interval are not part of
+any tier.
+
 #### Settings kept out of the console
 
 The listeners, `public_url`, Link addresses, paths and managed-DNS service
@@ -808,6 +842,28 @@ their next login (**ready**), and what the step opens. How the rules apply:
 The account screen shows **Auto promotion: on**, **off (level set by hand)**,
 or **on, but skipped** with the reason (a pending account, for example).
 <kbd>U</kbd> **Use promotion rules** turns it on or off.
+
+#### Start with a ladder
+
+<kbd>A</kbd> **Apply levels ladder** under **Users ▸ Levels (LAST)** sets up
+the club plan above in one step:
+
+- level 0 is named **New** and level 10 **Member**;
+- a rule raises accounts from 0 to 10 after 24 hours and 2 logins;
+- the Mail level and the Oneliner level become 10.
+
+It replaces only those: a name you gave level 0 or 10, or your rule from
+level 0, shows in the preview as `before → after`, and every other name and
+rule stays. A name another level already has is listed under **Not changed**.
+
+> [!WARNING]
+> Accounts at level 0 lose mail and the oneliner wall until the rule raises
+> them at a later login. The preview counts the level-0 accounts the rule never
+> raises (level set by hand, staff, pending, disabled, the guest account):
+> raise those by hand if they should keep mail.
+
+Press <kbd>A</kbd> **Apply** to write it all at once, with one audit entry.
+It applies straight away.
 
 #### See what every level opens (LAST)
 
@@ -2738,6 +2794,31 @@ What callers and you see:
 - <kbd>U</kbd> **Usage** shows today's and this month's requests, tokens and
   cost, the busiest callers and which limits callers reached.
 - Prompt logging is off by default.
+
+#### Budget presets
+
+<kbd>A</kbd> **Apply budget preset**, beside **Model settings**, sets the
+eight limits at once:
+
+| Field | Frugal | Normal | Generous |
+| --- | --- | --- | --- |
+| Node daily token budget | 25,000 | 100,000 | 1,000,000 |
+| Node monthly token budget | 250,000 | 1,000,000 | 20,000,000 |
+| Requests per caller per day | 5 | 20 | 100 |
+| Caller cooldown (seconds) | 60 | 10 | 5 |
+| Model requests per channel/minute | 1 | 2 | 6 |
+| Maximum output tokens | 128 | 256 | 512 |
+| Maximum reply characters | 300 | 400 | 500 |
+| Prior exchange lines | 2 | 6 | 10 |
+
+Normal is the default. The preview lists only what would change; press
+<kbd>A</kbd> **Apply** to save it, and it applies from the next request. A
+preset never changes prices, money budgets, the provider, the key, the system
+prompt, prompt logging, guest access, or whether model conversation is on.
+
+> [!WARNING]
+> When a tier raises the token budgets and no money budget is set, the preview
+> warns you: with a paid provider, only the token counts then cap the bill.
 
 ## MRC chat bridge
 
