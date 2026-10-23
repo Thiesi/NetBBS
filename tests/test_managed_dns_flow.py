@@ -222,7 +222,7 @@ def test_offer_opt_in_releases_the_decision_lock_before_registration(tmp_path, m
         registration_started = asyncio.Event()
         finish_registration = asyncio.Event()
 
-        async def parked_registration(session, registration_lane):
+        async def parked_registration(session, registration_lane, *, actor=None):
             registration_started.set()
             await finish_registration.wait()
 
@@ -1358,4 +1358,64 @@ def test_register_on_a_node_that_never_started_says_to_start_it_not_restart_it(t
     assert "has never been started" in text and "Start the node once" in text
     assert "restart" not in text
     lane.close()
+    db.close()
+
+
+def _audit(db, action):
+    return [
+        (row["actor_user_id"], row["detail"])
+        for row in db.connection.execute(
+            "SELECT actor_user_id, detail FROM moderation_log WHERE action = ? ORDER BY id", (action,)
+        )
+    ]
+
+
+@pytest.mark.parametrize("answer,decision", [("y", "accepted"), ("n", "declined")])
+def test_offer_opt_in_answer_is_audited_under_the_answering_sysop(tmp_path, answer, decision):
+    """Issue #1505: the first-run managed-DNS answer names its SysOp."""
+    from netbbs.auth.users import SYSOP_LEVEL, create_user
+
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter22", user_level=SYSOP_LEVEL)
+    lane = DatabaseLane(db.path)
+
+    asyncio.run(offer_managed_dns_opt_in(FakeSession([answer]), lane, sysop))
+
+    assert _audit(db, "set_managed_dns_opt_in") == [(sysop.id, f"opt_in={decision}")]
+    lane.close()
+    db.close()
+
+
+def test_register_via_prompt_audits_name_dynamic_and_opt_in(tmp_path):
+    """Issue #1505: a registration is the SysOp choosing a name and
+    whether it follows address changes; the entry names both, and the
+    opt-in it implies, in the transaction that writes them -- never the
+    credential."""
+    from netbbs.auth.users import SYSOP_LEVEL, create_user
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, cooldown_seconds=3600)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            sysop = create_user(db, "sysop", password="hunter22", user_level=SYSOP_LEVEL)
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            await register_via_prompt(FakeSession(["0", "1", "myboard", "0", "2", "r"]), lane, actor=sysop)
+            lane.close()
+            return db, sysop
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, sysop = asyncio.run(scenario())
+    assert _audit(db, "register_managed_dns") == [
+        (sysop.id, "name=myboard status=pending dynamic=False opt_in=accepted")
+    ]
+    credential = load_credential(credential_path_for(db.path))
+    assert credential
+    every = " ".join(row["detail"] or "" for row in db.connection.execute("SELECT detail FROM moderation_log"))
+    assert credential not in every
     db.close()

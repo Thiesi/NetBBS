@@ -181,3 +181,18 @@ def test_status_screen_reports_open_rooms(db, lane, sysop, lobby):
             await bridge.close()
             await fake.close()
     asyncio.run(scenario())
+
+
+def test_settings_save_audits_every_open_room_gate_and_the_blocklist(db, lane, sysop):
+    """Issue #1505: the entry names the open-room level, age, age and name
+    requirements and the blocklist, not only the switch, cap and retention."""
+    save_open_room_settings(db, OpenRoomSettings(
+        enabled=True, min_level=20, min_age=18, age_requirement="verified",
+        name_requirement="verified_and_displayed", blocklist=("evil", "spam"),
+    ))
+    session = FakeSession(["s", "i", "s", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    detail = [a for a in list_recent_actions(db, limit=5) if a.action == "set_mrc_settings"][0].detail
+    for part in ("open_rooms=True", "open_min_level=20", "open_min_age=18", "open_age_requirement=verified",
+                 "open_name_requirement=verified_and_displayed", "open_blocklist=evil,spam", "info_sysop="):
+        assert part in detail

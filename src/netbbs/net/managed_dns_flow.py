@@ -45,15 +45,16 @@ from netbbs.managed_dns.state import (
     get_service_url,
     foreign_credential_service_url,
     set_cancelled_rename_state,
-    set_opt_in,
+    set_opt_in_without_commit,
     get_published,
     get_registration_deferred,
     set_registration_deferred,
     set_registration_status,
-    set_registration_result_state,
+    set_registration_result_state_without_commit,
     set_pending_rename_state,
 )
 from netbbs.auth.users import User
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.location import crumbs, located
@@ -82,6 +83,7 @@ from netbbs.rendering.detail import Field, Section, render_sections
 from netbbs.rendering.layout import MenuEntry, screen_title
 from netbbs.net.char_input import HELP_KEY, reject_unhandled_key
 from netbbs.net.help_overlay import show_menu_help
+from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
 
@@ -266,13 +268,16 @@ async def _write_note(session: Session, text: str) -> None:
         await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
 
 
-async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None:
+async def offer_managed_dns_opt_in(
+    session: Session, lane: DatabaseLane, actor: User | None = None
+) -> None:
     """Design doc §16 Decision 1: shown once, at whichever of the two
     call sites (first-SysOp bootstrap, first SysOp login) gets there
     first. Gated purely on "is the opt-in decision still undecided" --
     that decision is node-wide, not per-user, so this single check
     guarantees the prompt fires exactly once regardless of which caller
-    wins the race, and is a safe no-op every time after."""
+    wins the race, and is a safe no-op every time after. `actor` is the
+    SysOp answering, named in the audit entry (issue #1505)."""
     lock = _opt_in_locks.setdefault(lane.path.resolve(), asyncio.Lock())
     accepted = False
     async with lock:
@@ -289,7 +294,16 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
         accepted = await prompt_yes_no(
             session, "Enable managed netbbs.org subdomain hosting for this node?", default=True
         )
-        await lane.run(set_opt_in, OptIn.ACCEPTED if accepted else OptIn.DECLINED)
+        decision = OptIn.ACCEPTED if accepted else OptIn.DECLINED
+
+        def _record(db: Database) -> None:
+            with db.connection:
+                set_opt_in_without_commit(db, decision)
+                record_action_without_commit(
+                    db, actor=actor, action="set_managed_dns_opt_in", detail=f"opt_in={decision.value}",
+                )
+
+        await lane.run(_record)
 
     # The once-only choice is durable now. Name selection and registration
     # can remain interactive indefinitely without blocking another SysOp's
@@ -313,10 +327,12 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
             await lane.run(set_registration_deferred, True)
             await _write_note(session, _IDENTITY_PENDING_FIRST_RUN_NOTE)
             return
-        await register_via_prompt(session, lane)
+        await register_via_prompt(session, lane, actor=actor)
 
 
-async def offer_deferred_registration(session: Session, lane: DatabaseLane) -> None:
+async def offer_deferred_registration(
+    session: Session, lane: DatabaseLane, actor: User | None = None
+) -> None:
     """The inline registration design doc §16 Decision 1 attaches to
     accepting the opt-in, for a node that accepted before it could
     register (issue #634). Called from both interactive surfaces a SysOp
@@ -342,7 +358,7 @@ async def offer_deferred_registration(session: Session, lane: DatabaseLane) -> N
 
     await session.write_line("")
     await _write_note(session, _DEFERRED_REGISTRATION_BLURB)
-    if not await register_via_prompt(session, lane):
+    if not await register_via_prompt(session, lane, actor=actor):
         await _write_note(session, _DEFERRED_REGISTRATION_DECLINED_NOTE)
 
 
@@ -376,8 +392,9 @@ async def register_via_prompt(
     _handle_register`'s own docstring) -- passing it for an unrelated
     fresh name is harmless, simply ignored server-side.
 
-    `actor` (the SysOp menu's caller; `None` on the first-run path)
-    selects the editor's presentation preferences. Returns whether an
+    `actor` (the SysOp registering) selects the editor's presentation
+    preferences and is named in the registration's audit entry (issue
+    #1505); `None` leaves the defaults and records "(system)". Returns whether an
     outcome was written that the caller should hold on screen -- `False`
     for `[B]ack`, so the admin screen returns straight to its status.
     """
@@ -523,13 +540,27 @@ async def register_via_prompt(
             # Publication is only ever confirmed by a heartbeat's reported
             # address -- a reclaim that comes back `matured` may still have had
             # its republish fail, so the next heartbeat decides.
-            await lane.run(
-                set_registration_result_state,
-                name=result.name,
-                status=RegistrationStatus(result.status),
-                dynamic=dynamic,
-                service_url=base_url,
-            )
+            def _record(db: Database) -> None:
+                # The result and the SysOp's audit entry commit together
+                # (issue #1505): the name, whether it follows address
+                # changes, and the opt-in a registration implies.
+                with db.connection:
+                    set_registration_result_state_without_commit(
+                        db,
+                        name=result.name,
+                        status=RegistrationStatus(result.status),
+                        dynamic=dynamic,
+                        service_url=base_url,
+                    )
+                    record_action_without_commit(
+                        db, actor=actor, action="register_managed_dns",
+                        detail=(
+                            f"name={result.name} status={result.status} "
+                            f"dynamic={dynamic} opt_in={OptIn.ACCEPTED.value}"
+                        ),
+                    )
+
+            await lane.run(_record)
             delete_credential(previous_credential_path_for(lane.path))
 
             # Issue #640: the first check-in, now, while the SysOp is

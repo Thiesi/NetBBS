@@ -41,7 +41,7 @@ from pathlib import Path
 
 from netbbs.auth.users import SYSOP_LEVEL, User
 from netbbs.boards import Board
-from netbbs.config import get_config, set_config
+from netbbs.config import get_config, set_config_without_commit
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import parse_address
 from netbbs.ftn.areafix import AREAFIX, FILEFIX
@@ -99,7 +99,7 @@ from netbbs.ftn.queue import (
     list_held,
 )
 from netbbs.ftn.tosser import TossResult, release_held, retoss_bad_echo
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import record_action, record_action_without_commit
 from netbbs.net.admin_fields import _int_field, _optional_text_field
 from netbbs.net.admin_ui import (
     _BACK_ACTION,
@@ -635,19 +635,28 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
             if problem is not None:
                 raise FtnNetworkError(problem)
             # --- end netmail extras ---
-            saved = save_network(db, candidate)
-            # --- file requests (issue #1475) ---
-            save_freq_settings_without_commit(db, draft, saved.id)
+            # The row, the node-wide listener keys and the audit entry
+            # naming them commit together or not at all (issue #1505).
+            try:
+                saved = save_network(db, candidate, commit=False)
+                # --- file requests (issue #1475) ---
+                save_freq_settings_without_commit(db, draft, saved.id)
+                # --- end file requests ---
+                node_keys = {PORT_CONFIG_KEY: str(port), **node_wide}  # issues #1467, #1468
+                for key, value in node_keys.items():
+                    set_config_without_commit(db, key, value)
+                record_action_without_commit(
+                    db, actor=actor, action="set_ftn_network",
+                    detail=(f"{saved.name}: {saved.our_address} via {saved.uplink_address} "
+                            f"{saved.uplink_host}:{saved.uplink_port} tls={saved.uplink_tls or 'off'} "
+                            f"enabled={saved.enabled} "
+                            f"answers={saved.answers_calls} netmail_level={saved.netmail_min_level} "
+                            + " ".join(f"{key}={value or '(none)'}" for key, value in node_keys.items())),
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
             db.connection.commit()
-            # --- end file requests ---
-            set_config(db, PORT_CONFIG_KEY, str(port))
-            for key, value in node_wide.items():  # issues #1467, #1468
-                set_config(db, key, value)
-            record_action(db, actor=actor, action="set_ftn_network",
-                          detail=(f"{saved.name}: {saved.our_address} via {saved.uplink_address} "
-                                  f"{saved.uplink_host}:{saved.uplink_port} tls={saved.uplink_tls or 'off'} "
-                                  f"enabled={saved.enabled} "
-                                  f"answers={saved.answers_calls} netmail_level={saved.netmail_min_level}"))
             return saved
 
         return await lane.run(_persist)

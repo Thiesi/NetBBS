@@ -117,11 +117,11 @@ from netbbs.mrc.settings import (
     MrcSettingsError,
     OpenRoomSettings,
     load_open_room_settings,
-    save_open_room_settings,
+    save_open_room_settings_without_commit,
     default_port_for,
     list_mrc_mappings,
     load_mrc_settings,
-    save_mrc_settings,
+    save_mrc_settings_without_commit,
     validate_mrc_settings,
 )
 from netbbs.mrc.protocol import sanitize_room
@@ -2451,16 +2451,28 @@ async def _mrc_settings_screen(
             # Validate both halves before writing either, so a bad open-room
             # value cannot leave the hub half saved and the rest not.
             validate_mrc_settings(candidate)
-            open_saved = save_open_room_settings(db, open_candidate)
-            saved = save_mrc_settings(db, candidate)
-            record_action(
-                db, actor=actor, action="set_mrc_settings",
-                detail=(
-                    f"enabled={saved.enabled} hub={saved.host}:{saved.port} tls={saved.tls} site={saved.site_name!r} "
-                    f"open_rooms={open_saved.enabled} cap={open_saved.cap} retention={open_saved.retention_days}d "
-                    f"send_caller_ip={saved.send_caller_ip} send_caller_meta={saved.send_caller_meta}"
-                ),
-            )
+            # Both halves and the audit entry commit together or not at
+            # all; the entry names every value the save wrote (issue #1505).
+            with db.connection:
+                open_saved = save_open_room_settings_without_commit(db, open_candidate)
+                saved = save_mrc_settings_without_commit(db, candidate)
+                blocklist = ",".join(open_saved.blocklist) or "(none)"
+                record_action_without_commit(
+                    db, actor=actor, action="set_mrc_settings",
+                    detail=(
+                        f"enabled={saved.enabled} hub={saved.host}:{saved.port} tls={saved.tls} "
+                        f"site={saved.site_name!r} info_sysop={saved.info_sysop!r} "
+                        f"info_description={saved.info_description!r} info_telnet={saved.info_telnet!r} "
+                        f"info_ssh={saved.info_ssh!r} info_web={saved.info_web!r} "
+                        f"open_rooms={open_saved.enabled} cap={open_saved.cap} "
+                        f"retention={open_saved.retention_days}d open_min_level={open_saved.min_level} "
+                        f"open_min_age={'none' if open_saved.min_age is None else open_saved.min_age} "
+                        f"open_age_requirement={open_saved.age_requirement or 'none'} "
+                        f"open_name_requirement={open_saved.name_requirement or 'none'} "
+                        f"open_blocklist={blocklist} "
+                        f"send_caller_ip={saved.send_caller_ip} send_caller_meta={saved.send_caller_meta}"
+                    ),
+                )
             return saved
 
         saved = await lane.run(_persist)

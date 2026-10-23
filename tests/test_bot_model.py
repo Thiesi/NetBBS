@@ -446,3 +446,23 @@ def test_real_link_model_disclosure_caller_claim_and_old_peer_fallback(tmp_path)
             await caller.close()
             await host.close()
     asyncio.run(run())
+
+
+def test_model_settings_save_is_audited_without_the_api_key(db, sysop):
+    """Issue #1505: each save names every setting it changed and says only
+    whether the API key changed, never its value."""
+    config = model.save_settings(db, model.ModelSettings(enabled=False, model="local-test"), actor=sysop,
+                                 api_key="first-secret")
+    model.save_settings(db, replace(config, day_tokens=500, log_prompts=True, endpoint="https://ai.example/v1"),
+                        actor=sysop, api_key="first-secret")
+    model.save_settings(db, replace(model.settings(db), allow_guests=True), actor=sysop, api_key="second-secret")
+    rows = db.connection.execute(
+        "SELECT actor_user_id, detail FROM moderation_log WHERE action = 'set_model_conversation' ORDER BY id"
+    ).fetchall()
+    assert [row["actor_user_id"] for row in rows] == [sysop.id] * 3
+    first, second, third = (row["detail"] for row in rows)
+    assert first == "model='local-test' api_key=changed"
+    assert second == "endpoint='https://ai.example/v1' log_prompts=True day_tokens=500 api_key=unchanged"
+    assert third == "allow_guests=True api_key=changed"
+    every = " ".join(row["detail"] for row in db.connection.execute("SELECT detail FROM moderation_log"))
+    assert "secret" not in every
