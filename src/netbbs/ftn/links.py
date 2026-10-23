@@ -18,8 +18,8 @@ caller that only presents its address -- `give_held_unproven` is for
 nodelist nodes, never for links. A link the SysOp switched off
 (`disabled`) still has to prove its password, so nobody else can take its
 address, but it is given nothing and what it sends is held. `paused` is
-the link's own `%PAUSE` (the AreaFix server, #1479 part 2): its echomail
-fan-out stops, its netmail does not.
+the link's own `%PAUSE` (`netbbs.ftn.robot_server`): its echomail and file
+echoes stop, its netmail does not.
 
 **Routing.** `link_for_destination` is the one answer to "does this
 address belong to a link?": a link's own address, or a point under a
@@ -28,17 +28,19 @@ downlink. `netbbs.ftn.queue.enqueue_outbound_without_commit` and
 and file they queue, so netmail, bounces and anything later stages queue
 for a linked address go to the link's own outbound, whoever queued it.
 
-**Extension points for #1479 part 2.** `ftn_link_areas` holds the echoes
-and file echoes each link carries (`link_areas`, `set_link_area_without_commit`,
-`links_carrying`), and `enqueue_for_link_without_commit` queues one encoded
-message for one link -- with `fanout_reference` for a copy of one post sent
-to several links, since a reference id is unique per network and kind.
-`netbbs.ftn.route.merge_seen_by_path` writes SEEN-BY and PATH for it.
+**Areas and fan-out** (issue #1479). `ftn_link_areas` holds the echoes
+and file echoes each link carries, read-write or read-only (`link_areas`,
+`set_link_area_without_commit`, `links_carrying`), and
+`enqueue_for_link_without_commit` queues one encoded message for one link
+-- with `fanout_reference` for a copy of one post sent to several links,
+since a reference id is unique per network and kind. `netbbs.ftn.fanout`
+sends echomail on, `netbbs.ftn.ticfwd` file echoes, and
+`netbbs.ftn.robot_server` lets a link change its own areas.
 
 **Bounds.** At most `MAX_LINKS_PER_NETWORK` links per network; at most
 `queue.MAX_PENDING_PER_LINK` messages and `outbound.MAX_PENDING_FILES_PER_LINK`
 files wait for one link, and more is refused; what waits for a link longer
-than `outbound.HOLD_DAYS` is dropped and its sender told. A point's
+than `outbound.HOLD_DAYS` is dropped and its sender told. A link's
 echomail waiting for a moderator (`ftn_point_waiting`) keeps at most
 `MAX_POINT_WAITING` per network, oldest dropped, for `POINT_WAITING_DAYS`.
 """
@@ -367,7 +369,7 @@ def count_link_waiting(db: Database, link_id: int) -> tuple[int, int]:
     return messages, files
 
 
-# --- the extension points for the hub's part 2 (#1479) -------------------------
+# --- areas and fan-out (#1479) ---------------------------------------------------
 
 
 def fanout_reference(reference_id: str, link: FtnLink) -> str:
@@ -436,15 +438,16 @@ def links_carrying(db: Database, network_id: int, kind: str, tag: str) -> list[F
     return [_link_from_row(row) for row in rows]
 
 
-# --- a point's echomail waiting for a moderator ---------------------------------
+# --- a link's echomail waiting for a moderator ----------------------------------
 
 
-def hold_point_echomail_without_commit(db: Database, network_id: int, link_id: int | None, post_id: str,
-                                       packed: bytes) -> None:
-    """Keep a point's echomail, as it goes to the uplink, until its post is
-    approved (`release_point_echomail_without_commit`). At most
-    `MAX_POINT_WAITING` per network: the oldest is dropped, with a node-log
-    line, and its post stays local."""
+def hold_link_echomail_without_commit(db: Database, network_id: int, link_id: int | None, post_id: str,
+                                      packed: bytes) -> None:
+    """Keep a point's or downlink's echomail, as it was received, until its
+    post is approved (`release_link_echomail_without_commit`): only then is
+    it sent on (issues #1478, #1479). At most `MAX_POINT_WAITING` per
+    network: the oldest is dropped, with a node-log line, and its post
+    stays local."""
     db.connection.execute(
         "INSERT OR REPLACE INTO ftn_point_waiting (post_id, network_id, link_id, packed, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -460,18 +463,21 @@ def hold_point_echomail_without_commit(db: Database, network_id: int, link_id: i
         ).fetchall()
         for row in rows:
             db.connection.execute("DELETE FROM ftn_point_waiting WHERE post_id = ?", (row["post_id"],))
-            _logger.warning("FTN: a point's post %s waited for approval among more than %d; it stays local",
+            _logger.warning("FTN: a link's post %s waited for approval among more than %d; it stays local",
                             row["post_id"], MAX_POINT_WAITING)
 
 
-def release_point_echomail_without_commit(db: Database, post_id: str) -> bool:
-    """A point's post was approved: queue its echomail for the uplink.
-    False when none waits for it (not a point's post, or dropped)."""
-    from netbbs.ftn.queue import enqueue_outbound_without_commit
+def release_link_echomail_without_commit(db: Database, post_id: str) -> bool:
+    """A link's post was approved: send its echomail on, to the uplink and
+    every other link carrying the echo (`netbbs.ftn.fanout`). False when
+    none waits for it (not a link's post, or dropped) or nothing was
+    queued. Raises nothing for a full queue: the copies that fit go."""
+    from netbbs.ftn.fanout import fan_out_without_commit
+    from netbbs.ftn.packet import unpack_message
 
     try:
         row = db.connection.execute(
-            "SELECT network_id, packed FROM ftn_point_waiting WHERE post_id = ?", (post_id,)
+            "SELECT network_id, link_id, packed FROM ftn_point_waiting WHERE post_id = ?", (post_id,)
         ).fetchone()
     except sqlite3.OperationalError:  # a schema older than points
         return False
@@ -481,10 +487,25 @@ def release_point_echomail_without_commit(db: Database, post_id: str) -> bool:
     db.connection.execute("DELETE FROM ftn_point_waiting WHERE post_id = ?", (post_id,))
     if network is None or not network.enabled:
         return False
-    return enqueue_outbound_without_commit(
-        db, network.id, kind="echomail", reference_id=post_id, destination=str(network.uplink_address),
-        packed=bytes(row["packed"]),
-    )
+    try:
+        packed = unpack_message(bytes(row["packed"]))
+    except FtnFormatError as exc:
+        _logger.warning("FTN %s: a link's post %s can't be sent on: %s", network.name, post_id, exc)
+        return False
+    tag = _area_of(packed.text)
+    if tag is None:
+        return False
+    sender = get_link(db, row["link_id"]) if row["link_id"] is not None else None
+    return fan_out_without_commit(db, network, packed, tag, post_id, sender=sender).copies > 0
+
+
+def _area_of(text: bytes) -> str | None:
+    """The echo tag of a packed echomail's text, from its AREA line."""
+    first = text.split(b"\r", 1)[0].removeprefix(b"\x01")
+    if not first.startswith(b"AREA:"):
+        return None
+    tag = first[5:].decode("ascii", errors="replace").strip()
+    return tag or None
 
 
 def prune_point_waiting(db: Database, *, now: datetime.datetime | None = None) -> int:

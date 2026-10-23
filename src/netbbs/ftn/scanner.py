@@ -1,5 +1,6 @@
 """
-The scanner: local posts on FTN boards out to the uplink (design doc §6.8).
+The scanner: local posts on FTN boards out to the uplink, and to the points
+and downlinks carrying their echo (design doc §6.8; issue #1479).
 
 `export_post_if_ftn` is called wherever a post becomes visible on its
 board -- written on an unmoderated board, or approved on a moderated one
@@ -13,9 +14,10 @@ Nothing is exported that:
 - sits on a board carrying no echo, or on a network that is not enabled;
 - arrived from FTN (`posts.ftn_inbound`): a gateway that re-exported what
   it tossed would loop mail back into the network. The exception is a
-  point's echomail (issue #1478), which this node sends to the uplink as
-  its own: kept in `ftn_point_waiting` while its post waits for a
-  moderator, it is queued here once the post is approved;
+  point's or downlink's echomail (issues #1478, #1479), which this node
+  sends on to the uplink and its other links: kept in `ftn_point_waiting`
+  while its post waits for a moderator, it is fanned out here once the
+  post is approved;
 - is an edit of an earlier post. FTN has no edits, and a second copy
   would read as a new message;
 - sits on a board that sends real names (`sends_real_names`, issue
@@ -23,8 +25,12 @@ Nothing is exported that:
 
 Each exported post gets a MSGID, stored on the post so replies from
 elsewhere thread under it, and a REPLY when it answers a post that has
-one. SEEN-BY carries this node and its uplink and PATH this node (a point
-adds neither: its boss does it for it, FSC-0074).
+one. SEEN-BY carries this node, its uplink and every downlink the post goes
+to, and PATH this node (a point adds neither: its boss does it for it,
+FSC-0074). Each point and downlink carrying the echo gets its own copy of
+the same message (`netbbs.ftn.fanout.link_copies_without_commit`); one at
+its queue bound is skipped with a node-log line, and the post still goes
+to the uplink.
 
 A copy of a post written to several boards at once (issue #1298, design doc
 §6.8) is its own echomail message with its own MSGID. Its first body line,
@@ -88,12 +94,13 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
     if row is None or row["edit_of_post_id"] is not None:
         return False
     if row["ftn_inbound"]:
-        # A point's echomail goes on to the uplink once its post is
-        # approved (issue #1478); anything else from FTN never goes back.
-        from netbbs.ftn.links import release_point_echomail_without_commit
+        # A link's echomail goes on to the uplink and the other links once
+        # its post is approved (issues #1478, #1479); anything else from
+        # FTN never goes back.
+        from netbbs.ftn.links import release_link_echomail_without_commit
 
         try:
-            queued = release_point_echomail_without_commit(db, post.post_id)
+            queued = release_link_echomail_without_commit(db, post.post_id)
         except FtnQueueFullError as exc:
             db.connection.rollback()
             _logger.warning("FTN %s: a point's post %s was not sent on: %s", network.name, post.post_id, exc)
@@ -127,10 +134,13 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
             reply_msgid = parent["ftn_msgid"] or None
             to_name = _reply_to_name(db, parent, real_names=real_names)
     local_time, offset = _local_time(db, post.created_at)
+    # --- echomail fan-out (issue #1479): the links carrying the echo get it too ---
+    links = _links_carrying(db, network, area.tag)
+    # --- end echomail fan-out ---
     message = _echomail(
         db, network, area.tag, to_name=to_name, from_name=from_name, subject=post.subject,
         body=_crossposted_line(db, post, area.network_id, area.tag) + post.body, date=local_time,
-        origin_text=area.origin_text,
+        origin_text=area.origin_text, links=links,
     )
     if real_names:
         size = encoded_name_bytes(from_name, outbound_charset(message))
@@ -148,9 +158,10 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
         message.kludges.append(("REPLY", reply_msgid))
     message.kludges += [("PID", PRODUCT), ("TZUTC", format_tzutc(offset))]
     try:
+        encoded = encode_message(message)
         queued = enqueue_outbound_without_commit(
             db, network.id, kind="echomail", reference_id=post.post_id, destination=str(network.uplink_address),
-            packed=_pack(message),
+            packed=pack_message(encoded),
         )
     except FtnQueueFullError as exc:
         db.connection.rollback()
@@ -158,18 +169,38 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
         return False
     if queued:
         db.connection.execute("UPDATE posts SET ftn_msgid = ? WHERE post_id = ?", (msgid, post.post_id))
+        if links:
+            from netbbs.ftn.fanout import link_copies_without_commit
+
+            link_copies_without_commit(db, network, encoded, area.tag, post.post_id, links)
     db.connection.commit()
     return queued
 
 
+def _links_carrying(db: Database, network: FtnNetwork, tag: str) -> list:
+    """The active points and downlinks carrying echo `tag` (issue #1479);
+    none on a schema older than links, or for a node that is a point."""
+    import sqlite3
+
+    from netbbs.ftn.links import ECHO, links_carrying
+
+    if network.our_address.point or network.id is None:
+        return []
+    try:
+        return links_carrying(db, network.id, ECHO, tag)
+    except sqlite3.OperationalError:
+        return []
+
+
 def _echomail(
     db: Database, network: FtnNetwork, tag: str, *, to_name: str, from_name: str, subject: str, body: str,
-    date: datetime.datetime | None, origin_text: str = "",
+    date: datetime.datetime | None, origin_text: str = "", links: list = (),
 ) -> FtnMessage:
     """The echomail message a post on echo `tag` leaves as, but for its
     kludges: everything that decides its character set. `origin_text` is
     the board's own Origin (issue #1474); empty, the network's is used, and
-    without one the BBS's name."""
+    without one the BBS's name. `links` are the points and downlinks it goes
+    to as well (issue #1479): each downlink joins its SEEN-BY."""
     ours, uplink = network.our_address, network.uplink_address
     return FtnMessage(
         to_name=to_name,
@@ -180,7 +211,9 @@ def _echomail(
         date=date,
         tear_line=PRODUCT,
         origin=build_origin(origin_text or network.origin_text or get_node_display_name(db), ours),
-        seen_by=[uplink.net_node] if ours.point else [ours.net_node, uplink.net_node],
+        seen_by=[uplink.net_node] if ours.point else sorted({ours.net_node, uplink.net_node,
+                                                             *(link.address.net_node for link in links
+                                                               if not link.is_point)}),
         path=[] if ours.point else [ours.net_node],
         orig_net=ours.net,
         orig_node=ours.node,
@@ -318,11 +351,6 @@ def _crossposted_line(db: Database, post: Post, network_id: int, own_tag: str) -
     if not tags:
         return ""
     return f"{CROSSPOSTED_PREFIX}{', '.join(tags)}\n"
-
-
-def _pack(message: FtnMessage) -> bytes:
-    """The encoded packed message, as the queue stores it."""
-    return pack_message(encode_message(message))
 
 
 def _name_of(label: str) -> str:
