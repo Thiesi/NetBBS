@@ -2159,7 +2159,7 @@ model do not change, and FTN content never enters them. Decisions and the
 alternatives rejected for each are in §16, "Issue #166". Stage A of the FTN
 round (§16, "Issue #1154", tracker #1461, planned for v7.36) adds file
 echoes, FileFix and the robot rules, the nodelist from a file echo, echo-list
-import, bad echoes and the held-item actions. They are described below as
+import, unknown echoes and the held-item actions. They are described below as
 they are to be built. The round's later stages are listed under "Planned" at
 the end of this section.
 
@@ -2231,9 +2231,10 @@ per board. Nothing is mapped by default.
     kept as the post's date.
   - **Duplicates.** A message whose MSGID (or, without one, content hash) was
     seen on that area before is dropped.
-  - **Bad echoes.** A message for an area no board carries is held as a *bad
-    echo*, under its network and tag. The **Bad echoes** screen, reached from
-    the FTN status screen, shows one row per tag with its message count and
+  - **Unknown echoes.** A message for an area no board carries is held as an
+    *unknown echo* (a "bad echo" in tosser terms), under its network and tag.
+    The **Unknown echoes** screen, reached from
+    the FTN status screen with **[U]nknown echoes**, shows one row per tag with its message count and
     when it was first and last seen. Its actions:
     - **[C]reate** opens the new-board editor with the tag filled in. Saving
       maps the board and re-tosses the tag's messages.
@@ -2242,7 +2243,7 @@ per board. Nothing is mapped by default.
     - **[D]elete** drops the tag's messages.
 
     A re-toss goes through the ordinary tosser, with the board's moderation,
-    duplicate checks and threading. Bad-echo messages are kept apart from the
+    duplicate checks and threading. Unknown-echo messages are kept apart from the
     held store: at most 1,000 per tag and 10,000 or 64 MiB overall. The
     oldest are dropped first, and the drops are counted on the status screen.
     A board is never created without the SysOp (§16, "Issue #1154", Decision
@@ -2364,8 +2365,8 @@ says; at check 10 a duplicate is dropped and counted, not held.
 4. `Pw` matches the network's TIC password, compared case-insensitively. With
    no TIC password set, every TIC is held.
 5. `Area` is mapped to a file area of this network, or is the network's
-   nodelist echo (under "Nodelist" below). Any other tag is a bad echo:
-   unknown file echoes get their own rows on the Bad echoes screen, where
+   nodelist echo (under "Nodelist" below). Any other tag is an unknown echo:
+   unknown file echoes get their own rows on the Unknown echoes screen, where
    **[C]reate** opens the new-file-area editor and **[M]ap** picks a local
    file area. Either one then runs the tag's held pairs through these checks
    again, from check 6, the way echomail is re-tossed. A pair that passes
@@ -2388,14 +2389,18 @@ A pair that passes goes into the area through the area's own moderation
 as an upload does. Its description comes from the `LDesc` lines, else `Desc`,
 else the archive's `FILE_ID.DIZ` (§6.2), and is normalised as every
 description is. The file is recorded as arrived by TIC, with its network,
-tag and origin address. It has no local uploader, and the listing shows the
-network and the TIC's `Origin` address in place of a username.
+tag, origin address and CRC-32. It has no local uploader, and the listing
+shows the network and the TIC's `Origin` address in place of a username, as
+`nixNet (86:549/1)`.
 
 - **Pairing.** A half whose partner hasn't arrived waits in the held store,
   with the reason "waiting for its .TIC" or "waiting for `<file>`". It is
   paired as soon as the partner comes, in any later session with the same
-  network. A half still unpaired after 7 days is deleted, with a node-log
-  line.
+  network. A TIC alone that failed one of checks 3-6 waits the same way,
+  with that reason, and the pair is checked again from the start when its
+  file comes. A half still unpaired after 7 days is deleted, with a node-log
+  line. A TIC that doesn't parse names no file: it is held, but neither
+  pairs nor expires.
 - **Replaces.** Once the new file is visible (when stored in an unmoderated
   area, or on approval in a moderated one), each `Replaces` value removes the
   files that match it. Only files in the same area that arrived by TIC can
@@ -2414,10 +2419,11 @@ its actions are:
   SysOp's own upload, through that area's normal path. A file held together
   with its TIC keeps the TIC's description. A name already in the area is
   refused.
-- **[X] export** asks for a path on the host and writes the file there with
+- **[E]xport** asks for a path on the host and writes the file there with
   the rules for SysOp uploads (§6.2): written beside the destination and
   renamed, never over an existing file, no symlink followed, and
-  audit-logged.
+  audit-logged. A folder as the path writes the file into it under its own
+  name. The item stays held until it is deleted.
 - **[D]elete** throws the item away.
 
 The store holds at most 200 items and 256 MiB, enough for a file at the

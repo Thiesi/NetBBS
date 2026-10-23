@@ -2807,17 +2807,19 @@ remote hub.
 | **Decide first** | Which network to join; fsxNet is the usual first network for a new BBS |
 
 NetBBS can join FidoNet or an FTN othernet, such as fsxNet, as an ordinary FTN
-node. Echomail arrives on boards and netmail in Mail.
+node. Echomail arrives on boards, file echoes in file areas, and netmail in
+Mail.
 
 > [!IMPORTANT]
-> It is a gateway, not NetBBS Link. An FTN board is never also a Linked
-> board, and nothing that arrives over FTN is trust-evaluated.
+> It is a gateway, not NetBBS Link. An FTN board or file area is never also
+> Linked, and nothing that arrives over FTN is trust-evaluated.
 
 In this chapter: [Join a network](#join-a-network) ·
 [AreaFix and FileFix](#areafix-and-filefix) ·
-[Join echoes from the hub's list](#join-echoes-from-the-hubs-list) · [Netmail](#netmail) ·
-[Held packets and status](#held-packets-and-status) ·
-[Not supported](#not-supported)
+[Join echoes from the hub's list](#join-echoes-from-the-hubs-list) ·
+[File echoes](#file-echoes) · [Netmail](#netmail) ·
+[Held items and status](#held-items-and-status) ·
+[Unknown echoes](#unknown-echoes) · [Not supported](#not-supported)
 
 ### Join a network
 
@@ -2961,6 +2963,42 @@ Nothing is created before **Save**. If anything can't be created, nothing is,
 and the draft says why. The list may be up to 1 MiB and 10,000 lines; lines
 that aren't `TAG description` are skipped and counted.
 
+### File echoes
+
+A file echo distributes files the way an echo distributes messages. nixNet,
+for example, sends its weekly nodelist in NIX_LIST and its infopack in
+NIX_INFO. Each file comes with a small `.TIC` file that names it, its echo,
+its CRC and a password.
+
+1. In the network's settings, enter the **TIC password** the hub gave you.
+   Until you do, every file echo is held for you to look at, never accepted.
+2. On each file area that should carry a file echo, use
+   <kbd>F</kbd> **File echo (FTN)** on the area's screen and enter the tag,
+   such as `NIX_INFO`. Each file echo goes to one area, and a Linked area
+   can't carry one.
+3. Ask the hub to send it with FileFix.
+
+#### How file echoes behave
+
+- A file is checked before it is stored: it came from your hub in a secure
+  session, its TIC password matches, its area is carried here, its name is
+  a plain file name, and its size and CRC match what arrived. It must be
+  within your **Upload cap** (Settings, Limits & retention), and never over
+  64 MiB. A file that fails a check is held with its TIC and the reason.
+- It goes through the file area's own moderation, as an upload does: in a
+  moderated area it waits under <kbd>P</kbd> **Pending files**.
+- Its description comes from the TIC, else from the archive's
+  `FILE_ID.DIZ`. Its uploader reads as the network and the address that
+  sent it out, such as `nixNet (86:549/1)`.
+- The same file arriving again is dropped, and the call's summary counts it.
+- A TIC may say the new file **replaces** older ones, such as last week's
+  nodelist. That removes only files that also came by TIC into the same
+  area, once the new file is visible. A caller's upload is never replaced:
+  a TIC file with the same name as one is held instead.
+- A file and its TIC can come in different calls. The first to arrive waits
+  in the held store and is paired when the other comes. One still alone
+  after 7 days is deleted, and the log says so.
+
 ### Netmail
 
 Netmail is personal mail to an address written as `Name (zone:net/node)`.
@@ -3020,31 +3058,61 @@ Either way the file may be the list itself or a ZIP holding it. A list whose
 first line carries a check value that doesn't match is refused. A list
 imported by hand is kept like one from the echo, so later diffs apply to it.
 
-### Held packets and status
+### Held items and status
 
-Some packets are held instead of tossed:
+Some packets and files are held instead of tossed:
 
-- a packet from a caller that didn't prove a password;
+- everything from a caller that didn't prove a password, unopened;
 - a packet addressed to another address;
 - a message that couldn't be stored, for example because a mailbox was full;
-- a file that isn't mail: a ZIP archive with no packets in it (a file echo's
-  archive, say) is held whole, and any other file inside a mail bundle is
-  held on its own beside the tossed packets.
+- a file echo's file and TIC that failed a check, together;
+- a file waiting for its TIC, or a TIC waiting for its file. A ZIP archive
+  with no packets in it is held whole, and any other file inside a mail
+  bundle is held on its own beside the tossed packets.
 
-If the held store is full, what can't be kept is counted as lost in the last
-call's summary and written to the log.
+The store holds 200 items and 256 MiB. If it is full, what can't be kept is
+counted as lost in the last call's summary and written to the log.
 
 Look at them under **Node ▸ Echomail & netmail (FTN)** with
-<kbd>H</kbd> **Held packets**, then <kbd>R</kbd> **Release** (toss) or
-<kbd>D</kbd> **Delete** each one.
+<kbd>H</kbd> **Held items**:
+
+- <kbd>R</kbd> **Release** tosses a packet as if it came from a known
+  system. It works on packets only; for a file it says why.
+- <kbd>S</kbd> **Save** stores a held file in a file area you pick, as your
+  own upload. A file held with its TIC keeps the TIC's description. A name
+  already in the area is refused.
+- <kbd>E</kbd> **Export** writes a held file to a folder or path on the
+  host. An existing file is never overwritten, nothing is written through a
+  symbolic link, and the item stays held until you delete it.
+- <kbd>D</kbd> **Delete** throws it away.
 
 **Node ▸ Echomail & netmail (FTN)** also shows each network's last call,
 errors, waiting messages and recently answered calls.
 <kbd>P</kbd> **Poll now** calls the hub at once.
 
+### Unknown echoes
+
+An echo the hub sends that no board carries, or a file echo no file area
+carries, is an *unknown echo*. Its messages and files wait for you instead of
+being lost. **Node ▸ Echomail & netmail (FTN)** counts them, and
+<kbd>U</kbd> **Unknown echoes** lists one row per tag, with how many wait and
+when the first and last came:
+
+- <kbd>C</kbd> **Create** opens a new board, or a new file area for a file
+  echo, with the tag as its name. Saving it carries the echo there and tosses
+  what waited.
+- <kbd>M</kbd> **Map** picks an existing local board or file area that
+  carries no echo, and tosses what waited into it.
+- <kbd>D</kbd> **Delete** drops what waited for that tag.
+
+Tossing again goes through the board's moderation and duplicate checks, and a
+file echo's files through the checks above. At most 1,000 messages wait per
+tag and 10,000 (or 64 MiB) in all; beyond that the oldest are dropped, and
+the status screen counts them.
+
 ### Not supported
 
-- file echoes (TIC) and file requests;
+- file requests, and sending files out to a file echo;
 - acting as a hub for other nodes;
 - ARC and ARJ bundles. Ask the hub for ZIP bundles or uncompressed packets.
 

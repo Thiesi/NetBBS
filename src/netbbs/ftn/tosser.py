@@ -14,8 +14,9 @@ The tosser: inbound FTN packets into boards and Mail (design doc §6.8).
     future is today, so a wrong clock elsewhere can't pin a message to
     the top.
 
-  An area no board carries is skipped and counted, which is normal while
-  a hub still sends an echo the SysOp has unmapped.
+  A message for an area no board carries is held as a *bad echo* under
+  its network and tag (issue #1466), for the SysOp to create or map a
+  board and re-toss (`retoss_bad_echo`), or delete.
 - **Netmail** addressed to this node is delivered to the account whose
   username (or a name it was renamed away from) matches its To name,
   case-insensitively, else to the one account whose verified real name it
@@ -82,6 +83,18 @@ class TossResult:
     lost: int = 0  # held store full: nothing could keep them
     truncated_packet: bool = False
     refused_packet: str | None = None  # why the whole packet was held
+    bad_echo: int = 0  # messages held as bad echoes (issue #1466)
+    bad_echo_dropped: int = 0  # older bad-echo messages the bounds dropped for them
+    files: int = 0  # file-echo files stored (issue #1462)
+    file_duplicates: int = 0
+
+    def add(self, other: TossResult) -> None:
+        """Count `other` into this total."""
+        for name in ("posts", "netmail", "duplicates", "not_for_us", "blocked", "held", "lost", "bad_echo",
+                     "bad_echo_dropped", "files", "file_duplicates"):
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+        for tag, count in other.unknown_areas.items():
+            self.unknown_areas[tag] = self.unknown_areas.get(tag, 0) + count
 
 
 def toss_packet(
@@ -110,7 +123,8 @@ def toss_packet(
         try:
             message = decode_message(packed, default_charset=network.default_charset)
             if message.is_echomail:
-                _toss_echomail(db, network, message, packed, header, result)
+                _toss_echomail(db, network, message, packed, header, result, data=data,
+                               remote_address=remote_address)
             else:
                 _toss_netmail(db, network, message, packed, header, result)
         except (_Unstorable, FtnFormatError) as exc:
@@ -132,27 +146,54 @@ def release_held(db: Database, network: FtnNetwork, held_id: int) -> TossResult:
     """Toss a held packet as if it came from a secure session -- the SysOp
     looked at it and vouches for it -- and drop it from the held store.
     What still can't be stored is held again, as a new entry with the
-    reason it gives now."""
-    from netbbs.ftn.queue import delete_held, held_content, list_held
+    reason it gives now. Only a packet can be released: a held file or
+    TIC raises `FtnFormatError` saying so, and stays held (issue #1460)."""
+    from netbbs.ftn.queue import HELD_PACKET, delete_held, get_held, held_content
 
-    held = next((h for h in list_held(db) if h.id == held_id), None)
+    held = get_held(db, held_id)
     content = held_content(db, held_id)
     if held is None or content is None:
-        raise FtnFormatError("that held packet is gone")
+        raise FtnFormatError("that held item is gone")
+    if held.kind != HELD_PACKET:
+        raise FtnFormatError(
+            f"{held.file_name} is a {'TIC' if held.kind == 'tic' else 'file'}, not a mail packet, so it can't be "
+            "released: [S]ave it to a file area or [E]xport it"
+        )
     delete_held(db, held_id)
     return toss_packet(db, network, content, secure=True, vouched=True, remote_address=held.remote_address,
                        file_name=held.file_name)
+
+
+def retoss_bad_echo(db: Database, network: FtnNetwork, tag: str) -> TossResult:
+    """Toss a bad echo's held messages again, oldest first, through the
+    ordinary tosser -- the board's moderation, duplicate checks and
+    threading -- once the SysOp has created or mapped its board. A message
+    is taken out of the bad-echo store as it is tossed; one whose area is
+    still unmapped comes straight back."""
+    from netbbs.ftn.queue import bad_echo_ids, take_bad_echo
+
+    total = TossResult()
+    for message_id in bad_echo_ids(db, network.id, tag):
+        taken = take_bad_echo(db, message_id)
+        if taken is None:
+            continue
+        remote, packet = taken
+        total.add(toss_packet(db, network, packet, secure=True, vouched=True, remote_address=remote,
+                              file_name=f"unknown echo {tag.upper()}"))
+    return total
 
 
 class _Unstorable(Exception):
     """This message can't be stored here; it is held with this reason."""
 
 
-def _toss_echomail(db, network, message: FtnMessage, packed, header, result: TossResult) -> None:
+def _toss_echomail(db, network, message: FtnMessage, packed, header, result: TossResult, *, data: bytes,
+                   remote_address: str) -> None:
     board_id = board_id_for_area(db, network.id, message.area)
     if board_id is None:
         tag = message.area.upper()
         result.unknown_areas[tag] = result.unknown_areas.get(tag, 0) + 1
+        _hold_bad_echo(db, network, tag, header, packed, data, remote_address, result)
         return
     board = get_board_by_id(db, board_id)
     if not record_seen_msgid_without_commit(db, network.id, message.area.upper(), _dupe_key(message, packed)):
@@ -345,6 +386,20 @@ def _fit(text: str, max_bytes: int, *, note: str = _CUT_NOTE) -> str:
         return text
     room = max_bytes - len(note.encode("utf-8"))
     return text.encode("utf-8")[:room].decode("utf-8", errors="ignore") + note
+
+
+def _hold_bad_echo(db, network, tag: str, header, packed, data, remote_address, result: TossResult) -> None:
+    """Keep a message for an area no board carries, as a packet of its own
+    (issue #1466)."""
+    from netbbs.ftn.queue import hold_bad_echo
+
+    db.connection.rollback()
+    try:
+        single = build_packet(header, [packed])
+    except (FtnFormatError, ValueError):
+        single = data  # re-tossed whole; what was tossed from it is a duplicate then
+    result.bad_echo_dropped += hold_bad_echo(db, network.id, tag, remote_address, single)
+    result.bad_echo += 1
 
 
 def _hold_packet(db, network, data, remote_address, file_name, reason, result: TossResult) -> TossResult:

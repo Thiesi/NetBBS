@@ -369,10 +369,7 @@ def test_mapped_tags_cant_be_imported_again(db, sysop):
         import_echoes(db, network, sysop, ECHOMAIL, [EchoListEntry("NIX_LINUX", "Linux again")], None)
 
 
-def test_a_file_echo_list_makes_file_areas_and_asks_filefix(db, sysop, monkeypatch):
-    mapped = []
-    monkeypatch.setattr(ftn_networks, "set_file_area_tic",
-                        lambda db, area, network_id, tag: mapped.append((area.name, network_id, tag)), raising=False)
+def test_a_file_echo_list_makes_file_areas_and_asks_filefix(db, sysop):
     network = _network(db)
     entries = list(parse_echolist((FIXTURES / "NIXNET.FA").read_bytes()).entries)
 
@@ -380,8 +377,11 @@ def test_a_file_echo_list_makes_file_areas_and_asks_filefix(db, sysop, monkeypat
 
     assert result.mapped and result.requests == 1
     assert {a.name for a in list_file_areas(db)} >= {"NixNet Nodelists", "NixNet InfoPacks"}
-    assert mapped == [("NixNet Nodelists", network.id, "NIX_LIST"), ("NixNet InfoPacks", network.id, "NIX_INFO"),
-                      ("NixNet BinkD Nodelists", network.id, "NIX_BINKD")]
+    mapped = {area.name: ftn_networks.file_area_tic(db, area) for area in list_file_areas(db)}
+    assert {name: (m.network_id, m.tag) for name, m in mapped.items() if m is not None} == {
+        "NixNet Nodelists": (network.id, "NIX_LIST"), "NixNet InfoPacks": (network.id, "NIX_INFO"),
+        "NixNet BinkD Nodelists": (network.id, "NIX_BINKD")}
+    assert echolist_module.mapped_tags(db, network.id, FILE_ECHOES) == {"NIX_LIST", "NIX_INFO", "NIX_BINKD"}
     (message,) = _sent(db, network.id)
     assert (message.to_name, message.body) == ("FileFix", "+NIX_LIST\n+NIX_INFO\n+NIX_BINKD")
 

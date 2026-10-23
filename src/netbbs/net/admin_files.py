@@ -35,6 +35,7 @@ from netbbs.files.entries import (
     expired_file_purge_at,
     list_expired_files,
 )
+from netbbs.ftn.networks import list_networks
 from netbbs.link.boards import LinkContext
 from netbbs.link.files import linked_area_ids, LinkFilesError, is_area_linked, link_file_area
 from netbbs.link.carry import (
@@ -44,6 +45,7 @@ from netbbs.link.carry import (
     mark_carried_reviewed,
 )
 from netbbs.net.char_input import HELP_KEY, reject_unhandled_key
+from netbbs.net.ftn_console import file_area_echo_action, file_area_echo_rows
 from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.location import crumbs, entered, located
 from netbbs.net.picker import ListColumn
@@ -423,14 +425,15 @@ def _area_draft(area: FileArea | None) -> dict:
 
 async def _area_screen(
     session: Session, lane: DatabaseLane, actor: User, *, existing: FileArea | None = None,
-    link_context: LinkContext | None = None, transfers: Any = None,
+    link_context: LinkContext | None = None, transfers: Any = None, initial_name: str = "",
 ) -> FileArea | None:
     """A file area's one screen (issue #1081, design doc §3.5), and the
     screen that creates one -- the same shape as `_board_screen`: its
     files and latest upload, its place and whether it is Linked above the
     fields; the NetBBS Link section after them; [U]p, [D]own, [R]emove,
-    [P]ending files, [E]xpired files, [H]istory and [L]ink while nothing
-    waits to be saved."""
+    [P]ending files, [E]xpired files, [H]istory, [L]ink and [F]ile echo while
+    nothing waits to be saved. `initial_name` fills in a new area's name: a
+    bad file echo's [C]reate starts from its tag (issue #1466)."""
     with entered(session, sanitize_text(existing.name) if existing is not None else "Create file area"):
         current: dict[str, FileArea | None] = {"area": existing}
         own_fingerprint = link_context.node_identity.fingerprint if link_context is not None else None
@@ -500,7 +503,7 @@ async def _area_screen(
         async def refresh() -> DetailState:
             area = current["area"]
             if area is None:
-                return DetailState(draft=_area_draft(None))
+                return DetailState(draft={**_area_draft(None), "name": initial_name})
 
             def _load(db: Database):
                 fresh = next((a for a in list_file_areas(db) if a.id == area.id), area)
@@ -538,6 +541,17 @@ async def _area_screen(
                     [Section("NetBBS Link", rows)], width=session.terminal_width,
                     unicode_style=await lane.run(unicode_style_enabled, actor),
                 )
+            # --- FTN file echo (issue #1462): an area is local, Linked or FTN,
+            # never two, so a Linked area shows no FTN section and offers no
+            # [F]ile echo. ---
+            ftn_networks = [] if linked else await lane.run(list_networks)
+            if ftn_networks:
+                ftn_rows = await lane.run(file_area_echo_rows, area)
+                after = (after + "\r\n" if after else "") + _sections_text(
+                    [Section("FTN", ftn_rows)], width=session.terminal_width,
+                    unicode_style=await lane.run(unicode_style_enabled, actor),
+                )
+            # --- end FTN file echo ---
             actions = []
             if place > 0:
                 actions.append(DetailAction("u", menu_key("U", "p"), _act(lambda a: _move(a, -1)), brief="Earlier in the callers' list"))
@@ -551,6 +565,11 @@ async def _area_screen(
             ]
             if link_context is not None and not linked:
                 actions.append(DetailAction("l", menu_key("L", "ink this file area"), _act(_link), brief="Share it via NetBBS Link"))
+            if ftn_networks:  # issue #1462
+                actions.append(DetailAction(
+                    "f", menu_key("F", "ile echo (FTN)"),
+                    _act(lambda a: file_area_echo_action(session, lane, actor, a)),
+                    brief="Carry an FTN file echo here"))
             return DetailState(
                 draft={**_area_draft(area), **labels},
                 title=sanitize_text(area.name),

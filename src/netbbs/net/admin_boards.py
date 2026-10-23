@@ -1265,7 +1265,7 @@ async def _board_link_rows(
 
 async def _board_screen(
     session: Session, lane: DatabaseLane, actor: User, *, existing: Board | None = None,
-    link_context: LinkContext | None = None,
+    link_context: LinkContext | None = None, initial_name: str = "",
 ) -> Board | None:
     """A message board's one screen (issue #1081, design doc §3.5), and the
     screen that creates one. Above the fields: its posts and latest
@@ -1275,7 +1275,8 @@ async def _board_screen(
     [P]ending posts, [H]istory, and the Link ones -- are offered while
     nothing waits to be saved. Creating uses the same screen with an empty
     draft and no actions, and returns the board it created; nothing is
-    written before [S]ave either way."""
+    written before [S]ave either way. `initial_name` fills in a new board's
+    name: a bad echo's [C]reate starts from its tag (issue #1466)."""
     with entered(session, sanitize_text(existing.name) if existing is not None else "Create message board"):
         current: dict[str, Board | None] = {"board": existing}
         own_fingerprint = link_context.node_identity.fingerprint if link_context is not None else None
@@ -1373,7 +1374,7 @@ async def _board_screen(
         async def refresh() -> DetailState:
             board = current["board"]
             if board is None:
-                return DetailState(draft=_board_draft(None))
+                return DetailState(draft={**_board_draft(None), "name": initial_name})
 
             def _load(db: Database):
                 fresh = next((b for b in list_boards(db) if b.id == board.id), board)

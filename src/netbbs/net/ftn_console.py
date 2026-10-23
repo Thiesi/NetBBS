@@ -11,9 +11,13 @@ Configuration and operation are kept apart, as MRC's are:
 - **Node → Echomail & netmail (FTN)** (`ftn_status_screen`): what the mailer and listener
   last did, what waits, and the work on a running network: poll now,
   AreaFix and FileFix requests, echo-list import, nodelist import, held
-  packets. The robot screens live in `netbbs.net.ftn_robots_console`.
+  items (packets, files and TICs, with [R]elease, [S]ave, [E]xport and
+  [D]elete) and unknown echoes (tags no board or file area carries, with
+  [C]reate, [M]ap and [D]elete). The robot screens live in
+  `netbbs.net.ftn_robots_console`.
 - **A board's echo** (`board_echo_action`): which echo area a board carries,
-  from the board's own screen.
+  from the board's own screen; **a file area's file echo**
+  (`file_area_echo_action`) likewise, from the area's screen.
 
 Every screen follows §3.5: content first, actions on the bar, drafts that
 persist nothing before Save.
@@ -43,16 +47,30 @@ from netbbs.ftn.networks import (
     FtnNetworkError,
     board_area,
     clear_board_area,
+    clear_file_area_tic,
     delete_network,
+    file_area_tic,
     get_network,
     list_networks,
     save_network,
     set_board_area,
+    set_file_area_tic,
 )
 from netbbs.ftn.nodelist import HOW_MANUAL, ImportOutcome, NodelistError, import_list, nodelist_status
 from netbbs.ftn.nodelist_feed import read_list_file
-from netbbs.ftn.queue import count_pending_outbound, delete_held, list_held
-from netbbs.ftn.tosser import release_held
+from netbbs.ftn.queue import (
+    HELD_PACKET,
+    FtnQueueFullError,
+    bad_echo_dropped,
+    count_pending_outbound,
+    delete_bad_echo,
+    delete_held,
+    held_bad_file_echo_ids,
+    list_bad_echoes,
+    list_bad_file_echoes,
+    list_held,
+)
+from netbbs.ftn.tosser import TossResult, release_held, retoss_bad_echo
 from netbbs.moderation.log import record_action
 from netbbs.net.admin_fields import _int_field, _optional_text_field
 from netbbs.net.admin_ui import (
@@ -268,6 +286,9 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                        node_controls=None) -> FtnNetwork | None:
     """One network's settings in a draft; nothing is stored before [S]ave."""
     draft = _network_draft(existing, await lane.run(_listen_port))
+    # --- file echoes (issue #1462) ---
+    draft["tic_password"] = existing.tic_password if existing is not None else ""
+    # --- end file echoes ---
     secret = lambda key: (lambda d: "set" if d[key] else "(not set)")  # noqa: E731
     fields = [
         FieldSpec(key="enabled", label="Enabled",
@@ -332,9 +353,19 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
     ]
     fields += robot_field_specs(_secret_field)  # issue #1463: the Robots section
     fields += _nodelist_fields()  # issue #1464: the Nodelist section, after Robots
+    # --- file echoes (issue #1462): the File echoes section, after Nodelist ---
+    fields.append(
+        FieldSpec(key="tic_password",
+                     label="TIC password", render=secret("tic_password"),
+                     prompt=_secret_field("tic_password", "TIC password"), section="File echoes",
+                     brief="The Pw line of the hub's TIC files",
+                     help="File echoes arrive with a TIC file carrying this password. With none set, every "
+                          "file echo is held for you to look at."))
+    # --- end file echoes ---
 
     async def save(draft: dict) -> FtnNetwork:
         candidate = _network_from_draft(draft, existing)
+        candidate = replace(candidate, tic_password=draft["tic_password"])  # issue #1462
         port = int(draft["listen_port"])
         if not 0 < port < 65536:
             raise FtnNetworkError("The answer port must be between 1 and 65535.")
@@ -382,10 +413,24 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
         if status is not None and status.last_error:
             rows.append(Field("Last error", sanitize_text(status.last_error)))
         rows.append(Field("Waiting", f"{count_pending_outbound(db, network.id)} messages"))
-        # The same packets [H]eld packets lists: this network's, and those a
+        # The same items [H]eld items lists: this network's, and those a
         # deleted network left behind.
         held = [h for h in list_held(db) if h.network_id in (network.id, None)]
-        rows.append(Field("Held", f"{len(held)} packets"))
+        files = sum(1 for h in held if h.kind != HELD_PACKET)
+        rows.append(Field("Held", f"{len(held)} items" + (f", {files} of them files or TICs" if files else "")))
+        # --- bad echoes (issue #1466) ---
+        echoes, file_echoes = list_bad_echoes(db, network.id), list_bad_file_echoes(db, network.id)
+        dropped = bad_echo_dropped(db, network.id)
+        if echoes or file_echoes or dropped:
+            parts = []
+            if echoes:
+                parts.append(f"{sum(e.count for e in echoes)} messages in {len(echoes)} echoes")
+            if file_echoes:
+                parts.append(f"{sum(e.count for e in file_echoes)} items in {len(file_echoes)} file echoes")
+            if dropped:
+                parts.append(f"{dropped} oldest dropped (store full)")
+            rows.append(Field("Unknown echoes", "; ".join(parts)))
+        # --- end bad echoes ---
         rows.extend(_nodelist_rows(db, network))
         sections.append(Section(f"{network.name} ({network.our_address.four_d})", rows))
     if not sections:
@@ -448,7 +493,8 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
             sections=sections, page=page, message=message,
             actions=[("p", menu_key("P", "oll now")), ("a", menu_key("A", "reaFix")), ("f", menu_key("F", "ileFix")),
                      ("i", menu_key("I", "mport echo list")),
-                     ("n", menu_key("N", "odelist import")), ("h", menu_key("H", "eld packets")), _BACK_ACTION],
+                     ("n", menu_key("N", "odelist import")), ("h", menu_key("H", "eld items")),
+                     ("u", menu_key("U", "nknown echoes")), _BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Echomail & netmail help",
             help_about=(
@@ -477,6 +523,8 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
             await _import_nodelist(session, lane, actor, network)
         elif choice == "h":
             await _held_packets(session, lane, actor, network)
+        elif choice == "u":
+            await _bad_echoes(session, lane, actor, network)
 
 
 async def _pick_network(session: Session, lane: DatabaseLane, actor: User) -> FtnNetwork | None:
@@ -535,6 +583,9 @@ async def import_nodelist_file(lane: DatabaseLane, actor: User | None, network: 
 
 
 async def _held_packets(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork) -> None:
+    """The held items: packets, files and TICs. [R]elease re-tosses a
+    packet; a file or TIC is [S]aved to a file area or [E]xported to the
+    host instead (issue #1460)."""
     status: str | None = None
 
     async def _load():
@@ -542,36 +593,277 @@ async def _held_packets(session: Session, lane: DatabaseLane, actor: User, netwo
 
     async def _release(held):
         nonlocal status
-        result = await lane.run(lambda db: release_held(db, get_network(db, network.id), held.id))
+        try:
+            result = await lane.run(lambda db: release_held(db, get_network(db, network.id), held.id))
+        except FtnFormatError as exc:
+            status = f"Not released: {sanitize_text(str(exc))}."
+            return await _load()
         await lane.run(lambda db: record_action(db, actor=actor, action="release_ftn_packet",
                                                 detail=f"{network.name}: {held.file_name} from {held.remote_address}"))
-        status = (f"Released {held.file_name}: {result.posts} posts, {result.netmail} netmail, "
-                  f"{result.duplicates} duplicates" + (f", held again: {result.refused_packet}"
+        status = (f"Released {sanitize_text(held.file_name)}: {result.posts} posts, {result.netmail} netmail, "
+                  f"{result.duplicates} duplicates" + (f", held again: {sanitize_text(result.refused_packet)}"
                                                        if result.refused_packet else ""))
+        return await _load()
+
+    async def _save(held):
+        nonlocal status
+        status = await _save_held_to_area(session, lane, actor, held)
+        return await _load()
+
+    async def _export(held):
+        nonlocal status
+        status = await _export_held(session, lane, actor, network, held)
         return await _load()
 
     async def _delete(held):
         nonlocal status
         await lane.run(delete_held, held.id)
-        status = f"Deleted {held.file_name}."
+        status = f"Deleted {sanitize_text(held.file_name)}."
         return await _load()
 
     chrome = await _load_chrome(lane, actor)
     await _pick_item(
         session, await _load(),
-        name_of=lambda h: f"{h.file_name} from {h.remote_address}",
+        name_of=lambda h: sanitize_text(f"{h.file_name} from {h.remote_address}"),
         stable_id_of=lambda h: h.id,
-        description_of=lambda h: f"{h.size} bytes, {h.received_at[:19]}: {sanitize_text(h.reason)}",
-        title=f"Held packets ({network.name})",
+        description_of=lambda h: (f"{_held_kind_label(h)}, {h.size} bytes, {h.received_at[:19]}: "
+                                  f"{sanitize_text(h.reason)}"),
+        title=f"Held items ({network.name})",
         empty_message="Nothing is held.",
-        refresh=_load, item_keys={"r": _release, "d": _delete},
-        live_nav=[MenuEntry(label=menu_key("R", "elease"), brief="Toss it as from a known system"),
+        refresh=_load, item_keys={"r": _release, "s": _save, "e": _export, "d": _delete},
+        live_nav=[MenuEntry(label=menu_key("R", "elease"), brief="Toss a packet as from a known system"),
+                  MenuEntry(label=menu_key("S", "ave"), brief="Store a file in a file area"),
+                  MenuEntry(label=menu_key("E", "xport"), brief="Write a file to this machine"),
                   MenuEntry(label=menu_key("D", "elete"), brief="Throw it away")],
         live_label=lambda: status or "Held: from an unknown caller, or what could not be stored",
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,
     )
+
+
+def _held_kind_label(held) -> str:
+    if held.kind == HELD_PACKET:
+        return "packet"
+    if held.kind == "tic":
+        return "TIC" + (", waiting for its file" if held.waiting else "")
+    return ("file with its TIC" if held.has_tic else "file") + (", waiting for its TIC" if held.waiting else "")
+
+
+async def _save_held_to_area(session: Session, lane: DatabaseLane, actor: User, held) -> str:
+    """[S]ave: the SysOp picks a file area and the held item becomes their
+    own upload there; the outcome, for the screen's status line."""
+    from netbbs.files.areas import list_file_areas
+    from netbbs.files.diz import read_archive_description
+    from netbbs.files.entries import FileEntryError
+    from netbbs.files.storage import store_bytes
+    from netbbs.ftn.fileecho import HeldItemError, held_file_for_saving, save_held_to_area
+
+    areas = await lane.run(list_file_areas)
+    if not areas:
+        return "No file areas yet: create one under Content → File areas first."
+    chrome = await _load_chrome(lane, actor)
+    area = await pick_item(
+        session, areas, name_of=lambda a: sanitize_text(a.name), stable_id_of=lambda a: a.id,
+        description_of=lambda a: sanitize_text(a.description or ""),
+        title=f"Save {sanitize_text(held.file_name)} to which file area?", empty_message="No file areas.",
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
+        accent_color=chrome.accent_color, header_color=chrome.header_color,
+    )
+    if area is None:
+        return "Nothing saved."
+    try:
+        item = await lane.run(held_file_for_saving, held.id)
+        description = item.description
+        if description is None:
+            _sha256, path = await lane.run(store_bytes, item.data)
+            description = await read_archive_description(path, item.name)
+        entry = await lane.run(lambda db: save_held_to_area(db, held.id, area, actor, name=item.name,
+                                                            description=description))
+    except (HeldItemError, FileEntryError) as exc:
+        return f"Not saved: {sanitize_text(str(exc))}"
+    return (f"Saved {sanitize_text(entry.filename)} to {sanitize_text(area.name)}"
+            + (", waiting for approval." if entry.status == "pending" else "."))
+
+
+async def _export_held(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork, held) -> str:
+    """[E]xport: one path on the host, a folder or the file to write. The
+    rules are a SysOp upload's (§6.2): nothing overwritten, no symbolic
+    link followed, audit-logged. The item stays held."""
+    from netbbs.ftn.fileecho import HeldItemError, export_held, held_file_for_saving
+
+    await session.write_line("")
+    await session.write_line(colored(
+        "A path on this machine: a folder, or the file to write. An existing file is never overwritten.",
+        fg_color=MUTED_COLOR))
+    await write_prompt(session, "Export to: ")
+    try:
+        text = (await session.read_line(cancellable=True)).strip()
+    except InputCancelled:
+        text = ""
+    if not text:
+        return "Nothing exported."
+    try:
+        item = await lane.run(held_file_for_saving, held.id)
+    except HeldItemError as exc:
+        return f"Not exported: {exc}"
+    target = Path(os.path.expanduser(text))
+
+    def _resolve() -> Path:
+        if not target.is_symlink() and target.is_dir():
+            return target / item.name
+        return target
+
+    try:
+        written = await asyncio.to_thread(lambda: export_held(item.data, _resolve()))
+    except (HeldItemError, OSError, ValueError) as exc:  # ValueError: a NUL in the typed path
+        return f"Not exported: {sanitize_text(str(exc))}"
+    await lane.run(lambda db: record_action(
+        db, actor=actor, action="export_ftn_held",
+        detail=f"{network.name}: held {item.name} ({len(item.data)} bytes) exported to {written}"))
+    return f"Exported to {sanitize_text(str(written))}. It stays held until you [D]elete it."
+
+
+# --- bad echoes (issue #1466) -------------------------------------------------
+
+
+async def _bad_echoes(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork) -> None:
+    """Tags no board or file area carries, one row each: [C]reate a board
+    or file area for one, [M]ap an existing one, or [D]elete what waits.
+    Creating or mapping tosses the tag's messages again, or runs its file
+    pairs through the TIC checks again."""
+    status: str | None = None
+
+    async def _load():
+        def _rows(db: Database):
+            rows = [("echo", e.tag, e.count, e.first_seen, e.last_seen) for e in list_bad_echoes(db, network.id)]
+            rows += [("file", e.tag, e.count, e.first_seen, e.last_seen) for e in list_bad_file_echoes(db, network.id)]
+            return rows
+        return await lane.run(_rows)
+
+    async def _create(row):
+        nonlocal status
+        status = await _create_for_bad_echo(session, lane, actor, network, row)
+        return await _load()
+
+    async def _map(row):
+        nonlocal status
+        status = await _map_bad_echo(session, lane, actor, network, row)
+        return await _load()
+
+    async def _delete(row):
+        nonlocal status
+        kind, tag, count = row[0], row[1], row[2]
+        await session.write_line("")
+        what = "messages" if kind == "echo" else "held files and TICs"
+        if not await prompt_yes_no(session, f"Delete the {count} {what} waiting for {sanitize_text(tag)}?",
+                                   default=False):
+            return None
+
+        def _persist(db: Database) -> None:
+            if kind == "echo":
+                delete_bad_echo(db, network.id, tag)
+            else:
+                for held_id in held_bad_file_echo_ids(db, network.id, tag):
+                    delete_held(db, held_id)
+            record_action(db, actor=actor, action="delete_ftn_bad_echo",
+                          detail=f"{network.name}: {count} {what} for {tag}")
+
+        await lane.run(_persist)
+        status = f"Deleted what waited for {sanitize_text(tag)}."
+        return await _load()
+
+    chrome = await _load_chrome(lane, actor)
+    await _pick_item(
+        session, await _load(),
+        name_of=lambda r: sanitize_text(r[1]) + (" (file echo)" if r[0] == "file" else ""),
+        stable_id_of=lambda r: f"{r[0]}:{r[1]}",
+        description_of=lambda r: (f"{r[2]} {'messages' if r[0] == 'echo' else 'held'}, "
+                                  f"first {r[3][:16]}, last {r[4][:16]}"),
+        title=f"Unknown echoes ({network.name})",
+        empty_message="No unknown echoes: everything that came is carried here.",
+        refresh=_load, item_keys={"c": _create, "m": _map, "d": _delete},
+        live_nav=[MenuEntry(label=menu_key("C", "reate"), brief="A new board or file area for it"),
+                  MenuEntry(label=menu_key("M", "ap"), brief="Carry it on an existing one"),
+                  MenuEntry(label=menu_key("D", "elete"), brief="Drop what waits")],
+        live_label=lambda: status or "Echoes the hub sends that no board or file area carries",
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
+        accent_color=chrome.accent_color, header_color=chrome.header_color,
+    )
+
+
+async def _create_for_bad_echo(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork, row) -> str:
+    kind, tag = row[0], row[1]
+    if kind == "echo":
+        from netbbs.net.admin_boards import _board_screen  # it imports this module
+
+        created = await _board_screen(session, lane, actor, initial_name=tag)
+    else:
+        from netbbs.net.admin_files import _area_screen  # it imports this module
+
+        created = await _area_screen(session, lane, actor, initial_name=tag)
+    if created is None:
+        return "Nothing created."
+    return await _carry_bad_echo(lane, actor, network, kind, tag, created)
+
+
+async def _map_bad_echo(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork, row) -> str:
+    kind, tag = row[0], row[1]
+
+    def _candidates(db: Database):
+        if kind == "echo":
+            from netbbs.boards.boards import list_boards
+            from netbbs.link.boards import is_board_linked
+
+            return [b for b in list_boards(db) if board_area(db, b) is None and not is_board_linked(db, b)]
+        from netbbs.files.areas import list_file_areas
+        from netbbs.link.files import is_area_linked
+
+        return [a for a in list_file_areas(db) if file_area_tic(db, a) is None and not is_area_linked(db, a)]
+
+    candidates = await lane.run(_candidates)
+    noun = "board" if kind == "echo" else "file area"
+    if not candidates:
+        return f"Every {noun} here is Linked or carries an echo already: [C]reate one instead."
+    chrome = await _load_chrome(lane, actor)
+    picked = await pick_item(
+        session, candidates, name_of=lambda c: sanitize_text(c.name), stable_id_of=lambda c: c.id,
+        description_of=lambda c: sanitize_text(c.description or ""),
+        title=f"Which local {noun} carries {sanitize_text(tag)}?", empty_message=f"No local {noun}s.",
+        redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
+        accent_color=chrome.accent_color, header_color=chrome.header_color,
+    )
+    if picked is None:
+        return "Nothing mapped."
+    return await _carry_bad_echo(lane, actor, network, kind, tag, picked)
+
+
+async def _carry_bad_echo(lane: DatabaseLane, actor: User, network: FtnNetwork, kind: str, tag: str, target) -> str:
+    """Map `target` (a board or a file area) to `tag`, then toss again what
+    waited for it; the outcome for the status line."""
+    from netbbs.ftn.exchange import rerun_bad_file_echo
+
+    try:
+        if kind == "echo":
+            await lane.run(set_board_area, target, network.id, tag)
+        else:
+            await lane.run(set_file_area_tic, target, network.id, tag)
+    except FtnNetworkError as exc:
+        return f"Not mapped: {exc}"
+    fresh = await lane.run(get_network, network.id)
+    if kind == "echo":
+        result: TossResult = await lane.run(lambda db: retoss_bad_echo(db, fresh, tag))
+        outcome = (f"{sanitize_text(target.name)} carries {sanitize_text(tag)}: {result.posts} posts tossed, "
+                   f"{result.duplicates} duplicates, {result.held} held")
+    else:
+        result = await rerun_bad_file_echo(lane, fresh, tag)
+        outcome = (f"{sanitize_text(target.name)} carries {sanitize_text(tag)}: {result.files} files stored, "
+                   f"{result.file_duplicates} duplicates, {result.held} still held")
+    await lane.run(lambda db: record_action(
+        db, actor=actor, action="set_board_echo" if kind == "echo" else "set_file_area_echo",
+        detail=f"{network.name}: {target.name} carries unknown echo {tag}"))
+    return outcome + "."
 
 
 # --- a board's echo ------------------------------------------------------------
@@ -620,5 +912,56 @@ async def board_echo_action(session: Session, lane: DatabaseLane, actor: User, b
         _announce(session, str(exc), error=True)
         return False
     await lane.run(lambda db: record_action(db, actor=actor, action="set_board_echo", detail=outcome))
+    _announce(session, outcome)
+    return True
+
+
+# --- a file area's file echo (issue #1462) -------------------------------------
+
+
+def file_area_echo_rows(db: Database, area) -> list[Field]:
+    """The file area screen's FTN rows: the file echo it carries, if any."""
+    mapping = file_area_tic(db, area)
+    if mapping is None:
+        return [Field("File echo", "none (a local area)")]
+    network = get_network(db, mapping.network_id)
+    return [Field("File echo", f"{mapping.tag} on {network.name if network else '?'}")]
+
+
+async def file_area_echo_action(session: Session, lane: DatabaseLane, actor: User, area) -> bool:
+    """[F]ile echo on a file area's screen: carry a file echo, or stop
+    carrying it (an empty tag). Returns whether anything changed."""
+    networks = await lane.run(list_networks)
+    if not networks:
+        _announce(session, "No FTN networks yet: add one under Settings → Echomail & netmail (FTN).", error=True)
+        return False
+    network = networks[0] if len(networks) == 1 else await _pick_network(session, lane, actor)
+    if network is None:
+        return False
+    current = await lane.run(file_area_tic, area)
+    await session.write_line("")
+    await session.write_line(colored(
+        f"The {network.name} file echo this area carries (e.g. FSX_INFO). An empty line makes it local again; "
+        f"link the file echo at the hub with FileFix. Files arrive through this area's own moderation.",
+        fg_color=MUTED_COLOR))
+    await write_prompt(session, "File echo tag: ")
+    try:
+        tag = (await session.read_line(cancellable=True,
+                                       initial=current.tag if current and current.network_id == network.id else "")).strip()
+    except InputCancelled:
+        return False
+    try:
+        if not tag:
+            if current is None:
+                return False
+            await lane.run(clear_file_area_tic, area)
+            outcome = f"{area.name} is a local file area again; its files stay."
+        else:
+            mapping = await lane.run(set_file_area_tic, area, network.id, tag)
+            outcome = f"{area.name} carries file echo {mapping.tag} on {network.name}."
+    except FtnNetworkError as exc:
+        _announce(session, str(exc), error=True)
+        return False
+    await lane.run(lambda db: record_action(db, actor=actor, action="set_file_area_echo", detail=outcome))
     _announce(session, outcome)
     return True

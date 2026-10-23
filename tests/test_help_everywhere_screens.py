@@ -519,7 +519,7 @@ def test_a_linked_bbs_detail_has_help(db, lane, alice):
     assert session.leftover == []
 
 
-def test_the_ftn_status_screen_has_help_and_h_is_still_held_packets(db, lane, sysop):
+def test_the_ftn_status_screen_has_help_and_h_is_still_held_items(db, lane, sysop):
     from netbbs.net.ftn_console import ftn_status_screen
     from tests.test_ftn_console import _controls, _network
 
@@ -528,7 +528,7 @@ def test_the_ftn_status_screen_has_help_and_h_is_still_held_packets(db, lane, sy
     asyncio.run(ftn_status_screen(session, lane, sysop, _controls()))
     text = session.squeezed()
     assert "Echomail & netmail help" in text and "What the echomail and netmail gateway last did" in text
-    assert "[H]eld packets" in text.split("Echomail & netmail help")[1]
+    assert "[H]eld items" in text.split("Echomail & netmail help")[1]
     assert session.leftover == []
 
 

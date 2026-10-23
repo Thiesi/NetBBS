@@ -5091,4 +5091,56 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issues #1462 and #1466 (design doc §6.8, §16 \"Issue #1154\"): FTN file echoes and bad "
+            "echoes. A network gets a `tic_password` (empty: every TIC is held). A file area carries "
+            "one file echo through `file_areas.ftn_network_id`/`ftn_file_echo`, unique per network, "
+            "as a board carries an echo. A file that arrived by TIC records its network, tag, origin "
+            "address and CRC-32 (`files.ftn_*`; a non-NULL `ftn_file_echo` is what `Replaces` may "
+            "match), and `ftn_replaces` keeps a moderated file's `Replaces` values until approval. "
+            "The held store tells packets, files and TICs apart (`kind`, backfilled from the "
+            "content), keeps a held file's TIC with it (`tic`), marks an unpaired half (`waiting`, "
+            "with the names it `wants`) and an unknown file echo (`bad_echo`). Echomail for an area "
+            "no board carries waits in `ftn_bad_echoes`, one message per row, and "
+            "`ftn_networks.bad_echo_dropped` counts what its bounds dropped. Nothing is mapped on "
+            "upgrade, so nothing changes until the SysOp maps an area."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN tic_password TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ftn_networks ADD COLUMN bad_echo_dropped INTEGER NOT NULL DEFAULT 0;
+
+        ALTER TABLE file_areas ADD COLUMN ftn_network_id INTEGER REFERENCES ftn_networks(id) ON DELETE SET NULL;
+        ALTER TABLE file_areas ADD COLUMN ftn_file_echo TEXT;
+        CREATE UNIQUE INDEX idx_file_areas_ftn_echo
+            ON file_areas(ftn_network_id, ftn_file_echo COLLATE NOCASE) WHERE ftn_network_id IS NOT NULL;
+
+        ALTER TABLE files ADD COLUMN ftn_network_id INTEGER REFERENCES ftn_networks(id) ON DELETE SET NULL;
+        ALTER TABLE files ADD COLUMN ftn_file_echo TEXT;
+        ALTER TABLE files ADD COLUMN ftn_origin TEXT;
+        ALTER TABLE files ADD COLUMN ftn_crc32 TEXT;
+        ALTER TABLE files ADD COLUMN ftn_replaces TEXT;
+        CREATE INDEX idx_files_ftn_tic ON files(area_id, filename COLLATE NOCASE) WHERE ftn_file_echo IS NOT NULL;
+
+        ALTER TABLE ftn_held_inbound ADD COLUMN kind TEXT NOT NULL DEFAULT 'packet'
+            CHECK (kind IN ('packet', 'file', 'tic'));
+        ALTER TABLE ftn_held_inbound ADD COLUMN tic BLOB;
+        ALTER TABLE ftn_held_inbound ADD COLUMN waiting INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE ftn_held_inbound ADD COLUMN wants TEXT;
+        ALTER TABLE ftn_held_inbound ADD COLUMN bad_echo TEXT;
+        UPDATE ftn_held_inbound SET kind = 'tic' WHERE lower(file_name) LIKE '%.tic';
+        UPDATE ftn_held_inbound SET kind = 'file'
+         WHERE kind = 'packet' AND NOT (length(content) >= 20 AND substr(content, 19, 2) = X'0200');
+
+        CREATE TABLE ftn_bad_echoes (
+            id              INTEGER PRIMARY KEY,
+            network_id      INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            tag             TEXT NOT NULL COLLATE NOCASE,
+            remote_address  TEXT NOT NULL,
+            packet          BLOB NOT NULL,
+            received_at     TEXT NOT NULL
+        );
+        CREATE INDEX idx_ftn_bad_echoes_tag ON ftn_bad_echoes(network_id, tag, id);
+        """,
+    ),
 ]
