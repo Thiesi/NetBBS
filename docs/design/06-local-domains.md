@@ -2163,8 +2163,10 @@ echoes, FileFix and the robot rules, the nodelist from a file echo, echo-list
 import, unknown echoes and the held-item actions. They are described below as
 they are to be built, and so are stage B's netmail extras: file attach,
 crash and hold flavours, and bounces (#1470-#1472), and stage C's file
-requests (#1475). The round's later stages are listed under "Planned" at
-the end of this section.
+requests (#1475). Stage D's points and the hub's records, sessions and
+transit netmail (#1478, #1479) are under "Points and downlinks". The
+round's later stages are listed under "Planned" at the end of this
+section.
 
 **Networks.** A SysOp adds one network record per FTN network:
 
@@ -2352,14 +2354,101 @@ use it.
   the uplink. After 5 failed calls the netmail is dropped, and its sender
   is told why in a letter from the BBS.
 - **Hold**: nothing calls out. It goes in the next session with its node
-  that a password proves: the uplink's, today, and other nodes' once stage
-  D gives them passwords. A session with any other node proves nothing
+  that a password proves: the uplink's, or a point's or downlink's (below).
+  A session with any other node proves nothing
   about who is at the other end -- anyone can present an address -- so it
   carries no held mail, unless the network sets **Give held mail to callers
   without a password** (off by default). Then a node that calls in, or that
   this node calls for other mail, is handed its own held items, and a
   caller that only claims the address is handed nothing else. Held mail
   still waiting after 30 days is dropped, and its sender told.
+
+**Points and downlinks** (issues #1478 and #1479; §16, "Issue #1154",
+Decisions 15 and 17). A network's SysOp can serve systems under this node,
+each a **link** on the network's **Links** screen (**Settings ▸ Echomail
+& netmail (FTN) ▸ [L]inks**, a picker with [C]reate, [D]elete and a draft
+editor per link):
+
+- **A point** has this node's address with a point number, `86:549/40.3`.
+  It calls in for its mail and is never called. A node that is itself a
+  point has no links.
+- **A downlink** is a node this node feeds, `86:549/41`. It calls in too
+  (*hold*), or, given the host it answers BinkP on, this node calls it
+  when mail waits (*poll*), at most once per 5 minutes and after a failed
+  call again after 1, 2, 4 ... minutes. A downlink's own points are
+  reached through it. Its mail never goes via the uplink, which would
+  only route it back.
+
+Each link has a session password, required, and optional packet,
+AreaFix, FileFix and TIC passwords (the last three serve the AreaFix
+server and TIC forwarding, below, and are not yet in the editor), a
+bundle preference (bare packets or ZIP), and a status: *active*;
+*paused*, set by the link's own `%PAUSE`, which stops its echomail but
+not its netmail; or *disabled* by the SysOp. The Links screen shows each
+link's last call and what waits for it, and the FTN status screen counts
+them per network. Nothing is a link until the SysOp adds it: on a network
+that forbids feeding other systems, nothing changes. nixNet allows a node
+to feed approved points only (policy III.8), so ReLink can serve points
+there and stays a leaf.
+
+- **Sessions.** A caller presenting a link's address must prove that
+  link's session password, on either answer port; a wrong one or none
+  ends the call. Only then is the link's mail read and handed over -- of
+  every flavour, since the link's password proved it -- in a packet to
+  its address under its packet password, and what it sends is tossed as
+  the link's, its packets checked against that packet password. A
+  disabled link must still prove its password, so nobody else can take
+  its address, but it is given nothing and what it sends is held. **Give
+  held mail to callers without a password** never applies to a link.
+  Each call, in or out, is recorded on the link. A link's file request
+  ("File requests") is answered in that session as a secure link's, and a
+  disabled link's is not; a request made here to a point or downlink
+  waits in its outbound for its next proven session.
+- **Its outbound.** Anything queued for a linked address -- a caller's
+  netmail, a bounce, transit netmail, files -- waits for that link
+  alone, whoever queued it: the queue looks the address up as it queues.
+  At most 2,000 messages and 50 files wait for one link, and more is
+  refused. What a link has not collected after 30 days is dropped and its
+  sender told, as held mail is. Deleting a link drops what waits for it
+  the same way. Netmail to a point this node does not serve is refused.
+- **A point's echomail** is tossed here, through the board's moderation as
+  any echomail is, and then sent to the uplink as this node's own: SEEN-BY
+  this node and the uplink, PATH this node, and whatever SEEN-BY and PATH
+  the point's software wrote dropped, since a point is never in either
+  (FTS-0004, FSC-0074). Its MSGID, Origin line and kludges go on as
+  written. On a moderated board it goes once the post is approved, and is
+  forgotten after 30 days unapproved (at most 1,000 wait per network). A
+  point's echomail for an echo no board carries waits as an unknown echo
+  and goes on when the SysOp creates or maps the board; one the SysOp
+  releases from the held store goes on too, by the address it was held
+  under. Echomail or netmail a point sends must say it was written at the
+  point's own address (its Origin line, else its MSGID; its INTL and
+  FMPT, else its packet), or it is held: a point sends its own mail.
+- **Transit netmail**, for another node, is routed with a `^AVia` line
+  naming this node (FTS-4009): to the point or downlink it is for, else,
+  when a point or downlink sent it, to the uplink. INTL, and FMPT and
+  TOPT where points need them, are added when the sender left them out,
+  since the next system reads zones and points from the kludges, not
+  from the packet this node writes. The message is otherwise forwarded
+  byte for byte, marked in transit. Netmail for another node that came
+  from anyone else, the uplink included, is not this node's to route: it
+  is counted and dropped, as before. A netmail whose Via lines already
+  name this node (a loop), that passed 30 systems, that is addressed back
+  to the link that sent it, or that is for a point this node does not
+  serve, is held for the SysOp; a repeat is dropped by its MSGID. Files
+  attached to a transit netmail are not forwarded: they wait in the held
+  store as unclaimed files and expire.
+
+Not built yet, and the subject of the hub's second part (#1479): echomail
+fan-out to points and downlinks, the AreaFix/FileFix server and TIC
+forwarding. They build on these records without a schema change: each
+link's echoes and file echoes go in `ftn_link_areas` (with a read-only
+mode), one encoded message is queued for one link with
+`enqueue_for_link_without_commit` (a copy of one post for several links
+names the link in its reference), and SEEN-BY and PATH are merged by
+`netbbs.ftn.route.merge_seen_by_path`. Until then a downlink's echomail is
+tossed here and goes no further, and a TIC from a link is held (check 3
+below).
 
 **What a session received** is sorted once the session ends (issue #1458):
 
@@ -2879,9 +2968,8 @@ a time, each live-checked on ReLink. Each stage's PR writes its rules into
 this section; until then the text above is what holds.
 
 - **Stage D:**
-  - points (#1478);
-  - the hub: downlinks, echomail fan-out, an AreaFix/FileFix server, TIC
-    forwarding and transit netmail (#1479);
+  - the hub's second part: echomail fan-out, an AreaFix/FileFix server and
+    TIC forwarding (#1479), on the link records above;
   - pointlist and nodelist segment publishing (#1480).
 - **Stage E:**
   - QWK offline mail for callers (#1389);

@@ -219,8 +219,13 @@ def test_netmail_for_another_node_is_not_routed(db, network, sysop):
     assert list_inbox(db, sysop) == []
 
 
-def test_netmail_for_a_point_of_this_node_is_not_ours(db, network, sysop):
-    assert _toss(db, network, _packet(_netmail(topt="3"))).not_for_us == 1
+def test_netmail_for_a_point_this_node_does_not_serve_is_held(db, network, sysop):
+    # Not delivered here, and not routed (issue #1478): no point .3 is set
+    # up, so the SysOp sees it.
+    result = _toss(db, network, _packet(_netmail(topt="3")))
+    assert (result.netmail, result.not_for_us, result.held) == (0, 0, 1)
+    (held,) = queue.list_held(db)
+    assert "a point this node does not serve" in held.reason
 
 
 def test_a_full_mailbox_holds_the_one_message_and_keeps_its_msgid_unseen(db, network, sysop, monkeypatch):

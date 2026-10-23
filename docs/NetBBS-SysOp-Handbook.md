@@ -2821,6 +2821,7 @@ In this chapter: [Join a network](#join-a-network) ·
 [Mail bundles](#mail-bundles) ·
 [Held items and status](#held-items-and-status) ·
 [Unknown echoes](#unknown-echoes) · [IPv6 and TLS](#ipv6-and-tls) ·
+[Points and downlinks](#points-and-downlinks) ·
 [Not supported](#not-supported)
 
 ### Join a network
@@ -3159,8 +3160,9 @@ choices:
   is your hub. After five failed calls the netmail is dropped, and its sender
   gets a letter from the BBS saying so.
 - **Hold**: nothing calls out. The netmail waits for a call with the node
-  that a password proves, which today means your hub. Held netmail still
-  waiting after 30 days is dropped, and its sender is told.
+  that a password proves: your hub, or one of your points or downlinks
+  (below). Held netmail still waiting after 30 days is dropped, and its
+  sender is told.
 
 > [!WARNING]
 > Netmail held for any other node waits, by default, until it expires: that
@@ -3402,9 +3404,90 @@ NetBBS speaks binkp/1.1 with multiple batches, so mail and files that become
 ready during a call go out in the same call. With an older mailer it falls
 back to binkp/1.0 by itself; there is nothing to set.
 
+### Points and downlinks
+
+Your BBS can serve systems under its own address: **points**, such as a
+user's own offline reader setup, and **downlinks**, other nodes you feed.
+
+| Links | |
+| --- | --- |
+| **Where** | **Settings ▸ Echomail & netmail (FTN)**, highlight the network, <kbd>L</kbd> **Links** |
+| **A point** | Your address with a point number: `21:1/199.1`, `.2` ... It calls you for its mail; you never call it. |
+| **A downlink** | A node you feed, such as `21:1/200`. It calls you, or you call it when mail waits. Its own points are reached through it. |
+| **Password** | Every link needs a session password. Only a call that proves it gets the link's mail. |
+| **Status** | **Node ▸ Echomail & netmail (FTN)** counts each network's links and what waits for them. |
+
+> [!IMPORTANT]
+> Check your network's rules first. Many networks let a node feed points but
+> not other nodes. nixNet, for one, allows feeding approved points only.
+
+#### Add a point
+
+1. In **Settings ▸ Echomail & netmail (FTN)**, highlight the network and
+   press <kbd>L</kbd> **Links**.
+2. Press <kbd>C</kbd> **Create**. A new link starts as your next free point.
+3. Set **Session password**, and **Packet password** if the point uses one.
+   Give the point's owner both, with your address and the answer port.
+4. Press <kbd>S</kbd> **Save**.
+
+The point's software calls your answer port, so **Answer calls** must be on
+for the network.
+
+#### Add a downlink
+
+Create a link as above, then set **Kind** to **downlink** and type its
+address. Under **Calls**:
+
+- **hold**: it calls you for its mail, as a point does.
+- **poll**: you call it when mail waits, at most every five minutes. Fill in
+  **Host** with where it answers BinkP, and **Port** if it isn't 24554.
+
+**Bundle mail** sends its packets in a ZIP, if it prefers that.
+
+#### What a link gets
+
+- **Netmail** to a point, a downlink or one of the downlink's points waits
+  for that link alone, of any flavour, and goes in its next call that
+  proves the password. Netmail to a point you haven't set up is refused.
+- **A point's echomail** is posted here and then sent to your hub as if you
+  wrote it: your hub sees your address in SEEN-BY and PATH, never the
+  point's. On a moderated board it goes once you approve the post.
+- **Netmail a point or downlink sends** to another node goes to your hub,
+  with a Via line naming your BBS. Netmail your hub sends for one of your
+  links goes to that link. Netmail for any other node that reaches you is
+  still not yours to route, as before.
+- **File requests** from a link are answered in its call, as from any
+  secure link, when the network answers them. A request you make to a
+  point or downlink waits for its next call.
+- A point's mail must say it was written at the point. Anything else it
+  sends is held for you, under **Held items**.
+
+Some netmail is held instead of routed, with the reason: one that has
+passed through your BBS before (a loop), one that has passed 30 systems, and
+one for a point you don't serve.
+
+Mail a link hasn't collected after 30 days is dropped, and its sender is
+told. At most 2,000 messages and 50 files wait for one link.
+
+#### Switch a link off or remove it
+
+- **Status** **disabled** keeps the link's address safe: a caller claiming
+  it must still know the password, but gets nothing, and what it sends is
+  held for you. **paused** is set by the link itself through AreaFix and
+  stops only its echomail.
+- <kbd>D</kbd> **Delete** removes a link after asking. Mail waiting for it is
+  dropped, and its senders are told.
+
+> [!NOTE]
+> Sending your echoes on to points and downlinks, answering their AreaFix
+> and FileFix requests, and passing file echoes on are not built yet. Until
+> then a downlink gets its netmail from you, and its echomail is posted here
+> and goes no further.
+
 ### Not supported
 
-- acting as a hub for other nodes;
+- sending echomail and file echoes on to points and downlinks, and an
+  AreaFix or FileFix robot of your own;
 - sending bundles in any format but ZIP.
 
 > [!NOTE]

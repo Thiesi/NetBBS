@@ -12,7 +12,10 @@ Nothing is exported that:
 - is not approved;
 - sits on a board carrying no echo, or on a network that is not enabled;
 - arrived from FTN (`posts.ftn_inbound`): a gateway that re-exported what
-  it tossed would loop mail back into the network;
+  it tossed would loop mail back into the network. The exception is a
+  point's echomail (issue #1478), which this node sends to the uplink as
+  its own: kept in `ftn_point_waiting` while its post waits for a
+  moderator, it is queued here once the post is approved;
 - is an edit of an earlier post. FTN has no edits, and a second copy
   would read as a new message;
 - sits on a board that sends real names (`sends_real_names`, issue
@@ -82,8 +85,21 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
         "FROM posts WHERE post_id = ?",
         (post.post_id,),
     ).fetchone()
-    if row is None or row["ftn_inbound"] or row["edit_of_post_id"] is not None:
+    if row is None or row["edit_of_post_id"] is not None:
         return False
+    if row["ftn_inbound"]:
+        # A point's echomail goes on to the uplink once its post is
+        # approved (issue #1478); anything else from FTN never goes back.
+        from netbbs.ftn.links import release_point_echomail_without_commit
+
+        try:
+            queued = release_point_echomail_without_commit(db, post.post_id)
+        except FtnQueueFullError as exc:
+            db.connection.rollback()
+            _logger.warning("FTN %s: a point's post %s was not sent on: %s", network.name, post.post_id, exc)
+            return False
+        db.connection.commit()
+        return queued
 
     real_names = sends_real_names(db, board)
     from_name = post.author_label
