@@ -21,10 +21,12 @@ from netbbs.rendering.layout import MenuEntry
 from netbbs.rendering.menu import continue_prompt, highlight_hotkeys
 from netbbs.attestation import (
     SELF_ATTESTED_NOT_SHARED,
+    AttestationChanged,
     AttestationError,
     ProfileFieldError,
-    attest_age,
-    attest_name,
+    UserAttestation,
+    attest_identity,
+    birthdate_problem,
     change_birthdate,
     change_display_name,
     compute_age,
@@ -106,8 +108,12 @@ from netbbs.net.prose_editor import EditorHeader, edit_prose
 from netbbs.net.animation_preference import animations_enabled, set_animations_enabled
 from netbbs.net.redraw_preference import redraw_in_place_enabled, set_redraw_in_place_enabled
 from netbbs.net.resource_editor import (
+    DetailAction,
+    DetailMode,
+    DetailState,
     Draft,
     FieldSpec,
+    SaveDeclined,
     edit_resource_draft,
     inline_field,
     live_choice_field,
@@ -140,6 +146,7 @@ from netbbs.net.unicode_style_preference import (
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ERROR_COLOR,
+    HEADER_COLOR,
     LABEL_COLOR,
     METADATA_COLOR,
     MUTED_COLOR,
@@ -2695,7 +2702,9 @@ async def _identity_details_screen(
 
 
 @located("Verify")
-async def _verify_identity_menu(session: Session, db: Database, verifier: User) -> None:
+async def _verify_identity_menu(
+    session: Session, db: Database, verifier: User, *, lane: DatabaseLane | None = None,
+) -> None:
     """
     Conditionally-visible main-menu entry for users with
     `can_verify_identity` (or SysOp level) -- lives at the main menu
@@ -2723,14 +2732,17 @@ async def _verify_identity_menu(session: Session, db: Database, verifier: User) 
         header_color=effective_header_color(session, db),
     )
     if selected is not None:
-        await _verify_user(session, db, verifier, selected)
+        await _verify_user(session, db, verifier, selected, lane=lane)
 
 
-async def _revoke_one(session: Session, db: Database, verifier: User, subject: User) -> None:
+async def _revoke_one(
+    session: Session, lane: DatabaseLane, verifier: User, subject: User, *,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR, unicode_style: bool = False,
+) -> None:
     """Withdraw `subject`'s verified age or real name (issue #1115), asking
     which when both are on record, then confirming."""
-    age = get_attestation(db, subject, "age")
-    name = get_attestation(db, subject, "name")
+    age = await lane.run(get_attestation, subject, "age")
+    name = await lane.run(get_attestation, subject, "name")
     if age is not None and name is not None:
         while True:
             await write_prompt(session, highlight_hotkeys("Revoke which: [A]ge, [N]ame, or [B]ack? "))
@@ -2747,8 +2759,8 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
                     f"{sanitize_text(subject.username)} has both a verified age and a verified real name. "
                     "Revoking one leaves the other; you are asked to confirm."
                 ),
-                header_color=effective_header_color(session, db),
-                unicode_style=unicode_style_enabled(db, verifier),
+                header_color=header_color,
+                unicode_style=unicode_style,
             )
             await session.write_line("")
         await session.write_line("")
@@ -2756,6 +2768,9 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
             announce_line(session, "Cancelled.")
             return
         attribute = "age" if which == "a" else "name"
+    elif age is None and name is None:
+        announce_line(session, f"No verification on record for {subject.username!r} any more.")
+        return
     else:
         attribute = "age" if age is not None else "name"
     label = "age" if attribute == "age" else "real name"
@@ -2768,7 +2783,7 @@ async def _revoke_one(session: Session, db: Database, verifier: User, subject: U
         announce_line(session, "Cancelled.")
         return
     try:
-        revoked = revoke_attestation(db, subject, attribute, actor=verifier)
+        revoked = await lane.run(revoke_attestation, subject, attribute, actor=verifier)
     except AttestationError as exc:
         announce_line(session, f"Could not revoke: {exc}")
         return
@@ -2788,125 +2803,259 @@ def _verification_status_description(db: Database, user: User) -> str:
     return ", ".join(parts) if parts else "not verified"
 
 
-async def _verify_user(session: Session, db: Database, verifier: User, subject: User) -> None:
+#: What a Verify field's line editor says on the `Choice:` row: the value goes
+#: into the draft, and only `[S]ave` records it.
+_VERIFY_FIELD_HINT = "Enter takes it; Esc keeps"
+_VERIFY_LABELS = {"age": "age", "name": "real name"}
+
+
+def _verified_birthdate_text(value: str) -> str:
+    """An ISO birthdate with the age it gives today, as the field and the
+    confirmation show it: a mistyped year reads as a wrong age."""
+    return f"{value} (age {compute_age(date.fromisoformat(value))})"
+
+
+def _load_verify_state(db: Database, subject: User) -> dict[str, Any]:
+    """What the Verify screen shows besides its draft, read in one go: the
+    stored verifications, who made them, and what the caller says."""
+    shown = {attribute: get_attestation(db, subject, attribute) for attribute in ("age", "name")}
+    verifiers: dict[int, str] = {}
+    for attestation in shown.values():
+        if attestation is not None and attestation.verifier_user_id is not None:
+            verifier = get_user_by_id(db, attestation.verifier_user_id)
+            verifiers[attestation.verifier_user_id] = verifier.username if verifier is not None else "a former account"
+    return {
+        "shown": shown,
+        "verifiers": verifiers,
+        "self_birthdate": get_birthdate(db, subject),
+        "self_display_name": get_display_name(db, subject),
+    }
+
+
+async def _verify_user(
+    session: Session, db: Database, verifier: User, subject: User, *, lane: DatabaseLane | None = None,
+) -> None:
     """
-    One user's attestation status plus the two attest actions. Issue
-    #282: this used to print the status and then ask "Attest a
-    birthdate?" and "Attest a real name?" in turn, with no other way
-    off the screen -- a verifier who drilled in from the picker purely
-    to *check* whether someone was already verified (which is exactly
-    what the picker's "age verified / not verified" descriptions
-    invite) had to decline twice to leave. Now the status is followed
-    by an action bar, `[B]ack` is one silent keystroke, and each attest
-    action redraws the status so the result is visible where it was
-    read from. A blank value at either prompt cancels that action.
+    One user's verification screen (design doc §18, §3.5): a resource's
+    own screen in the draft editor, as the console's are (issue #1081).
+    What the caller says about themselves and who verified what sit
+    above two fields, `01` the verified birthdate and `02` the verified
+    real name, each edited where it is shown and opened on the value on
+    record. Nothing is stored until `[S]ave`, which says what it records,
+    what it replaces and whose Link sharing that switches off, and asks
+    once; both values then land together with their history entries, or
+    neither does (`attest_identity`). A verification changed by someone
+    else since the screen was drawn is not replaced: the save refuses and
+    the screen shows what is stored now. Emptying a stored value does not
+    withdraw it; `[R]evoke`, offered while nothing is unsaved, does.
+
+    Issue #282 replaced two gating yes/no questions here with an action
+    bar; this replaces that bar's `[A]ge`/`[N]ame` prompts, which read a
+    value under the bar and stored it on Enter.
     """
-    header_color = effective_header_color(session, db)
-    redraw_in_place = redraw_in_place_enabled(db, verifier)
-    unicode_style = unicode_style_enabled(db, verifier)
-    collapsed = breadcrumb_collapsed_enabled(db, verifier)
+    if lane is None:
+        own_lane = DatabaseLane(db.path)
+        try:
+            await _verify_user(session, db, verifier, subject, lane=own_lane)
+        finally:
+            own_lane.close()
+        return
 
-    async def _draw() -> None:
-        await session.write_line(
-            "\r\n" + screen_title(
-                f"Verifying {sanitize_text(subject.username)}",
-                breadcrumb=crumbs(session),
-                width=session.terminal_width,
-                clear=redraw_in_place,
-                unicode_style=unicode_style, collapsed=collapsed,
-                header_color=header_color,
-                node_name_gradient=session.node_name_gradient,
-            )
-        )
-        self_birthdate = get_birthdate(db, subject)
-        self_display_name = get_display_name(db, subject)
-        await session.write_line(
-            f"Self-reported birthdate: {self_birthdate.isoformat() if self_birthdate else '(not set)'}"
-        )
-        await session.write_line(
-            f"Self-reported display name: {sanitize_text(self_display_name) if self_display_name else '(not set)'}"
-        )
-        existing_age = get_attestation(db, subject, "age")
-        await session.write_line(
-            "Attested birthdate: "
-            + (existing_age.attested_value if existing_age is not None else "(not attested)")
-        )
-        existing_name = get_attestation(db, subject, "name")
-        await session.write_line(
-            "Attested real name: "
-            + (sanitize_text(existing_name.attested_value) if existing_name is not None else "(not attested)")
-        )
-        actions = [
-            menu_key("A", "ge"),
-            menu_key("N", "ame"),
-        ]
-        # Issue #1115: whoever may verify may also withdraw a verification.
-        if existing_age is not None or existing_name is not None:
-            actions.append(menu_key("R", "evoke"))
-        actions.append(menu_key("B", "ack"))
-        await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width, height=session.terminal_height))
-        # What the last action reported (issue #1124): shown above the
-        # prompt of the redrawn status, not held behind a keypress.
-        await write_notices(session)
-        await write_prompt(session, "Choice: ")
+    self_verify = verifier.id == subject.id
+    who = "yourself" if self_verify else repr(subject.username)
+    title = "Verifying yourself" if self_verify else f"Verifying {sanitize_text(subject.username)}"
+    header_color = await lane.run(effective_header_color_256)
+    unicode_style = await lane.run(unicode_style_enabled, verifier)
+    state: dict[str, Any] = await lane.run(_load_verify_state, subject)
 
-    await _draw()
-    while True:
-        choice = (await session.read_key()).lower()
+    def _stored(attribute: str) -> str:
+        attestation = state["shown"][attribute]
+        return attestation.attested_value if attestation is not None else ""
 
-        if choice == "b":
-            await session.write_line("")
-            return
-        elif choice == "a":
-            await session.write_line("")
-            await write_prompt(session, "Attested birthdate (YYYY-MM-DD, blank to cancel): ")
-            raw = (await session.read_line()).strip()
-            if not raw:
-                announce_line(session, "Cancelled.")
-            else:
-                try:
-                    birthdate = date.fromisoformat(raw)
-                    attest_age(db, subject, birthdate, verifier=verifier)
-                except (ValueError, AttestationError) as exc:
-                    announce_line(session, f"Could not attest age: {exc}")
-                else:
-                    announce_line(session, "Age attested.")
-            await _draw()
-        elif choice == "r" and (
-            get_attestation(db, subject, "age") is not None or get_attestation(db, subject, "name") is not None
-        ):
-            await session.write_line("")
-            await _revoke_one(session, db, verifier, subject)
-            await _draw()
-        elif choice == "n":
-            await session.write_line("")
-            await write_prompt(session, "Attested real name (blank to cancel): ")
-            raw = (await session.read_line()).strip()
-            if not raw:
-                announce_line(session, "Cancelled.")
-            else:
-                try:
-                    attest_name(db, subject, raw, verifier=verifier)
-                except AttestationError as exc:
-                    announce_line(session, f"Could not attest name: {exc}")
-                else:
-                    announce_line(session, "Real name attested.")
-            await _draw()
-        elif choice == HELP_KEY:
-            entries = [
-                MenuEntry(label=menu_key("A", "ge"), brief="Attest the birthdate you checked"),
-                MenuEntry(label=menu_key("N", "ame"), brief="Attest the real name you checked"),
-            ]
-            if get_attestation(db, subject, "age") is not None or get_attestation(db, subject, "name") is not None:
-                entries.append(MenuEntry(label=menu_key("R", "evoke"), brief="Withdraw a verification"))
-            await show_menu_help(
-                session, "Verify identity help", entries,
-                about=(
-                    "What this caller says about themselves, and what has been verified. "
-                    "Record only what you have checked: a verified age or name opens what asks for one."
-                ),
-                header_color=header_color, unicode_style=unicode_style,
-            )
-            await _draw()
+    def _verified_by(attestation: UserAttestation, *, sharing: bool = True) -> str:
+        if attestation.verifier_user_id == verifier.id:
+            by = "you"
         else:
-            await session.write(reject_unhandled_key(choice))
+            by = sanitize_text(state["verifiers"].get(attestation.verifier_user_id, "a former account"))
+        text = f"by {by} on {attestation.created_at[:10]}"
+        if attestation.self_attested:
+            text += " (self)"
+        if sharing and attestation.link_visible:
+            text += ", shared over Link"
+        return text
+
+    def _preamble(_d: Draft) -> str:
+        says = []
+        if state["self_birthdate"] is not None:
+            says.append(f"born {_verified_birthdate_text(state['self_birthdate'].isoformat())}")
+        if state["self_display_name"]:
+            says.append(f"display name {sanitize_text(state['self_display_name'])}")
+        lines = [
+            colored(
+                ("You say: " if self_verify else "They say: ") + (", ".join(says) if says else "(nothing)"),
+                fg_color=MUTED_COLOR,
+            )
+        ]
+        for attribute in ("age", "name"):
+            attestation = state["shown"][attribute]
+            if attestation is not None:
+                lines.append(colored(
+                    f"{_VERIFY_LABELS[attribute].capitalize()} verified {_verified_by(attestation)}",
+                    fg_color=MUTED_COLOR,
+                ))
+        if self_verify:
+            lines.append(colored(SELF_ATTESTED_NOT_SHARED[0].upper() + SELF_ATTESTED_NOT_SHARED[1:] + ".", fg_color=MUTED_COLOR))
+        return "\r\n".join(lines)
+
+    def _verify_prompt(
+        attribute: str, label: str, parse: Callable[[str], str],
+    ) -> Callable[[Session, DatabaseLane, Draft], Awaitable[None]]:
+        """One verified value into the draft: opened on what is there, Esc
+        keeps it, and `parse` turns what was typed into the stored text or
+        raises ValueError with the reason it was refused."""
+
+        @inline_field
+        async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
+            current = draft[attribute]
+            await write_field_prompt(
+                session, colored(f"{label} ({_VERIFY_FIELD_HINT}):", fg_color=MUTED_COLOR), hint=_VERIFY_FIELD_HINT,
+            )
+            try:
+                raw = (await read_field_line(session, initial=current)).strip()
+            except InputCancelled:
+                await session.write_line("")
+                return
+            if raw == current:
+                return
+            if not raw:
+                if _stored(attribute):
+                    announce_line(
+                        session,
+                        f"Can't empty a verified {_VERIFY_LABELS[attribute]}: use [R]evoke to withdraw it. Unchanged.",
+                    )
+                    return
+                draft[attribute] = ""
+                return
+            try:
+                draft[attribute] = parse(raw)
+            except ValueError as exc:
+                announce_line(session, f"{exc} -- unchanged.")
+
+        return prompt
+
+    def _parse_birthdate(raw: str) -> str:
+        try:
+            birthdate = date.fromisoformat(raw)
+        except ValueError:
+            raise ValueError("Not a valid date (expected YYYY-MM-DD)") from None
+        problem = birthdate_problem(birthdate)
+        if problem is not None:
+            raise ValueError(f"Can't verify {birthdate.isoformat()}: {problem}")
+        return birthdate.isoformat()
+
+    def _confirmation(changes: dict[str, str]) -> list[str]:
+        parts = []
+        if "age" in changes:
+            parts.append(f"born {_verified_birthdate_text(changes['age'])}")
+        if "name" in changes:
+            parts.append(f"real name {sanitize_text(changes['name'])}")
+        lines = [f"Record for {who}: {' and '.join(parts)}."]
+        for attribute in changes:
+            old = state["shown"][attribute]
+            if old is None:
+                continue
+            old_value = (
+                _verified_birthdate_text(old.attested_value) if attribute == "age" else sanitize_text(old.attested_value)
+            )
+            line = f"It replaces the verified {_VERIFY_LABELS[attribute]} {old_value}, {_verified_by(old, sharing=False)}"
+            if old.link_visible:
+                line += (
+                    f", and switches off {'your' if self_verify else _possessive(subject)} sharing of it over Link"
+                    + ("" if self_verify else " until they share the new one")
+                )
+            lines.append(line + ".")
+        if self_verify:
+            lines.append("A verification you make of yourself is not shared over Link.")
+        return lines
+
+    async def save(draft: Draft) -> None:
+        changes = {attribute: draft[attribute] for attribute in ("age", "name") if draft[attribute] != _stored(attribute)}
+        if not changes:
+            return None
+        for line in _confirmation(changes):
+            await session.write_line(line)
+        if not await prompt_yes_no(session, "Record it?", default=False):
+            announce_line(session, "Cancelled. Nothing recorded; your changes are still here.")
+            raise SaveDeclined()
+        try:
+            await lane.run(
+                attest_identity, subject, verifier=verifier,
+                birthdate=date.fromisoformat(changes["age"]) if "age" in changes else None,
+                real_name=changes.get("name"),
+                expected={attribute: state["shown"][attribute] for attribute in changes},
+            )
+        except AttestationChanged:
+            # Show what is stored now above the draft, which stays for another look.
+            state.update(await lane.run(_load_verify_state, subject))
+            raise
+        recorded = " and ".join(f"verified {_VERIFY_LABELS[attribute]}" for attribute in changes)
+        announce_line(session, f"Recorded the {recorded}{' (self)' if self_verify else ''}.")
+        return None
+
+    async def _revoke(session: Session, lane: DatabaseLane) -> bool:
+        await _revoke_one(session, lane, verifier, subject, header_color=header_color, unicode_style=unicode_style)
+        return False
+
+    async def refresh() -> DetailState:
+        state.update(await lane.run(_load_verify_state, subject))
+        actions = []
+        # Issue #1115: whoever may verify may also withdraw a verification.
+        if any(attestation is not None for attestation in state["shown"].values()):
+            actions.append(DetailAction("r", menu_key("R", "evoke"), _revoke, brief="Withdraw a verification"))
+        return DetailState(draft={"age": _stored("age"), "name": _stored("name")}, actions=actions)
+
+    record_help = (
+        " Nothing is recorded until [S]ave, which says what it replaces and asks once. A new value "
+        "switches off the caller's sharing of the old one over Link until they share the new one. "
+        "Emptying it here does not withdraw it: [R]evoke does."
+    )
+    fields = [
+        FieldSpec(
+            key="age", label="Verified birthdate",
+            render=lambda d: _verified_birthdate_text(d["age"]) if d["age"] else "(not verified)",
+            prompt=_verify_prompt("age", "Verified birthdate, YYYY-MM-DD", _parse_birthdate),
+            brief="The date of birth you checked",
+            help=(
+                "The date of birth you checked, as YYYY-MM-DD. It decides every age gate on this node, "
+                "whatever the caller entered as their own birthdate (shown above)." + record_help
+            ),
+        ),
+        FieldSpec(
+            key="name", label="Verified real name",
+            render=lambda d: sanitize_text(d["name"]) if d["name"] else "(not verified)",
+            prompt=_verify_prompt("name", "Verified real name", str),
+            brief="The real name you checked",
+            help=(
+                "The real name you checked. Boards, areas and channels that require a verified name "
+                "let the caller in with it, and some show it beside their posts." + record_help
+            ),
+        ),
+    ]
+    await edit_resource_draft(
+        session, lane,
+        title=title,
+        fields=fields,
+        draft={},
+        save=save,
+        error_type=AttestationError,
+        save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, verifier),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, verifier),
+        preamble=_preamble,
+        unicode_style=unicode_style,
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, verifier),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=header_color,
+        detail=DetailMode(refresh=refresh),
+    )

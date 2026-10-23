@@ -1067,6 +1067,18 @@ unchanged: an account's keys are separate, individually confirmed operations
 rather than fields of one form, and the settings screens already open straight
 into their editors.
 
+The main menu's Verify screen is one of these screens too (design doc §18).
+Its header is what the caller says about themselves and who verified what;
+its two fields are the verified birthdate, shown with the age it gives, and
+the verified real name, each opened on the value on record; its action is
+`[R]evoke`. A verification is a statement made on the verifier's
+authority, so `[S]ave` asks once more, as the last keystroke before it: it
+says what it records, what it replaces, and whose Link sharing of the old
+value that switches off. Saying no keeps the draft. Both values land together
+with their history entries, or neither does, and only if what is stored is
+still what the screen showed. Emptying a verified value does not withdraw
+it: that is `[R]evoke`, a destructive action with its own question.
+
 A pause that waits for a key before going on reads `[Enter] Continue` (issue
 #1083), or `[Enter] Back`, `[Enter] Stop` where that says more. Written
 text gets it from `netbbs.rendering.continue_prompt`; the live screens that
