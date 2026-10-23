@@ -156,9 +156,30 @@ def validate_settings(value):
 
 
 def save_settings(db, value, *, actor, api_key):
+    if api_key is None:
+        raise BotError("API key must be empty or printable ASCII without spaces (up to 2048 characters).")
+    # Same protected database/backup boundary as FTN secrets; no plaintext audit.
+    with db.connection:
+        before = settings(db)
+        key_changed = api_key != get_config(db, SECRET_KEY, "")
+        saved = save_settings_without_commit(db, value, actor=actor, api_key=api_key)
+        # Issue #1505: every changed setting by name and value, in the same
+        # transaction; the API key only as changed/unchanged, never its value.
+        # (A preset writes its own entry around `save_settings_without_commit`.)
+        changed = [f"{f.name}={getattr(saved, f.name)!r}" for f in fields(ModelSettings)
+                   if f.name != "revision" and getattr(saved, f.name) != getattr(before, f.name)]
+        changed.append(f"api_key={'changed' if key_changed else 'unchanged'}")
+        record_action_without_commit(db, actor=actor, action="set_model_conversation", detail=" ".join(changed))
+    return saved
+
+
+def save_settings_without_commit(db, value, *, actor, api_key=None):
+    """`save_settings` for a caller that owns the transaction (a preset,
+    issue #1504). `api_key=None` keeps the stored key as it is."""
     require_sysop(db, actor)
     value = validate_settings(value)
-    if not isinstance(api_key, str) or len(api_key) > 2048 or any(ord(c) < 33 or ord(c) > 126 for c in api_key):
+    if api_key is not None and (not isinstance(api_key, str) or len(api_key) > 2048
+                                or any(ord(c) < 33 or ord(c) > 126 for c in api_key)):
         raise BotError("API key must be empty or printable ASCII without spaces (up to 2048 characters).")
     if value.enabled:
         try:
@@ -166,18 +187,9 @@ def save_settings(db, value, *, actor, api_key):
         except ImportError:
             raise BotError("Install the optional netbbs[bots] extra before enabling model conversation.") from None
     value = replace(value, revision=uuid.uuid4().hex)
-    # Same protected database/backup boundary as FTN secrets; no plaintext audit.
-    with db.connection:
-        before = settings(db)
-        key_changed = api_key != get_config(db, SECRET_KEY, "")
-        set_config_without_commit(db, CONFIG_KEY, json.dumps(asdict(value)))
+    set_config_without_commit(db, CONFIG_KEY, json.dumps(asdict(value)))
+    if api_key is not None:
         set_config_without_commit(db, SECRET_KEY, api_key)
-        # Issue #1505: every changed setting by name and value, in the same
-        # transaction; the API key only as changed/unchanged, never its value.
-        changed = [f"{f.name}={getattr(value, f.name)!r}" for f in fields(ModelSettings)
-                   if f.name != "revision" and getattr(value, f.name) != getattr(before, f.name)]
-        changed.append(f"api_key={'changed' if key_changed else 'unchanged'}")
-        record_action_without_commit(db, actor=actor, action="set_model_conversation", detail=" ".join(changed))
     return value
 
 

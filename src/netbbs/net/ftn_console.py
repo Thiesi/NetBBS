@@ -11,7 +11,9 @@ Configuration and operation are kept apart, as MRC's are:
   answer port with its certificate files (issues #1467, #1468). A new network starts as fsxNet's main hub, the usual first
   network for a new BBS; the SysOp fills in the address fsxNet gave them.
   **[L]inks** opens the highlighted network's points and downlinks
-  (`netbbs.net.ftn_links_console`, issues #1478 and #1479).
+  (`netbbs.net.ftn_links_console`, issues #1478 and #1479), and
+  **[P]ublishing** its pointlist and nodelist segment
+  (`netbbs.net.ftn_publish_console`, issue #1480).
 - **Node → Echomail & netmail (FTN)** (`ftn_status_screen`): what the mailer and listener
   last did, what waits, and the work on a running network: poll now,
   AreaFix and FileFix requests, echo-list import, nodelist import, held
@@ -207,6 +209,14 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
         return await _load()
     # --- end points and downlinks ---
 
+    # --- publishing (issue #1480) ---
+    async def _publishing(network: FtnNetwork) -> list[FtnNetwork] | None:
+        from netbbs.net.ftn_publish_console import ftn_publish_screen
+
+        await ftn_publish_screen(session, lane, actor, network)
+        return await _load()
+    # --- end publishing ---
+
     chrome = await _load_chrome(lane, actor)
     start = None
     while True:
@@ -219,10 +229,13 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
                                       + (", answers calls" if n.answers_calls else "")),
             title="FTN networks", own=True,
             empty_message="No FTN networks. [C]reate one: it starts as fsxNet's hub.",
-            refresh=_load, on_create=_create, item_keys={"d": _delete, "r": _robot_password, "l": _links},
+            refresh=_load, on_create=_create, item_keys={"d": _delete, "r": _robot_password, "l": _links,
+                                                         "p": _publishing},
             live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network"),
                       MenuEntry(label=menu_key("R", "obot password"), brief="Change robot password: send %PWD"),
-                      MenuEntry(label=menu_key("L", "inks"), brief="Points and downlinks on this network")],
+                      MenuEntry(label=menu_key("L", "inks"), brief="Points and downlinks on this network"),
+                      MenuEntry(label=menu_key("P", "ublishing"),
+                                brief="Pointlist and nodelist segment")],  # issue #1480
             live_label=lambda: status or "FidoNet-style networks: echomail on boards, netmail in Mail",
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),

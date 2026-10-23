@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 
 from netbbs.auth.users import SYSOP_LEVEL, User
-from netbbs.config import get_config, set_config
+from netbbs.config import get_config, set_config_without_commit
 from netbbs.digits import is_ascii_number
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.storage.database import Database
@@ -52,6 +52,24 @@ def set_level_name(db: Database, level: int, name: str | None, *, changed_by: Us
     level already has."""
     from netbbs.moderation.log import record_action
 
+    cleaned = _store_level_name(db, level, name)
+    db.connection.commit()
+    record_action(
+        db, actor=changed_by, action="name_level",
+        detail=f"level {level} named {cleaned!r}" if cleaned else f"level {level} name cleared",
+    )
+    return get_level_names(db)
+
+
+def set_level_name_without_commit(db: Database, level: int, name: str | None) -> dict[int, str]:
+    """`set_level_name` for a caller that owns the transaction and writes
+    its own audit entry (a preset, issue #1504): checked the same way, but
+    neither committed nor audited."""
+    _store_level_name(db, level, name)
+    return get_level_names(db)
+
+
+def _store_level_name(db: Database, level: int, name: str | None) -> str:
     if level == SYSOP_LEVEL:
         raise LevelNameError(f"{SYSOP_LEVEL} is always called {SYSOP_LEVEL_NAME}.")
     if not 0 <= level < SYSOP_LEVEL:
@@ -63,20 +81,21 @@ def set_level_name(db: Database, level: int, name: str | None, *, changed_by: Us
             raise LevelNameError(f"A level name is at most {MAX_LEVEL_NAME_LENGTH} characters.")
         if not any(char.isalpha() for char in cleaned):
             raise LevelNameError("A level name needs a letter, so it can't be mistaken for a level.")
-        taken = next((other for other, other_name in names.items()
-                      if other != level and other_name.casefold() == cleaned.casefold()), None)
+        taken = level_name_holder(names, level, cleaned)
         if taken is not None:
             raise LevelNameError(f"Level {taken} is already called {names[taken]}.")
         names[level] = cleaned
     else:
         names.pop(level, None)
     stored = {str(key): value for key, value in sorted(names.items()) if key != SYSOP_LEVEL}
-    set_config(db, LEVEL_NAMES_CONFIG_KEY, json.dumps(stored))
-    record_action(
-        db, actor=changed_by, action="name_level",
-        detail=f"level {level} named {cleaned!r}" if cleaned else f"level {level} name cleared",
-    )
-    return get_level_names(db)
+    set_config_without_commit(db, LEVEL_NAMES_CONFIG_KEY, json.dumps(stored))
+    return cleaned
+
+
+def level_name_holder(names: dict[int, str], level: int, name: str) -> int | None:
+    """The other level already called `name` (in any case), if one is."""
+    return next((other for other, other_name in names.items()
+                 if other != level and other_name.casefold() == name.casefold()), None)
 
 
 def level_label(level: int, names: dict[int, str]) -> str:

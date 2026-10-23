@@ -123,6 +123,28 @@ DOWNLOAD = "download"
 UPLOAD = "upload"
 
 
+@dataclass(frozen=True)
+class PrivateTransfer:
+    """Something of the caller's own that lives in no file area (issue
+    #1389): a QWK packet built for them to download, or a reply packet they
+    send. The grant still names its account and is re-checked when used;
+    what the file is, and what happens to an upload, is the screen's.
+
+    A download sends `path` as `filename`. An upload is bounded by
+    `max_bytes` and handed, once received, to `receive(db, user, path,
+    filename, node_identity=...)` on the gateway's lane, which returns what
+    the browser page says: `{"title": ..., "lines": [...]}`. `on_received`
+    is then told the same, for the terminal that asked for the link."""
+
+    label: str
+    filename: str = ""
+    path: Path | None = None
+    size: int = 0
+    max_bytes: int = 0
+    receive: Callable[..., dict] | None = field(default=None, compare=False, repr=False)
+    on_received: Callable[[dict], None] | None = field(default=None, compare=False, repr=False)
+
+
 class TransferError(Exception):
     """Raised when a grant cannot be issued -- the node is at its
     outstanding-grant ceiling, or the caller could not do this transfer
@@ -164,6 +186,8 @@ class TransferGrant:
     #: caller's screen stays silent while the file lands somewhere they
     #: cannot see.
     on_stored: Callable[[FileEntry], None] | None = field(default=None, compare=False, repr=False)
+    #: Issue #1389: the caller's own file, in no area (`PrivateTransfer`).
+    private: PrivateTransfer | None = None
 
     def is_live(self, *, now: float | None = None) -> bool:
         return (now if now is not None else time.monotonic()) < self.expires_at
@@ -255,6 +279,30 @@ class TransferGrants:
         self._grants[grant.token] = grant
         return grant
 
+    def issue_private(self, *, direction: str, user: User, transfer: PrivateTransfer) -> TransferGrant:
+        """A single-use link for the caller's own file (issue #1389): a QWK
+        packet to download, or a reply packet to upload. Counted against the
+        same ceiling as every other link."""
+        self._sweep()
+        if len(self._grants) >= self._max_outstanding:
+            raise TransferError(
+                f"this node already has {len(self._grants)} transfers waiting to start -- "
+                "try again in a few minutes"
+            )
+        grant = TransferGrant(
+            token=secrets.token_urlsafe(32),
+            direction=direction,
+            user_id=user.id,
+            username=user.username,
+            user_created_at=user.created_at,
+            area_id=None,
+            file_id=None,
+            expires_at=self._clock() + self._ttl_seconds,
+            private=transfer,
+        )
+        self._grants[grant.token] = grant
+        return grant
+
     def peek(self, token: str) -> TransferGrant | None:
         """Look a grant up *without* spending it (Codex review).
 
@@ -329,6 +377,17 @@ def resolve(db: Database, grant: TransferGrant) -> RedeemedTransfer:
         # it was created, so the three together are an identity no
         # recreation can inherit (Codex review).
         raise TransferError("this account can no longer transfer files")
+    if grant.private is not None:
+        # Issue #1389: the caller's own packet. Nobody else's gates apply,
+        # but a lockout since the link was minted ends it.
+        if is_blocked(db, user):
+            raise TransferError("this account can no longer transfer files")
+        if grant.direction == DOWNLOAD and (grant.private.path is None or not grant.private.path.exists()):
+            raise TransferError("that packet is no longer on this node; ask for a new one")
+        return RedeemedTransfer(
+            grant=grant, user=user, area=None, entry=None,
+            max_upload_bytes=grant.private.max_bytes,
+        )
     if grant.sysop_upload is not None:
         # Issue #728. The link was minted by a SysOp at the console; by the
         # time a browser sends the file that account may have been demoted
@@ -539,14 +598,15 @@ class TransferGateway:
             self._probes_in_flight -= 1
         if self._downloads_in_flight >= self._max_concurrent_uploads:
             return _head_refusal(429, "This node is already busy sending files. Try again in a moment.")
+        filename, size = _download_name_and_size(resolved)
         # A StreamResponse, so Content-Length can be the file's size rather
         # than the empty body's; a HEAD sends no body either way.
         response = web.StreamResponse(status=200, headers={
-            "Content-Disposition": _content_disposition(resolved.entry.filename),
+            "Content-Disposition": _content_disposition(filename),
             "Content-Type": "application/octet-stream",
             "Cache-Control": "no-store, no-cache, must-revalidate, private",
         })
-        response.content_length = resolved.entry.size_bytes
+        response.content_length = size
         await response.prepare(request)
         await response.write_eof()
         return response
@@ -613,12 +673,18 @@ class TransferGateway:
 
         resolved = await self._redeem(request)
         entry = resolved.entry
-        if entry is None:  # an upload grant that expired between peek and redeem
+        private = resolved.grant.private
+        if private is not None and resolved.grant.direction == DOWNLOAD:
+            filename, size, path = private.filename, private.size, private.path
+            _logger.info("transfer: %r downloading %s", resolved.user.username, private.label)
+        elif entry is None:  # an upload grant that expired between peek and redeem
             raise web.HTTPMethodNotAllowed(method="GET", allowed_methods=["POST"])
-        _logger.info(
-            "transfer: %r downloading %r from area %r",
-            resolved.user.username, entry.filename, resolved.area.name,
-        )
+        else:
+            filename, size, path = entry.filename, entry.size_bytes, Path(entry.storage_path)
+            _logger.info(
+                "transfer: %r downloading %r from area %r",
+                resolved.user.username, entry.filename, resolved.area.name,
+            )
 
         # Streamed here rather than handed to `FileResponse`, so the
         # in-flight count falls when the *transfer* ends rather than
@@ -631,7 +697,7 @@ class TransferGateway:
                 # RFC 6266's `filename*` form, so a CP437-era name with
                 # non-ASCII characters survives the trip; `filename` is
                 # the ASCII fallback for anything that still cares.
-                "Content-Disposition": _content_disposition(entry.filename),
+                "Content-Disposition": _content_disposition(filename),
                 "Content-Type": "application/octet-stream",
                 # A single-use URL that a browser or shared proxy can
                 # replay from cache is not single-use (Codex review).
@@ -639,19 +705,18 @@ class TransferGateway:
                 "Pragma": "no-cache",
             },
         )
-        response.content_length = entry.size_bytes
+        response.content_length = size
         await response.prepare(request)
         try:
             # Bounded in time as well as in count (Codex review): four
             # clients consuming at a trickle would otherwise hold every
             # slot for as long as they cared to, which is the same
             # denial the upload deadline exists to prevent.
-            await asyncio.wait_for(_stream_file(response, Path(entry.storage_path)),
-                                   timeout=TRANSFER_TIMEOUT_SECONDS)
+            await asyncio.wait_for(_stream_file(response, path), timeout=TRANSFER_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             _logger.warning(
                 "transfer: download of %r by %r exceeded %ss; dropping it",
-                entry.filename, resolved.user.username, TRANSFER_TIMEOUT_SECONDS,
+                filename, resolved.user.username, TRANSFER_TIMEOUT_SECONDS,
             )
         return response
 
@@ -672,7 +737,9 @@ class TransferGateway:
         from aiohttp import web
 
         resolved = await self._redeem(request)
-        if resolved.entry is not None:  # a download grant used with POST
+        if resolved.entry is not None or (
+            resolved.grant.private is not None and resolved.grant.direction == DOWNLOAD
+        ):  # a download grant used with POST
             raise web.HTTPMethodNotAllowed(method="POST", allowed_methods=["GET"])
 
         temp_path = await self._lane.run(new_incoming_temp_path)
@@ -713,6 +780,8 @@ class TransferGateway:
         target = resolved.grant.sysop_upload
         if target is not None:
             return await self._install_sysop_upload(request, resolved, target, temp_path, filename)
+        if resolved.grant.private is not None:
+            return await self._receive_private(request, resolved, temp_path, filename, received)
 
         try:
             sha256, size_bytes = await asyncio.to_thread(hash_and_measure, temp_path)
@@ -753,6 +822,40 @@ class TransferGateway:
             "description": entry.description,
         }, where=f"[{resolved.area.name}]")
 
+
+    async def _receive_private(self, request, resolved, temp_path: Path, filename: str, size: int):
+        """Issue #1389: hand the caller's own upload -- a QWK reply packet --
+        to the screen's `receive`, on this lane, and say what it did. The
+        staging file is removed either way: `receive` reads it and keeps
+        nothing on disk."""
+        from aiohttp import web
+
+        private = resolved.grant.private
+        try:
+            if private.receive is None:
+                raise TransferError("this link takes no upload")
+            identity = self._announce_identity()
+            result = await self._lane.run(
+                lambda db: private.receive(db, resolved.user, temp_path, filename, node_identity=identity)
+            )
+        except TransferError as exc:
+            raise web.HTTPForbidden(text=str(exc)) from exc
+        except Exception as exc:
+            _logger.warning("transfer: %s from %r failed: %s", private.label, resolved.user.username, exc)
+            raise web.HTTPBadRequest(text=f"The upload could not be used: {exc}") from exc
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                _logger.warning("transfer: could not remove %s: %s", temp_path, cleanup_error)
+        _logger.info("transfer: %r uploaded %s (%d bytes)", resolved.user.username, private.label, size)
+        if private.on_received is not None:
+            # Best-effort, as for a stored file: the terminal may be gone.
+            try:
+                private.on_received(result)
+            except Exception:
+                _logger.warning("transfer: could not tell the terminal about %s", private.label, exc_info=True)
+        return _private_upload_response(request, result, filename=filename, size=size)
 
     async def _install_sysop_upload(self, request, resolved, target: SysOpUploadTarget, temp_path: Path, filename: str):
         """Issue #728: put a SysOp's upload at the destination they chose
@@ -1019,6 +1122,33 @@ def _head_refusal(status: int, message: str):
         "X-NetBBS-Transfer-Message": safe,
         "Cache-Control": "no-store",
     })
+
+
+def _download_name_and_size(resolved: RedeemedTransfer) -> tuple[str, int]:
+    private = resolved.grant.private
+    if private is not None:
+        return private.filename, private.size
+    return resolved.entry.filename, resolved.entry.size_bytes
+
+
+def _private_upload_response(request, result: dict, *, filename: str, size: int):
+    """What a caller's own upload answers (issue #1389): `result`'s title
+    and lines, as JSON for the terminal page and as a page for a person."""
+    from aiohttp import web
+
+    title = str(result.get("title") or "Received")
+    lines = [str(line) for line in result.get("lines") or []]
+    if "text/html" not in request.headers.get("Accept", ""):
+        return web.json_response({
+            "filename": filename, "size_bytes": size, "status": "received",
+            "description": "\n".join([title, *lines]), "lines": lines,
+        })
+    body = "".join(f"<p>{html.escape(line)}</p>" for line in lines)
+    return web.Response(
+        text=_page(title, body + "<p>You can close this tab and go back to your terminal.</p>"),
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _content_disposition(filename: str) -> str:

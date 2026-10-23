@@ -378,3 +378,60 @@ def set_crosspost_board_limit(db: Database, limit: int) -> None:
     if not 1 <= limit <= MAX_CROSSPOST_BOARD_LIMIT:
         raise ValueError(f"cross-post board limit must be 1-{MAX_CROSSPOST_BOARD_LIMIT}, got {limit!r}")
     set_config(db, CROSSPOST_BOARD_LIMIT_CONFIG_KEY, str(limit))
+
+
+# Issue #1389 (design doc §6.10): QWK offline mail. The BBS ID names every
+# packet (`<ID>.QWK`) and is what a reply packet must carry; blank, it is
+# made from the node's display name. The message cap bounds one packet; the
+# rest wait for the next.
+QWK_BBS_ID_CONFIG_KEY = "qwk_bbs_id"
+QWK_PACKET_MESSAGES_CONFIG_KEY = "qwk_packet_messages"
+DEFAULT_QWK_PACKET_MESSAGES = 2000
+MIN_QWK_PACKET_MESSAGES = 50
+MAX_QWK_PACKET_MESSAGES = 10000
+_QWK_BBS_ID_RE = re.compile(r"^[A-Z0-9]{1,8}$")
+
+
+def is_valid_qwk_bbs_id(value: str) -> bool:
+    return bool(_QWK_BBS_ID_RE.match(value))
+
+
+def derived_qwk_bbs_id(db: Database) -> str:
+    """The BBS ID made from the node's display name: its letters and
+    digits, upper case, the first eight -- or NETBBS when it has none."""
+    letters = "".join(ch for ch in get_node_display_name(db).upper() if ch.isascii() and ch.isalnum())
+    return letters[:8] or "NETBBS"
+
+
+def get_qwk_bbs_id_setting(db: Database) -> str:
+    """The SysOp's BBS ID, or "" for the one made from the node's name."""
+    value = (get_config(db, QWK_BBS_ID_CONFIG_KEY) or "").strip().upper()
+    return value if is_valid_qwk_bbs_id(value) else ""
+
+
+def get_qwk_bbs_id(db: Database) -> str:
+    return get_qwk_bbs_id_setting(db) or derived_qwk_bbs_id(db)
+
+
+def set_qwk_bbs_id(db: Database, value: str) -> None:
+    value = value.strip().upper()
+    if value and not is_valid_qwk_bbs_id(value):
+        raise ValueError(f"a QWK BBS ID is 1-8 letters and digits, got {value!r}")
+    set_config(db, QWK_BBS_ID_CONFIG_KEY, value)
+
+
+def get_qwk_packet_messages(db: Database) -> int:
+    value = get_config(db, QWK_PACKET_MESSAGES_CONFIG_KEY)
+    try:
+        limit = int(value) if value is not None else DEFAULT_QWK_PACKET_MESSAGES
+    except ValueError:
+        return DEFAULT_QWK_PACKET_MESSAGES
+    return min(max(limit, MIN_QWK_PACKET_MESSAGES), MAX_QWK_PACKET_MESSAGES)
+
+
+def set_qwk_packet_messages(db: Database, limit: int) -> None:
+    if not MIN_QWK_PACKET_MESSAGES <= limit <= MAX_QWK_PACKET_MESSAGES:
+        raise ValueError(
+            f"QWK packet cap must be {MIN_QWK_PACKET_MESSAGES}-{MAX_QWK_PACKET_MESSAGES}, got {limit!r}"
+        )
+    set_config(db, QWK_PACKET_MESSAGES_CONFIG_KEY, str(limit))

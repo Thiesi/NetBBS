@@ -1767,6 +1767,46 @@ session needs the same treatment.
   bytes (the trailing SEEN-BY/PATH run, an appended Via line, inserted
   INTL/FMPT/TOPT) so a forwarded message keeps its character set and
   kludges exactly; `decode_message`/`encode_message` would normalise them.
+- **Every fan-out copy shares one SEEN-BY.** `netbbs.ftn.fanout` computes
+  the target set first and writes the same SEEN-BY (old + this node + every
+  downlink and the uplink it goes to, never a point) into every copy; a
+  per-copy SEEN-BY would let two downlinks that also talk to each other
+  exchange the message again. Loop detection reads PATH, not SEEN-BY: an
+  uplink normally puts this node in SEEN-BY before sending.
+- **`ftn_point_waiting` keeps a link's message as received**, not a
+  forwarded form: the fan-out runs at approval time against the links
+  carrying the echo then. Rows written by the first part (already in the
+  uplink form) still fan out correctly, as a point's SEEN-BY/PATH are
+  replaced anyway.
+- **A TIC's sender is the session that brought the TIC**, not its `From`
+  line: for a TIC that waited in the held store it is that held row's
+  `remote_address` (`exchange.settle_pair`). Judging it by the session that
+  brought the *file* would let a link's file pair with an uplink TIC and be
+  checked against the wrong password.
+- **A rescan never reuses a fan-out reference.** The queue's reference is
+  unique per network and kind and sent rows linger for
+  `SENT_RETENTION_DAYS`, so rescans are keyed by the request
+  (`rescan:<request>:<post>><link>`); a fan-out key would silently skip
+  every message the link already got once.
+
+### FTN publishing (issue #1480)
+
+- **A published list's CRC-16 comes from the importer's own code.**
+  `netbbs.ftn.publish` computes the first line's check value with
+  `nodelist.list_crc`, the function `check_crc` verifies received lists
+  with, and the tests import a generated segment through `import_list` with
+  the check required. Change either side and the round-trip test is what
+  catches it.
+- **A net's segment has no Zone line.** `parse_nodelist`/`import_list` take
+  a `zone=` for that; without it a segment starting at `Host` is refused
+  ("a net is listed before any Zone line"), as a received partial list
+  always was.
+- **A generated file hatched from outside a file area** goes through
+  `hatch.hatch_generated_file`, not `hatch_file`: it is spooled under a
+  random prefix (`ABCD1234-POINTS.Z96`, sent as `POINTS.Z96`) so a second
+  edition queued the same day never overwrites one still waiting, its rows
+  use reference kind `publish` (paired with the TIC like `hatch`), and it
+  is not recorded in `ftn_hatches`, whose `file_id` is a file area entry's.
 
 ### Read cursors and follows (issue #56)
 

@@ -16,6 +16,10 @@ Everything here is synchronous and `db`-first.
   To is the uplink; Desc is the description's first line and Ldesc every
   line; Crc, Size and Date are the stored file's; one Path line (this node,
   now); Seenby this node and the uplink; Pw the network's TIC password.
+- **Links** (issue #1479). The points and downlinks carrying the file echo
+  get the file too, each with a TIC under its own TIC password
+  (`netbbs.ftn.ticfwd`); every TIC's Seenby names them all. A link with no
+  TIC password, or whose queue is full, is skipped with a node-log line.
 - **Once.** Each hatch is recorded in `ftn_hatches` and audit-logged. A file
   already hatched into a network is hatched again only when the SysOp asks
   for it again on purpose, and that TIC carries `Replaces` with the names
@@ -200,13 +204,14 @@ def _unix(iso: str) -> int | None:
         return None
 
 
-def _write_spool_tic(db: Database, data: bytes) -> tuple[Path, str]:
-    """Write the TIC into the spool folder under a fresh 8.3 name."""
+def _write_spool_tic(db: Database, data: bytes, suffix: str = ".TIC") -> tuple[Path, str]:
+    """Write the TIC into the spool folder under a fresh 8.3 name (or, with
+    another `suffix`, a file under a fresh name ending in it)."""
     folder = spool_dir(db) / "hatch"
     folder.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     for _attempt in range(16):
-        name = f"{secrets.token_hex(4).upper()}.TIC"
+        name = f"{secrets.token_hex(4).upper()}{suffix}"
         path = folder / name
         try:
             descriptor = os.open(path, flags, 0o644)
@@ -260,6 +265,7 @@ def hatch_file(
     lines = _description_lines(entry)
     now = datetime.datetime.now(datetime.timezone.utc)
     us = network.our_address
+    links = _links_carrying(db, network, tag)  # issue #1479
     tic = Tic(
         area=tag, file=send_name, crc=crc, long_name=entry.filename if entry.filename != send_name else None,
         size=size, desc=lines[0] if lines else entry.filename, ldesc=tuple(lines), replaces=replaces,
@@ -267,11 +273,13 @@ def hatch_file(
     )
     try:
         data = write_tic(tic, to=network.uplink_address, path=[(us, int(now.timestamp()))],
-                         seen_by=[us, network.uplink_address], date=_unix(entry.created_at),
+                         seen_by=[us, network.uplink_address, *(link.address for link in links)],
+                         date=_unix(entry.created_at),
                          created=f"NetBBS {__version__}")
     except FtnFormatError as exc:
         raise HatchError(f"{entry.filename} can't be hatched: {exc}.") from None
     tic_path, tic_name = _write_spool_tic(db, data)
+    spooled: list[Path] = []
     try:
         cursor = db.connection.execute(
             "INSERT INTO ftn_hatches (network_id, file_id, area_id, tag, file_name, send_name, tic_name, crc32, "
@@ -286,18 +294,66 @@ def hatch_file(
                                   **common)
         queue_file_without_commit(db, network.id, send_name=tic_name, size_bytes=len(data), path=tic_path,
                                   after_sent=KILL, **common)
+        sent_to = _queue_for_links(db, network, entry, tic, links, now, reference, spooled)
         db.connection.commit()
     except BaseException:
         db.connection.rollback()
         tic_path.unlink(missing_ok=True)
+        for path in spooled:
+            path.unlink(missing_ok=True)
         raise
     how = "automatically" if automatic else ("again" if replaces else "")
     detail = (f"hatched {entry.filename} into {tag} on {network.name}{' ' + how if how else ''} "
-              f"(as {send_name}, CRC-32 {crc:08X}, {size} bytes)")
+              f"(as {send_name}, CRC-32 {crc:08X}, {size} bytes)"
+              + (f"; also to {', '.join(sent_to)}" if sent_to else ""))
     record_action(db, actor=actor, action="hatch_ftn_file", object_type="file_area", object_id=entry.area_id,
                   detail=detail)
     _logger.info("FTN %s: %s", network.name, detail)
     return Hatched(network.name, tag, entry.filename, send_name, tic_name, replaces)
+
+
+def _links_carrying(db: Database, network: FtnNetwork, tag: str) -> list:
+    import sqlite3
+
+    from netbbs.ftn.links import FILE_ECHO, links_carrying
+
+    try:
+        links = links_carrying(db, network.id, FILE_ECHO, tag)
+    except sqlite3.OperationalError:  # a schema older than links
+        return []
+    for link in links:
+        if not link.tic_password:
+            _logger.warning("FTN %s: hatches into %s are not sent to %s: no TIC password is set for it",
+                            network.name, tag, link.label)
+    # Only the links that get it are named in every TIC's Seenby.
+    return [link for link in links if link.tic_password]
+
+
+def _queue_for_links(db: Database, network: FtnNetwork, entry: FileEntry, tic: Tic, links: list,
+                     now: datetime.datetime, reference: str, spooled: list[Path]) -> list[str]:
+    """Queue the hatched file for each link carrying the echo (issue #1479);
+    returns the addresses it went to."""
+    from netbbs.ftn.ticfwd import queue_tic_copy_without_commit
+
+    us = network.our_address
+    seen_by = [us, network.uplink_address, *(link.address for link in links)]
+    sent_to = []
+    for link in links:
+        try:
+            queued = queue_tic_copy_without_commit(
+                db, network, entry, tic, to=link.address,
+                password=link.tic_password, link_id=link.id, earlier_path=(), path=[(us, int(now.timestamp()))],
+                seen_by=seen_by, reference=f"hatch{reference}>{link.id}", spooled=spooled,
+            )
+        except (FtnFormatError, ValueError) as exc:
+            _logger.warning("FTN %s: hatched %s not sent to %s: %s", network.name, entry.filename, link.label, exc)
+            continue
+        if queued:
+            sent_to.append(link.address.four_d)
+        else:
+            _logger.warning("FTN %s: hatched %s not sent to %s: its outbound files queue is full", network.name,
+                            entry.filename, link.label)
+    return sent_to
 
 
 def auto_hatch(db: Database, file_id: str) -> Hatched | None:
@@ -326,3 +382,71 @@ def auto_hatch(db: Database, file_id: str) -> Hatched | None:
             pass
         _logger.exception("FTN: automatic hatch of %s failed", file_id[:16])
     return None
+
+
+# --- published lists (issue #1480) ---------------------------------------------------
+
+PUBLISH_REFERENCE_KIND = "publish"
+
+
+def hatch_generated_file(
+    db: Database, network: FtnNetwork, tag: str, data: bytes, *, send_name: str, desc: str,
+    reference_id: str, replaces: tuple[str, ...] = (),
+) -> str:
+    """Hatch a file this node made only to send (a pointlist or nodelist
+    segment, `netbbs.ftn.publish`) into file echo `tag`: write it and its
+    TIC into the spool folder and queue both to the uplink, the file
+    first, each deleted once sent. The same guards as `hatch_file`: a TIC
+    password, BinkP's size limit, an 8.3 name no receiver takes for a
+    control file, and room for two files in the queue. Returns the TIC's
+    name; raises `HatchError` (or `FtnQueueFullError`) and changes nothing.
+    Commits."""
+    if not tag or " " in tag:
+        raise HatchError("No file echo is set to hatch into.")
+    if not network.tic_password:
+        raise HatchError(f"No TIC password is set for {network.name}; set the one agreed with the hub in the "
+                         "network editor first.")
+    if len(data) > MAX_FILE_BYTES:
+        raise HatchError(f"{send_name} is {len(data)} bytes; BinkP sends at most {MAX_FILE_BYTES}.")
+    if dos_name(send_name) != send_name or send_name.lower().endswith(_CONTROL_EXTENSIONS):
+        raise HatchError(f"{send_name} is not an 8.3 name a receiver takes for a file.")
+    pending = db.connection.execute(
+        "SELECT COUNT(*) FROM ftn_outbound_files WHERE network_id = ?", (network.id,)
+    ).fetchone()[0]
+    if pending + 2 > MAX_PENDING_FILES_PER_NETWORK:
+        raise FtnQueueFullError(f"{pending} files are already waiting for {network.name}; hatch again once they "
+                                "have gone")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    us = network.our_address
+    replaces = tuple(n for n in replaces if n != send_name and "*" not in n and "?" not in n
+                     and replaces_pattern_problem(n) is None)
+    tic = Tic(area=tag, file=send_name, crc=zlib.crc32(data) & 0xFFFFFFFF, size=len(data), desc=desc,
+              replaces=replaces, origin=us, from_address=us, password=network.tic_password)
+    try:
+        tic_data = write_tic(tic, to=network.uplink_address, path=[(us, int(now.timestamp()))],
+                             seen_by=[us, network.uplink_address], date=int(now.timestamp()),
+                             created=f"NetBBS {__version__}")
+    except FtnFormatError as exc:
+        raise HatchError(f"{send_name} can't be hatched: {exc}.") from None
+    # The file goes under a spool name of its own, so a second edition
+    # queued the same day never overwrites one still waiting.
+    file_path, _spool_name = _write_spool_tic(db, data, suffix=f"-{send_name}")
+    try:
+        tic_path, tic_name = _write_spool_tic(db, tic_data)
+    except BaseException:
+        file_path.unlink(missing_ok=True)
+        raise
+    try:
+        common = dict(destination=network.uplink_address.four_d, route="uplink",
+                      reference_kind=PUBLISH_REFERENCE_KIND, reference_id=reference_id, after_sent=KILL)
+        queue_file_without_commit(db, network.id, send_name=send_name, size_bytes=len(data), path=file_path,
+                                  **common)
+        queue_file_without_commit(db, network.id, send_name=tic_name, size_bytes=len(tic_data), path=tic_path,
+                                  **common)
+        db.connection.commit()
+    except BaseException:
+        db.connection.rollback()
+        file_path.unlink(missing_ok=True)
+        tic_path.unlink(missing_ok=True)
+        raise
+    return tic_name

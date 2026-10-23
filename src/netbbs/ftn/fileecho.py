@@ -28,6 +28,11 @@ session, and the console after a SysOp maps a bad file echo.
   or not a file area carries the echo.
 - **Held items.** `held_file_for_saving`, `save_held_to_area` and
   `export_held` are the held screen's [S]ave and [E]xport (issue #1460).
+- **From a link** (issue #1479). A TIC a point or downlink sends, in a
+  session its password proved (`sender`), must name that link in `From`,
+  carry the link's own TIC password, and be for a file echo the link
+  carries read-write. A stored file is then forwarded to the other systems
+  carrying the echo (`netbbs.ftn.ticfwd`), whoever sent it.
 """
 
 from __future__ import annotations
@@ -189,12 +194,19 @@ def load_held_pair(db: Database, held_id: int) -> tuple[Half, Tic, Half | None] 
 # --- the checks -------------------------------------------------------------
 
 
-def judge(db: Database, network: FtnNetwork, tic: Tic, data: bytes | None, *, link_checks: bool = True) -> Verdict:
+def judge(db: Database, network: FtnNetwork, tic: Tic, data: bytes | None, *, link_checks: bool = True,
+          sender=None) -> Verdict:
     """§6.8's checks 3-11 on a pair whose TIC parsed. `link_checks=False`
     skips 3 and 4, for a bad file echo's pairs run again after the SysOp
-    mapped it: they passed those already."""
+    mapped it: they passed those already. `sender` is the point or downlink
+    whose proven session brought the TIC (issue #1479): checks 3 and 4 are
+    then the link's, and it must carry the file echo read-write."""
     tag = tic.area.upper()
-    if link_checks:
+    if link_checks and sender is not None:
+        verdict = _link_checks(db, network, tic, sender, tag)
+        if verdict is not None:
+            return verdict
+    elif link_checks:
         if tic.from_address is None or not tic.from_address.same_node(network.uplink_address):
             sender = tic.from_address.four_d if tic.from_address is not None else "nobody (no From line)"
             return Verdict(HOLD, f"the TIC is from {sender}, not the uplink {network.uplink_address.four_d}", tag)
@@ -239,6 +251,29 @@ def judge(db: Database, network: FtnNetwork, tic: Tic, data: bytes | None, *, li
     return Verdict(ACCEPT, "", tag, area_id, name, nodelist)
 
 
+def _link_checks(db: Database, network: FtnNetwork, tic: Tic, sender, tag: str) -> Verdict | None:
+    """Checks 3 and 4 for a TIC from a point or downlink (issue #1479), and
+    whether it may send to the echo; None when it passes."""
+    from netbbs.ftn.links import FILE_ECHO, link_areas
+
+    who = sender.address.four_d
+    if tic.from_address is None or not tic.from_address.same_node(sender.address):
+        claimed = tic.from_address.four_d if tic.from_address is not None else "nobody (no From line)"
+        return Verdict(HOLD, f"the TIC is from {claimed}, but {who}'s session brought it", tag)
+    if not sender.tic_password:
+        return Verdict(HOLD, f"no TIC password is set for {who}, so no TIC from it is accepted", tag)
+    if tic.password.upper() != sender.tic_password.upper():
+        return Verdict(HOLD, f"the TIC password does not match {who}'s", tag)
+    modes = {area.tag.upper(): area.mode for area in link_areas(db, sender.id, FILE_ECHO)}
+    mode = modes.get(tag)
+    if mode is None:
+        return Verdict(HOLD, f"{who} does not carry file echo {tag}: it links it with FileFix, or the SysOp adds it",
+                       tag)
+    if mode != "rw":
+        return Verdict(HOLD, f"{who} carries file echo {tag} read-only, so it can't send files to it", tag)
+    return None
+
+
 def _is_nodelist_echo(network: FtnNetwork, tag: str) -> bool:
     return bool(network.nodelist_echo) and network.nodelist_echo.upper() == tag.upper()
 
@@ -260,7 +295,7 @@ def _usable_replaces(tic: Tic, network: FtnNetwork) -> list[str]:
 
 def settle(
     db: Database, network: FtnNetwork, remote: str, tic_half: Half, tic: Tic, file_half: Half | None,
-    verdict: Verdict, description: str | None, result,
+    verdict: Verdict, description: str | None, result, *, sender=None,
 ) -> None:
     """Carry out `verdict` for a pair (or a TIC alone), counting into
     `result` (a `TossResult`). The halves' held items are consumed: what
@@ -274,7 +309,7 @@ def settle(
             except FtnFormatError as exc:
                 db.connection.rollback()
                 return settle(db, network, remote, tic_half, tic, file_half,
-                              Verdict(HOLD, f"could not be stored: {exc}", verdict.tag), None, result)
+                              Verdict(HOLD, f"could not be stored: {exc}", verdict.tag), None, result, sender=sender)
             _delete_held_without_commit(db, consumed)
             db.connection.commit()
             reindex_file(db, entry.area_id, entry.file_id)
@@ -285,6 +320,11 @@ def settle(
                          "waiting for approval" if entry.status == "pending" else "visible")
             if verdict.nodelist_echo:
                 _nodelist_feed(db, network, verdict.tag, verdict.name, Path(entry.storage_path))
+            # --- TIC forwarding (issue #1479): on to the others carrying the echo ---
+            from netbbs.ftn.ticfwd import forward_or_wait
+
+            forward_or_wait(db, network, entry, tic_half.data, tic, sender=sender)
+            # --- end TIC forwarding ---
             return
         if _feed_without_area(db, network, verdict, file_half.data):
             _delete_held_without_commit(db, consumed)
@@ -323,13 +363,26 @@ def settle(
 
 def judge_and_settle(
     db: Database, network: FtnNetwork, remote: str, tic_half: Half, tic: Tic, file_half: Half | None,
-    description: str | None, result, *, link_checks: bool = True,
+    description: str | None, result, *, link_checks: bool = True, sender_remote: str | None = None,
 ) -> Verdict:
     """`judge`, then `settle`, in one go on the lane: what was checked is
-    what is stored, whatever happened since an earlier look."""
-    verdict = judge(db, network, tic, file_half.data if file_half is not None else None, link_checks=link_checks)
-    settle(db, network, remote, tic_half, tic, file_half, verdict, description, result)
+    what is stored, whatever happened since an earlier look.
+    `sender_remote` is the address the TIC's session was proven under
+    (its held item's, for one that waited): a point's or downlink's makes
+    that link the sender (issue #1479)."""
+    sender = tic_sender(db, network, sender_remote if sender_remote is not None else remote)
+    verdict = judge(db, network, tic, file_half.data if file_half is not None else None, link_checks=link_checks,
+                    sender=sender)
+    settle(db, network, remote, tic_half, tic, file_half, verdict, description, result, sender=sender)
     return verdict
+
+
+def tic_sender(db: Database, network: FtnNetwork, remote: str):
+    """The point or downlink a TIC came from, by the address its proven
+    session was held or tossed under; None for the uplink (issue #1479)."""
+    from netbbs.ftn.tosser import link_of
+
+    return link_of(db, network, remote)
 
 
 def hold_waiting_file(db: Database, network: FtnNetwork, remote: str, name: str, data: bytes, reason: str) -> bool:

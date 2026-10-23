@@ -272,3 +272,16 @@ def pack_message(message: PackedMessage) -> bytes:
         message.subject, b"\x00",
         message.text, b"\x00",
     ))
+
+
+def unpack_message(data: bytes) -> PackedMessage:
+    """The packed message `pack_message` wrote (issue #1479: a link's
+    echomail kept while its post waits for a moderator). Raises
+    `FtnFormatError` for anything else."""
+    if len(data) < 2 or struct.unpack_from("<H", data, 0)[0] != PACKET_VERSION:
+        raise FtnFormatError("not a packed message")
+    try:
+        message, _offset = _parse_message(data, 0)
+    except _Truncated:
+        raise FtnFormatError("the packed message is cut off") from None
+    return message

@@ -5390,4 +5390,153 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1389 (design doc §6.10, §16 \"Issue #1154\", Decisions 21-23): QWK offline mail "
+            "for callers. `qwk_conferences` gives each board a caller has taken in a packet a "
+            "conference number that stays theirs (0, their mail, has no row), keyed by the board's "
+            "content id so a reused `boards.id` never inherits it, with the caller's choice: "
+            "`follow` (in packets while followed), `add` or `remove`. `qwk_sent` lists the posts "
+            "and letters a packet carried that are not marked read yet; the next reply packet or "
+            "[M]ark read marks them and empties it. `qwk_rep_seen` remembers what each reply packet "
+            "posted, by digest, so the same packet uploaded twice posts once. No foreign key points "
+            "at `boards`, `posts` or `mail_messages`, which migrations rebuild: a gone row is "
+            "checked where it is used. Empty on upgrade."
+        ),
+        sql="""
+        CREATE TABLE qwk_conferences (
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            number      INTEGER NOT NULL CHECK (number BETWEEN 1 AND 65535),
+            board_key   TEXT NOT NULL,
+            choice      TEXT NOT NULL DEFAULT 'follow' CHECK (choice IN ('follow', 'add', 'remove')),
+            PRIMARY KEY (user_id, number),
+            UNIQUE (user_id, board_key)
+        );
+
+        CREATE TABLE qwk_sent (
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind        TEXT NOT NULL CHECK (kind IN ('post', 'mail')),
+            ref_id      INTEGER NOT NULL,
+            ref_key     TEXT NOT NULL,
+            sent_at     TEXT NOT NULL,
+            PRIMARY KEY (user_id, kind, ref_id)
+        );
+
+        CREATE TABLE qwk_rep_seen (
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            digest      TEXT NOT NULL,
+            seen_at     TEXT NOT NULL,
+            PRIMARY KEY (user_id, digest)
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #1480 (design doc §6.8, §16 \"Issue #1154\", Decision 18): publishing a pointlist "
+            "(FTS-5002, Boss format) of this node's points and a nodelist segment (FTS-5000) for the net "
+            "it coordinates. `ftn_publish_settings` holds a network's publishing settings -- which lists "
+            "are on (both off by default, and with no row nothing is published), their base file names "
+            "and the file echoes they are hatched into, the segment's Host line, the folder, whether a "
+            "ZIP is written, the schedule -- and what was last published: day, CRC-16 and file per list, "
+            "and the last failure. `ftn_publish_points` holds a point's pointlist line beside its "
+            "`ftn_links` record, so the link table is not changed. `ftn_segment_nodes` holds the "
+            "segment's node lines, which the SysOp maintains. Nothing is configured on upgrade."
+        ),
+        sql="""
+        CREATE TABLE ftn_publish_settings (
+            network_id          INTEGER PRIMARY KEY REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            pointlist_on        INTEGER NOT NULL DEFAULT 0,
+            pointlist_name      TEXT NOT NULL DEFAULT 'POINTS',
+            pointlist_echo      TEXT NOT NULL DEFAULT '',
+            segment_on          INTEGER NOT NULL DEFAULT 0,
+            segment_name        TEXT NOT NULL DEFAULT '',
+            segment_echo        TEXT NOT NULL DEFAULT '',
+            host_name           TEXT NOT NULL DEFAULT '',
+            host_location       TEXT NOT NULL DEFAULT '',
+            host_sysop          TEXT NOT NULL DEFAULT '',
+            host_phone          TEXT NOT NULL DEFAULT '-Unpublished-',
+            host_speed          TEXT NOT NULL DEFAULT '300',
+            host_flags          TEXT NOT NULL DEFAULT '',
+            folder              TEXT NOT NULL DEFAULT '',
+            archive             INTEGER NOT NULL DEFAULT 0,
+            schedule            TEXT NOT NULL DEFAULT 'off' CHECK (schedule IN ('off', 'daily', 'weekly')),
+            weekday             INTEGER NOT NULL DEFAULT 4 CHECK (weekday BETWEEN 0 AND 6),
+            scheduled_on        TEXT,
+            pointlist_at        TEXT,
+            pointlist_day       INTEGER,
+            pointlist_crc       INTEGER,
+            pointlist_file      TEXT NOT NULL DEFAULT '',
+            segment_at          TEXT,
+            segment_day         INTEGER,
+            segment_crc         INTEGER,
+            segment_file        TEXT NOT NULL DEFAULT '',
+            failure             TEXT NOT NULL DEFAULT '',
+            failed_at           TEXT
+        );
+
+        CREATE TABLE ftn_publish_points (
+            link_id     INTEGER PRIMARY KEY REFERENCES ftn_links(id) ON DELETE CASCADE,
+            listed      INTEGER NOT NULL DEFAULT 1,
+            name        TEXT NOT NULL DEFAULT '',
+            location    TEXT NOT NULL DEFAULT '',
+            sysop       TEXT NOT NULL DEFAULT '',
+            phone       TEXT NOT NULL DEFAULT '-Unpublished-',
+            speed       TEXT NOT NULL DEFAULT '300',
+            flags       TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE ftn_segment_nodes (
+            id          INTEGER PRIMARY KEY,
+            network_id  INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            keyword     TEXT NOT NULL DEFAULT '' CHECK (keyword IN ('', 'Pvt', 'Hold', 'Down')),
+            node        INTEGER NOT NULL CHECK (node BETWEEN 1 AND 32767),
+            name        TEXT NOT NULL,
+            location    TEXT NOT NULL,
+            sysop       TEXT NOT NULL,
+            phone       TEXT NOT NULL DEFAULT '-Unpublished-',
+            speed       TEXT NOT NULL DEFAULT '300',
+            flags       TEXT NOT NULL DEFAULT '',
+            UNIQUE (network_id, node)
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #1479, the hub's second part (design doc §6.8, \"Points and downlinks\"; §16 \"Issue "
+            "#1154\", Decision 17). `ftn_link_offers` is the echoes and file echoes a network's SysOp offers "
+            "to its points and downlinks: the areas their AreaFix and FileFix requests may link. "
+            "`ftn_tic_waiting` keeps a TIC file echo's TIC while its file waits for a moderator, so the file "
+            "is forwarded to the links carrying the echo once it is approved. `ftn_attach_waits` gains the "
+            "route of a transit netmail whose attached files are forwarded with it (`forward_to`, "
+            "`forward_route`, `forward_link_id`, `forward_reference`; NULL for a letter delivered here), "
+            "and `forward_from`, the address of the session the netmail came in, the only one whose "
+            "files it claims. "
+            "`ftn_point_waiting` now keeps any link's echomail, as received, while its post waits for a "
+            "moderator. Nothing is offered on upgrade, so nothing changes."
+        ),
+        sql="""
+        CREATE TABLE ftn_link_offers (
+            network_id  INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            kind        TEXT NOT NULL CHECK (kind IN ('echo', 'file')),
+            tag         TEXT NOT NULL COLLATE NOCASE,
+            created_at  TEXT NOT NULL,
+            PRIMARY KEY (network_id, kind, tag)
+        );
+
+        CREATE TABLE ftn_tic_waiting (
+            file_id     TEXT PRIMARY KEY,
+            network_id  INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            from_uplink INTEGER NOT NULL DEFAULT 1,
+            link_id     INTEGER REFERENCES ftn_links(id) ON DELETE SET NULL,
+            tic         BLOB NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_to TEXT;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_route TEXT;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_link_id INTEGER;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_reference TEXT;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_from TEXT;
+        """,
+    ),
 ]

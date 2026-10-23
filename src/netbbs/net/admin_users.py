@@ -563,6 +563,12 @@ async def _levels_screen(
     def _status_line() -> str:
         return status or "Each row: what that level adds to the ones below it"
 
+    async def _ladder_preset() -> list[LadderStep]:
+        # Issue #1504: names, a rule and two gates in one previewed step.
+        from netbbs.net.presets import LEVELS_LADDER, run_preset
+        await run_preset(session, lane, actor, LEVELS_LADDER)
+        return await _load()
+
     async def _other_level() -> list[LadderStep] | None:
         await write_field_prompt(
             session, colored(f"Which level? (0-{SYSOP_LEVEL}, or a level's name)", fg_color=MUTED_COLOR),
@@ -596,11 +602,12 @@ async def _levels_screen(
             title="Level Admin SysOp Tool (LAST)", own=True,
             empty_message="No levels in use.",
             refresh=_load,
-            live_keys={"g": _other_level},
+            live_keys={"g": _other_level, "a": _ladder_preset},
             item_keys={"n": _name_level},
             live_nav=[
                 MenuEntry(label=menu_key("G", "o to level"), brief="What any level opens"),
                 MenuEntry(label=menu_key("N", "ame"), brief="Name or rename a level"),
+                MenuEntry(label=menu_key("A", "pply levels ladder"), brief="New, Member and a rule to 10"),
             ],
             live_label=_status_line,
             start_stable_id=start,

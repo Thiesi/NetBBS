@@ -102,6 +102,12 @@ async def bot_menu(session, lane, actor):
         await model_editor(session, lane, actor, chrome)
         return await refresh()
 
+    async def budget_preset():
+        # Issue #1504: beside Model settings, since that editor is a draft.
+        from netbbs.net.presets import MODEL_BUDGETS, run_preset
+        await run_preset(session, lane, actor, MODEL_BUDGETS)
+        return await refresh()
+
     async def model_usage():
         from netbbs.net.bot_model_flow import model_usage as show_usage
         await show_usage(session, lane, actor)
@@ -123,12 +129,13 @@ async def bot_menu(session, lane, actor):
             column_values_of=lambda b: [_state_cell(b, statuses), str(len(b.channels)), _error_cell(b, statuses)],
             description_of=description, title="Chat bots", own=True,
             empty_message="No bots installed. Create an instance of Baud to get started.",
-            refresh=refresh, on_create=create, live_keys={"s": stop_all, "m": model_settings, "u": model_usage}, item_keys={"k": stop_one, "d": delete_one, "t": try_one},
+            refresh=refresh, on_create=create, live_keys={"s": stop_all, "m": model_settings, "a": budget_preset, "u": model_usage}, item_keys={"k": stop_one, "d": delete_one, "t": try_one},
             live_nav=(MenuEntry(label=menu_key("K", "ill selected"), brief="Stop this bot persistently"),
                       MenuEntry(label=menu_key("D", "elete selected"), brief="Delete a stopped bot and its state"),
                       MenuEntry(label=menu_key("T", "ry selected"), brief="Run it on a scratch node"),
                       MenuEntry(label=menu_key("S", "top all"), brief="Stop every bot persistently"),
                       MenuEntry(label=menu_key("M", "odel settings"), brief="Provider, privacy and budgets"),
+                      MenuEntry(label=menu_key("A", "pply budget preset"), brief="Frugal, Normal or Generous"),
                       MenuEntry(label=menu_key("U", "sage"), brief="Spending, callers and limits")),
             preamble="Bots read addressed messages only, unless you grant more. Changes apply within a second.",
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
