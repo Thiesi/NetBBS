@@ -264,7 +264,9 @@ above.
 - **A file a TIC names is never opened as a mail bundle.** A ZIP with no
   packet in it is held whole (#1458).
 - **Unknown file echoes are bad echoes too.** They are listed apart from
-  echomail tags, and [C]reate makes a file area (Decision 9).
+  echomail tags, and [C]reate makes a file area. Creating or mapping one runs
+  its held pairs through the TIC checks again, so they keep their TIC
+  provenance (Decision 9).
 - **The held store's byte cap is raised** so that a file at the 64 MiB limit
   fits (Decision 4).
 - **The password action covers the robot password (`%PWD`) only.** Session and
