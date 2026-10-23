@@ -39,7 +39,8 @@ caller address; another caller is told the node is busy (`M_BSY`) and
 disconnected.
 
 `batch_hook(network, context)`, as on the mailer, is asked for more files
-before each batch after the first of a binkp/1.1 multi-batch session.
+before each batch after the first of a binkp/1.1 multi-batch session: file
+requests are answered there (`netbbs.ftn.freq.FreqAnswerer`, issue #1475).
 """
 
 from __future__ import annotations
@@ -354,6 +355,9 @@ class FtnListener:
             def next_batch(context: BatchContext):
                 if hook is None:
                     return []
+                link = state.get("link")
+                if context.result.secure and link is not None and not link.enabled:
+                    return []  # a disabled link is handed nothing, file request answers included
                 return hook(_session_network(networks, state, context.result), context)
 
             outcome_prefix = ""

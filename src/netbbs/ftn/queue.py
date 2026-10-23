@@ -266,13 +266,15 @@ def held_kind_of(file_name: str, content: bytes) -> str:
 def hold_inbound(
     db: Database, *, network_id: int | None, remote_address: str, file_name: str, content: bytes, reason: str,
     kind: str | None = None, tic: bytes | None = None, waiting: bool = False, wants: tuple[str, ...] = (),
-    bad_echo: str | None = None, received_at: str | None = None,
+    bad_echo: str | None = None, received_at: str | None = None, requested: bool = False,
 ) -> bool:
     """Keep an item for the SysOp to look at; False, keeping nothing, when
     the held store is at `MAX_HELD_PACKETS` items or would pass
     `MAX_HELD_BYTES` (a held file's TIC counts too). `received_at` keeps an
     earlier arrival time when an item is held again, so an unpaired half's
-    seven days run from when it came."""
+    seven days run from when it came. A `requested` file answers a file
+    request made here (issue #1475): it waits for a TIC like any file, so a
+    file echo's file still pairs, but never expires."""
     count, size = db.connection.execute(
         "SELECT COUNT(*), COALESCE(SUM(LENGTH(content) + COALESCE(LENGTH(tic), 0)), 0) FROM ftn_held_inbound"
     ).fetchone()
@@ -280,9 +282,10 @@ def hold_inbound(
         return False
     db.connection.execute(
         "INSERT INTO ftn_held_inbound (network_id, remote_address, file_name, content, reason, received_at, "
-        "kind, tic, waiting, wants, bad_echo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "kind, tic, waiting, wants, bad_echo, requested) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (network_id, remote_address, file_name, content, reason, received_at or utc_now_iso(),
-         kind or held_kind_of(file_name, content), tic, int(waiting), "\n".join(wants) or None, bad_echo),
+         kind or held_kind_of(file_name, content), tic, int(waiting), "\n".join(wants) or None, bad_echo,
+         int(requested)),
     )
     db.connection.commit()
     return True
@@ -382,7 +385,8 @@ def expire_unpaired(db: Database, *, now: datetime.datetime | None = None) -> li
     them; each one gets a node-log line."""
     cutoff = utc_iso((now or _utcnow()) - datetime.timedelta(days=UNPAIRED_DAYS))
     rows = db.connection.execute(
-        f"SELECT {_HELD_COLUMNS} FROM ftn_held_inbound WHERE waiting = 1 AND received_at < ? ORDER BY id", (cutoff,)
+        f"SELECT {_HELD_COLUMNS} FROM ftn_held_inbound WHERE waiting = 1 AND requested = 0 "
+        "AND received_at < ? ORDER BY id", (cutoff,)
     ).fetchall()
     expired = [_held_from_row(row) for row in rows]
     for item in expired:

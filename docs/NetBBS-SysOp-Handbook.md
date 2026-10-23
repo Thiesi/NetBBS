@@ -3059,6 +3059,63 @@ on. With it on, each upload is hatched once, as soon as it is approved: at
 once in an unmoderated area, or when you approve it in a moderated one. An
 upload that can't be hatched is still stored, and the log says why.
 
+### File requests
+
+A file request (FREQ) asks another node for files by name, and other nodes
+can ask yours. Both work in the call itself: the files come back in the
+same call when both sides speak binkp/1.1, as NetBBS, binkd and most
+current mailers do.
+
+#### Ask for files
+
+1. Open **Node ▸ Echomail & netmail (FTN)** and press
+   <kbd>R</kbd> **Request files**.
+2. **From node** is your hub. Change it to ask another node, which must be
+   listed in the network's nodelist as answering BinkP.
+3. Under **Files**, type the names, separated by spaces. `*` and `?` match
+   any characters. Three names ask for something special: `FILES`, the
+   node's list of files; `ABOUT`, its description; `NODELIST`, the network's
+   nodelist. A password the node gave you follows its file:
+   `THIS.ZIP !secret`.
+4. Press <kbd>S</kbd> **Send**. The request goes out at once.
+
+What comes back waits under <kbd>H</kbd> **Held items**, marked as
+requested. Save it to a file area with <kbd>S</kbd> **Save**; it does not
+expire. Files that come in a later call are recognised for 14 days.
+
+#### Answer requests
+
+Answering is off until you turn it on, for each network.
+
+1. On each file area whose files other nodes may ask for, press
+   <kbd>O</kbd> **Offer to file requests: no** on the area's screen, which
+   turns it to yes. Only an area anyone could read can be offered: no read
+   level, age gate, verified name or hidden Community. A Linked area can't be offered, and an area
+   carrying another network's file echo is served only on that network.
+2. In the network's settings, under **File requests**, turn on
+   **Answer requests**.
+3. **Who may ask** is **secure links only** by default: your hub, which
+   proves itself with the session password. **Anyone** lets any node ask.
+4. Set the limits: **Files per call** and **MiB per call**, and
+   **Files per node a day** and **MiB per node a day**.
+5. Optionally name an **ABOUT file**, and a **NODELIST file**. Without a
+   NODELIST file, NODELIST gets the network's nodelist as you imported it;
+   turn **Serve NODELIST** off to refuse it.
+
+`FILES` is always answered with a list of every file the request could get.
+A name with a folder or drive in it, or a pattern of wildcards alone such
+as `*.*`, is refused. Passwords are not used: offered files are public, and
+a password in a request is never stored or shown. Whatever the settings, a
+network sends at most 1,000 files and 1 GiB a day by file request.
+
+> [!NOTE]
+> A node calling with binkp/1.0 can't get an answer in the call, and
+> NetBBS does not keep its request for a later one. The request is refused,
+> and the log says why.
+
+Every request, answered or refused, is written to the log. The status
+screen shows the network's last five, made and answered.
+
 ### Netmail
 
 Netmail is personal mail to an address written as `Name (zone:net/node)`.
@@ -3247,7 +3304,9 @@ Some packets and files are held instead of tossed:
 - a mail bundle that no installed tool can open (see
   [Mail bundles](#mail-bundles));
 - a file sent with a netmail that couldn't be stored, such as when the
-  network has no **Attach area** (see [Netmail](#netmail)).
+  network has no **Attach area** (see [Netmail](#netmail));
+- a file another node sent for your file request (see
+  [File requests](#file-requests)).
 
 The store holds 200 items and 256 MiB. If it is full, what can't be kept is
 counted as lost in the last call's summary and written to the log.
@@ -3397,6 +3456,9 @@ address. Under **Calls**:
   with a Via line naming your BBS. Netmail your hub sends for one of your
   links goes to that link. Netmail for any other node that reaches you is
   still not yours to route, as before.
+- **File requests** from a link are answered in its call, as from any
+  secure link, when the network answers them. A request you make to a
+  point or downlink waits for its next call.
 - A point's mail must say it was written at the point. Anything else it
   sends is held for you, under **Held items**.
 
@@ -3424,7 +3486,6 @@ told. At most 2,000 messages and 50 files wait for one link.
 
 ### Not supported
 
-- file requests;
 - sending echomail and file echoes on to points and downlinks, and an
   AreaFix or FileFix robot of your own;
 - sending bundles in any format but ZIP.

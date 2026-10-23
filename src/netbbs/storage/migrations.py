@@ -5278,6 +5278,57 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #1475 (design doc §6.8, §16 \"Issue #1154\", Decision 13): FTN file requests. "
+            "`ftn_freq_settings` holds a network's answering settings -- off by default, and with no "
+            "row a network answers nothing -- with who may request (secure links only, or anyone), "
+            "the per-session and per-node-per-day limits and the files behind the ABOUT and NODELIST "
+            "magic names. `ftn_freq_areas` lists the file areas the SysOp offers to file requests, "
+            "by their content-addressed `area_id`, never the reusable row id; no foreign key points "
+            "at `file_areas`, which later migrations may rebuild, so a gone area is checked where it "
+            "is used. `ftn_freq_requests` records every request made (`out`) and every request "
+            "received (`in`), answered or refused, for the daily limits and the status screen. "
+            "`ftn_held_inbound.requested` marks a held file that answers a request made here: it "
+            "waits for a TIC like any file but never expires (0 for every item on upgrade)."
+        ),
+        sql="""
+        CREATE TABLE ftn_freq_settings (
+            network_id      INTEGER PRIMARY KEY REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            answer          INTEGER NOT NULL DEFAULT 0,
+            secure_only     INTEGER NOT NULL DEFAULT 1,
+            session_files   INTEGER NOT NULL DEFAULT 10,
+            session_bytes   INTEGER NOT NULL DEFAULT 52428800,
+            day_files       INTEGER NOT NULL DEFAULT 25,
+            day_bytes       INTEGER NOT NULL DEFAULT 104857600,
+            about_path      TEXT NOT NULL DEFAULT '',
+            serve_nodelist  INTEGER NOT NULL DEFAULT 1,
+            nodelist_path   TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE ftn_freq_areas (
+            area_id         TEXT PRIMARY KEY,
+            offered_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE ftn_freq_requests (
+            id              INTEGER PRIMARY KEY,
+            network_id      INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            direction       TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+            node            TEXT NOT NULL,
+            names           TEXT NOT NULL,
+            secure          INTEGER NOT NULL DEFAULT 0,
+            send_name       TEXT,
+            outcome         TEXT NOT NULL DEFAULT '',
+            files           INTEGER NOT NULL DEFAULT 0,
+            bytes           INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL
+        );
+        CREATE INDEX idx_ftn_freq_requests_node ON ftn_freq_requests(network_id, direction, node, created_at);
+
+        ALTER TABLE ftn_held_inbound ADD COLUMN requested INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    Migration(
+        description=(
             "Issues #1478 and #1479 (design doc §6.8, §16 \"Issue #1154\", Decisions 15 and 17): points "
             "and downlinks. `ftn_links` holds the systems a network's SysOp adds under this node: a "
             "`point` (this node's address with a point number) or a `downlink` (a node this node "

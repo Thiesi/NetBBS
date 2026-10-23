@@ -646,3 +646,75 @@ def test_the_retry_gap_never_overflows_after_weeks_of_failures():
     assert [retry_after(n, 3600.0) for n in (1, 2, 3)] == [60.0, 120.0, 240.0]
     assert retry_after(5000, MIN_CALL_GAP) == MIN_CALL_GAP
     assert retry_after(5000, 24 * 3600.0) == 24 * 3600.0
+
+
+# --- file requests from and to a link (issue #1475 with #1478) ------------------------------------
+
+
+def _offer_and_answer(db, network, sysop):
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import upload_file
+    from netbbs.ftn import freq
+
+    area = create_file_area(db, "uploads", creator=sysop)
+    upload_file(db, area, sysop, "README.ZIP", b"read me")
+    freq.set_area_offered(db, area, True)
+    freq.save_settings_without_commit(db, freq.FreqSettings(network.id, answer=True))
+    db.connection.commit()
+
+
+async def _with_freq_listener(db, test):
+    from netbbs.ftn.freq import FreqAnswerer
+
+    lane = DatabaseLane(db.path)
+    listener = FtnListener(lane, batch_hook=FreqAnswerer(lane))
+    try:
+        await listener.reconcile()
+        return await test(listener)
+    finally:
+        await listener.close()
+        lane.close()
+
+
+def test_a_points_file_request_is_answered_in_its_proven_session(db, setup):
+    from netbbs.ftn import freq
+
+    sysop, network, _board, _point = setup
+    _offer_and_answer(db, network, sysop)
+
+    async def test(listener):
+        result = await _call(listener, address=POINT_1, password="PTPW",
+                             files=[OutgoingFile("00010001.REQ", b"README.ZIP\r\n")])
+        await _settled(listener)
+        return result
+
+    result = asyncio.run(_with_freq_listener(db, test))
+    assert result.secure
+    assert [(r.name, r.data) for r in result.received] == [("README.ZIP", b"read me")]
+    (record,) = [r for r in freq.recent_requests(db, network.id) if r.direction == "in"]
+    assert record.secure
+
+
+def test_a_disabled_point_gets_no_file_request_answer(db, setup):
+    sysop, network, _board, point = setup
+    _offer_and_answer(db, network, sysop)
+    save_link(db, replace(point, status=DISABLED))
+
+    async def test(listener):
+        result = await _call(listener, address=POINT_1, password="PTPW",
+                             files=[OutgoingFile("00010001.REQ", b"README.ZIP\r\n")])
+        await _settled(listener)
+        return result
+
+    result = asyncio.run(_with_freq_listener(db, test))
+    assert result.secure and result.received == []
+
+
+def test_a_file_request_to_a_point_waits_for_its_session(db, setup):
+    from netbbs.ftn import freq
+
+    _sysop, network, _board, point = setup
+    freq.queue_request(db, network, POINT_1, freq.request_lines_from_text("FILES"))
+    row = db.connection.execute("SELECT link_id, route, flavour FROM ftn_outbound_files").fetchone()
+    assert (row["link_id"], row["route"]) == (point.id, "direct")
+    assert direct_nodes_waiting(db, network) == []

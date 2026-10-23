@@ -695,8 +695,11 @@ async def run(
     mrc_bridge = MrcBridge(hub=hub, lane=background_lane, version=__version__, presence=presence)
     # Design doc §6.8: one FTN mailer per node. It calls only networks a
     # SysOp has enabled, read on every pass, so a node with none stays idle.
-    ftn_mailer = FtnMailer(background_lane)
-    ftn_listener = FtnListener(background_lane)
+    # Both answer file requests in a session's later batches (issue #1475).
+    from netbbs.ftn.freq import FreqAnswerer
+
+    ftn_mailer = FtnMailer(background_lane, batch_hook=FreqAnswerer(background_lane))
+    ftn_listener = FtnListener(background_lane, batch_hook=FreqAnswerer(background_lane))
     # Issue #466: every door service this node owns. Constructed here so the
     # session handlers below can close over it, but nothing is *started* until
     # inside the lifecycle try/finally -- a supervisor started before that
