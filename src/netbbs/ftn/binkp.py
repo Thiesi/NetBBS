@@ -202,7 +202,8 @@ async def run_session(
     password: str = "",
     password_for: Callable[[list[FtnAddress]], str | None] | None = None,
     outgoing: list[OutgoingFile] | None = None,
-    outgoing_for: Callable[[list[FtnAddress], bool], list[OutgoingFile]] | None = None,
+    outgoing_for: Callable[[list[FtnAddress], bool],
+                           list[OutgoingFile] | Awaitable[list[OutgoingFile]]] | None = None,
     next_batch: NextBatch | None = None,
     expected_remote: FtnAddress | None = None,
     timeout: float = IDLE_TIMEOUT,
@@ -211,7 +212,8 @@ async def run_session(
     `outgoing` files; the answering side passes `password_for`, which gives
     the password held for the caller's addresses (None when this node holds
     none, making the session non-secure), and `outgoing_for`, which gives
-    the files to send once it knows who called and whether it proved it.
+    (or awaits) the files to send once it knows who called and whether it
+    proved it.
     An originating side that names `expected_remote` ends the session
     before any password or file moves if the remote doesn't present it.
 
@@ -283,7 +285,10 @@ async def _run_session(session: _Session, *, originating, our_addresses, system,
             if not offered.startswith("CRAM-MD5-"):
                 result.plaintext_password = True
         await session.send(M_OK, "secure" if result.secure else "non-secure")
-        files = list(outgoing_for(result.remote_addresses, result.secure) if outgoing_for else [])
+        offered_files = outgoing_for(result.remote_addresses, result.secure) if outgoing_for else []
+        if inspect.isawaitable(offered_files):  # a link's mail is read once its password is proven (#1478)
+            offered_files = await offered_files
+        files = list(offered_files)
 
     # Decided from what the remote said before authentication ended, as
     # FSP-1024 4.1 asks.

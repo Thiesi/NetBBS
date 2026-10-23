@@ -461,6 +461,13 @@ def request_target_problem(db: Database, network: FtnNetwork, node: FtnAddress) 
         return "that is this BBS's own address"
     if node.same_node(network.uplink_address):
         return None
+    # A point or downlink of this node (issues #1478, #1479): the request
+    # waits in its own outbound for a session its password proves.
+    from netbbs.ftn.links import link_for_destination
+
+    link = link_for_destination(db, network.id, node)
+    if link is not None and link.address.same_node(node):
+        return None
     if node.point:
         return "a point is reached through its boss node; request from the boss, or via the uplink"
     if direct_route(db, network.id, node) is None:

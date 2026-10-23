@@ -22,6 +22,11 @@ Inbox, so Reply fills it in. `@` stays Link's (`user@node`).
   goes direct only, and is refused when the nodelist lists no BinkP
   address for the destination (unless it is the uplink itself). `hold`
   waits for the destination to call.
+- **Points and downlinks** (issues #1478, #1479, `netbbs.ftn.links`): a
+  netmail to a point of this node, or to a downlink or one of its points,
+  waits in that link's own outbound for a session its password proves --
+  any flavour, since the link calls in (or a polled downlink is called).
+  A point this node does not serve is refused.
 - **File attach** (issue #1470): a SysOp's netmail sends the files it
   points at (§6.4's file refs) with it, as FTS-0001's FileAttach: the
   netmail's subject on the network is the files' names, and each file is
@@ -42,6 +47,7 @@ from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.binkp import MAX_FILE_BYTES, safe_file_name
 from netbbs.ftn.chrs import MAX_NAME_BYTES, MAX_SUBJECT_BYTES
+from netbbs.ftn.links import is_own_point, link_for_destination
 from netbbs.ftn.message import FtnMessage, encode_message, format_msgid, format_tzutc
 from netbbs.ftn.networks import FtnNetwork, list_networks
 from netbbs.ftn.nodelist import direct_route
@@ -104,6 +110,8 @@ def netmail_refusal(db: Database, sender: User, text: str) -> str | None:
         return f"This BBS sends no netmail to zone {address.zone}."
     if not meets_level(sender, network.netmail_min_level):
         return f"Sending netmail on {network.name} needs level {network.netmail_min_level}."
+    if is_own_point(network, address) and link_for_destination(db, network.id, address) is None:
+        return f"This BBS has no point {address.four_d} on {network.name}."
     return None
 
 
@@ -183,6 +191,8 @@ def flavour_refusal(db: Database, text: str, flavour: str) -> str | None:
     if flavour != CRASH or network is None:
         return None
     address = parsed[1]
+    if link_for_destination(db, network.id, address) is not None:
+        return None  # it waits for its point or downlink, whatever the flavour
     if _is_uplink(network, address) or route_for(db, network, address) == "direct":
         return None
     return (f"Crash netmail goes straight to {address.four_d}, and the {network.name} nodelist lists no BinkP "
@@ -193,6 +203,8 @@ def flavour_route(db: Database, network: FtnNetwork, address: FtnAddress, flavou
     """Where a netmail of `flavour` to `address` is queued: `hold` waits for
     the destination itself to call, so it is routed direct unless the
     destination is the uplink; crash and normal as `route_for` says."""
+    if link_for_destination(db, network.id, address) is not None:
+        return "direct"  # the link's own outbound (issues #1478, #1479)
     if flavour == HOLD:
         return "uplink" if _is_uplink(network, address) else "direct"
     if flavour == CRASH and _is_uplink(network, address):
@@ -266,6 +278,12 @@ def sent_outcome(db: Database, text: str, flavour: str, files: int) -> str:
     parsed = parse_ftn_recipient(text)
     where = parsed[1].four_d if parsed else "its destination"
     with_files = f" with {files} file{'s' if files != 1 else ''}" if files else ""
+    network = network_for(db, parsed[1]) if parsed else None
+    link = link_for_destination(db, network.id, parsed[1]) if network is not None else None
+    if link is not None:
+        if link.polled:
+            return f"Netmail queued{with_files} for {link.address.four_d}: this BBS calls it shortly."
+        return f"Netmail queued{with_files}: it waits for {link.address.four_d} to call this BBS."
     if flavour == CRASH:
         return f"Crash netmail queued{with_files}: this BBS calls {where} now."
     if flavour == HOLD:
