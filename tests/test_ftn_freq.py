@@ -25,7 +25,8 @@ from netbbs.ftn.exchange import toss_received
 from netbbs.ftn.freq import FreqAnswerer, FreqError, FreqSettings, RequestLine
 from netbbs.ftn.listener import FtnListener
 from netbbs.ftn.mailer import FtnMailer
-from netbbs.ftn.networks import FtnNetwork, get_network, save_network, set_file_area_tic
+from netbbs.ftn.netmail import send_netmail
+from netbbs.ftn.networks import BUNDLE_ZIP, FtnNetwork, get_network, save_network, set_file_area_tic
 from netbbs.ftn.nodelist import import_nodelist
 from netbbs.ftn.queue import held_content, list_held
 from netbbs.storage.database import Database
@@ -382,6 +383,35 @@ def test_a_request_to_the_hub_is_answered_in_the_same_call(pair):
     (answered,) = hub.records("in")
     assert answered.files == 2 and "not found: NOPE.ZIP" in answered.outcome and answered.secure
     assert hub.held() == {}  # the .REQ is never held
+
+
+def test_a_request_and_its_answer_never_ride_in_a_mail_bundle(pair, monkeypatch):
+    ours, hub = pair
+    # Both bundle their mail, and both have mail waiting: the .REQ and the
+    # answer still travel as files of their own, beside each side's bundle.
+    for node, other in ((ours, "Hub Op (21:1/100)"), (hub, "Node Op (21:1/199)")):
+        node.network = save_network(node.db, replace(node.network, bundle_outgoing=BUNDLE_ZIP))
+        send_netmail(node.db, node.sysop, other, "Hello", "Mail that rides in a bundle")
+    hub.offer({"README.ZIP": b"read me"})
+    hub.answer()
+    freq.queue_request(ours.db, ours.network, HUB, freq.request_lines_from_text("README.ZIP"))
+    announced = []
+    original = binkp._Session.send
+
+    async def send(self, command, argument):
+        if command == binkp.M_FILE:
+            announced.append(argument.split(" ", 1)[0])
+        await original(self, command, argument)
+
+    monkeypatch.setattr(binkp._Session, "send", send)
+    status, calls = _poll(ours, hub)
+
+    assert status.last_error is None
+    assert "00010064.REQ" in announced and "README.ZIP" in announced
+    bundles = [name for name in announced if name not in ("00010064.REQ", "README.ZIP")]
+    assert len(bundles) == 2 and not any(name.lower().endswith(".pkt") for name in bundles)
+    assert ours.held()["README.ZIP"][1] == b"read me"
+    assert hub.records("in")[0].files == 1
 
 
 def test_a_request_from_a_node_this_bbs_calls_is_answered_by_the_mailer(pair):

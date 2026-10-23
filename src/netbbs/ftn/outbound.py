@@ -44,7 +44,12 @@ one node:
   `HOLD_DAYS`.
 
 **The session interface.** `outbound_for_node` gives one node's waiting
-messages (as one packet) and files as a `SessionOutbound`. The caller
+messages (as one packet) and files as a `SessionOutbound`. A network that
+bundles its mail (`bundle_outgoing`, issue #1477) gets the packet inside a
+ZIP bundle named for the day of the week (FTS-5005, `0000fff8.mo0`) with a
+sequence character moved on per bundle; `packet_name` is then the bundle's
+name, so the messages are marked sent only when the remote confirms the
+bundle. The caller
 passes `outbound.files` to `binkp.run_session`, then calls
 `await outbound.settle(lane, result.sent)` with what the remote confirmed
 -- which marks messages sent, deletes sent file rows and applies
@@ -65,8 +70,8 @@ from pathlib import Path
 from netbbs.files.storage import storage_root
 from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.binkp import MAX_FILE_BYTES, OutgoingFile, safe_file_name
-from netbbs.ftn.bundle import packet_name
-from netbbs.ftn.networks import FtnNetwork
+from netbbs.ftn.bundle import build_bundle, bundle_name, packet_name
+from netbbs.ftn.networks import BUNDLE_ZIP, FtnNetwork, next_bundle_sequence
 from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
 from netbbs.ftn.queue import FtnQueueFullError, OutboundMessage, mark_outbound_sent
 from netbbs.storage.database import Database
@@ -84,6 +89,8 @@ MAX_SESSION_FILE_BYTES = 256 * 1024 * 1024
 MAX_MESSAGES_PER_PACKET = 500
 CRASH_ATTEMPTS = 5
 HOLD_DAYS = 30
+# Rows of these reference kinds travel together: a hatch's file and TIC.
+_PAIRED_KINDS = frozenset({"hatch"})
 
 
 @dataclass(frozen=True)
@@ -424,6 +431,15 @@ def _prepare(db: Database, network: FtnNetwork, node: FtnAddress, uplink: bool, 
         names.add(row.send_name.casefold())
         budget -= stat.st_size
         files.append((row, path, stat.st_size, int(stat.st_mtime)))
+    # A hatched file and its TIC go together (issue #1476): when one can't
+    # be sent, the other is dropped with it rather than arrive alone.
+    broken = {row.reference_id for row, _reason in dropped if row.reference_kind in _PAIRED_KINDS}
+    if broken:
+        for row in [row for row in rows if row.reference_kind in _PAIRED_KINDS and row.reference_id in broken]:
+            if all(row.id != gone.id for gone, _reason in dropped):
+                dropped.append((row, f"{row.send_name}'s partner can't be sent"))
+        files = [entry for entry in files if not (entry[0].reference_kind in _PAIRED_KINDS
+                                                  and entry[0].reference_id in broken)]
     return _Prepared(messages, files, dropped)
 
 
@@ -432,6 +448,10 @@ def _drop_unsendable(db: Database, dropped: list[tuple[OutboundFile, str]]) -> N
         db.connection.execute("DELETE FROM ftn_outbound_files WHERE id = ?", (row.id,))
         _logger.warning("FTN: queued file %s for %s dropped: %s", row.send_name, row.destination, reason)
     db.connection.commit()
+    for row, _reason in dropped:
+        # A spooled file made only to be sent (a hatch's TIC) goes with its row.
+        if row.path is not None and row.after_sent == KILL and _in_spool(db, Path(row.path)):
+            _after_sent(Path(row.path), KILL)
     for row, reason in dropped:
         report_undelivered(db, row.reference_kind, row.reference_id, f"its file {row.send_name} could not be sent: "
                                                                      f"{reason}")
@@ -449,9 +469,16 @@ async def outbound_for_node(lane, network: FtnNetwork, node: FtnAddress, *, upli
     if prepared.messages:
         header = PacketHeader(orig=network.our_address, dest=node, created=datetime.datetime.now(),
                               password=network.packet_password if uplink else "")
-        outbound.packet_name = packet_name(secrets.randbits(32))
-        outbound.files.append(OutgoingFile(outbound.packet_name,
-                                           build_packet_from_packed(header, [m.packed for m in prepared.messages])))
+        name = packet_name(secrets.randbits(32))
+        packet = build_packet_from_packed(header, [m.packed for m in prepared.messages])
+        # --- mail bundles (issue #1477): the packet in a ZIP, when the network asks ---
+        if network.bundle_outgoing == BUNDLE_ZIP and network.id is not None:
+            sequence = await lane.run(next_bundle_sequence, network.id)
+            packet = build_bundle([(name, packet)])
+            name = bundle_name(network.our_address, node, datetime.date.today(), sequence)
+        # --- end mail bundles ---
+        outbound.packet_name = name
+        outbound.files.append(OutgoingFile(name, packet))
         outbound.message_ids = [m.id for m in prepared.messages]
     for row, path, size, mtime in prepared.files:
         lazy = _LazyFile(path, size)

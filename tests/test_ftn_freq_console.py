@@ -7,6 +7,7 @@ to file requests -- driven through the real screens with the scripted
 from __future__ import annotations
 
 import asyncio
+import re
 
 from netbbs.files.areas import create_file_area
 from netbbs.ftn import freq, outbound
@@ -14,17 +15,21 @@ from netbbs.ftn.networks import get_network
 from netbbs.net.ftn_console import edit_network, ftn_status_screen
 from netbbs.net.ftn_freq_console import area_offer_rows, toggle_area_offer
 from tests.test_admin_flow import FakeSession, _visible, _written_text
+from tests.test_ftn_console import _controls, _network, db, lane, sysop  # noqa: F401 -- fixtures
 
 
 def _text(session) -> str:
     return " ".join(_visible(_written_text(session)).split())
 
 
-from tests.test_ftn_console import _controls, _network, db, lane, sysop  # noqa: F401 -- fixtures
 
-# The File requests section's first field, the editor's 33rd.
-ANSWER_FIELD = ["3", "3"]
-ABOUT_FIELD = ["3", "9"]
+def _field(lane, sysop, network, label: str) -> list[str]:
+    """The keys that choose `label` in the network editor, read off its
+    sections, so a section another feature adds earlier moves nothing here."""
+    session = FakeSession([">"] * 20 + ["b"])
+    asyncio.run(edit_network(session, lane, sysop, network))
+    number = re.search(rf"(\d\d) {label}:", _visible(_written_text(session))).group(1)
+    return list(number)
 
 
 def test_request_files_queues_a_req_for_the_uplink(db, lane, sysop):
@@ -52,12 +57,13 @@ def test_a_request_to_an_unlisted_node_keeps_the_draft_with_the_reason(db, lane,
 
 def test_the_network_editor_turns_answering_on_and_checks_the_files(db, lane, sysop):
     network = _network(db)
-    session = FakeSession([*ANSWER_FIELD, *ABOUT_FIELD, "/nowhere/about.txt", "s", "b", "y"])
+    answer, about = _field(lane, sysop, network, "Answer requests"), _field(lane, sysop, network, "ABOUT file")
+    session = FakeSession([*answer, *about, "/nowhere/about.txt", "s", "b", "y"])
     asyncio.run(edit_network(session, lane, sysop, network))
     assert "ABOUT file: /nowhere/about.txt is not a file" in _text(session)
     assert not freq.get_settings(db, network.id).answer
 
-    session = FakeSession([*ANSWER_FIELD, "s"])
+    session = FakeSession([*answer, "s"])
     asyncio.run(edit_network(session, lane, sysop, get_network(db, network.id)))
     settings = freq.get_settings(db, network.id)
     assert settings.answer and settings.secure_only

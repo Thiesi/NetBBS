@@ -5230,6 +5230,54 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #1477 (design doc §6.8, §16 \"Issue #1154\", Decision 16): optional outbound mail "
+            "bundles. A network may send its packets as one ZIP bundle per session, named for the day "
+            "of the week (FTS-5005), instead of a bare packet: `bundle_outgoing` is `off` (the default, "
+            "and on upgrade: bare packets work with every hub) or `zip`. `bundle_sequence` is the "
+            "bundle name's last character (0-9 then a-z), moved on for each bundle so two sessions in "
+            "a day don't send the same name."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN bundle_outgoing TEXT NOT NULL DEFAULT 'off'
+            CHECK (bundle_outgoing IN ('off', 'zip'));
+        ALTER TABLE ftn_networks ADD COLUMN bundle_sequence INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #1476 (design doc §6.8, §16 \"Issue #1154\", Decision 14): TIC hatching. "
+            "`ftn_hatches` records each file this node hatched into a file echo -- the file "
+            "(`file_id`, the content id), its network, area and tag, the names it went under, its "
+            "CRC-32 and size, who hatched it (NULL for an automatic hatch) and the Replaces values "
+            "a deliberate second hatch carried -- so a file is hatched once unless the SysOp hatches "
+            "it again on purpose. A file area hatches its approved uploads automatically when "
+            "`file_areas.ftn_auto_hatch` is set: off by default and on upgrade. No foreign key "
+            "points at `files` or `file_areas`, which later migrations may rebuild."
+        ),
+        sql="""
+        ALTER TABLE file_areas ADD COLUMN ftn_auto_hatch INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE ftn_hatches (
+            id              INTEGER PRIMARY KEY,
+            network_id      INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            file_id         TEXT NOT NULL,
+            area_id         INTEGER NOT NULL,
+            tag             TEXT NOT NULL,
+            file_name       TEXT NOT NULL,
+            send_name       TEXT NOT NULL,
+            tic_name        TEXT NOT NULL,
+            crc32           TEXT NOT NULL,
+            size_bytes      INTEGER NOT NULL,
+            replaces        TEXT,
+            automatic       INTEGER NOT NULL DEFAULT 0,
+            hatched_by      INTEGER,
+            hatched_at      TEXT NOT NULL
+        );
+        CREATE INDEX idx_ftn_hatches_file ON ftn_hatches(file_id, network_id);
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #1475 (design doc §6.8, §16 \"Issue #1154\", Decision 13): FTN file requests. "
             "`ftn_freq_settings` holds a network's answering settings -- off by default, and with no "
             "row a network answers nothing -- with who may request (secure links only, or anyone), "

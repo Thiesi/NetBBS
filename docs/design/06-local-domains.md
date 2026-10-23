@@ -388,7 +388,8 @@ input, extraction reads the member from the tool's stdout and never writes to
 disk, passes argv lists with a fixed member name and no shell, applies POSIX
 CPU/memory/process rlimits, bounds the read and the wall clock, and kills and
 reaps on every exit path. No archive, no DIZ, no unpacker, or a corrupt member
-are all "no description", never a failed upload.
+are all "no description", never a failed upload. The same sandbox opens FTN mail bundles in
+these formats (§6.8, "Mail bundles").
 
 Every description, whether extracted, typed, or carried in a peer's
 `file_descriptor`, is stored as plain text. Whole ANSI escape sequences are
@@ -2274,15 +2275,53 @@ screen shows the failure with what moved.
 
 No external mailer or tosser is needed or supported. Packets are Type 2+
 (FSC-0048) when written, and Type 2, 2+ or FSC-0039 are accepted when read.
-Bundles are ZIP, identified by content rather than by name. Outbound mail is
+Bundles are identified by content rather than by name. Outbound mail is
 queued in the database, modelled on §13.7's work items, not in BSO
 directories.
+
+**Mail bundles** (issue #1477; §16, "Issue #1154", Decision 16).
+
+- **ZIP** is opened in-process.
+- **LHA, ARC, 7-Zip and RAR**, and ARJ, are opened by the sandboxed external
+  tools that read `FILE_ID.DIZ` (§6.2), shared as `netbbs.files.extract`.
+  Installing a tool is the opt-in, as for DIZ reading:
+  - LHA: `lha`, else 7-Zip;
+  - ARC: `nomarch` (7-Zip has no ARC support);
+  - 7-Zip and ARJ: `7z`, `7za` or `7zz`;
+  - RAR: `unrar`, else 7-Zip.
+- **How a tool reads a bundle.** The tool lists the archive first. ARC has no
+  tool that lists reliably, so its 29-byte headers are walked instead. Then
+  each member is read from the tool's stdout, one run per member, and
+  nothing is extracted to disk. The tool runs in a private temporary folder
+  under the DIZ sandbox: rlimits on POSIX, no shell, bounded output, and a
+  kill and reap on every exit path. For ARC, `nomarch -p` prints every
+  member, and the output is split by the sizes the headers give.
+- **Limits.** A ZIP's limits apply: 256 members, 64 MiB unpacked in all, and
+  members returned by base name. Two more apply to a tool-read bundle:
+  - a member must come out at the size the listing gives, because 7-Zip
+    prints nothing, and still succeeds, for a name it can't find;
+  - a member name that isn't printable ASCII, contains `*?[]`, starts with
+    `-`, has no file name, or is a link refuses the whole bundle. A tool
+    could read such a name as a wildcard or an option, and FTN bundles hold
+    8.3 names, so nothing real is refused.
+- **Without a tool, or when one fails,** the bundle is held whole, waiting
+  for a TIC, with the reason. A missing tool's reason names the tools and
+  their pkgsrc packages. [R]elease on a held file opens it as a bundle, so
+  the SysOp can install the tool and then toss what waited.
+- **Nodelist archives** in these formats are opened the same way, on the
+  database lane, which a nodelist's rare arrival can afford.
+- **Outbound.** A network's **Bundle outgoing mail** setting (`off`, the
+  default, or `zip`) puts the session's packet into a ZIP. The ZIP is named
+  by FTS-5005: the net and node differences in hex, the weekday, and a
+  sequence character (`00000063.we4`). The sequence moves on per bundle and
+  is kept per network, so two calls on one day don't reuse a name. Messages
+  are marked sent only when the remote confirms (`M_GOT`) the bundle.
 
 **Outbound files** (issues #1470 and #1471). Files wait for a session in a
 queue of their own, beside the queued messages, and every session takes
 both from one place, `netbbs.ftn.outbound`. The queue is general: a
-netmail's attached files use it now, and file requests and hatched TIC
-files (stage C) are to use it as they are.
+netmail's attached files, hatched files with their TICs and file requests
+use it.
 
 - **A queued file** is a file area entry, read from its stored content, or
   a file on disk. It is sent under a name BinkP's safe-name rule leaves
@@ -2330,9 +2369,10 @@ files (stage C) are to use it as they are.
 2. A file a TIC names, in this session or waiting from an earlier one, is a
    file-echo file. It is never opened as a mail bundle.
 3. Bare packets are tossed.
-4. ZIPs are opened as bundles. A ZIP with no `.pkt` member is held whole, as
-   a file that may still be waiting for its TIC. A bundle's non-packet members
-   are held one by one.
+4. Archives are opened as bundles (ZIP, and LHA, ARC, 7-Zip, RAR and ARJ
+   through the external tools, above). An archive with no `.pkt` member is
+   held whole, as a file that may still be waiting for its TIC. So is one no
+   installed tool opens. A bundle's non-packet members are held one by one.
 5. Anything else is held, waiting for a TIC -- unless it answers a file
    request made here (below), when it is held as requested and never
    expires.
@@ -2594,6 +2634,50 @@ shows the network and the TIC's `Origin` address in place of a username, as
   `?` match within the name. A value containing `/`, `\`, `:` or `..` is
   ignored, with a node-log line. The new file never replaces itself.
 
+**Hatching** (issue #1476; §16, "Issue #1154", Decision 14). A SysOp sends
+one of this node's own files into a file echo with **[H]atch** on the
+listing of a file area that carries one, acting on the file under the
+cursor and confirmed with one yes/no, since it goes to the network.
+
+- **The TIC** (FTS-5006) is written with CR LF lines, in CP437 when every
+  character fits and UTF-8 otherwise. It has `Area` (the area's tag),
+  `Origin` and `From` (this node), `To` (the uplink), `File`, `Lfile` when
+  the name is not 8.3, `Size`, `Date` (when the file was stored, in Unix
+  time), `Desc` (the description's first line, else the name) and an
+  `Ldesc` line per description line, `Created`, `Crc` (CRC-32 of the stored
+  bytes), one `Path` line (this node, now), `Seenby` for this node and the
+  uplink, and `Pw`, the network's TIC password. Control characters in a
+  description become spaces, so no value can start a line of its own.
+- **Names.** A name that is already 8.3 of BinkP's safe characters is sent as
+  it is. Any other is sent under up to six letters and digits of its stem,
+  two hex digits of the long name's CRC-32, and up to three of its last
+  extension, upper case (`NETBBS4F.ZIP`), with `Lfile` carrying the real
+  name. The TIC gets a fresh random 8.3 name.
+- **Queued** to the uplink through the outbound files queue, normal
+  flavour: the file area entry (always kept), then the TIC, written to the
+  node's spool folder and deleted once sent. The two travel together: when
+  one of them can't be sent at its session (the file was deleted or
+  unapproved), the other is dropped with it and the spooled TIC removed.
+- **Once.** Each hatch is recorded (`ftn_hatches`: the file, network, tag,
+  names, CRC-32, size, who, when) and audit-logged on the area. A file
+  already hatched into a network is hatched again only when the SysOp
+  confirms that on purpose; that TIC carries `Replaces` with the earlier
+  copy's names. A name containing `*` or `?` is left out, since receivers
+  read `Replaces` as a pattern; the 8.3 name never contains either.
+- **Refused**, with the reason and nothing queued: a file not approved; a
+  file that came over FTN (by TIC, as a netmail's file, or saved from the
+  held store, which records its sender for this), so nothing echoes back;
+  an area with no file echo; a network with no TIC password; a file over
+  BinkP's 64 MiB; a name a receiver would take for a control file (`.TIC`,
+  `.PKT`, `.REQ`); a network with fewer than two free places in its files
+  queue.
+- **Auto-hatch** is a file area setting, off by default and on upgrade,
+  toggled with **[A]uto-hatch** on the area's screen. With it on, a
+  caller's upload is hatched once when it becomes approved: when it is
+  stored in an unmoderated area, or when it is approved in a moderated one.
+  An automatic hatch that is refused is a node-log line; the upload and the
+  approval stand.
+
 **File requests** (issue #1475, §16 "Issue #1154", Decision 13). A
 request is a WaZOO `.REQ` file (FTS-0006): a line per file, a name or a
 pattern with `*` and `?`, optionally followed by ` !password` and by an
@@ -2672,9 +2756,9 @@ to its node: net and node in hex, `000C0002.REQ` for 1/2.
   the node, whether the session was secure, the names and the outcome
   (sent, not found, over the limits, refused), and a record kept 30 days
   (at most 2,000 each of requests made and received, so a flood of
-  received requests never evicts the requests made here). The FTN status screen shows, per network, whether it
-  answers, how many areas are offered, and its last five requests, made
-  and answered.
+  received requests never evicts the requests made here). The FTN status
+  screen shows, per network, whether it answers, how many areas are
+  offered, and its last five requests, made and answered.
 
 **Held items.** The held store keeps packets, files and TICs, each with its
 network, sender, size, time and reason. The **Held** screen lists them, and
@@ -2712,9 +2796,10 @@ the status screen, as before.
   are compared case-insensitively, and a file of any other name is not the
   nodelist's.
 
-  An archive is recognised by content: ZIP now, and the other formats with
-  stage C, until which they are held. It is opened in-process within the
-  64 MiB nodelist limit. The nodelist echo needs no file area. When it is
+  An archive is recognised by content and opened within the 64 MiB nodelist
+  limit. ZIP is opened in-process, and LHA, ARC, 7-Zip, RAR and ARJ through
+  the external tools that open mail bundles (issue #1477). Without the tool,
+  the file is held with the reason. The nodelist echo needs no file area. When it is
   also mapped to one, every file in it is stored there as well, and a file of
   any other name is stored only then. Otherwise such a file is held.
 
@@ -2793,9 +2878,6 @@ These are decided in outline and ship before the feature freeze, one stage at
 a time, each live-checked on ReLink. Each stage's PR writes its rules into
 this section; until then the text above is what holds.
 
-- **Stage C:**
-  - TIC hatching (#1476);
-  - LHA, ARC, 7z and RAR bundles, and optional outbound ZIP bundling (#1477).
 - **Stage D:**
   - points (#1478);
   - the hub: downlinks, echomail fan-out, an AreaFix/FileFix server, TIC

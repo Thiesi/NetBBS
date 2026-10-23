@@ -31,6 +31,10 @@ from netbbs.ftn.transport import TLS_MODES, TLS_OFF, normalise_fingerprint, pars
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
+# --- mail bundles (issue #1477) ---
+BUNDLE_OFF, BUNDLE_ZIP = "off", "zip"
+BUNDLE_MODES = (BUNDLE_OFF, BUNDLE_ZIP)
+# --- end mail bundles ---
 DEFAULT_PORT = 24554
 MAX_NAME = 40
 MAX_ORIGIN_TEXT = 60
@@ -92,6 +96,9 @@ class FtnNetwork:
     attach_area_id: int | None = None  # where inbound file attaches are stored; None: held
     give_held_unproven: bool = False  # hand held mail to a caller without a password (issue #1471)
     # --- end netmail extras ---
+    # --- mail bundles (issue #1477) ---
+    bundle_outgoing: str = BUNDLE_OFF  # BUNDLE_OFF: bare packets; BUNDLE_ZIP: one ZIP bundle per session
+    # --- end mail bundles ---
     id: int | None = None
 
     @property
@@ -176,6 +183,8 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
     except ValueError as exc:
         raise FtnNetworkError(str(exc)) from None
     # --- end transport ---
+    if network.bundle_outgoing not in BUNDLE_MODES:  # issue #1477
+        raise FtnNetworkError("Bundle outgoing mail must be off or ZIP.")
     robots = {label: validate_robot_name(value, label)
               for value, label in ((network.areafix_robot, "AreaFix"), (network.filefix_robot, "FileFix"))}
     return replace(network, name=name, domain=domain, our_address=our, uplink_address=uplink,
@@ -246,6 +255,10 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
              validated.id),
         )
         # --- end netmail extras ---
+        # --- mail bundles (issue #1477), on their own ---
+        db.connection.execute("UPDATE ftn_networks SET bundle_outgoing = ? WHERE id = ?",
+                              (validated.bundle_outgoing, validated.id))
+        # --- end mail bundles ---
     except sqlite3.IntegrityError:
         db.connection.rollback()
         raise FtnNetworkError(f"A network called {validated.name!r} already exists.") from None
@@ -306,7 +319,26 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
         attach_area_id=row["attach_area_id"] if "attach_area_id" in row.keys() else None,
         give_held_unproven=bool(row["give_held_unproven"]) if "give_held_unproven" in row.keys() else False,
         # --- end netmail extras ---
+        bundle_outgoing=row["bundle_outgoing"] if "bundle_outgoing" in row.keys() else BUNDLE_OFF,  # issue #1477
     )
+
+
+# --- mail bundles (issue #1477) -----------------------------------------------
+
+
+def next_bundle_sequence(db: Database, network_id: int) -> int:
+    """The sequence character's index (0-35) for the network's next
+    outgoing bundle name, moved on by one each call: two sessions on one
+    day send different names, and the hub never has one overwrite the
+    other."""
+    row = db.connection.execute("SELECT bundle_sequence FROM ftn_networks WHERE id = ?", (network_id,)).fetchone()
+    sequence = (row["bundle_sequence"] if row is not None else 0) % 36
+    db.connection.execute("UPDATE ftn_networks SET bundle_sequence = ? WHERE id = ?", ((sequence + 1) % 36, network_id))
+    db.connection.commit()
+    return sequence
+
+
+# --- end mail bundles ---
 
 
 # --- transport (issue #1468) --------------------------------------------------

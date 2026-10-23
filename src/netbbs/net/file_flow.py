@@ -57,7 +57,7 @@ from typing import Awaitable, Callable
 
 from netbbs.activity import follow, is_following, record_file_area_seen, unfollow
 from netbbs.attestation import format_stored_name_for_resource, meets_name_requirement
-from netbbs.auth.users import User
+from netbbs.auth.users import User, is_usable_sysop
 from netbbs.communities import (
     get_community,
     get_effective_name_requirement,
@@ -602,6 +602,7 @@ async def _render_area_page(
     can_pin: bool = False,
     can_keep: bool = False,
     following: bool | None = None,
+    can_hatch: bool = False,
     description_level: str = "off",
     redraw_in_place: bool = False,
     unicode_style: bool = False,
@@ -625,7 +626,7 @@ async def _render_area_page(
         session, page, can_write=can_write, can_describe=can_describe,
         describable_pending=describable_pending, show_transfer_hint=show_transfer_hint,
         show_remote_hint=show_remote_hint, can_pin=can_pin, can_keep=can_keep, following=following,
-        queue_count=queue_count,
+        queue_count=queue_count, can_hatch=can_hatch,
     )
     await session.write_line(
         f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
@@ -655,6 +656,7 @@ def _area_page_menus(
     can_keep: bool = False,
     following: bool | None = None,
     queue_count: int = 0,
+    can_hatch: bool = False,
 ) -> tuple[list[MenuEntry], list[MenuEntry]]:
     """The listing's two menu rows, navigation and actions: what
     `_render_area_page` draws and what its help describes."""
@@ -723,6 +725,9 @@ def _area_page_menus(
         hints.append(MenuEntry(label=menu_key("O", "n top"), brief="Pin or unpin a file at the top"))
         if can_keep:
             hints.append(MenuEntry(label=menu_key("K", "eep"), brief="Keep a file from expiring, or stop"))
+    if can_hatch and n_files > 0:
+        # A SysOp's, in an area carrying an FTN file echo (issue #1476).
+        hints.append(MenuEntry(label=menu_key("H", "atch"), brief="Send a file into the file echo"))
     return options, hints
 
 
@@ -808,7 +813,15 @@ def _key_action(
         return ("follow", None, highlighted)
     if lowered == "q":
         return ("queue", None, highlighted)
+    if lowered == "h":
+        return ("hatch", None, highlighted)
     return None
+
+
+def _carries_file_echo(db: Database, area: FileArea) -> bool:
+    """Whether `area` carries an FTN file echo (issue #1476)."""
+    row = db.connection.execute("SELECT * FROM file_areas WHERE id = ?", (area.id,)).fetchone()
+    return row is not None and "ftn_file_echo" in row.keys() and bool(row["ftn_file_echo"])
 
 
 def _is_digit(char: str) -> bool:
@@ -1206,6 +1219,9 @@ async def _area_screen(
     async def _queue_count() -> int:
         return await lane.run(count_pending_files, area) if can_approve else 0
 
+    # [H]atch (issue #1476): a SysOp's, where the area carries a file echo.
+    can_hatch = is_usable_sysop(user) and await lane.run(_carries_file_echo, area)
+
     async def _open_queue() -> None:
         from netbbs.net.admin_moderation import _pending_files_screen
 
@@ -1219,7 +1235,7 @@ async def _area_screen(
             show_transfer_hint=transfers is not None,
             show_remote_hint=show_remote_hint, can_pin=can_edit_any_file,
             can_keep=_keep_offered(area, current_page), following=follows["on"],
-            queue_count=await _queue_count(),
+            queue_count=await _queue_count(), can_hatch=can_hatch,
         )
 
     async def _render_and_advance_cursor(current_page: FileEntryPage, highlighted: int | None = None) -> None:
@@ -1286,6 +1302,8 @@ async def _area_screen(
             return can_edit_any_file
         if kind == "keep":
             return can_edit_any_file and _keep_offered(area, page)
+        if kind == "hatch":
+            return can_hatch and bool(page.entries)
         return True
 
     highlighted: int | None = None
@@ -1442,6 +1460,20 @@ async def _area_screen(
                     highlighted = None
                 # Otherwise -- nothing decided, or only rejections -- the
                 # caller is back on the page they left (Codex review on #796).
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
+            elif kind == "hatch":
+                entry = await _choose_entry(
+                    session, lane, user, page,
+                    highlighted=highlighted,
+                    title=f"Hatch a file from {area_name}",
+                    empty_message="No files to hatch.",
+                    description_of=_download_choice_description,
+                )
+                if entry is not None:
+                    from netbbs.net.ftn_console import hatch_action  # netbbs.net.ftn_console is the SysOp side
+
+                    await hatch_action(session, lane, user, entry)
                 await _render_and_advance_cursor(page, highlighted=highlighted)
                 continue
             elif kind == "follow":

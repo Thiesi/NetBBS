@@ -4,32 +4,52 @@ Mail bundles: archives of packets exchanged with a hub (FTS-5005 naming).
 A hub usually sends echomail as ZIP archives named for the day of the
 week (`0000fff8.mo0` ... `.su9`, then `.moa` ...), and sometimes bare
 `.pkt` files. The name says nothing reliable about the format, so an
-archive is recognised by its first bytes (`archive_kind`). Only ZIP is
-unpacked; ARC, ARJ, LHA, RAR and 7-Zip are recognised so the refusal can
-name them, and a hub can be asked to send ZIP or bare packets instead.
+archive is recognised by its first bytes (`archive_kind`).
 
-`unpack_bundle` is bounded against a hostile or broken archive: at most
+ZIP is unpacked in-process (`unpack_bundle`). LHA, ARC, 7-Zip, RAR and
+ARJ are unpacked by the sandboxed external tools `FILE_ID.DIZ` reading
+uses (`netbbs.files.extract`, issue #1477): `open_bundle` takes any of
+them. Without an installed tool it raises `BundleToolMissing`, naming the
+tool to install.
+
+Both are bounded against a hostile or broken archive: at most
 `MAX_MEMBERS` members, and `MAX_UNPACKED_BYTES` unpacked in total,
 counted while reading rather than trusted from the archive's own
-directory, since a zip bomb lies there. It returns the `*.pkt` members
+directory, since a zip bomb lies there. They return the `*.pkt` members
 and, apart, every other member, so the caller can hold those rather than
-drop them; a ZIP with no packet at all is not a mail bundle and is not
-read. Members are returned by base name: nothing is written to disk here,
-so a member's path cannot escape anywhere.
+drop them; an archive with no packet at all is not a mail bundle and is
+not read. Members are returned by base name. Nothing is extracted to
+disk: a member's path cannot escape anywhere, and a name that could be
+read as a wildcard or an option makes the tools refuse the archive.
+
+Outbound, a network can bundle its packets as one ZIP per session
+(`build_bundle`, named by `bundle_name`); see `netbbs.ftn.outbound`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import io
 import zipfile
 
+from netbbs.files.extract import KIND_LABELS, ArchiveError, ArchiveToolMissing, Member, unpack_with_tools
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress
 
 MAX_MEMBERS = 256
 MAX_UNPACKED_BYTES = 64 * 1024 * 1024
+TOOL_BUDGET_SECONDS = 180
+"""Wall-clock ceiling for unpacking one bundle with external tools: the
+listing and one run per member, each also under its own timeout."""
+TOOL_KINDS = tuple(KIND_LABELS)
+"""Archive kinds the external tools open: lha, arc, 7z, rar and arj."""
 _CHUNK = 64 * 1024
+
+
+class BundleToolMissing(FtnFormatError):
+    """No unpacker for the bundle's format is installed; the message names
+    what to install."""
 
 _DAYS = ("mo", "tu", "we", "th", "fr", "sa", "su")
 _SEQUENCE = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -100,6 +120,41 @@ def unpack_bundle(data: bytes) -> tuple[list[tuple[str, bytes]], list[tuple[str,
                 raise FtnFormatError(f"cannot unpack {name!r} from the bundle: {exc}") from exc
             (packets if _is_packet(name) else others).append((name, bytes(content)))
         return packets, others
+
+
+async def open_bundle(data: bytes) -> tuple[list[tuple[str, bytes]], list[tuple[str, bytes]]]:
+    """`unpack_bundle` for every archive kind this node can open: ZIP
+    in-process (off the event loop), the others through the sandboxed
+    external tools. Raises `BundleToolMissing` when no tool for the kind is
+    installed, and `FtnFormatError` for an unknown kind, a damaged
+    archive, a tool that failed, or one over the bounds."""
+    kind = archive_kind(data)
+    if kind == "zip":
+        return await asyncio.to_thread(unpack_bundle, data)
+    if kind not in TOOL_KINDS:
+        raise FtnFormatError(f"bundle is {kind or 'not a recognised archive'}")
+
+    def choose(members: list[Member]) -> list[Member]:
+        # Not a mail bundle without a packet: nothing is read.
+        return members if any(_is_packet(member.name) for member in members) else []
+
+    try:
+        read = await unpack_with_tools(data, kind, choose=choose, max_members=MAX_MEMBERS,
+                                       max_bytes=MAX_UNPACKED_BYTES, budget_seconds=TOOL_BUDGET_SECONDS,
+                                       label="FTN bundle")
+    except ArchiveToolMissing as exc:
+        raise BundleToolMissing(str(exc)) from None
+    except ArchiveError as exc:
+        raise FtnFormatError(f"{KIND_LABELS[kind]} bundle: {exc}") from None
+    packets, others = [], []
+    for member, content in read:
+        (packets if _is_packet(member.name) else others).append((member.name, content))
+    return packets, others
+
+
+def is_openable_archive(data: bytes) -> bool:
+    """True for content `open_bundle` would try to open."""
+    return archive_kind(data) in ("zip", *TOOL_KINDS)
 
 
 def _is_packet(name: str) -> bool:

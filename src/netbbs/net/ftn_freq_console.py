@@ -215,7 +215,7 @@ def area_offer_rows(db: Database, area) -> list[Field]:
 
 
 def area_offer_label(offered: bool):
-    return menu_key("O", "ffer to file requests: " + ("yes" if offered else "no"))
+    return menu_key("O", "ffer to file requests: yes") if offered else menu_key("O", "ffer to file requests: no")
 
 
 async def toggle_area_offer(session: Session, lane: DatabaseLane, actor: User, area) -> bool:

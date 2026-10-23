@@ -18,11 +18,19 @@ A TIC is untrusted text from another system, read here and nowhere else:
   a regular expression built from the value, so a hostile pattern costs no
   more than its length times the name's.
 - `crc32` is FTS-5006 §3's CRC-32 (the ITU-T one `zlib` computes).
+
+Written here as well (issue #1476, hatching): `write_tic` makes the TIC
+this node sends with a file it hatches, CR LF lines in CP437 when every
+character fits and UTF-8 otherwise, as outbound text is. `dos_name` gives
+the 8.3 `File` name a long name travels under, beside `Lfile`.
 """
 
 from __future__ import annotations
 
+import datetime
+import re
 import zlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from netbbs.ftn import FtnFormatError
@@ -190,3 +198,106 @@ def crc32(data: bytes) -> int:
 
 def is_tic_name(name: str) -> bool:
     return name.lower().endswith(".tic")
+
+
+# --- writing (issue #1476) ----------------------------------------------------
+
+_DOS_PART = re.compile(r"[A-Za-z0-9_-]")
+_DOS_NAME = re.compile(r"[A-Za-z0-9_-]{1,8}(\.[A-Za-z0-9_-]{1,3})?")
+# What one written value may hold: the parser reads at most `_MAX_LINE`
+# characters of a line, keyword included.
+_MAX_VALUE = _MAX_LINE - 16
+
+
+def is_dos_name(name: str) -> bool:
+    """Whether `name` is already an 8.3 name of the characters BinkP sends
+    as they are."""
+    return _DOS_NAME.fullmatch(name) is not None
+
+
+def dos_name(name: str) -> str:
+    """The 8.3 `File` name `name` is sent under: itself when it is one
+    already, else up to six letters and digits of its stem, two hex digits
+    of the long name's CRC-32 (so two long names sharing a stem stay apart),
+    and up to three of its last extension, upper case."""
+    if is_dos_name(name):
+        return name
+    stem, dot, extension = name.rpartition(".")
+    if not dot or not stem:
+        stem, extension = name, ""
+    short = "".join(_DOS_PART.findall(stem)).upper()[:6] or "FILE"
+    short += f"{crc32(name.encode('utf-8')) & 0xFF:02X}"
+    extension = "".join(_DOS_PART.findall(extension)).upper()[:3]
+    return f"{short}.{extension}" if extension else short
+
+
+def _one_line(text: str) -> str:
+    """A description line as a TIC value: control characters become
+    spaces, runs of spaces one, cut to what the parser reads."""
+    cleaned = "".join(" " if ord(c) < 32 or ord(c) == 127 or 0x80 <= ord(c) < 0xA0 else c for c in text)
+    return " ".join(cleaned.split())[:_MAX_VALUE]
+
+
+def _plain(value: str, what: str) -> str:
+    if not value or any(ord(c) < 32 or ord(c) == 127 for c in value) or len(value) > _MAX_VALUE:
+        raise FtnFormatError(f"a TIC's {what} {value[:40]!r} is empty, too long or has control characters")
+    return value
+
+
+def write_tic(
+    tic: Tic, *, to: FtnAddress, path: Sequence[tuple[FtnAddress, int]], seen_by: Sequence[FtnAddress],
+    date: int | None = None, created: str | None = None,
+) -> bytes:
+    """The TIC (FTS-5006) for `tic`, from `tic.from_address` to `to`: its
+    Area, Origin, From, To, File and Lfile, Size, Date, Desc and Ldesc,
+    Replaces, Crc, the `path` lines (address, Unix time), the Seenby lines
+    and Pw. `tic.origin` and `tic.from_address` must be set, and `File`
+    must be an 8.3 name. Raises `FtnFormatError` for a value no TIC can
+    carry."""
+    if tic.origin is None or tic.from_address is None:
+        raise FtnFormatError("a TIC this node writes names its Origin and From")
+    if not is_dos_name(tic.file):
+        raise FtnFormatError(f"a TIC's File {tic.file!r} must be an 8.3 name")
+    if " " in tic.area:
+        raise FtnFormatError(f"a TIC's Area {tic.area!r} has a space")
+    lines = [
+        f"Area {_plain(tic.area, 'Area')}",
+        f"Origin {tic.origin.four_d}",
+        f"From {tic.from_address.four_d}",
+        f"To {to.four_d}",
+        f"File {tic.file}",
+    ]
+    if tic.long_name and tic.long_name != tic.file:
+        problem = name_problem(tic.long_name)
+        if problem is not None:
+            raise FtnFormatError(f"a TIC's Lfile {tic.long_name[:40]!r} is not a safe name: {problem}")
+        lines.append(f"Lfile {tic.long_name}")
+    if tic.size is not None:
+        lines.append(f"Size {tic.size}")
+    if date is not None:
+        lines.append(f"Date {date}")
+    desc = _one_line(tic.desc or "")
+    if desc:
+        lines.append(f"Desc {desc}")
+    ldesc = [_one_line(line) for line in tic.ldesc][:MAX_LDESC_LINES]
+    lines += [f"Ldesc {line}" if line else "Ldesc" for line in ldesc]
+    for value in tic.replaces[:MAX_REPLACES]:
+        lines.append(f"Replaces {_plain(value, 'Replaces')}")
+    if created:
+        lines.append(f"Created {_one_line(created)}")
+    lines.append(f"Crc {tic.crc & 0xFFFFFFFF:08X}")
+    for address, when in path:
+        stamp = datetime.datetime.fromtimestamp(when, datetime.timezone.utc)
+        lines.append(f"Path {address.four_d} {when} {stamp:%a %b} {stamp.day} {stamp:%H:%M:%S %Y} UTC")
+    for address in seen_by:
+        lines.append(f"Seenby {address.four_d}")
+    if tic.password:
+        lines.append(f"Pw {_plain(tic.password, 'Pw')}")
+    text = "\r\n".join(lines) + "\r\n"
+    try:
+        data = text.encode("cp437")
+    except UnicodeEncodeError:
+        data = text.encode("utf-8")
+    if len(data) > MAX_TIC_BYTES:
+        raise FtnFormatError(f"the TIC would be {len(data)} bytes, more than {MAX_TIC_BYTES}")
+    return data

@@ -47,6 +47,7 @@ from netbbs.link.carry import (
 )
 from netbbs.net.char_input import HELP_KEY, reject_unhandled_key
 from netbbs.net.ftn_console import file_area_echo_action, file_area_echo_rows
+from netbbs.net.ftn_console import auto_hatch_action, file_area_hatch_rows  # issue #1476
 from netbbs.net.ftn_freq_console import area_offer_label, area_offer_rows, toggle_area_offer
 from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.location import crumbs, entered, located
@@ -498,6 +499,10 @@ async def _area_screen(
             )
             return False
 
+        async def _auto_hatch(area: FileArea) -> bool:  # issue #1476: a toggle, so the screen stays
+            await auto_hatch_action(session, lane, actor, area)
+            return False
+
         async def _link(area: FileArea) -> bool:
             await _link_area_screen(session, lane, actor, area, link_context)
             return False
@@ -547,8 +552,13 @@ async def _area_screen(
             # never two, so a Linked area shows no FTN section and offers no
             # [F]ile echo. ---
             ftn_networks = [] if linked else await lane.run(list_networks)
+            hatch_rows: list = []  # issue #1476
             if ftn_networks:
                 ftn_rows = await lane.run(file_area_echo_rows, area)
+                # --- hatching (issue #1476) ---
+                hatch_rows = await lane.run(file_area_hatch_rows, area)
+                ftn_rows = [*ftn_rows, *hatch_rows]
+                # --- end hatching ---
                 ftn_rows += await lane.run(area_offer_rows, area)  # issue #1475
                 after = (after + "\r\n" if after else "") + _sections_text(
                     [Section("FTN", ftn_rows)], width=session.terminal_width,
@@ -573,6 +583,12 @@ async def _area_screen(
                     "f", menu_key("F", "ile echo (FTN)"),
                     _act(lambda a: file_area_echo_action(session, lane, actor, a)),
                     brief="Carry an FTN file echo here"))
+                # --- hatching (issue #1476) ---
+                if hatch_rows:
+                    actions.append(DetailAction(
+                        "a", menu_key("A", "uto-hatch"),
+                        _act(_auto_hatch), brief="Hatch approved uploads"))
+                # --- end hatching ---
                 # --- file requests (issue #1475) ---
                 offered = await lane.run(is_area_offered, area)
                 actions.append(DetailAction(

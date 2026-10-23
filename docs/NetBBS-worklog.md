@@ -912,6 +912,22 @@ cannot do is "no description", never a failed upload.
 
 A tool's presence on `PATH` is the SysOp's opt-in; NetBBS installs none.
 
+That sandbox is `netbbs.files.extract` since issue #1477, which also opens FTN
+mail bundles and nodelist archives with it (list, then one stdout run per
+member). Two tool behaviours shape that path:
+
+- `7z e -so` exits 0 and prints nothing for a member name it doesn't find, so
+  every member is checked against the size its listing gave. Without that, a
+  name the tool spells differently from its own listing reads as an empty
+  member rather than a failure.
+- `lha`, `unrar` and `nomarch` match member arguments as wildcards, and `lha`
+  has no `--`. A listed name with `*?[]`, a leading `-`, or anything but
+  printable ASCII refuses the whole archive instead of reaching argv. 7-Zip
+  gets `-spd` (exact names) and `--`.
+
+ARC has no tool that lists reliably, so its headers are walked in Python, and
+`nomarch -p`'s single stream is split by the sizes they give.
+
 Descriptions are normalized at the domain boundary (control/bidi characters
 stripped, ≤10 lines, ≤ the Link `file_descriptor` byte cap) rather than only at
 render time, because the same text is also carried over Link, indexed for

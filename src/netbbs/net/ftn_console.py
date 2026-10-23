@@ -63,6 +63,9 @@ from netbbs.ftn.transport import (
 )
 from netbbs.ftn.message import origin_room
 from netbbs.ftn.networks import (
+    BUNDLE_MODES,
+    BUNDLE_OFF,
+    BUNDLE_ZIP,
     AreaMapping,
     FtnNetwork,
     FtnNetworkError,
@@ -82,6 +85,7 @@ from netbbs.ftn.nodelist import HOW_MANUAL, ImportOutcome, NodelistError, import
 from netbbs.ftn.nodelist_feed import read_list_file
 from netbbs.ftn.outbound import count_waiting
 from netbbs.ftn.queue import (
+    HELD_FILE,
     HELD_PACKET,
     FtnQueueFullError,
     bad_echo_dropped,
@@ -453,6 +457,26 @@ def _netmail_fields() -> list[FieldSpec]:
 
 
 # --- end Netmail section ---
+# --- the Mail bundles section (issue #1477) ---
+
+_BUNDLE_LABELS = {BUNDLE_OFF: "off: bare packets", BUNDLE_ZIP: "ZIP"}
+
+
+def _bundle_fields() -> list[FieldSpec]:
+    choices = list(BUNDLE_MODES)
+    return [
+        FieldSpec(key="bundle_outgoing", label="Bundle outgoing mail",
+                  render=lambda d: _BUNDLE_LABELS[d["bundle_outgoing"]],
+                  prompt=choice_field("bundle_outgoing", choices), step=choice_step("bundle_outgoing", choices),
+                  section="Mail bundles", brief="Send packets in a ZIP bundle instead of bare",
+                  help="Off by default: every hub takes bare packets. ZIP sends each call's packet in one "
+                       "bundle named for the day of the week, as most tossers do. Bundles that arrive are "
+                       "opened either way: ZIP always, and LHA, ARC, 7-Zip and RAR when their unpacker is "
+                       "installed (see the SysOp Handbook)."),
+    ]
+
+
+# --- end Mail bundles section ---
 
 
 def _network_from_draft(draft: dict, existing: FtnNetwork | None) -> FtnNetwork:
@@ -490,6 +514,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
     draft["tic_password"] = existing.tic_password if existing is not None else ""
     # --- end file echoes ---
     draft.update(_netmail_draft(existing))  # issues #1470 and #1472
+    draft["bundle_outgoing"] = existing.bundle_outgoing if existing is not None else BUNDLE_OFF  # issue #1477
     draft["attach_area_label"] = await lane.run(_area_name, draft["attach_area_id"])
     secret = lambda key: (lambda d: "set" if d[key] else "(not set)")  # noqa: E731
     fields = [
@@ -567,6 +592,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
     # --- end file echoes ---
     fields += _transport_fields()  # issues #1467, #1468: the Transport section, after File echoes
     fields += _netmail_fields()  # issues #1470 and #1472: the Netmail section, after File echoes
+    fields += _bundle_fields()  # issue #1477: the Mail bundles section, after Netmail
     # --- file requests (issue #1475): the File requests section, after Netmail ---
     draft.update(await lane.run(freq_draft, existing))
     fields += freq_fields()
@@ -576,6 +602,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
         candidate = _network_from_draft(draft, existing)
         candidate = replace(candidate, tic_password=draft["tic_password"])  # issue #1462
         candidate = _with_netmail_values(candidate, draft)  # issues #1470 and #1472
+        candidate = replace(candidate, bundle_outgoing=draft["bundle_outgoing"])  # issue #1477
         port = int(draft["listen_port"])
         if not 0 < port < 65536:
             raise FtnNetworkError("The answer port must be between 1 and 65535.")
@@ -841,7 +868,7 @@ async def import_nodelist_file(lane: DatabaseLane, actor: User | None, network: 
 
 async def _held_packets(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork) -> None:
     """The held items: packets, files and TICs. [R]elease re-tosses a
-    packet; a file or TIC is [S]aved to a file area or [E]xported to the
+    packet, or opens a held mail bundle and tosses its packets (issue #1477); a file or TIC is [S]aved to a file area or [E]xported to the
     host instead (issue #1460)."""
     status: str | None = None
 
@@ -851,7 +878,15 @@ async def _held_packets(session: Session, lane: DatabaseLane, actor: User, netwo
     async def _release(held):
         nonlocal status
         try:
-            result = await lane.run(lambda db: release_held(db, get_network(db, network.id), held.id))
+            if held.kind != HELD_FILE:
+                result = await lane.run(lambda db: release_held(db, get_network(db, network.id), held.id))
+            else:
+                # --- mail bundles (issue #1477): a held bundle is opened now ---
+                from netbbs.ftn.exchange import release_held_bundle
+
+                fresh = await lane.run(get_network, network.id)
+                result = await release_held_bundle(lane, fresh or network, held.id)
+                # --- end mail bundles ---
         except FtnFormatError as exc:
             status = f"Not released: {sanitize_text(str(exc))}."
             return await _load()
@@ -888,7 +923,7 @@ async def _held_packets(session: Session, lane: DatabaseLane, actor: User, netwo
         title=f"Held items ({network.name})",
         empty_message="Nothing is held.",
         refresh=_load, item_keys={"r": _release, "s": _save, "e": _export, "d": _delete},
-        live_nav=[MenuEntry(label=menu_key("R", "elease"), brief="Toss a packet as from a known system"),
+        live_nav=[MenuEntry(label=menu_key("R", "elease"), brief="Toss a packet or a mail bundle as from a known system"),
                   MenuEntry(label=menu_key("S", "ave"), brief="Store a file in a file area"),
                   MenuEntry(label=menu_key("E", "xport"), brief="Write a file to this machine"),
                   MenuEntry(label=menu_key("D", "elete"), brief="Throw it away")],
@@ -1225,7 +1260,77 @@ async def file_area_echo_action(session: Session, lane: DatabaseLane, actor: Use
     return True
 
 
-# --- a board's Origin line (issue #1474) ---------------------------------------
+# --- hatching (issue #1476) ------------------------------------------------------
+
+
+def file_area_hatch_rows(db: Database, area) -> list[Field]:
+    """The file area screen's Auto-hatch row, for an area carrying a file
+    echo; none for any other."""
+    from netbbs.ftn.hatch import auto_hatch_enabled
+
+    if file_area_tic(db, area) is None:
+        return []
+    if auto_hatch_enabled(db, area.id):
+        return [Field("Auto-hatch", "on: approved uploads are hatched into the file echo")]
+    return [Field("Auto-hatch", "off: files are hatched by hand with [H]atch on the listing")]
+
+
+async def auto_hatch_action(session: Session, lane: DatabaseLane, actor: User, area) -> bool:
+    """[A]uto-hatch on the screen of a file area carrying a file echo: a
+    toggle. Returns whether anything changed."""
+    from netbbs.ftn.hatch import auto_hatch_enabled, set_auto_hatch
+
+    if await lane.run(file_area_tic, area) is None:
+        _announce(session, f"{area.name} carries no file echo, so it has nothing to hatch into.", error=True)
+        return False
+    enabled = not await lane.run(auto_hatch_enabled, area.id)
+    await lane.run(lambda db: set_auto_hatch(db, area.id, enabled, actor=actor))
+    _announce(session, f"Auto-hatch on: {area.name}'s uploads are hatched into its file echo once approved."
+              if enabled else f"Auto-hatch off: {area.name}'s files are hatched only by hand.")
+    return True
+
+
+async def hatch_action(session: Session, lane: DatabaseLane, actor: User, entry) -> bool:
+    """[H]atch on a file area's listing: send `entry` into the area's file
+    echo, after one yes/no (it goes to the network). A file hatched before
+    is hatched again only when the SysOp says so, with `Replaces`. Returns
+    whether it was hatched; the outcome is announced either way."""
+    from netbbs.ftn.hatch import HatchError, hatch_file, hatch_target
+    from netbbs.ftn.queue import FtnQueueFullError
+
+    name = sanitize_text(entry.filename)
+    try:
+        target = await lane.run(hatch_target, entry)
+    except HatchError as exc:
+        _announce(session, f"Not hatched: {exc}", error=True)
+        return False
+    uplink = target.network.uplink_address.four_d
+    await session.write_line("")
+    if target.previous is not None:
+        how = "automatically" if target.previous.automatic else "by hand"
+        question = (f"{name} was already hatched into {target.tag} {how} on {target.previous.hatched_at[:10]}. "
+                    f"Hatch it again, replacing that copy?")
+    else:
+        question = f"Hatch {name} into {target.tag} on {target.network.name}? It goes to the uplink {uplink}."
+    if not await prompt_yes_no(session, question, default=False):
+        _announce(session, "Nothing was hatched.", color=MUTED_COLOR)
+        return False
+    try:
+        hatched = await lane.run(hatch_file, entry.file_id, actor=actor, again=target.previous is not None)
+    except (HatchError, FtnQueueFullError) as exc:
+        _announce(session, f"Not hatched: {exc}", error=True)
+        return False
+    sent_as = f" as {hatched.send_name}" if hatched.send_name != hatched.file_name else ""
+    again = ", replacing the earlier copy" if hatched.replaces else ""
+    _announce(session, f"{name} hatched into {hatched.tag}{sent_as}{again}: it goes to {uplink} with the next "
+                       f"session.")
+    return True
+
+
+# --- end hatching ------------------------------------------------------------------
+
+
+# --- a board's Origin line (issue #1474)---------------------------------------
 
 
 def board_origin_rows(db: Database, area: AreaMapping, network: FtnNetwork | None) -> list[Field]:

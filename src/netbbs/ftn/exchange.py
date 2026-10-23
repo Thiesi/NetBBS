@@ -19,9 +19,11 @@ answers (`netbbs.ftn.listener`). Design doc §6.8.
      netmail among them names its files before they are looked at;
   4. a file a delivered netmail waits for is that netmail's file
      (`netbbs.ftn.attach`, issue #1470), and is never opened as a bundle;
-  5. ZIPs are opened as bundles (off the event loop); a ZIP with no packet
-     is held whole, and a bundle's non-packet members one by one, each
-     waiting for a TIC or a netmail;
+  5. archives are opened as bundles: ZIP off the event loop, LHA, ARC,
+     7-Zip, RAR and ARJ through the sandboxed external tools (issue
+     #1477); an archive with no packet is held whole, and a bundle's
+     non-packet members one by one, each waiting for a TIC or a netmail.
+     One no tool can open is held whole too, saying what to install;
   6. anything else is held, waiting for a TIC or a netmail -- unless it
      answers a file request made here, when it is held as requested and
      never expires.
@@ -35,7 +37,6 @@ answers (`netbbs.ftn.listener`). Design doc §6.8.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from netbbs import __version__
@@ -47,9 +48,19 @@ from netbbs.ftn import FtnFormatError
 from netbbs.ftn import fileecho, freq
 from netbbs.ftn.attach import claim_received, expire_attach_waits
 from netbbs.ftn.binkp import ReceivedFile, SessionResult, SystemInfo
-from netbbs.ftn.bundle import archive_kind, unpack_bundle
+from netbbs.files.extract import KIND_LABELS
+from netbbs.ftn.bundle import BundleToolMissing, archive_kind, is_openable_archive, open_bundle
 from netbbs.ftn.networks import FtnNetwork
-from netbbs.ftn.queue import HELD_FILE, HELD_TIC, expire_unpaired, held_bad_file_echo_ids, hold_inbound
+from netbbs.ftn.queue import (
+    HELD_FILE,
+    HELD_TIC,
+    delete_held,
+    expire_unpaired,
+    get_held,
+    held_bad_file_echo_ids,
+    held_content,
+    hold_inbound,
+)
 from netbbs.ftn.tic import Tic, is_tic_name
 from netbbs.ftn.tosser import TossResult, toss_packet
 
@@ -161,9 +172,17 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: 
     others: list[tuple[str, bytes]] = []
     if kind == "pkt":
         packets = [(received.name, received.data)]
-    elif kind == "zip":
+    elif is_openable_archive(received.data):
+        label = "ZIP" if kind == "zip" else KIND_LABELS[kind]
         try:
-            packets, others = await asyncio.to_thread(unpack_bundle, received.data)
+            packets, others = await open_bundle(received.data)
+        except BundleToolMissing as exc:
+            # Maybe a file echo's archive, maybe mail: it waits for a TIC,
+            # and [R]elease opens it once the tool is installed.
+            if not await _hold_requested(lane, network, remote, received, result, total):  # issue #1475
+                await _hold_waiting(lane, network, remote, received,
+                                    f"waiting for its .TIC, or a mail bundle that can't be opened: {exc}", total)
+            return
         except FtnFormatError as exc:
             await _hold_waiting(lane, network, remote, received, f"bundle could not be unpacked: {exc}", total)
             return
@@ -172,13 +191,18 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: 
             # its TIC to claim.
             if not await _hold_requested(lane, network, remote, received, result, total):  # issue #1475
                 await _hold_waiting(lane, network, remote, received,
-                                    "waiting for its .TIC (a ZIP archive with no mail packets)", total)
+                                    f"waiting for its .TIC (a {label} archive with no mail packets)", total)
             return
     else:
         if not await _hold_requested(lane, network, remote, received, result, total):  # issue #1475
             await _hold_waiting(lane, network, remote, received,
-                                f"waiting for its .TIC (not a packet or ZIP bundle: {kind or 'unknown'})", total)
+                                f"waiting for its .TIC (not a packet or mail bundle: {kind or 'unknown'})", total)
         return
+    await _toss_unpacked(lane, network, remote, received.name, packets, others, total)
+
+
+async def _toss_unpacked(lane, network, remote: str, bundle: str, packets: list[tuple[str, bytes]],
+                         others: list[tuple[str, bytes]], total: TossResult) -> None:
     for name, data in packets:
         one = await lane.run(toss_packet, network, data, secure=True, remote_address=remote, file_name=name)
         total.add(one)
@@ -191,9 +215,31 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: 
         if await lane.run(claim_received, network, remote, member.name, member.data, total):
             continue
         _logger.warning("FTN %s: %s in bundle %s from %s is not a mail packet; holding it", network.name, name,
-                        received.name, remote)
+                        bundle, remote)
         await _hold_waiting(lane, network, remote, member,
-                            f"waiting for its .TIC (not a mail packet, found in bundle {received.name})", total)
+                            f"waiting for its .TIC (not a mail packet, found in bundle {bundle})", total)
+
+
+async def release_held_bundle(lane, network: FtnNetwork, held_id: int) -> TossResult:
+    """[R]elease on a held file that is a mail bundle (issue #1477): open it
+    -- the SysOp may have installed the tool it needed since -- toss its
+    packets as from a secure session, hold its other members, and drop it
+    from the held store. Raises `FtnFormatError` with the reason when it
+    can't be opened or holds no packet; it stays held then."""
+    held = await lane.run(get_held, held_id)
+    content = await lane.run(held_content, held_id)
+    if held is None or content is None:
+        raise FtnFormatError("that held item is gone")
+    if held.has_tic or not is_openable_archive(content):
+        raise FtnFormatError(f"{held.file_name} is a file, not a mail packet or bundle, so it can't be released: "
+                             "[S]ave it to a file area or [E]xport it")
+    packets, others = await open_bundle(content)
+    if not packets:
+        raise FtnFormatError(f"{held.file_name} holds no mail packets")
+    await lane.run(delete_held, held_id)
+    total = TossResult()
+    await _toss_unpacked(lane, network, held.remote_address, held.file_name, packets, others, total)
+    return total
 
 
 # --- file requests (issue #1475) ---
