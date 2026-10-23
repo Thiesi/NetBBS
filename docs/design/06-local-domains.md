@@ -2156,7 +2156,12 @@ A node can join FidoNet or an FTN othernet (fsxNet, AgoraNet, Micronet, ...)
 as an ordinary FTN node. The node carries echomail on boards and netmail in
 Mail. This is a **gateway at the boundary**. Link's protocol, events and trust
 model do not change, and FTN content never enters them. Decisions and the
-alternatives rejected for each are in §16, "Issue #166".
+alternatives rejected for each are in §16, "Issue #166". Stage A of the FTN
+round (§16, "Issue #1154", tracker #1461, planned for v7.36) adds file
+echoes, FileFix and the robot rules, the nodelist from a file echo, echo-list
+import, bad echoes and the held-item actions. They are described below as
+they are to be built. The round's later stages are listed under "Planned" at
+the end of this section.
 
 **Networks.** A SysOp adds one network record per FTN network:
 
@@ -2164,6 +2169,11 @@ alternatives rejected for each are in §16, "Issue #166".
 - this node's address in it (`zone:net/node`, or `.point` for a point);
 - the uplink's address and its BinkP `host:port`;
 - the session password, plus optional packet and AreaFix passwords;
+- the robots' names, `AreaFix` and `FileFix` by default, and an optional
+  FileFix password, which falls back to the AreaFix password when empty;
+- the TIC password for file echoes;
+- the nodelist echo and the nodelist's file name, with an optional diff file
+  name;
 - the poll interval, and whether this node answers incoming calls.
 
 Every network is off until the SysOp enables it, and settings take effect
@@ -2193,6 +2203,20 @@ Bundles are ZIP, identified by content rather than by name. Outbound mail is
 queued in the database, modelled on §13.7's work items, not in BSO
 directories.
 
+**What a session received** is sorted once the session ends (issue #1458):
+
+1. `.TIC` files first (file echoes, below).
+2. A file a TIC names, in this session or waiting from an earlier one, is a
+   file-echo file. It is never opened as a mail bundle.
+3. Bare packets are tossed.
+4. ZIPs are opened as bundles. A ZIP with no `.pkt` member is held whole, as
+   a file that may still be waiting for its TIC. A bundle's non-packet members
+   are held one by one.
+5. Anything else is held, waiting for a TIC.
+
+Nothing a session received is dropped without being held or counted. A file
+from an unsecure session is held as it came, unopened, before any of this.
+
 **Echomail on boards.** A board is either local, Linked or FTN; it cannot be
 two of these. One echo area maps to one board, and the SysOp sets the mapping
 per board. Nothing is mapped by default.
@@ -2207,6 +2231,22 @@ per board. Nothing is mapped by default.
     kept as the post's date.
   - **Duplicates.** A message whose MSGID (or, without one, content hash) was
     seen on that area before is dropped.
+  - **Bad echoes.** A message for an area no board carries is held as a *bad
+    echo*, under its network and tag. The **Bad echoes** screen, reached from
+    the FTN status screen, shows one row per tag with its message count and
+    when it was first and last seen. Its actions:
+    - **[C]reate** opens the new-board editor with the tag filled in. Saving
+      maps the board and re-tosses the tag's messages.
+    - **[M]ap** picks an existing local board that carries no echo, maps it,
+      and re-tosses.
+    - **[D]elete** drops the tag's messages.
+
+    A re-toss goes through the ordinary tosser, with the board's moderation,
+    duplicate checks and threading. Bad-echo messages are kept apart from the
+    held store: at most 1,000 per tag and 10,000 or 64 MiB overall. The
+    oldest are dropped first, and the drops are counted on the status screen.
+    A board is never created without the SysOp (§16, "Issue #1154", Decision
+    9).
 - *Outbound.* A local post on an FTN board is exported to the uplink:
   - the `AREA:` line, `^AMSGID` (a persisted serial, unique across restores),
     `^AREPLY`, `^APID`, `^ATZUTC` and `^ACHRS`;
@@ -2259,7 +2299,7 @@ per board. Nothing is mapped by default.
   the network's nodelist (FTS-5000) and calls the destination over BinkP when
   its entry lists a BinkP host (`IBN`/`INA` flags). Otherwise the netmail
   goes to the uplink for routing, and so does one whose direct call fails
-  after its retries.
+  after its retries. How the nodelist arrives is under "Nodelist" below.
 - **Kludges.** INTL, FMPT and TOPT (FTS-4001) are written whenever zones or
   points need them.
 - **Inbound delivery.** Netmail is delivered by matching the To name,
@@ -2271,8 +2311,152 @@ per board. Nothing is mapped by default.
   matches. A netmail matching no account, a verified real name two accounts
   share, or an account that takes no mail goes to the SysOp, marked as
   addressed to someone else. It is not bounced.
-- **Robots.** AreaFix is netmail too. The console's Areas screen sends `+TAG`,
-  `-TAG` and `%LIST` to the uplink's AreaFix and shows the replies.
+- **Robots.** AreaFix and FileFix requests are netmail too. **[A]reaFix** and
+  **[F]ileFix** on the FTN status screen (**Node ▸ Echomail & netmail (FTN)**)
+  ask for a request and send it to the uplink's robot of that name, under the
+  robot's password. The robot's reply arrives as netmail in the SysOp's Mail,
+  not on the console. The same rules apply to both robots' requests:
+  - `+TAG` (or a bare `TAG`) links an area, and `-TAG` unlinks one.
+  - The known `%` commands are checked: `%LIST`, `%QUERY`, `%LINKED`,
+    `%UNLINKED`, `%AVAIL`, `%HELP`, `%RESCAN`, `%PAUSE` and `%RESUME`.
+    `%RESCAN` may name a tag, followed by the robot's own arguments.
+  - Any other line starting with `%` is sent verbatim, as one line. It is
+    never turned into a `+%...` link request (issue #1459).
+  - `%PWD`, `%PASSWORD` and `%PKTPWD` are refused. The reason names
+    **Change robot password**, a Networks action: the new password is typed
+    masked, twice, then sent to the chosen robot as `%PWD` and stored for that
+    robot in the same step. If the robot refuses, its reply in Mail says so,
+    and the SysOp sets the old password back in the network editor. Session
+    and packet passwords are agreed with the hub's coordinator and stay
+    editor fields.
+  - A request holds at most 50 commands.
+
+**File echoes (TIC, FTS-5006).** A file area can carry one file echo tag of
+one network. Its SysOp sets this on the area's screen, the way a board's echo
+is set. An area is local, Linked or FTN, never two (§16, "Issue #166",
+Decision 3, extended in "Issue #1154"), so an FTN file never gets a Link
+`file_descriptor`. Nothing is mapped by default. A file arrives as a pair: the
+file itself and a `.TIC` that names it. The pair is checked in this order, and
+the first check that fails holds both halves with its reason:
+
+1. The session is secure. Otherwise both halves are held unopened, as above.
+2. The TIC parses: `Area`, `File` and `Crc` are present, and the TIC is at
+   most 64 KiB.
+3. `From` is the network's uplink. Until the hub (stage D), no other system
+   sends this node file echoes.
+4. `Pw` matches the network's TIC password, compared case-insensitively. With
+   no TIC password set, every TIC is held.
+5. `Area` is mapped to a file area of this network, or is the network's
+   nodelist echo (under "Nodelist" below). Any other tag is a bad echo:
+   unknown file echoes get their own rows on the Bad echoes screen, where
+   **[C]reate** opens the new-file-area editor and **[M]ap** picks a local
+   file area.
+6. `File` is a path-safe name, under the rules for a SysOp upload's name
+   (§6.2): no folder part, no leading dot, no control characters or colon,
+   and at most 255 bytes. A long name in `Lfile` or `Fullname` is used
+   instead when it passes the same rules.
+7. The file has arrived (pairing, below).
+8. The file's length equals `Size` when `Size` is given, and is within both
+   the node's `max_upload_bytes` and BinkP's 64 MiB per file. A larger file is
+   held.
+9. Its CRC32 equals `Crc`.
+10. It is not a duplicate. A file with the same name and CRC32 already
+    received by TIC in that area is dropped and counted.
+11. No other file of that name is in the area, unless `Replaces` covers it.
+
+A pair that passes goes into the area through the area's own moderation
+(§16, "Issue #1154", Decision 1). In a moderated area it waits for approval,
+as an upload does. Its description comes from the `LDesc` lines, else `Desc`,
+else the archive's `FILE_ID.DIZ` (§6.2), and is normalised as every
+description is. The file is recorded as arrived by TIC, with its network,
+tag and origin address. It has no local uploader, and the listing shows the
+network and the TIC's `Origin` address in place of a username.
+
+- **Pairing.** A half whose partner hasn't arrived waits in the held store,
+  with the reason "waiting for its .TIC" or "waiting for `<file>`". It is
+  paired as soon as the partner comes, in any later session with the same
+  network. A half still unpaired after 7 days is deleted, with a node-log
+  line.
+- **Replaces.** Once the new file is visible (when stored in an unmoderated
+  area, or on approval in a moderated one), each `Replaces` value removes the
+  files that match it. Only files in the same area that arrived by TIC can
+  match, never an upload by a caller or the SysOp, and never a file in another
+  area. A value is a plain file name, compared case-insensitively, and `*` and
+  `?` match within the name. A value containing `/`, `\`, `:` or `..` is
+  ignored, with a node-log line. The new file never replaces itself.
+
+**Held items.** The held store keeps packets, files and TICs, each with its
+network, sender, size, time and reason. The **Held** screen lists them, and
+its actions are:
+
+- **[R]elease** re-tosses an item as from a known system. It works on packets
+  only. For a file it says why it can't (issue #1460).
+- **[S]ave to file area** picks a file area and stores the file there as the
+  SysOp's own upload, through that area's normal path. A file held together
+  with its TIC keeps the TIC's description. A name already in the area is
+  refused.
+- **[X] export** asks for a path on the host and writes the file there with
+  the rules for SysOp uploads (§6.2): written beside the destination and
+  renamed, never over an existing file, no symlink followed, and
+  audit-logged.
+- **[D]elete** throws the item away.
+
+The store holds at most 200 items and 256 MiB, enough for a file at the
+64 MiB limit. What doesn't fit is lost with a node-log error and counted on
+the status screen, as before.
+
+**Nodelist.** A network's nodelist (FTS-5000) arrives in one of two ways:
+
+- **By hand:** [N]odelist import on the FTN status screen, or
+  `ftn-import-nodelist`, from an unpacked file on the host.
+- **From the nodelist echo**, automatically. A file that arrives by TIC in the
+  network's nodelist echo and passes the TIC checks is handled by its name:
+  - `<name>.<ddd>`, or an archive of it, is a full list;
+  - `<diff name>.<ddd>`, or an archive of it, is a diff.
+
+  An archive is recognised by content: ZIP now, and the other formats with
+  stage C, until which they are held. It is opened in-process within the
+  64 MiB nodelist limit. The nodelist echo needs no file area. When it is
+  also mapped to one, every file in it is stored there as well, and a file of
+  any other name is stored only then. Otherwise such a file is held.
+
+What happens to each kind:
+
+- **A full list** has its CRC-16 checked against the first line, as FTS-5000
+  specifies: computed from the second line to the end, before the end-of-file
+  byte. On a mismatch nothing is imported, the file is held, and the current
+  list stays in use. On a match the list replaces the stored entries, and its
+  raw text is kept, one per network.
+- **A diff** (FTS-5000's `A`, `C` and `D` commands) is applied to the kept
+  raw text. Its first line must equal the kept list's first line, and the
+  result's CRC-16 must match. Then the result becomes the kept list and is
+  imported. If any of this fails, nothing changes: the diff is held, and the
+  status says the network is waiting for a full list. That is the fall-back
+  (§16, "Issue #1154", Decision 5).
+- **A list imported by hand** is kept as raw text too, so later diffs apply
+  to it.
+
+The FTN status screen shows, per network, the list's day number, when it was
+imported and how (full, diff or by hand), its node count, and the last
+failure.
+
+**Echo lists.** A hub's list of echoes, `.NA` for echomail or `.FA` for file
+echoes, is imported from a path on the host, from the FTN status screen. The
+file holds one `TAG description` per line, with `;` comments. It may be up to
+1 MiB and 10,000 lines. Tags are normalised as a board's echo tag is, and
+invalid lines are skipped and counted. The import is a draft editor (§3.5):
+
+- a checklist of the tags and their descriptions, where tags already mapped
+  on that network are marked and can't be checked;
+- the Community the new boards or file areas go into.
+
+**[S]ave** creates one board (for `.NA`) or file area (for `.FA`) per checked
+tag in that Community. Each is named from the description, cut to the name
+limit, or from the tag, and is mapped. Then one AreaFix or FileFix request
+with `+TAG` for each tag is queued, split into requests of at most 50
+commands. Nothing is written before [S]ave. A save that can't create
+everything, a name already taken for example, writes nothing and keeps the
+draft with the reason.
 
 **Character sets.** Text is decoded by its `^ACHRS` kludge (FTS-5003). Without
 one, the network's default is used, CP437 unless the SysOp sets another.
@@ -2282,9 +2466,35 @@ on character boundaries to FTS-0001's 35 and 71 bytes, except a real-name
 echo's From, which is never cut (above). Inbound text is
 sanitized before display like any other external content.
 
-**Not part of this design:** file echoes (TIC), file requests, acting as a
-hub for downlinks (AreaFix robot, SEEN-BY fan-out to other nodes), nodelist
-publishing, and QWK. Each needs its own decision.
+**Planned: the rest of the FTN round** (§16, "Issue #1154", tracker #1461).
+These are decided in outline and ship before the feature freeze, one stage at
+a time, each live-checked on ReLink. Each stage's PR writes its rules into
+this section; until then the text above is what holds.
+
+- **Stage B:**
+  - IPv6 listen and dial, and `ftn_listen_host` in the console (#1467);
+  - BinkP over TLS (#1468);
+  - binkp/1.1 multi-batch (#1469);
+  - netmail file attach (#1470);
+  - crash and hold flavours (#1471);
+  - netmail bounce for unknown recipients, on by default per network, where
+    netmail to `SysOp` or `Sysop` always reaches the SysOp (#1472). It
+    replaces "goes to the SysOp" in "Inbound delivery" above for networks
+    that keep bouncing on;
+  - a ROT-13 toggle in the reader (#1473);
+  - a per-board Origin line (#1474).
+- **Stage C:**
+  - file requests, made and answered (#1475);
+  - TIC hatching (#1476);
+  - LHA, ARC, 7z and RAR bundles, and optional outbound ZIP bundling (#1477).
+- **Stage D:**
+  - points (#1478);
+  - the hub: downlinks, echomail fan-out, an AreaFix/FileFix server, TIC
+    forwarding and transit netmail (#1479);
+  - pointlist and nodelist segment publishing (#1480).
+- **Stage E:**
+  - QWK offline mail for callers (#1389);
+  - QWKnet as a node (#1481) and as a hub (#1482).
 
 ### 6.9 The oneliner wall (issue #1391)
 

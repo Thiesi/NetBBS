@@ -74,6 +74,7 @@ Each decision lives in its own file under [`decisions/`](decisions/), named afte
 | #1105 | [a gated resource names its gates on entry](decisions/1105-a-gated-resource-names-its-gates-on-entry.md) | decided |
 | #1110 | [a SysOp corrects a caller's display name and birthdate](decisions/1110-a-sysop-corrects-a-callers-display-name-and.md) | decided |
 | #1111 | [renaming a username](decisions/1111-renaming-a-username.md) | decided |
+| #1154 | [the FTN round before the feature freeze](decisions/1154-ftn-round-before-the-freeze.md) | decided; stages A-E tracked in #1461 |
 | #1156 | [how an MRC sender's styled name is shown](decisions/1156-how-an-mrc-senders-styled-name-is-shown.md) | decided |
 | #1158 | [keys that work everywhere](decisions/1158-keys-that-work-everywhere.md) | decided |
 | #1165 | [public node pages on www.netbbs.org](decisions/1165-public-node-pages-on-www-netbbs-org.md) | decided |
