@@ -5145,6 +5145,17 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #1474 (design doc §6.8, §16 \"Issue #1154\", Decision 10): a board carrying an "
+            "FTN echo can have its own Origin line text, `boards.ftn_origin_text`. Empty, the default "
+            "for every board on upgrade, uses the network's Origin, so nothing changes until the "
+            "SysOp sets one."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN ftn_origin_text TEXT NOT NULL DEFAULT '';
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #1468: BinkP over TLS for calls out. `ftn_networks.uplink_tls` says how a "
             "network's uplink is called: '' plain, 'pin' over TLS with the hub's certificate "
             "pinned on first use, 'ca' over TLS checked against the system's certificate "

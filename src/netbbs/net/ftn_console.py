@@ -18,7 +18,8 @@ Configuration and operation are kept apart, as MRC's are:
   [C]reate, [M]ap and [D]elete). The robot screens live in
   `netbbs.net.ftn_robots_console`.
 - **A board's echo** (`board_echo_action`): which echo area a board carries,
-  from the board's own screen; **a file area's file echo**
+  from the board's own screen, and its own Origin line
+  (`board_origin_action`, issue #1474); **a file area's file echo**
   (`file_area_echo_action`) likewise, from the area's screen.
 
 Every screen follows §3.5: content first, actions on the bar, drafts that
@@ -59,7 +60,9 @@ from netbbs.ftn.transport import (
     parse_listen_hosts,
     show_fingerprint,
 )
+from netbbs.ftn.message import origin_room
 from netbbs.ftn.networks import (
+    AreaMapping,
     FtnNetwork,
     FtnNetworkError,
     board_area,
@@ -71,6 +74,7 @@ from netbbs.ftn.networks import (
     list_networks,
     save_network,
     set_board_area,
+    set_board_origin,
     set_file_area_tic,
 )
 from netbbs.ftn.nodelist import HOW_MANUAL, ImportOutcome, NodelistError, import_list, nodelist_status
@@ -1014,7 +1018,8 @@ def board_echo_rows(db: Database, board: Board) -> list[Field]:
     if area is None:
         return [Field("Echo", "none (a local board)")]
     network = get_network(db, area.network_id)
-    return [Field("Echo", f"{area.tag} on {network.name if network else '?'}")]
+    return [Field("Echo", f"{area.tag} on {network.name if network else '?'}"),
+            *board_origin_rows(db, area, network)]
 
 
 async def board_echo_action(session: Session, lane: DatabaseLane, actor: User, board: Board) -> bool:
@@ -1102,5 +1107,54 @@ async def file_area_echo_action(session: Session, lane: DatabaseLane, actor: Use
         _announce(session, str(exc), error=True)
         return False
     await lane.run(lambda db: record_action(db, actor=actor, action="set_file_area_echo", detail=outcome))
+    _announce(session, outcome)
+    return True
+
+
+# --- a board's Origin line (issue #1474) ---------------------------------------
+
+
+def board_origin_rows(db: Database, area: AreaMapping, network: FtnNetwork | None) -> list[Field]:
+    """The board screen's Origin row: the board's own text, or what it
+    falls back to -- the network's Origin, else the BBS's name."""
+    if area.origin_text:
+        return [Field("Origin", area.origin_text)]
+    if network is not None and network.origin_text:
+        return [Field("Origin", f"the network's: {network.origin_text}")]
+    return [Field("Origin", "the network's: the BBS's name")]
+
+
+async def board_origin_action(session: Session, lane: DatabaseLane, actor: User, board: Board) -> bool:
+    """[O]rigin on the screen of a board carrying an echo: the text its
+    echomail's Origin line carries before this node's address, or an empty
+    line for the network's Origin. Returns whether anything changed."""
+    area = await lane.run(board_area, board)
+    network = await lane.run(get_network, area.network_id) if area is not None else None
+    if area is None or network is None:
+        _announce(session, f"{board.name} carries no echo, so it has no Origin line.", error=True)
+        return False
+    room = origin_room(network.our_address)
+    await session.write_line("")
+    await session.write_line(colored(
+        f"The Origin line this board's echomail carries on {network.name}, before this node's address: at most "
+        f"{room} characters, so the line stays within 79. An empty line uses the network's Origin.",
+        fg_color=MUTED_COLOR))
+    await write_prompt(session, "Origin: ")
+    try:
+        text = await session.read_line(cancellable=True, initial=area.origin_text)
+    except InputCancelled:
+        return False
+    try:
+        stored = await lane.run(set_board_origin, board, text)
+    except FtnNetworkError as exc:
+        _announce(session, str(exc), error=True)
+        return False
+    if stored == area.origin_text:
+        return False
+    outcome = (
+        f"{board.name}'s echomail carries the Origin {stored!r} on {network.name}." if stored
+        else f"{board.name}'s echomail carries {network.name}'s Origin again."
+    )
+    await lane.run(lambda db: record_action(db, actor=actor, action="set_board_origin", detail=outcome))
     _announce(session, outcome)
     return True
