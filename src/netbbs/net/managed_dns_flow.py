@@ -44,14 +44,14 @@ from netbbs.managed_dns.state import (
     get_admin_token,
     get_service_url,
     foreign_credential_service_url,
-    set_cancelled_rename_state,
+    set_cancelled_rename_state_without_commit,
     set_opt_in_without_commit,
     get_published,
     get_registration_deferred,
     set_registration_deferred,
-    set_registration_status,
+    set_registration_status_without_commit,
     set_registration_result_state_without_commit,
-    set_pending_rename_state,
+    set_pending_rename_state_without_commit,
 )
 from netbbs.auth.users import User
 from netbbs.moderation.log import record_action_without_commit
@@ -614,14 +614,15 @@ async def register_via_prompt(
     return True
 
 
-async def release_registration(session: Session, lane: DatabaseLane) -> None:
+async def release_registration(session: Session, lane: DatabaseLane, actor: User | None = None) -> None:
     """The admin screen's `[L] Release` action (design doc §16 Decision
     5). Confirms first -- release starts an irreversible-feeling
     (though bounded, see design doc §16) cooldown before this name could
     ever go to a different registrant, not something a stray keypress
     should trigger. The credential stays on disk either way: it's what a
     later reclaim (`register_via_prompt`'s own `credential` argument)
-    presents, and deleting it here would make that impossible."""
+    presents, and deleting it here would make that impossible. `actor`
+    is named in the audit entry (issue #1505)."""
     name = await lane.run(get_registered_name)
     if name is None:
         await session.write_line(colored("Nothing to release.", fg_color=MUTED_COLOR))
@@ -658,12 +659,20 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
             await session.write_line(colored(f"Release failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
             return
 
-        await lane.run(set_registration_status, RegistrationStatus(result.status))
+        def _record(db: Database) -> None:
+            with db.connection:
+                set_registration_status_without_commit(db, RegistrationStatus(result.status))
+                record_action_without_commit(
+                    db, actor=actor, action="release_managed_dns", detail=f"name={name} status={result.status}",
+                )
+
+        await lane.run(_record)
     await session.write_line(colored(f"Released {name}.netbbs.org.", fg_color=MUTED_COLOR))
 
 
-async def rename_registration(session: Session, lane: DatabaseLane) -> None:
-    """Start an authenticated managed-name transition without releasing the old name."""
+async def rename_registration(session: Session, lane: DatabaseLane, actor: User | None = None) -> None:
+    """Start an authenticated managed-name transition without releasing the
+    old name. `actor` is named in the audit entry (issue #1505)."""
     recover_credential_transition(lane.path)
     old_name = await lane.run(get_registered_name)
     previous_name = await lane.run(get_previous_name)
@@ -720,13 +729,21 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
         save_credential(previous_credential_path_for(lane.path), old_credential)
         save_credential(primary_path, result.credential)
         previous_published = await lane.run(get_published)
-        await lane.run(
-            set_pending_rename_state,
-            name=result.name,
-            previous_name=result.previous_name,
-            previous_status=RegistrationStatus(result.previous_status),
-            previous_published=previous_published,
-        )
+        def _record(db: Database) -> None:
+            with db.connection:
+                set_pending_rename_state_without_commit(
+                    db,
+                    name=result.name,
+                    previous_name=result.previous_name,
+                    previous_status=RegistrationStatus(result.previous_status),
+                    previous_published=previous_published,
+                )
+                record_action_without_commit(
+                    db, actor=actor, action="rename_managed_dns",
+                    detail=f"name={result.name} previous_name={result.previous_name} status=pending",
+                )
+
+        await lane.run(_record)
         delete_credential(transition_credential_path_for(lane.path))
     await session.write_line(
         colored(
@@ -737,7 +754,9 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
     )
 
 
-async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> None:
+async def cancel_registration_rename(session: Session, lane: DatabaseLane, actor: User | None = None) -> None:
+    """Cancel a pending name change; `actor` is named in the audit entry
+    (issue #1505)."""
     recover_credential_transition(lane.path)
     new_name = await lane.run(get_registered_name)
     old_name = await lane.run(get_previous_name)
@@ -786,12 +805,20 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
             return
         restored_status = RegistrationStatus(result.previous_status) if result.previous_status else old_status
         restored_published = result.previous_last_known_address is not None
-        await lane.run(
-            set_cancelled_rename_state,
-            name=result.previous_name,
-            status=restored_status,
-            published=restored_published,
-        )
+        def _record(db: Database) -> None:
+            with db.connection:
+                set_cancelled_rename_state_without_commit(
+                    db,
+                    name=result.previous_name,
+                    status=restored_status,
+                    published=restored_published,
+                )
+                record_action_without_commit(
+                    db, actor=actor, action="cancel_managed_dns_rename",
+                    detail=f"name={result.previous_name} cancelled={new_name} status={restored_status.value}",
+                )
+
+        await lane.run(_record)
         # The database now describes the remotely revived old name. Until
         # this reverse file swap completes, the still-retained previous
         # secret lets the updater recover by heartbeating both credentials.

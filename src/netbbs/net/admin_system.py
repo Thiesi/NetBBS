@@ -1461,7 +1461,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
         ):
             await session.write_line("")
             flow = _TrailingOutput(session)
-            await release_registration(flow, lane)
+            await release_registration(flow, lane, actor)
             flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
@@ -1470,7 +1470,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
         ):
             await session.write_line("")
             flow = _TrailingOutput(session)
-            await rename_registration(flow, lane)
+            await rename_registration(flow, lane, actor)
             flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
@@ -1479,7 +1479,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
         ):
             await session.write_line("")
             flow = _TrailingOutput(session)
-            await cancel_registration_rename(flow, lane)
+            await cancel_registration_rename(flow, lane, actor)
             flow.announce_rest()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif choice == "w" and status in _NODE_PAGE_STATUSES:

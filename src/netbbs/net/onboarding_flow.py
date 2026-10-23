@@ -168,7 +168,7 @@ async def _offer_house_bot(session: Session, lane: DatabaseLane, actor: User) ->
         if not await prompt_yes_no(
             session, f"Switch on {HOUSE_BOT_NAME}, with help and greetings, in a channel you choose?", default=False
         ):
-            await lane.run(decline_house_bot)
+            await lane.run(decline_house_bot, actor=actor)
             await _write_wrapped(
                 session, f"(Noted. {HOUSE_BOT_NAME} stays off; set it up any time under {_BAUD_CHANGE_LATER}.)"
             )

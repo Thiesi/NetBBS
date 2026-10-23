@@ -13,10 +13,11 @@ from netbbs.auth.users import User, get_user_by_id, is_usable_sysop
 from netbbs.bots.baud import PHRASE_KEYS, preset
 from netbbs.chat.blocks import BlockError, BotBlock, parse_block
 from netbbs.chat.bots import channel_bot_policy
-from netbbs.config import get_config, set_config
+from netbbs.config import get_config, set_config, set_config_without_commit
 from netbbs.chat.channels import Channel, ChannelError, get_channel_by_name as get_channel, list_channels
 from netbbs.chat.scrollback import record_message
 from netbbs.moderation import ChannelPermission, has_permission, record_action
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.link.channels import is_channel_linked
 from netbbs.rendering import sanitize_text
 from netbbs.storage.database import Database
@@ -367,8 +368,13 @@ def house_bot_offer_pending(db: Database) -> bool:
     return bool(house_bot_channels(db))
 
 
-def decline_house_bot(db: Database) -> None:
-    set_config(db, HOUSE_BOT_ONBOARDING_CONFIG_KEY, "declined")
+def decline_house_bot(db: Database, *, actor: User | None = None) -> None:
+    """Onboarding's no, audited under the action its yes writes (issue
+    #1505), in the same transaction."""
+    with db.connection:
+        set_config_without_commit(db, HOUSE_BOT_ONBOARDING_CONFIG_KEY, "declined")
+        record_action_without_commit(db, actor=actor, action="bot_configure",
+                                     detail=f"{HOUSE_BOT_NAME}.bot declined at onboarding")
 
 
 def enable_house_bot(db: Database, *, actor: User, channel: str) -> Bot:

@@ -406,17 +406,6 @@ def _audit(db) -> list[tuple]:
     ]
 
 
-def _run_as(session: FakeSession, db_path, actor) -> None:
-    async def scenario():
-        lane = DatabaseLane(db_path)
-        try:
-            await offer_onboarding(session, lane, actor)
-        finally:
-            lane.close()
-
-    asyncio.run(scenario())
-
-
 def test_onboarding_answers_are_audited_like_their_settings_screens(tmp_path):
     """Issue #1505: the Link answer writes the entry Settings > Join
     NetBBS Link writes, the name the one Settings > Node name writes, and
@@ -442,3 +431,12 @@ def test_declining_link_at_onboarding_is_audited(tmp_path):
     _run_as(FakeSession(["n"]), db.path, sysop)
     assert get_participation(db) is Participation.DECLINED
     assert _audit(db) == [(sysop.id, "set_link_participation", "declined")]
+
+
+def test_declining_baud_at_onboarding_is_audited(tmp_path):
+    """Issue #1505: the no is logged under the action the yes writes."""
+    db, sysop = _baud_node(tmp_path, "lobby")
+    _run_as(FakeSession([""]), db.path, sysop)
+    assert [entry for entry in _audit(db) if entry[1] == "bot_configure"] == [
+        (sysop.id, "bot_configure", "Baud.bot declined at onboarding")
+    ]
