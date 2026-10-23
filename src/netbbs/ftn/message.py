@@ -253,12 +253,16 @@ def encode_message(message: FtnMessage) -> PackedMessage:
     )
 
 
+def origin_room(address: FtnAddress) -> int:
+    """How many characters of Origin text fit before ` (address)` with the
+    whole ` * Origin: ` line within FTS-0004's 79 characters."""
+    return max(MAX_ORIGIN_LINE - len(" * Origin: ") - len(f" ({address})"), 0)
+
+
 def build_origin(text: str, address: FtnAddress) -> str:
     """The Origin line's text: `text (address)`, with `text` shortened so the
     whole ` * Origin: ` line stays within 79 characters."""
-    suffix = f" ({address})"
-    room = MAX_ORIGIN_LINE - len(" * Origin: ") - len(suffix)
-    return text[:max(room, 0)].rstrip() + suffix
+    return text[:origin_room(address)].rstrip() + f" ({address})"
 
 
 def format_msgid(address: FtnAddress, serial: int) -> str:

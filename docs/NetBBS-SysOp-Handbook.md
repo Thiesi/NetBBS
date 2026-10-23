@@ -2852,6 +2852,23 @@ In this chapter: [Join a network](#join-a-network) ·
 - Edits and deletions stay on this BBS, because FTN has no way to carry them.
 - Posts go out under the author's username, except on a real-name echo
   (below).
+- Each message ends with an Origin line: the network's **Origin**, or the
+  BBS's name when that is empty, then this node's address.
+
+#### A board's own Origin line
+
+A board carrying an echo can sign its echomail with its own Origin, such as
+the name of a club that meets there. On the board's screen, press
+<kbd>O</kbd> **Origin (FTN)** and type it. The board's FTN section shows
+the Origin in use.
+
+- An empty line goes back to the network's **Origin**.
+- The whole line, ` * Origin: ` and this node's address included, stays
+  within the 79 characters FTN allows. The prompt says how much fits:
+  50 characters for the address `21:1/199@fsxnet`. A longer one is
+  refused, never cut.
+- Making the board local again with <kbd>E</kbd> **Echo (FTN)** drops its
+  Origin.
 
 #### Real-name echoes
 

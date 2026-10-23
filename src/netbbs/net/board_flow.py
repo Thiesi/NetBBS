@@ -204,6 +204,7 @@ from netbbs.rendering.post_body import (
     styled_post_body,
 )
 from netbbs.rendering.reflow import wrap_terminal_text
+from netbbs.rendering.rot13 import rot13
 from netbbs.rendering.width import cut_to_width, display_width, wrap_to_width
 from netbbs.quoting import quote_body, reply_subject
 from netbbs.signature import append_signature, get_signature
@@ -1347,6 +1348,10 @@ async def _board_screen(
         action bar on screen while a long post pages under them."""
         nonlocal page, page_anchor
         detail_page = 0
+        # The post shown ROT-13 decoded (issue #1473): a toggle on the post
+        # on screen only, so stepping to another post, or back, shows it as
+        # it was written. Nothing is stored.
+        decoded_post_id: str | None = None
         while True:
             post = page.posts[index]
             # Opening a post is what makes it read (issue #710), recorded as
@@ -1378,9 +1383,11 @@ async def _board_screen(
                 held="post" if held else "edit" if post.root_post_id in page.held_edits else None,
                 also_in=[copy_board.name for copy_board, _copy in visible_crosspost_copies(db, user, post)],
             )
+            can_decode = post.layout != "art" and post.tombstoned_at is None and not post.withdrawn
+            decoded = can_decode and decoded_post_id == post.post_id
             body_rows = post_body_rows(
-                post.body, post_body_width(session, post.layout), body_mode, truecolor=truecolor,
-                layout=post.layout,
+                rot13(post.body) if decoded else post.body, post_body_width(session, post.layout), body_mode,
+                truecolor=truecolor, layout=post.layout,
             )
             # Files the post points at (issue #842), as this reader finds
             # them: a file in an area closed to them is not named.
@@ -1459,6 +1466,10 @@ async def _board_screen(
                     actions.append(("k", menu_key("K", "ept: yes" if post.exempt_from_expiry else "ept: no")))
             if can_close_poll:
                 actions.append(("c", menu_key("C", "lose poll")))
+            if can_decode:
+                actions.append((
+                    "d", menu_key("D", "ecode ROT-13: on") if decoded else menu_key("D", "ecode ROT-13: off"),
+                ))
             if has_next:
                 actions.append(("n", menu_key("N", "ext post")))
             if has_previous:
@@ -1482,6 +1493,9 @@ async def _board_screen(
             )
             if key == "b":
                 return index
+            if key == "d" and can_decode:
+                decoded_post_id = None if decoded else post.post_id
+                continue
             if key == "v" and can_vote and poll is not None:
                 await _vote(post, poll)
                 continue
@@ -1578,6 +1592,7 @@ async def _board_screen(
                 index = found if found is not None else min(index, len(page.posts) - 1)
                 continue
             detail_page = 0
+            decoded_post_id = None  # the next post shows as it was written
             if key == "n":
                 if index < len(page.posts) - 1:
                     index += 1

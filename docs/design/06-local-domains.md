@@ -2254,6 +2254,16 @@ per board. Nothing is mapped by default.
   - a tear line and an Origin line;
   - SEEN-BY and `^APATH` as FTS-0004 sets them.
 
+  **Origin line.** It is ` * Origin: <text> (<address>)`, within FTS-0004's
+  79 characters. The text is the board's own Origin when it has one (issue
+  #1474, §16 "Issue #1154", Decision 10), else the network's, else the
+  BBS's name. The SysOp sets a board's with **[O]rigin (FTN)** on the
+  board's screen, offered while the board carries an echo; an empty line
+  goes back to the network's. A board's Origin is bounded by this node's
+  address on its network, so that the whole line fits, and a longer one is
+  refused rather than cut. The network's text is cut to fit as before.
+  Making the board local again clears its Origin.
+
   A copy of a cross-post (issue #1298) is its own message with its own
   `^AMSGID`, and its first body line is `* Crossposted in <ECHO>, <ECHO>`,
   naming the other echoes of the same network that get a copy. It names no
@@ -2502,6 +2512,17 @@ writes nothing and keeps the draft with the reason. Creating a board
 commits, so a failure after the first one was made removes what was made
 before the draft is shown again.
 
+**ROT-13 in the reader** (issue #1473, §16 "Issue #1154", Decision 12). The
+post reader and the reader of a received letter have **[D]ecode ROT-13**, a
+toggle that shows the body ROT-13 decoded. It is offered on every board and
+for every letter, not only FTN ones, since a spoiler in ROT-13 can be
+written anywhere; a post drawn in the ANSI art editor, and a post taken down
+or withdrawn, don't offer it. Only ASCII letters turn; escape sequences and
+pipe codes stay as they are. It is display-only: the stored body never
+changes, nothing about the toggle is stored, and a reply quotes the text as
+written. On a board it holds for the post on screen: stepping to the next or
+previous post shows that post as written.
+
 **Character sets.** Text is decoded by its `^ACHRS` kludge (FTS-5003). Without
 one, the network's default is used, CP437 unless the SysOp sets another.
 Outbound text is written in CP437 when every character fits, and in UTF-8
@@ -2524,9 +2545,7 @@ this section; until then the text above is what holds.
   - netmail bounce for unknown recipients, on by default per network, where
     netmail to `SysOp` or `Sysop` always reaches the SysOp (#1472). It
     replaces "goes to the SysOp" in "Inbound delivery" above for networks
-    that keep bouncing on;
-  - a ROT-13 toggle in the reader (#1473);
-  - a per-board Origin line (#1474).
+    that keep bouncing on.
 - **Stage C:**
   - file requests, made and answered (#1475);
   - TIC hatching (#1476);
