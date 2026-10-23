@@ -98,6 +98,13 @@ def test_a_learned_pin_is_let_go_when_the_uplink_host_changes(db):
     assert moved.uplink_tls_pin == ""
 
 
+def test_the_same_host_written_another_way_keeps_the_pin(db):
+    network = _network(db, uplink_host="2001:db8::1", uplink_tls=TLS_PINNED, uplink_tls_pin="ab" * 32)
+    kept, _ = _transport_values(_draft(uplink_host="[2001:db8::1]:24554", uplink_tls=TLS_PINNED,
+                                       uplink_tls_pin="ab" * 32), network, 24554, network)
+    assert kept.uplink_tls_pin == "ab" * 32
+
+
 def test_the_cli_shows_and_sets_where_the_node_answers(db, tmp_path):
     lines = run_ftn_listen(db)
     assert lines[0] == "Answers BinkP on port 24554, on every address, IPv6 and IPv4."

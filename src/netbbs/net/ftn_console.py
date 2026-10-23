@@ -55,6 +55,7 @@ from netbbs.ftn.transport import (
     TLS_OFF,
     TLS_PINNED,
     TLS_VERIFIED,
+    parse_host_port,
     parse_listen_hosts,
     show_fingerprint,
 )
@@ -342,8 +343,11 @@ def _transport_values(draft: dict, candidate: FtnNetwork, listen_port: int,
     `FtnNetworkError` with the reason. A learned pin is let go when the
     uplink's host changes: another host has another certificate."""
     pin = draft["uplink_tls_pin"]
-    if (existing is not None and pin == existing.uplink_tls_pin
-            and draft["uplink_host"].strip() != existing.uplink_host):
+    try:  # compared as stored: [2001:db8::1]:24554 is the same host as 2001:db8::1
+        host = parse_host_port(draft["uplink_host"])[0] if draft["uplink_host"].strip() else ""
+    except ValueError:
+        host = None  # refused by the save anyway
+    if existing is not None and pin == existing.uplink_tls_pin and host != existing.uplink_host:
         pin = ""
     candidate = replace(candidate, uplink_tls=draft["uplink_tls"], uplink_tls_pin=pin)
     try:
