@@ -44,7 +44,12 @@ one node:
   `HOLD_DAYS`.
 
 **The session interface.** `outbound_for_node` gives one node's waiting
-messages (as one packet) and files as a `SessionOutbound`. The caller
+messages (as one packet) and files as a `SessionOutbound`. A network that
+bundles its mail (`bundle_outgoing`, issue #1477) gets the packet inside a
+ZIP bundle named for the day of the week (FTS-5005, `0000fff8.mo0`) with a
+sequence character moved on per bundle; `packet_name` is then the bundle's
+name, so the messages are marked sent only when the remote confirms the
+bundle. The caller
 passes `outbound.files` to `binkp.run_session`, then calls
 `await outbound.settle(lane, result.sent)` with what the remote confirmed
 -- which marks messages sent, deletes sent file rows and applies
@@ -65,8 +70,8 @@ from pathlib import Path
 from netbbs.files.storage import storage_root
 from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.binkp import MAX_FILE_BYTES, OutgoingFile, safe_file_name
-from netbbs.ftn.bundle import packet_name
-from netbbs.ftn.networks import FtnNetwork
+from netbbs.ftn.bundle import build_bundle, bundle_name, packet_name
+from netbbs.ftn.networks import BUNDLE_ZIP, FtnNetwork, next_bundle_sequence
 from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
 from netbbs.ftn.queue import FtnQueueFullError, OutboundMessage, mark_outbound_sent
 from netbbs.storage.database import Database
@@ -461,9 +466,16 @@ async def outbound_for_node(lane, network: FtnNetwork, node: FtnAddress, *, upli
     if prepared.messages:
         header = PacketHeader(orig=network.our_address, dest=node, created=datetime.datetime.now(),
                               password=network.packet_password if uplink else "")
-        outbound.packet_name = packet_name(secrets.randbits(32))
-        outbound.files.append(OutgoingFile(outbound.packet_name,
-                                           build_packet_from_packed(header, [m.packed for m in prepared.messages])))
+        name = packet_name(secrets.randbits(32))
+        packet = build_packet_from_packed(header, [m.packed for m in prepared.messages])
+        # --- mail bundles (issue #1477): the packet in a ZIP, when the network asks ---
+        if network.bundle_outgoing == BUNDLE_ZIP and network.id is not None:
+            sequence = await lane.run(next_bundle_sequence, network.id)
+            packet = build_bundle([(name, packet)])
+            name = bundle_name(network.our_address, node, datetime.date.today(), sequence)
+        # --- end mail bundles ---
+        outbound.packet_name = name
+        outbound.files.append(OutgoingFile(name, packet))
         outbound.message_ids = [m.id for m in prepared.messages]
     for row, path, size, mtime in prepared.files:
         lazy = _LazyFile(path, size)

@@ -5230,6 +5230,21 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #1477 (design doc §6.8, §16 \"Issue #1154\", Decision 16): optional outbound mail "
+            "bundles. A network may send its packets as one ZIP bundle per session, named for the day "
+            "of the week (FTS-5005), instead of a bare packet: `bundle_outgoing` is `off` (the default, "
+            "and on upgrade: bare packets work with every hub) or `zip`. `bundle_sequence` is the "
+            "bundle name's last character (0-9 then a-z), moved on for each bundle so two sessions in "
+            "a day don't send the same name."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN bundle_outgoing TEXT NOT NULL DEFAULT 'off'
+            CHECK (bundle_outgoing IN ('off', 'zip'));
+        ALTER TABLE ftn_networks ADD COLUMN bundle_sequence INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    Migration(
+        description=(
             "Issue #1476 (design doc §6.8, §16 \"Issue #1154\", Decision 14): TIC hatching. "
             "`ftn_hatches` records each file this node hatched into a file echo -- the file "
             "(`file_id`, the content id), its network, area and tag, the names it went under, its "

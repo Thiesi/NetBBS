@@ -337,6 +337,41 @@ def test_a_session_sends_both_and_deletes_only_the_tic(db, lane, sysop, network,
     assert not tic_path.exists() and Path(entry.storage_path).exists()
 
 
+def test_a_bundling_network_bundles_only_its_mail_never_a_hatch(db, lane, sysop, network, area):
+    """Mail bundles (issue #1477) wrap the session's packet; a hatched file
+    and its TIC go beside the bundle as files of their own."""
+    import io
+    import zipfile
+    from dataclasses import replace
+
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.posts import create_post
+    from netbbs.ftn.networks import BUNDLE_ZIP, set_board_area
+    from netbbs.ftn.scanner import export_post_if_ftn
+
+    network = save_network(db, replace(network, bundle_outgoing=BUNDLE_ZIP))
+    board = create_board(db, "general", creator=sysop)
+    set_board_area(db, board, network.id, "FSX_GEN")
+    export_post_if_ftn(db, create_post(db, board, sysop, "Out", "Going out"), board)
+    entry = _upload(db, area, sysop)
+    hatched = hatch_file(db, entry.file_id, actor=sysop)
+
+    async def _run():
+        outbound = await outbound_for_node(lane, network, HUB, uplink=True)
+        try:
+            return [(f.name, bytes(f.data[0:len(f.data)])) for f in outbound.files], outbound.packet_name
+        finally:
+            outbound.close()
+
+    files, bundle = asyncio.run(_run())
+    names = [name for name, _data in files]
+    assert names == [bundle, hatched.send_name, hatched.tic_name]
+    with zipfile.ZipFile(io.BytesIO(files[0][1])) as archive:
+        assert [m.filename.lower().endswith(".pkt") for m in archive.infolist()] == [True]
+    assert files[1][1] == b"a NetBBS release"
+    assert parse_tic(files[2][1]).file == hatched.send_name
+
+
 def test_a_hatched_file_deleted_before_its_session_takes_its_tic_with_it(db, lane, sysop, network, area):
     entry = _upload(db, area, sysop)
     hatch_file(db, entry.file_id, actor=sysop)

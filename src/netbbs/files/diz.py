@@ -35,10 +35,10 @@ is:
 - argv lists only, never a shell, and the member name is a fixed
   constant of this module rather than anything derived from the upload;
 - on POSIX the tool runs behind the door launcher's own post-exec
-  `resource.setrlimit` helper (`netbbs.doors.launcher`, reached by path
-  so this module never imports the doors package), with far tighter
-  CPU/memory/process ceilings than a door gets -- an unpacker that
-  spins or allocates is killed by the kernel, not merely by us;
+  `resource.setrlimit` helper, with far tighter CPU/memory/process
+  ceilings than a door gets -- an unpacker that spins or allocates is
+  killed by the kernel, not merely by us. That sandbox is
+  `netbbs.files.extract`, shared with FTN mail bundles (§6.8);
 - the read is bounded, each spawn has a timeout, the whole attempt has
   an overall budget, and the child is killed and reaped on every exit
   path including cancellation;
@@ -58,19 +58,16 @@ carry (design doc §11.2's own 4096-byte cap, mirrored here).
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
 import logging
 import os
 import re
 import shutil
-import signal
-import sys
 import time
 import unicodedata
 import zipfile
 from pathlib import Path
 
+from netbbs.files.extract import EXTRACT_CPU_SECONDS, run_extractor
 from netbbs.rendering.sauce import split_sauce
 
 _logger = logging.getLogger(__name__)
@@ -146,9 +143,9 @@ upload. Kept short deliberately: this runs while a caller sits at a
 finished transfer with nothing on screen yet, and the only thing a long
 budget buys is a longer silence before the same "no description"."""
 
-_EXTRACT_CPU_SECONDS = 10
-_EXTRACT_MEMORY_BYTES = 256 * 1024 * 1024
-_EXTRACT_MAX_PROCESSES = 16
+_EXTRACT_CPU_SECONDS = EXTRACT_CPU_SECONDS
+"""The sandbox's CPU ceiling (`netbbs.files.extract`), shared with FTN
+bundles."""
 
 _ARCHIVE_TOOLS: dict[str, tuple[tuple[str, ...], ...]] = {
     ".lzh": (("lha", "pq", "{archive}", "{member}"), ("7z", "e", "-so", "-y", "{archive}", "{member}")),
@@ -427,119 +424,11 @@ def _zip_central_directory_bytes(archive_path: Path) -> int | None:
 
 async def _run_extractor(argv: list[str], *, deadline: float) -> bytes | None:
     """
-    Run one already-resolved unpacker command and return what it wrote
-    to stdout, bounded and never trusted. `None` for a tool that
-    failed, printed nothing, timed out, or produced more than
-    `MAX_DIZ_BYTES`.
-
-    The child is started in its own session on POSIX so a tool which
-    spawns helpers can be killed as a group, and it is killed and
-    reaped in `finally` -- including on cancellation, where leaving an
-    unpacker running against a caller's upload would outlive the
-    session that asked for it.
+    Run one already-resolved unpacker command through the shared sandbox
+    (`netbbs.files.extract.run_extractor`) and return what it wrote to
+    stdout, or `None` for a tool that failed, printed nothing, timed out,
+    or produced more than `MAX_DIZ_BYTES`.
     """
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        return None
-    if os.name == "posix":
-        setup = {"pty": False, "limits": {"RLIMIT_CPU": _EXTRACT_CPU_SECONDS,
-                                          "RLIMIT_AS": _EXTRACT_MEMORY_BYTES,
-                                          "RLIMIT_NPROC": _EXTRACT_MAX_PROCESSES}}
-        # Reached by path, not by import: netbbs.doors.launcher imports
-        # fcntl/termios at module scope (it is exec'd, never imported),
-        # and nothing about reading a DIZ should pull in the doors
-        # package.
-        launcher = Path(__file__).resolve().parent.parent / "doors" / "launcher.py"
-        argv = [sys.executable, "-I", str(launcher), json.dumps(setup), *argv]
-        spawn_kwargs = {"start_new_session": True}
-    else:
-        spawn_kwargs = {}
-
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            **spawn_kwargs,
-        )
-    except (OSError, ValueError) as exc:
-        _logger.info("FILE_ID.DIZ: could not run %s: %s", argv[0], exc)
-        return None
-    killed = True
-    try:
-        if proc.stdout is None:  # pragma: no cover - stdout=PIPE guarantees one
-            return None
-        deadline_left = min(remaining, _SPAWN_TIMEOUT_SECONDS)
-        started = time.monotonic()
-        data = await asyncio.wait_for(
-            _read_bounded(proc.stdout, MAX_DIZ_BYTES + 1), timeout=deadline_left
-        )
-        if len(data) > MAX_DIZ_BYTES:
-            return None
-        # Output alone is not a result (Codex review): an unpacker that
-        # streams a damaged member and *then* reports a CRC error, or
-        # one that writes a "no such member" line to stdout, would
-        # otherwise hand back rubbish as a description -- and, worse,
-        # stop the lowercase-name retry and the next candidate tool from
-        # ever running. Exit status is the tool's own verdict on what it
-        # just printed, so wait for it and believe it. The kill path
-        # below stays for the cases where there is no verdict coming.
-        await asyncio.wait_for(proc.wait(), timeout=max(0.1, deadline_left - (time.monotonic() - started)))
-        killed = False
-        if proc.returncode != 0:
-            _logger.info(
-                "FILE_ID.DIZ: %s exited %s; ignoring its output",
-                Path(argv[0]).name, proc.returncode,
-            )
-            return None
-    except asyncio.TimeoutError:
-        _logger.warning("FILE_ID.DIZ: %s timed out; killing it", Path(argv[0]).name)
-        return None
-    finally:
-        if killed:
-            await _stop(proc)
-    return data or None
-
-
-async def _read_bounded(stream: asyncio.StreamReader, limit: int) -> bytes:
-    """Read at most `limit` bytes. `StreamReader.read(n)` returns as
-    soon as *any* data is available, so a single call can't be trusted
-    to have collected a whole small member yet."""
-    chunks: list[bytes] = []
-    total = 0
-    while total < limit:
-        chunk = await stream.read(limit - total)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-    return b"".join(chunks)
-
-
-async def _stop(proc: asyncio.subprocess.Process) -> None:
-    """Kill and reap, unconditionally, on every exit path.
-
-    `SIGKILL` rather than a polite `SIGTERM` first: by the time this
-    runs the unpacker's output is already read (or already too big, or
-    already too slow) and nothing it could still do is wanted -- and a
-    tool wedged in a parser loop on a crafted archive is exactly the
-    case a catchable signal would not end. On POSIX the whole process
-    group goes, since `start_new_session` made this child its leader
-    and a tool which spawned a helper must not leave it behind.
-
-    A cancellation arriving mid-wait still leaves the child killed (the
-    signal is sent before any await) and still being reaped -- the
-    shielded `wait()` outlives the cancellation, which is what keeps a
-    zombie from accumulating per abandoned upload."""
-    if proc.returncode is None:
-        try:
-            if os.name == "posix":
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    with contextlib.suppress(asyncio.TimeoutError):
-        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=2)
+    run = await run_extractor(argv, deadline=deadline, limit=MAX_DIZ_BYTES, spawn_timeout=_SPAWN_TIMEOUT_SECONDS,
+                              label="FILE_ID.DIZ")
+    return run.data or None
