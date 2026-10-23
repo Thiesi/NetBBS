@@ -204,13 +204,14 @@ def _unix(iso: str) -> int | None:
         return None
 
 
-def _write_spool_tic(db: Database, data: bytes) -> tuple[Path, str]:
-    """Write the TIC into the spool folder under a fresh 8.3 name."""
+def _write_spool_tic(db: Database, data: bytes, suffix: str = ".TIC") -> tuple[Path, str]:
+    """Write the TIC into the spool folder under a fresh 8.3 name (or, with
+    another `suffix`, a file under a fresh name ending in it)."""
     folder = spool_dir(db) / "hatch"
     folder.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     for _attempt in range(16):
-        name = f"{secrets.token_hex(4).upper()}.TIC"
+        name = f"{secrets.token_hex(4).upper()}{suffix}"
         path = folder / name
         try:
             descriptor = os.open(path, flags, 0o644)
@@ -381,3 +382,71 @@ def auto_hatch(db: Database, file_id: str) -> Hatched | None:
             pass
         _logger.exception("FTN: automatic hatch of %s failed", file_id[:16])
     return None
+
+
+# --- published lists (issue #1480) ---------------------------------------------------
+
+PUBLISH_REFERENCE_KIND = "publish"
+
+
+def hatch_generated_file(
+    db: Database, network: FtnNetwork, tag: str, data: bytes, *, send_name: str, desc: str,
+    reference_id: str, replaces: tuple[str, ...] = (),
+) -> str:
+    """Hatch a file this node made only to send (a pointlist or nodelist
+    segment, `netbbs.ftn.publish`) into file echo `tag`: write it and its
+    TIC into the spool folder and queue both to the uplink, the file
+    first, each deleted once sent. The same guards as `hatch_file`: a TIC
+    password, BinkP's size limit, an 8.3 name no receiver takes for a
+    control file, and room for two files in the queue. Returns the TIC's
+    name; raises `HatchError` (or `FtnQueueFullError`) and changes nothing.
+    Commits."""
+    if not tag or " " in tag:
+        raise HatchError("No file echo is set to hatch into.")
+    if not network.tic_password:
+        raise HatchError(f"No TIC password is set for {network.name}; set the one agreed with the hub in the "
+                         "network editor first.")
+    if len(data) > MAX_FILE_BYTES:
+        raise HatchError(f"{send_name} is {len(data)} bytes; BinkP sends at most {MAX_FILE_BYTES}.")
+    if dos_name(send_name) != send_name or send_name.lower().endswith(_CONTROL_EXTENSIONS):
+        raise HatchError(f"{send_name} is not an 8.3 name a receiver takes for a file.")
+    pending = db.connection.execute(
+        "SELECT COUNT(*) FROM ftn_outbound_files WHERE network_id = ?", (network.id,)
+    ).fetchone()[0]
+    if pending + 2 > MAX_PENDING_FILES_PER_NETWORK:
+        raise FtnQueueFullError(f"{pending} files are already waiting for {network.name}; hatch again once they "
+                                "have gone")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    us = network.our_address
+    replaces = tuple(n for n in replaces if n != send_name and "*" not in n and "?" not in n
+                     and replaces_pattern_problem(n) is None)
+    tic = Tic(area=tag, file=send_name, crc=zlib.crc32(data) & 0xFFFFFFFF, size=len(data), desc=desc,
+              replaces=replaces, origin=us, from_address=us, password=network.tic_password)
+    try:
+        tic_data = write_tic(tic, to=network.uplink_address, path=[(us, int(now.timestamp()))],
+                             seen_by=[us, network.uplink_address], date=int(now.timestamp()),
+                             created=f"NetBBS {__version__}")
+    except FtnFormatError as exc:
+        raise HatchError(f"{send_name} can't be hatched: {exc}.") from None
+    # The file goes under a spool name of its own, so a second edition
+    # queued the same day never overwrites one still waiting.
+    file_path, _spool_name = _write_spool_tic(db, data, suffix=f"-{send_name}")
+    try:
+        tic_path, tic_name = _write_spool_tic(db, tic_data)
+    except BaseException:
+        file_path.unlink(missing_ok=True)
+        raise
+    try:
+        common = dict(destination=network.uplink_address.four_d, route="uplink",
+                      reference_kind=PUBLISH_REFERENCE_KIND, reference_id=reference_id, after_sent=KILL)
+        queue_file_without_commit(db, network.id, send_name=send_name, size_bytes=len(data), path=file_path,
+                                  **common)
+        queue_file_without_commit(db, network.id, send_name=tic_name, size_bytes=len(tic_data), path=tic_path,
+                                  **common)
+        db.connection.commit()
+    except BaseException:
+        db.connection.rollback()
+        file_path.unlink(missing_ok=True)
+        tic_path.unlink(missing_ok=True)
+        raise
+    return tic_name
