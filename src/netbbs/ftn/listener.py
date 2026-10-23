@@ -19,7 +19,12 @@ loaded, the plain port goes on answering and `last_error` says why.
 A caller presenting a configured uplink's address must prove that
 network's session password (CRAM-MD5 offered, plain accepted); a wrong one
 ends the call. A proven caller gets the network's waiting mail and its
-packets are tossed. Any other caller gets a non-secure session: it may
+packets are tossed. So does a caller presenting a point's or downlink's
+address (`netbbs.ftn.links`, issues #1478 and #1479): it must prove that
+link's password, and is then handed everything held for that link --
+read only once the password is proven -- and its packets are tossed as the
+link's. Its call is recorded on the link for the console. A link the
+SysOp switched off must still prove its password, and is given nothing. Any other caller gets a non-secure session: it may
 deliver, but what it brings is held for the SysOp (`netbbs.ftn.tosser`),
 and it is given nothing -- unless its network sets **Give held mail to
 callers without a password** (`FtnNetwork.give_held_unproven`, off by
@@ -59,8 +64,9 @@ from netbbs.ftn.binkp import (
     run_session,
 )
 from netbbs.ftn.exchange import summary, system_info, toss_received
+from netbbs.ftn.links import link_for_session, list_links, record_link_call
 from netbbs.ftn.networks import FtnNetwork, list_networks
-from netbbs.ftn.outbound import direct_nodes_waiting, outbound_for_node
+from netbbs.ftn.outbound import direct_nodes_waiting, outbound_for_link, outbound_for_node
 from netbbs.ftn.transport import TLS_HANDSHAKE_SECONDS, parse_listen_hosts, server_context
 from netbbs.timeutil import utc_now_iso
 
@@ -302,14 +308,34 @@ class FtnListener:
                                                                               uplink=False, hold_only=True)
                     prepared.append(held[(network.id, node.four_d)])
             state: dict[str, object] = {}
+            # --- points and downlinks (issues #1478, #1479) ---
+            by_network = {network.id: network for network in networks}
+            links = [link for network in networks for link in await self._lane.run(list_links, network.id)]
+
+            async def link_files(network: FtnNetwork, link) -> list[OutgoingFile]:
+                outbound = await outbound_for_link(self._lane, network, link)
+                prepared.append(outbound)
+                state["outbound"] = outbound
+                return list(outbound.files)
+            # --- end points and downlinks ---
 
             def password_for(addresses: list[FtnAddress]) -> str | None:
                 network = _uplink_network(networks, addresses)
+                if network is None:
+                    link = link_for_session(links, addresses)
+                    if link is not None:
+                        state["link"], state["network"] = link, by_network[link.network_id]
+                        return link.session_password
                 state["network"] = network
                 return network.session_password if network is not None else None
 
-            def outgoing_for(addresses: list[FtnAddress], secure: bool) -> list[OutgoingFile]:
+            def outgoing_for(addresses: list[FtnAddress], secure: bool):
                 network = state.get("network")
+                link = state.get("link")
+                if secure and link is not None:
+                    # Read now, once its password is proven: a link's mail
+                    # is never prepared for a caller that only claims it.
+                    return link_files(network, link) if link.enabled else []
                 if secure and network is not None:
                     state["outbound"] = uplinks[network.id]
                     return list(uplinks[network.id].files)
@@ -352,9 +378,12 @@ class FtnListener:
         finally:
             for item in prepared:
                 item.close()
-        tossed = await toss_received(self._lane, network, result)
+        link = state.get("link") if result.secure else None
+        tossed = await toss_received(self._lane, network, result, link=link)
         outcome = outcome_prefix + summary(sent, len(result.received), tossed, files_sent=files_sent)
         addresses = " ".join(str(a) for a in result.remote_addresses)
+        if link is not None:
+            await self._lane.run(record_link_call, link.id, f"called in: {outcome}")
         self._record(peer_ip, addresses, result.secure, outcome, tls)
         _logger.info("FTN %s: answered %s (%s, %s%s) -- %s", network.name, addresses, peer_ip,
                      "secure" if result.secure else "non-secure", ", TLS" if tls else "", outcome)

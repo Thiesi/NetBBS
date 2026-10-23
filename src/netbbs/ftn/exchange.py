@@ -24,7 +24,11 @@ answers (`netbbs.ftn.listener`). Design doc §6.8.
      One no tool can open is held whole too, saying what to install;
   6. anything else is held, waiting for a TIC or a netmail.
 
-  A session that wasn't secure has everything held as it came, unopened.
+  A session that wasn't secure has everything held as it came, unopened,
+  and so has one with a point or downlink the SysOp switched off. A
+  session a point's or downlink's password proved (`link`) has its packets
+  tossed as that link's (`netbbs.ftn.tosser.toss_packet`, issues #1478 and
+  #1479).
   Nothing received is dropped unrecorded: what the full held store can't
   keep is counted as lost and logged.
 - `rerun_bad_file_echo` runs a bad file echo's held pairs through the
@@ -57,22 +61,26 @@ from netbbs.ftn.queue import (
     hold_inbound,
 )
 from netbbs.ftn.tic import Tic, is_tic_name
-from netbbs.ftn.tosser import TossResult, toss_packet
+from netbbs.ftn.tosser import TossResult, link_of, toss_packet
 
 _logger = logging.getLogger(__name__)
 
-async def toss_received(lane, network: FtnNetwork, result: SessionResult) -> TossResult:
-    """Sort and toss every file `result` received, as one total."""
+async def toss_received(lane, network: FtnNetwork, result: SessionResult, *, link=None) -> TossResult:
+    """Sort and toss every file `result` received, as one total. `link` is
+    the point or downlink whose password proved the session."""
     total = TossResult()
     remote = str(result.remote_addresses[0]) if result.remote_addresses else "?"
+    if link is not None:
+        remote = str(link.address)
     await lane.run(expire_unpaired)
     await lane.run(expire_attach_waits)
-    if not result.secure:
+    if not result.secure or (link is not None and not link.enabled):
         # Nothing proved who sent it: kept as it came, nothing unpacked or
         # paired, for the SysOp to look at -- a stranger's bundle doesn't get
         # to expand, nor a stranger's TIC to claim a file.
+        reason = "unsecure session" if not result.secure else f"from {link.address.four_d}, a link switched off"
         for received in result.received:
-            await _hold(lane, network, remote, received, "unsecure session", total)
+            await _hold(lane, network, remote, received, reason, total)
         return total
     pool = [received for received in result.received if not is_tic_name(received.name)]
     for received in result.received:
@@ -87,7 +95,7 @@ async def toss_received(lane, network: FtnNetwork, result: SessionResult) -> Tos
         if archive_kind(received.data) != "pkt" and await lane.run(
                 claim_received, network, remote, received.name, received.data, total):
             continue
-        await _toss_file(lane, network, received, remote, total)
+        await _toss_file(lane, network, received, remote, total, link=link)
     return total
 
 
@@ -151,7 +159,7 @@ def _remote_of(db, held_id: int) -> str:
     return row["remote_address"] if row is not None else "?"
 
 
-async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: TossResult) -> None:
+async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: TossResult, *, link=None) -> None:
     kind = archive_kind(received.data)
     others: list[tuple[str, bytes]] = []
     if kind == "pkt":
@@ -179,13 +187,14 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: 
         await _hold_waiting(lane, network, remote, received,
                             f"waiting for its .TIC (not a packet or mail bundle: {kind or 'unknown'})", total)
         return
-    await _toss_unpacked(lane, network, remote, received.name, packets, others, total)
+    await _toss_unpacked(lane, network, remote, received.name, packets, others, total, link=link)
 
 
 async def _toss_unpacked(lane, network, remote: str, bundle: str, packets: list[tuple[str, bytes]],
-                         others: list[tuple[str, bytes]], total: TossResult) -> None:
+                         others: list[tuple[str, bytes]], total: TossResult, *, link=None) -> None:
     for name, data in packets:
-        one = await lane.run(toss_packet, network, data, secure=True, remote_address=remote, file_name=name)
+        one = await lane.run(toss_packet, network, data, secure=True, remote_address=remote, file_name=name,
+                             link=link)
         total.add(one)
     for name, data in others:
         # Whatever else rode in the bundle is never dropped: each member is
@@ -219,7 +228,8 @@ async def release_held_bundle(lane, network: FtnNetwork, held_id: int) -> TossRe
         raise FtnFormatError(f"{held.file_name} holds no mail packets")
     await lane.run(delete_held, held_id)
     total = TossResult()
-    await _toss_unpacked(lane, network, held.remote_address, held.file_name, packets, others, total)
+    link = await lane.run(link_of, network, held.remote_address)  # a point's bundle: its echomail goes on
+    await _toss_unpacked(lane, network, held.remote_address, held.file_name, packets, others, total, link=link)
     return total
 
 
@@ -257,6 +267,8 @@ def summary(sent: int, received: int, tossed: TossResult, *, files_sent: int = 0
             + f", received {received} files: {tossed.posts} posts, {tossed.netmail} netmail, "
             + (f"{tossed.files} files stored, " if tossed.files else "")
             + (f"{tossed.bounced} netmail returned, " if tossed.bounced else "")
+            + (f"{tossed.routed} netmail routed on, " if tossed.routed else "")
+            + (f"{tossed.forwarded} sent on to the uplink, " if tossed.forwarded else "")
             + (f"{tossed.bad_echo} to unknown echoes, " if tossed.bad_echo else "")
             + f"{tossed.duplicates + tossed.file_duplicates} duplicates, {tossed.held} held"
             + (f", {tossed.lost} lost (held store full)" if tossed.lost else ""))

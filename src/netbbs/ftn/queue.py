@@ -34,6 +34,7 @@ _logger = logging.getLogger(__name__)
 MSGID_SERIAL_KEY = "ftn_msgid_serial"
 SEEN_RETENTION_DAYS = 180
 MAX_PENDING_PER_NETWORK = 10_000
+MAX_PENDING_PER_LINK = 2_000  # a point or downlink (issues #1478, #1479)
 SENT_RETENTION_DAYS = 14
 MAX_HELD_PACKETS = 200  # items: packets, files and TICs
 # Enough for a file at BinkP's 64 MiB limit with room to spare (issue #1462).
@@ -105,12 +106,18 @@ class OutboundMessage:
 
 def enqueue_outbound_without_commit(
     db: Database, network_id: int, *, kind: str, reference_id: str, destination: str,
-    packed: bytes, route: str = "uplink", flavour: str = "normal",
+    packed: bytes, route: str = "uplink", flavour: str = "normal", link_id: int | None = None,
 ) -> bool:
     """Queue an encoded message; False if this one is already queued (each
     post or letter goes out once per network). Raises `FtnQueueFullError`
     at `MAX_PENDING_PER_NETWORK` unsent messages. `flavour` is `normal`,
-    `crash` or `hold` (issue #1471, `netbbs.ftn.outbound`)."""
+    `crash` or `hold` (issue #1471, `netbbs.ftn.outbound`).
+
+    A message whose destination belongs to a point or downlink of this node
+    (`netbbs.ftn.links.link_for_destination`) goes to that link's own
+    outbound, whatever `route` says, unless `link_id` names the link
+    already (issues #1478, #1479): it waits for a session that link's
+    password proves. At most `MAX_PENDING_PER_LINK` wait for one link."""
     if db.connection.execute(
         "SELECT 1 FROM ftn_outbound WHERE network_id = ? AND kind = ? AND reference_id = ?",
         (network_id, kind, reference_id),
@@ -123,6 +130,28 @@ def enqueue_outbound_without_commit(
         raise FtnQueueFullError(
             f"{pending} messages are already waiting for this network; nothing more is queued until they go"
         )
+    # --- points and downlinks (issues #1478, #1479) ---
+    if link_id is None:
+        from netbbs.ftn.links import resolve_link_id  # links imports the queue's callers
+
+        link_id = resolve_link_id(db, network_id, destination)
+    if link_id is not None:
+        route = "direct"
+        waiting = db.connection.execute(
+            "SELECT COUNT(*) FROM ftn_outbound WHERE link_id = ? AND status = 'pending'", (link_id,)
+        ).fetchone()[0]
+        if waiting >= MAX_PENDING_PER_LINK:
+            raise FtnQueueFullError(
+                f"{waiting} messages are already waiting for {destination}; nothing more is queued until it calls"
+            )
+        cursor = db.connection.execute(
+            "INSERT OR IGNORE INTO ftn_outbound "
+            "(network_id, kind, reference_id, destination, route, packed, created_at, flavour, link_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (network_id, kind, reference_id, destination, route, packed, utc_now_iso(), flavour, link_id),
+        )
+        return cursor.rowcount == 1
+    # --- end points and downlinks ---
     cursor = db.connection.execute(
         "INSERT OR IGNORE INTO ftn_outbound "
         "(network_id, kind, reference_id, destination, route, packed, created_at, flavour) "

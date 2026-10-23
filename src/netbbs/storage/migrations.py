@@ -5243,4 +5243,67 @@ MIGRATIONS = [
         ALTER TABLE ftn_networks ADD COLUMN bundle_sequence INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    Migration(
+        description=(
+            "Issues #1478 and #1479 (design doc §6.8, §16 \"Issue #1154\", Decisions 15 and 17): points "
+            "and downlinks. `ftn_links` holds the systems a network's SysOp adds under this node: a "
+            "`point` (this node's address with a point number) or a `downlink` (a node this node "
+            "feeds), each with a session password every session must prove, optional packet, AreaFix, "
+            "FileFix and TIC passwords, whether this node calls it (`poll`, a downlink with a host) or "
+            "holds its mail until it calls (`hold`), its bundle preference, its status (`active`, "
+            "`paused` by its own AreaFix request, `disabled` by the SysOp) and its last call. "
+            "`ftn_link_areas` is the echoes and file echoes each link carries, for the echomail "
+            "fan-out, AreaFix/FileFix server and TIC forwarding that build on these records. A queued "
+            "message or file for a link names it in `link_id` and goes only in a session that link's "
+            "password proved. `ftn_point_waiting` keeps a point's echomail for the uplink while its "
+            "post waits for a moderator. Nothing is configured on upgrade, so nothing changes."
+        ),
+        sql="""
+        CREATE TABLE ftn_links (
+            id                 INTEGER PRIMARY KEY,
+            network_id         INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            kind               TEXT NOT NULL CHECK (kind IN ('point', 'downlink')),
+            address            TEXT NOT NULL,
+            name               TEXT NOT NULL DEFAULT '',
+            session_password   TEXT NOT NULL,
+            packet_password    TEXT NOT NULL DEFAULT '',
+            areafix_password   TEXT NOT NULL DEFAULT '',
+            filefix_password   TEXT NOT NULL DEFAULT '',
+            tic_password       TEXT NOT NULL DEFAULT '',
+            flavour            TEXT NOT NULL DEFAULT 'hold' CHECK (flavour IN ('hold', 'poll')),
+            host               TEXT NOT NULL DEFAULT '',
+            port               INTEGER NOT NULL DEFAULT 24554 CHECK (port BETWEEN 1 AND 65535),
+            bundle             TEXT NOT NULL DEFAULT 'off' CHECK (bundle IN ('off', 'zip')),
+            bundle_sequence    INTEGER NOT NULL DEFAULT 0,
+            status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'disabled')),
+            last_call_at       TEXT,
+            last_call_outcome  TEXT NOT NULL DEFAULT '',
+            created_at         TEXT NOT NULL,
+            UNIQUE (network_id, address)
+        );
+
+        CREATE TABLE ftn_link_areas (
+            link_id     INTEGER NOT NULL REFERENCES ftn_links(id) ON DELETE CASCADE,
+            kind        TEXT NOT NULL CHECK (kind IN ('echo', 'file')),
+            tag         TEXT NOT NULL COLLATE NOCASE,
+            mode        TEXT NOT NULL DEFAULT 'rw' CHECK (mode IN ('rw', 'read')),
+            created_at  TEXT NOT NULL,
+            PRIMARY KEY (link_id, kind, tag)
+        );
+        CREATE INDEX idx_ftn_link_areas_tag ON ftn_link_areas(kind, tag);
+
+        ALTER TABLE ftn_outbound ADD COLUMN link_id INTEGER REFERENCES ftn_links(id) ON DELETE CASCADE;
+        ALTER TABLE ftn_outbound_files ADD COLUMN link_id INTEGER REFERENCES ftn_links(id) ON DELETE CASCADE;
+        CREATE INDEX idx_ftn_outbound_link ON ftn_outbound(link_id, status) WHERE link_id IS NOT NULL;
+        CREATE INDEX idx_ftn_outbound_files_link ON ftn_outbound_files(link_id) WHERE link_id IS NOT NULL;
+
+        CREATE TABLE ftn_point_waiting (
+            post_id     TEXT PRIMARY KEY,
+            network_id  INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            link_id     INTEGER REFERENCES ftn_links(id) ON DELETE SET NULL,
+            packed      BLOB NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+        """,
+    ),
 ]

@@ -1748,6 +1748,26 @@ session needs the same treatment.
   `ftn_listen_host = "::"` would answer IPv6 only. Every address is `host=None`
   (both families); named addresses are passed as a list.
 
+### FTN points and downlinks (issues #1478, #1479)
+
+- **A linked address's row is tagged at queue time, and only there.**
+  `enqueue_outbound_without_commit` and `queue_file_without_commit` look
+  every destination up (`links.resolve_link_id`) and set `link_id` and
+  route `direct`. Every session selector that is not a link's
+  (`waiting_for_node`, `direct_nodes_waiting`, `count_callable`) must keep
+  `AND link_id IS NULL`: without it a point's mail -- whose boss is this
+  node -- would be handed to whoever calls in claiming this node's net/node,
+  or make the mailer call itself through its own nodelist entry.
+- **A link's mail is read only after its password is proven.** The
+  listener's `outgoing_for` returns a coroutine for a link
+  (`run_session` awaits an awaitable), so nothing of a link's is in memory
+  for a caller that fails the password. `give_held_unproven` never touches
+  link rows.
+- **Forwarding never re-encodes.** `netbbs.ftn.route` edits the packed
+  bytes (the trailing SEEN-BY/PATH run, an appended Via line, inserted
+  INTL/FMPT/TOPT) so a forwarded message keeps its character set and
+  kludges exactly; `decode_message`/`encode_message` would normalise them.
+
 ### Read cursors and follows (issue #56)
 
 A per-user read cursor is a position marker `(user_id, object_type,

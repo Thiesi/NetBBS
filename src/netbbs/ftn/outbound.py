@@ -36,12 +36,22 @@ one node:
   calls at once, and after `CRASH_ATTEMPTS` failed calls the netmail is
   dropped and its sender told why.
 - `hold`: never makes this node call. It goes in the next session with
-  its node that a password proved -- the uplink's, today; stage D adds
-  passwords for other nodes. A node that is not the uplink gets its held
-  items in an unproven session (calling in, or called for other mail) only
-  when its network sets `give_held_unproven`, off by default: anyone can
-  present an address. It is dropped, and its sender told, after
-  `HOLD_DAYS`.
+  its node that a password proved -- the uplink's, or a point's or
+  downlink's (below). A node that is neither gets its held items in an
+  unproven session (calling in, or called for other mail) only when its
+  network sets `give_held_unproven`, off by default: anyone can present an
+  address. It is dropped, and its sender told, after `HOLD_DAYS`.
+
+**Points and downlinks** (issues #1478, #1479; `netbbs.ftn.links`). A row
+for a linked address names its link (`link_id`), set by the queue itself
+when the row is queued, and has route `direct`. Such a row goes only in a
+session that link's password proved (`outbound_for_link`, every flavour),
+never in `waiting_for_node`'s sessions and never via the uplink;
+`links_with_callable` tells the mailer which polled downlinks to call. At
+most `MAX_PENDING_FILES_PER_LINK` files (and `queue.MAX_PENDING_PER_LINK`
+messages) wait for one link; what waits longer than `HOLD_DAYS` is dropped
+and reported, as held mail is (`expire_held`), and so is everything
+waiting for a link that is deleted (`drop_link_rows`).
 
 **The session interface.** `outbound_for_node` gives one node's waiting
 messages (as one packet) and files as a `SessionOutbound`. A network that
@@ -84,6 +94,7 @@ FLAVOURS = (NORMAL, CRASH, HOLD)
 KEEP, KILL, TRUNCATE = "keep", "kill", "truncate"
 
 MAX_PENDING_FILES_PER_NETWORK = 200
+MAX_PENDING_FILES_PER_LINK = 50  # a point or downlink (issues #1478, #1479)
 # BinkP's own bound on what one session receives, kept for what one sends.
 MAX_SESSION_FILE_BYTES = 256 * 1024 * 1024
 MAX_MESSAGES_PER_PACKET = 500
@@ -124,7 +135,7 @@ def _in_spool(db: Database, path: Path) -> bool:
 def queue_file_without_commit(
     db: Database, network_id: int, *, destination: FtnAddress | str, route: str, send_name: str,
     size_bytes: int, reference_kind: str, reference_id: str, flavour: str = NORMAL,
-    file_id: str | None = None, path: Path | str | None = None, after_sent: str = KEEP,
+    file_id: str | None = None, path: Path | str | None = None, after_sent: str = KEEP, link_id: int | None = None,
 ) -> int:
     """Queue one file for a session; returns its row id. Exactly one of
     `file_id` and `path`. Raises `ValueError` for a row that breaks the
@@ -146,6 +157,28 @@ def queue_file_without_commit(
         raise FtnQueueFullError(
             f"{pending} files are already waiting for this network; nothing more is queued until they go"
         )
+    # --- points and downlinks (issues #1478, #1479): a linked address's file waits for that link ---
+    if link_id is None:
+        from netbbs.ftn.links import resolve_link_id
+
+        link_id = resolve_link_id(db, network_id, destination)
+    if link_id is not None:
+        route = "direct"
+        waiting = db.connection.execute(
+            "SELECT COUNT(*) FROM ftn_outbound_files WHERE link_id = ?", (link_id,)
+        ).fetchone()[0]
+        if waiting >= MAX_PENDING_FILES_PER_LINK:
+            raise FtnQueueFullError(f"{waiting} files are already waiting for {destination}; nothing more is "
+                                    "queued until it calls")
+        cursor = db.connection.execute(
+            "INSERT INTO ftn_outbound_files (network_id, destination, route, flavour, file_id, path, send_name, "
+            "size_bytes, after_sent, reference_kind, reference_id, created_at, link_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (network_id, str(destination), route, flavour, file_id, str(path) if path is not None else None,
+             send_name, size_bytes, after_sent, reference_kind, reference_id, utc_now_iso(), link_id),
+        )
+        return cursor.lastrowid
+    # --- end points and downlinks ---
     cursor = db.connection.execute(
         "INSERT INTO ftn_outbound_files (network_id, destination, route, flavour, file_id, path, send_name, "
         "size_bytes, after_sent, reference_kind, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -213,9 +246,10 @@ def waiting_for_node(
     route = "uplink" if uplink else "direct"
     # Ids first, without the encoded messages: up to 10,000 may wait, and
     # only one packet's worth is read.
+    # A link's rows go only in a session its password proved (`waiting_for_link`).
     candidates = db.connection.execute(
         "SELECT id, destination, route FROM ftn_outbound "
-        f"WHERE network_id = ? AND status = 'pending' AND route = ?{flavour_clause} ORDER BY id",
+        f"WHERE network_id = ? AND status = 'pending' AND route = ? AND link_id IS NULL{flavour_clause} ORDER BY id",
         (network.id, route),
     ).fetchall()
     chosen = [row["id"] for row in candidates
@@ -229,7 +263,8 @@ def waiting_for_node(
         messages.append(OutboundMessage(row["id"], row["network_id"], row["kind"], row["reference_id"],
                                         row["destination"], row["route"], bytes(row["packed"])))
     file_rows = db.connection.execute(
-        f"SELECT * FROM ftn_outbound_files WHERE network_id = ? AND route = ?{flavour_clause} ORDER BY id",
+        f"SELECT * FROM ftn_outbound_files WHERE network_id = ? AND route = ? AND link_id IS NULL{flavour_clause} "
+        "ORDER BY id",
         (network.id, route),
     ).fetchall()
     files = [_file_from_row(row) for row in file_rows
@@ -246,7 +281,8 @@ def direct_nodes_waiting(db: Database, network: FtnNetwork, *, hold_only: bool =
     nodes: dict[tuple[int, int, int], None] = {}
     for table, status in (("ftn_outbound", " AND status = 'pending'"), ("ftn_outbound_files", "")):
         for row in db.connection.execute(
-            f"SELECT destination FROM {table} WHERE network_id = ? AND route = 'direct'{status}{clause} ORDER BY id",
+            f"SELECT destination FROM {table} WHERE network_id = ? AND route = 'direct' AND link_id IS NULL"
+            f"{status}{clause} ORDER BY id",
             (network.id,),
         ):
             boss = _boss(row["destination"])
@@ -262,7 +298,7 @@ def count_callable(db: Database, network_id: int, *, route: str) -> tuple[int, i
     for table, status in (("ftn_outbound", " AND status = 'pending'"), ("ftn_outbound_files", "")):
         row = db.connection.execute(
             f"SELECT COUNT(*) AS waiting, COALESCE(SUM(flavour = 'crash'), 0) AS crash FROM {table} "
-            f"WHERE network_id = ? AND route = ? AND flavour != 'hold'{status}",
+            f"WHERE network_id = ? AND route = ? AND flavour != 'hold' AND link_id IS NULL{status}",
             (network_id, route),
         ).fetchone()
         waiting += row["waiting"]
@@ -406,8 +442,42 @@ class _Prepared:
     dropped: list[tuple[OutboundFile, str]]
 
 
-def _prepare(db: Database, network: FtnNetwork, node: FtnAddress, uplink: bool, hold_only: bool) -> _Prepared:
-    messages, rows = waiting_for_node(db, network, node, uplink=uplink, hold_only=hold_only)
+def waiting_for_link(db: Database, link_id: int) -> tuple[list[OutboundMessage], list[OutboundFile]]:
+    """The messages (at most `MAX_MESSAGES_PER_PACKET`) and files waiting for
+    a point or downlink, oldest first, of every flavour: a session with a
+    link is one its password proved (issues #1478, #1479)."""
+    rows = db.connection.execute(
+        "SELECT id, network_id, kind, reference_id, destination, route, packed FROM ftn_outbound "
+        "WHERE link_id = ? AND status = 'pending' ORDER BY id LIMIT ?",
+        (link_id, MAX_MESSAGES_PER_PACKET),
+    ).fetchall()
+    messages = [OutboundMessage(row["id"], row["network_id"], row["kind"], row["reference_id"], row["destination"],
+                                row["route"], bytes(row["packed"])) for row in rows]
+    files = [_file_from_row(row) for row in db.connection.execute(
+        "SELECT * FROM ftn_outbound_files WHERE link_id = ? ORDER BY id", (link_id,))]
+    return messages, files
+
+
+def links_with_callable(db: Database, network_id: int) -> list[int]:
+    """The ids of the network's links that messages or files wait for which
+    may make this node call -- all but held ones -- oldest first."""
+    ids: dict[int, None] = {}
+    for table, status in (("ftn_outbound", " AND status = 'pending'"), ("ftn_outbound_files", "")):
+        for row in db.connection.execute(
+            f"SELECT link_id FROM {table} WHERE network_id = ? AND link_id IS NOT NULL AND flavour != 'hold'"
+            f"{status} ORDER BY id",
+            (network_id,),
+        ):
+            ids.setdefault(row["link_id"], None)
+    return list(ids)
+
+
+def _prepare(db: Database, network: FtnNetwork, node: FtnAddress, uplink: bool, hold_only: bool,
+             link_id: int | None = None) -> _Prepared:
+    if link_id is not None:
+        messages, rows = waiting_for_link(db, link_id)
+    else:
+        messages, rows = waiting_for_node(db, network, node, uplink=uplink, hold_only=hold_only)
     files: list[tuple[OutboundFile, Path, int, int]] = []
     dropped: list[tuple[OutboundFile, str]] = []
     budget = MAX_SESSION_FILE_BYTES
@@ -445,17 +515,38 @@ async def outbound_for_node(lane, network: FtnNetwork, node: FtnAddress, *, upli
     -- the uplink when `uplink` -- as one packet and its files. See the
     module docstring for how the caller settles and closes it."""
     prepared = await lane.run(_prepare, network, node, uplink, hold_only)
+    bundle = network.bundle_outgoing == BUNDLE_ZIP and network.id is not None
+    return await _session_outbound(lane, network, node, prepared, password=network.packet_password if uplink else "",
+                                   next_sequence=(lambda db: next_bundle_sequence(db, network.id)) if bundle else None)
+
+
+async def outbound_for_link(lane, network: FtnNetwork, link) -> SessionOutbound:
+    """What a session a point's or downlink's password proved hands it
+    (issues #1478, #1479): everything queued for that link, of every
+    flavour, in a packet to its address under its packet password, bundled
+    as the link prefers. Settled and closed as `outbound_for_node`'s is."""
+    from netbbs.ftn.links import next_link_bundle_sequence
+
+    prepared = await lane.run(_prepare, network, link.address, False, False, link.id)
+    bundle = link.bundle == BUNDLE_ZIP
+    return await _session_outbound(lane, network, link.address, prepared, password=link.packet_password,
+                                   next_sequence=(lambda db: next_link_bundle_sequence(db, link.id)) if bundle
+                                   else None)
+
+
+async def _session_outbound(lane, network: FtnNetwork, node: FtnAddress, prepared: _Prepared, *, password: str,
+                            next_sequence) -> SessionOutbound:
     if prepared.dropped:
         await lane.run(_drop_unsendable, prepared.dropped)
     outbound = SessionOutbound(network.id)
     if prepared.messages:
         header = PacketHeader(orig=network.our_address, dest=node, created=datetime.datetime.now(),
-                              password=network.packet_password if uplink else "")
+                              password=password)
         name = packet_name(secrets.randbits(32))
         packet = build_packet_from_packed(header, [m.packed for m in prepared.messages])
-        # --- mail bundles (issue #1477): the packet in a ZIP, when the network asks ---
-        if network.bundle_outgoing == BUNDLE_ZIP and network.id is not None:
-            sequence = await lane.run(next_bundle_sequence, network.id)
+        # --- mail bundles (issue #1477): the packet in a ZIP, when the network (or link) asks ---
+        if next_sequence is not None:
+            sequence = await lane.run(next_sequence)
             packet = build_bundle([(name, packet)])
             name = bundle_name(network.our_address, node, datetime.date.today(), sequence)
         # --- end mail bundles ---
@@ -504,8 +595,18 @@ def expire_held(db: Database, *, now: datetime.datetime | None = None) -> int:
     """Drop held rows older than `HOLD_DAYS` (their node never called) and
     tell their senders; returns how many."""
     cutoff = utc_iso((now or datetime.datetime.now(datetime.timezone.utc)) - datetime.timedelta(days=HOLD_DAYS))
-    return _drop_rows(db, None, "flavour = 'hold' AND created_at < ?", (cutoff,),
-                      f"its destination did not call this BBS within {HOLD_DAYS} days")
+    dropped = _drop_rows(db, None, "flavour = 'hold' AND created_at < ?", (cutoff,),
+                         f"its destination did not call this BBS within {HOLD_DAYS} days")
+    # A point's or downlink's mail waits for its session whatever its
+    # flavour, and goes the same way when none came (issues #1478, #1479).
+    return dropped + _drop_rows(db, None, "link_id IS NOT NULL AND created_at < ?", (cutoff,),
+                                f"its destination did not collect it within {HOLD_DAYS} days")
+
+
+def drop_link_rows(db: Database, link_id: int, reason: str) -> int:
+    """Drop everything waiting for a link (it was removed), telling each
+    netmail's sender; returns how many messages and files."""
+    return _drop_rows(db, None, "link_id = ?", (link_id,), reason)
 
 
 def _drop_rows(db: Database, network_id: int | None, condition: str, params: tuple, reason: str) -> int:

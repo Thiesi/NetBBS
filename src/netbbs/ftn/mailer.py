@@ -34,9 +34,19 @@ who it is. After `DIRECT_ATTEMPTS` failed calls normal netmail goes via
 the uplink instead; crash netmail never does, and is dropped and reported
 to its sender after `outbound.CRASH_ATTEMPTS` (issue #1471).
 
+**Polled downlinks** (issue #1479, `netbbs.ftn.links`). A downlink whose
+calls are `poll` is called on the host it names, under its own session
+password, when mail waits for it -- at most once per `MIN_CALL_GAP`, and
+after a failed call again after 1, 2, 4 ... minutes. What it hands over is
+tossed as the downlink's. Its mail never goes via the uplink: the uplink
+would only route it back here. Points, and downlinks that call in, are
+never called. Each call is recorded on the link for the console.
+
 Once a day it prunes the dupe history and the sent-message record
-(`netbbs.ftn.queue`), drops held mail older than `outbound.HOLD_DAYS` and
-forgets attached files that never arrived (`netbbs.ftn.attach`).
+(`netbbs.ftn.queue`), drops held mail older than `outbound.HOLD_DAYS` (and
+a point's or downlink's mail it never collected), forgets attached files
+that never arrived (`netbbs.ftn.attach`) and a point's echomail whose post
+was never approved (`netbbs.ftn.links`).
 
 **Transport** (issues #1467, #1468, #1469; `netbbs.ftn.transport`). A call
 dials the host over IPv6 or IPv4, whichever answers first. A network with
@@ -67,6 +77,7 @@ from netbbs.ftn.address import FtnAddress
 from netbbs.ftn.attach import expire_attach_waits
 from netbbs.ftn.binkp import BatchContext, BinkpError, OutgoingFile, SessionResult, SystemInfo, run_session
 from netbbs.ftn.exchange import summary, system_info, toss_received
+from netbbs.ftn.links import get_link, prune_point_waiting, record_link_call
 from netbbs.ftn.networks import FtnNetwork, list_networks, set_uplink_tls_pin
 from netbbs.ftn.nodelist import direct_route
 from netbbs.ftn.outbound import (
@@ -75,7 +86,9 @@ from netbbs.ftn.outbound import (
     direct_nodes_waiting,
     expire_held,
     fail_crash_without_route,
+    links_with_callable,
     note_failed_crash,
+    outbound_for_link,
     outbound_for_node,
     reroute_files_to_uplink,
     waiting_for_node,
@@ -122,6 +135,7 @@ class FtnMailer:
         self.status: dict[int, PollStatus] = {}
         # By network and the called node's 4D address: numbering is per network.
         self.direct_status: dict[tuple[int, str], PollStatus] = {}
+        self.link_status: dict[int, PollStatus] = {}  # polled downlinks, by link id (issue #1479)
 
     async def start(self) -> None:
         if self._task is None:
@@ -160,6 +174,7 @@ class FtnMailer:
             await self._lane.run(expire_unpaired)  # file-echo halves whose partner never came (issue #1462)
             await self._lane.run(expire_attach_waits)  # attached files that never came (issue #1470)
             await self._lane.run(expire_held)  # held mail whose node never called (issue #1471)
+            await self._lane.run(prune_point_waiting)  # a point's posts never approved (issue #1478)
         for network in await self._lane.run(list_networks):
             if not network.enabled or not network.uplink_host:
                 continue
@@ -168,6 +183,56 @@ class FtnMailer:
             if self._due(network, pending, now, crash=crash):
                 await self.poll(network)
             await self.deliver_direct(network)
+            await self.deliver_links(network)
+
+    async def deliver_links(self, network: FtnNetwork) -> None:
+        """Call each polled downlink mail waits for (issue #1479), under its
+        own session password; see the module docstring."""
+        now = self._clock()
+        for link_id in await self._lane.run(links_with_callable, network.id):
+            link = await self._lane.run(get_link, link_id)
+            if link is None or not link.enabled or not link.polled:
+                continue  # it calls in for its mail
+            status = self.link_status.setdefault(link.id, PollStatus())
+            if status.last_attempt is not None:
+                gap = min(60.0 * 2 ** (status.failures - 1), MIN_CALL_GAP) if status.failures else MIN_CALL_GAP
+                if now - status.last_attempt < gap:
+                    continue
+            await self.call_link(network, link)
+
+    async def call_link(self, network: FtnNetwork, link) -> PollStatus:
+        """Call one downlink once; its updated status."""
+        status = self.link_status.setdefault(link.id, PollStatus())
+        status.last_attempt = self._clock()
+        outbound = await outbound_for_link(self._lane, network, link)
+        where = format_host_port(link.host, link.port)
+        try:
+            system = await self._lane.run(system_info)
+            try:
+                result, _ = await self._call(link.host, link.port, network, system, outbound.files,
+                                             password=link.session_password, expected=link.address)
+            except (OSError, asyncio.TimeoutError, BinkpError) as exc:
+                status.failures += 1
+                status.last_error = str(exc) or type(exc).__name__
+                partial = getattr(exc, "result", None)
+                if partial is not None and (partial.received or partial.sent):
+                    moved = await self._settle(network, partial, outbound, link=link)
+                    status.last_error += f" (before that: {moved})"
+                _logger.warning("FTN %s: call to downlink %s (%s) failed: %s", network.name, link.address.four_d,
+                                where, status.last_error)
+                await self._lane.run(record_link_call, link.id, f"call failed: {status.last_error}")
+                return status
+            status.last_summary = await self._settle(network, result, outbound, link=link)
+        finally:
+            outbound.close()
+        status.failures = 0
+        status.last_error = None
+        status.last_success = status.last_attempt
+        status.last_success_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        await self._lane.run(record_link_call, link.id, f"called: {status.last_summary}")
+        _logger.info("FTN %s: call to downlink %s (%s) done -- %s", network.name, link.address.four_d, where,
+                     status.last_summary)
+        return status
 
     async def deliver_direct(self, network: FtnNetwork) -> None:
         """Call each node that direct netmail or files wait for (Decision 5),
@@ -297,13 +362,15 @@ class FtnMailer:
                      " over TLS" if network.uplink_tls != TLS_OFF else "", status.last_summary)
         return status
 
-    async def _settle(self, network: FtnNetwork, result: SessionResult, outbound: SessionOutbound) -> str:
+    async def _settle(self, network: FtnNetwork, result: SessionResult, outbound: SessionOutbound, *,
+                      link=None) -> str:
         """Settle what the remote confirmed (`SessionOutbound.settle`: its
         messages marked sent, its files' rows gone) and toss what was
-        received; the summary line. Also run on a failed session's partial
-        result, so nothing confirmed is sent twice."""
+        received, as `link`'s when a downlink was called; the summary line.
+        Also run on a failed session's partial result, so nothing confirmed
+        is sent twice."""
         sent, files_sent = await outbound.settle(self._lane, result.sent)
-        tossed = await toss_received(self._lane, network, result)
+        tossed = await toss_received(self._lane, network, result, link=link)
         return summary(sent, len(result.received), tossed, files_sent=files_sent)
 
     async def _call(self, host: str, port: int, network: FtnNetwork, system: SystemInfo,

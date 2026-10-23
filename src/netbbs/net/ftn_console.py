@@ -10,6 +10,8 @@ Configuration and operation are kept apart, as MRC's are:
   TLS for calls to the uplink (pinned or verified), and the node-wide TLS
   answer port with its certificate files (issues #1467, #1468). A new network starts as fsxNet's main hub, the usual first
   network for a new BBS; the SysOp fills in the address fsxNet gave them.
+  **[L]inks** opens the highlighted network's points and downlinks
+  (`netbbs.net.ftn_links_console`, issues #1478 and #1479).
 - **Node → Echomail & netmail (FTN)** (`ftn_status_screen`): what the mailer and listener
   last did, what waits, and the work on a running network: poll now,
   AreaFix and FileFix requests, echo-list import, nodelist import, held
@@ -188,6 +190,14 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
         return await _load()
     # --- end robots ---
 
+    # --- points and downlinks (issues #1478, #1479) ---
+    async def _links(network: FtnNetwork) -> list[FtnNetwork] | None:
+        from netbbs.net.ftn_links_console import ftn_links_screen
+
+        await ftn_links_screen(session, lane, actor, network, node_controls=node_controls)
+        return await _load()
+    # --- end points and downlinks ---
+
     chrome = await _load_chrome(lane, actor)
     start = None
     while True:
@@ -200,9 +210,10 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
                                       + (", answers calls" if n.answers_calls else "")),
             title="FTN networks", own=True,
             empty_message="No FTN networks. [C]reate one: it starts as fsxNet's hub.",
-            refresh=_load, on_create=_create, item_keys={"d": _delete, "r": _robot_password},
+            refresh=_load, on_create=_create, item_keys={"d": _delete, "r": _robot_password, "l": _links},
             live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network"),
-                      MenuEntry(label=menu_key("R", "obot password"), brief="Change robot password: send %PWD")],
+                      MenuEntry(label=menu_key("R", "obot password"), brief="Change robot password: send %PWD"),
+                      MenuEntry(label=menu_key("L", "inks"), brief="Points and downlinks on this network")],
             live_label=lambda: status or "FidoNet-style networks: echomail on boards, netmail in Mail",
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
@@ -678,6 +689,13 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
             rows.append(Field("Unknown echoes", "; ".join(parts)))
         # --- end bad echoes ---
         rows.extend(_nodelist_rows(db, network))
+        # --- points and downlinks (issues #1478, #1479) ---
+        from netbbs.net.ftn_links_console import links_summary
+
+        links = links_summary(db, network)
+        if links:
+            rows.append(Field("Links", links))
+        # --- end points and downlinks ---
         sections.append(Section(f"{network.name} ({network.our_address.four_d})", rows))
     if not sections:
         sections.append(Section(None, [Note("No FTN networks yet: add one under Settings → Echomail & netmail (FTN).")]))
