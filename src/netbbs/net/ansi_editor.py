@@ -477,10 +477,9 @@ async def _repaint(session: Session, state: _EditorState) -> Snapshot:
 
 async def _redraw(session: Session, state: _EditorState, previous: Snapshot) -> Snapshot:
     current = state.buffer.snapshot()
-    diff = diff_ansi(previous, current)
-    if diff:
-        await session.write_art(diff)
-    await _flush(session, state)
+    # One write per keystroke, as in `netbbs.net.prose_editor._redraw`:
+    # the status line is plain ASCII, which `write_art` sends unchanged.
+    await session.write_art(diff_ansi(previous, current) + _status_and_cursor(session, state))
     return current
 
 
@@ -493,6 +492,11 @@ async def _flush(session: Session, state: _EditorState) -> None:
     cursor to the logical edit position -- called after every action,
     so the SysOp always sees exactly where they are and what they'll
     paint with next, matching how a real terminal editor behaves."""
+    await session.write(_status_and_cursor(session, state))
+
+
+def _status_and_cursor(session: Session, state: _EditorState) -> str:
+    """`_flush`'s output, as one string."""
     fg_label = _PALETTE[state.current_fg] if state.current_fg is not None else "default"
     bg_label = _PALETTE[state.current_bg] if state.current_bg is not None else "default"
     if state.buffer.width < _FULL_STATUS_WIDTH:
@@ -531,10 +535,12 @@ async def _flush(session: Session, state: _EditorState) -> None:
     # every redraw. `terminal_width` is already a column short there; the
     # canvas itself keeps its full width.
     status = truncate(status, min(state.buffer.width, session.terminal_width))
-    await session.write(move_cursor(state.buffer.height + _STATUS_ROW_OFFSET, 1))
-    await session.write(clear_line())
-    await session.write(colored(status, fg_color=MUTED_COLOR))
-    await session.write(move_cursor(state.row + 1, state.col + 1))
+    return (
+        move_cursor(state.buffer.height + _STATUS_ROW_OFFSET, 1)
+        + clear_line()
+        + colored(status, fg_color=MUTED_COLOR)
+        + move_cursor(state.row + 1, state.col + 1)
+    )
 
 
 async def _offer_draft_recovery(session: Session) -> bool:
