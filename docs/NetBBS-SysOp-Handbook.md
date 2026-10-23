@@ -3684,7 +3684,9 @@ first line carries the CRC-16 of the rest.
 
 A hatched list goes to your hub with a TIC, as a hatched file does, and
 tells the receiving systems that it replaces your previous edition. It
-needs the network's **TIC password**.
+needs the network's **TIC password**. Your points and downlinks that carry
+the file echo get it from you too, each under its own **TIC password**; a
+link without one, or one that paused itself, gets nothing.
 
 Fields are plain ASCII. Spaces become underscores, and a comma is refused,
 since commas separate the fields. A line longer than 157 characters is

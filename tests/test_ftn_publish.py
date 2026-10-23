@@ -416,3 +416,76 @@ def test_a_network_name_outside_ascii_still_publishes(db, network, tmp_path):
     data = build_segment(db, named, get_settings(db, named.id), FRIDAY.date())
     assert b"FidoNet S?dwest" in data
     check_crc(list_lines(data), required=True)
+
+
+# --- editions to the links carrying the file echo (issue #1512) -------------------------
+
+
+def _carrying(db, network, *links):
+    from netbbs.ftn.links import FILE_ECHO, set_link_area_without_commit
+
+    for link in links:
+        set_link_area_without_commit(db, link.id, FILE_ECHO, "FSX_PNT")
+    db.connection.commit()
+
+
+def test_an_edition_goes_to_the_uplink_and_every_carrying_link_and_its_spool_goes_once_sent(
+        db, network, points, downlink, tmp_path):
+    from pathlib import Path
+
+    from netbbs.ftn.outbound import outbound_for_link, outbound_for_node
+
+    pat, _sam = points
+    pat = save_link(db, replace(pat, tic_password="PATTIC"))
+    down = save_link(db, replace(downlink, tic_password="DOWNTIC"))
+    _carrying(db, network, pat, down)
+    save_settings(db, network, PublishSettings(network_id=network.id, pointlist_on=True, pointlist_echo="FSX_PNT",
+                                               folder=str(tmp_path / "out")))
+    result = publish_now(db, network.id, actor=None, moment=FRIDAY)[0]
+    assert result.hatched_into == "FSX_PNT" and result.problem == ""
+    queued = pending_files(db, network.id)
+    assert len(queued) == 6 and {f.reference_kind for f in queued} == {"publish"}
+    sent = (tmp_path / "out" / "POINTS.296").read_bytes()
+    tics = {f.destination: parse_tic(Path(f.path).read_bytes()) for f in queued if f.send_name.endswith(".TIC")}
+    assert {d: t.password for d, t in tics.items()} == {
+        HUB.four_d: "TICPW", "21:1/199.1": "PATTIC", "21:1/200": "DOWNTIC"}
+    for tic in tics.values():
+        assert tic.area == "FSX_PNT" and tic.file == "POINTS.296" and tic.from_address == NODE
+        assert set(tic.seen_by) == {NODE, HUB, pat.address.with_domain(None), down.address.with_domain(None)}
+        assert tic.path_addresses == (NODE,)
+    files = [f for f in queued if not f.send_name.endswith(".TIC")]
+    assert len({f.path for f in files}) == 3 and all(Path(f.path).read_bytes() == sent for f in files)
+    spooled = [Path(f.path) for f in queued]
+
+    async def collect():
+        lane = DatabaseLane(db.path)
+        try:
+            fresh = network
+            for outbound in (await outbound_for_node(lane, fresh, HUB, uplink=True),
+                             await outbound_for_link(lane, fresh, pat), await outbound_for_link(lane, fresh, down)):
+                assert len(outbound.files) == 2  # each pair goes together
+                await outbound.settle(lane, [f.name for f in outbound.files])
+                outbound.close()
+        finally:
+            lane.close()
+
+    asyncio.run(collect())
+    assert pending_files(db, network.id) == []
+    assert not any(path.exists() for path in spooled)
+
+
+def test_a_paused_link_or_one_without_a_tic_password_gets_no_edition(db, network, points, downlink, tmp_path):
+    from netbbs.ftn.links import PAUSED
+
+    pat, sam = points
+    pat = save_link(db, replace(pat, tic_password="PATTIC", status=PAUSED))
+    _carrying(db, network, pat, sam, downlink)  # sam and the downlink have no TIC password
+    save_settings(db, network, PublishSettings(network_id=network.id, pointlist_on=True, pointlist_echo="FSX_PNT",
+                                               folder=str(tmp_path)))
+    publish_now(db, network.id, actor=None, moment=FRIDAY)
+    queued = pending_files(db, network.id)
+    assert {f.destination for f in queued} == {HUB.four_d}
+    from pathlib import Path
+
+    tic = parse_tic(Path(next(f.path for f in queued if f.send_name.endswith(".TIC"))).read_bytes())
+    assert set(tic.seen_by) == {NODE, HUB}
