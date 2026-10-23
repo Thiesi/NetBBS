@@ -2337,7 +2337,9 @@ is set. An area is local, Linked or FTN, never two (§16, "Issue #166",
 Decision 3, extended in "Issue #1154"), so an FTN file never gets a Link
 `file_descriptor`. Nothing is mapped by default. A file arrives as a pair: the
 file itself and a `.TIC` that names it. The pair is checked in this order, and
-the first check that fails holds both halves with its reason:
+the first check that fails holds both halves with its reason. There are two
+exceptions: at check 7 only one half exists, and it waits as "Pairing" below
+says; at check 10 a duplicate is dropped and counted, not held.
 
 1. The session is secure. Otherwise both halves are held unopened, as above.
 2. The TIC parses: `Area`, `File` and `Crc` are present, and the TIC is at
@@ -2350,7 +2352,9 @@ the first check that fails holds both halves with its reason:
    nodelist echo (under "Nodelist" below). Any other tag is a bad echo:
    unknown file echoes get their own rows on the Bad echoes screen, where
    **[C]reate** opens the new-file-area editor and **[M]ap** picks a local
-   file area.
+   file area. Either one then runs the tag's held pairs through these checks
+   again, from check 6, the way echomail is re-tossed. A pair that passes
+   arrives by TIC, so later `Replaces` values can match it.
 6. `File` is a path-safe name, under the rules for a SysOp upload's name
    (§6.2): no folder part, no leading dot, no control characters or colon,
    and at most 255 bytes. A long name in `Lfile` or `Fullname` is used
