@@ -112,7 +112,7 @@ def imported_name(entry: EchoListEntry) -> str:
     description = entry.description
     if len(description) <= MAX_IMPORTED_NAME:
         return description or entry.tag
-    cut = description[:MAX_IMPORTED_NAME + 1].rsplit(" ", 1)[0].rstrip(" ,;:-(")
+    cut = description[:MAX_IMPORTED_NAME + 1].rsplit(" ", 1)[0][:MAX_IMPORTED_NAME].rstrip(" ,;:-(")
     return cut if len(cut) >= MAX_IMPORTED_NAME // 2 else description[:MAX_IMPORTED_NAME].rstrip()
 
 

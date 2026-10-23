@@ -310,6 +310,8 @@ def test_a_name_comes_from_the_description_cut_at_a_word_or_the_tag():
     assert imported_name(long) == "NixNet Administration (SysOps/Real Names"
     assert len(imported_name(long)) <= 40
     assert imported_name(EchoListEntry("NIX_BARE", "")) == "NIX_BARE"
+    # No space in the first 41 characters: still cut to 40 (review of #1486).
+    assert imported_name(EchoListEntry("NIX_LONG", "x" * 45 + " tail")) == "x" * 40
 
 
 def test_import_creates_maps_and_requests_in_one_go(db, sysop):
