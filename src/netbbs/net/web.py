@@ -1280,6 +1280,7 @@ class WebServer:
         allowed_origins: set[str] | None = None,
         transfers=None,
         trusted_proxies: tuple[str, ...] = (),
+        qwknet=None,
     ):
         self._host = host
         self._port = port
@@ -1294,6 +1295,9 @@ class WebServer:
         # (`netbbs.net.file_transfer`), so nothing here needs to know
         # what a file area is.
         self._transfers = transfers
+        # Issue #1482: the QWKnet hub's `/qwk.ssjs`, built and owned by
+        # `netbbs.qwknet.hub` like the transfer gateway above.
+        self._qwknet = qwknet
         self._allowed_origins = (
             {origin.rstrip("/") for origin in allowed_origins}
             if allowed_origins is not None
@@ -1323,6 +1327,10 @@ class WebServer:
         app.router.add_static("/static/", _STATIC_DIR)
         if self._transfers is not None:
             self._transfers.add_routes(app)
+        if self._qwknet is not None:
+            self._qwknet.add_routes(app, address_of=lambda request: caller_address(
+                request.remote, request.headers.getall("X-Forwarded-For", []), self._trusted_proxies,
+            ))
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()

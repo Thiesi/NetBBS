@@ -1387,8 +1387,10 @@ def _handle_one(db: Database, door, config: OutboundConfig, actor: User, launch:
     # An FTN board's post goes out to its echo (design doc §6.8) like any
     # local post; a full queue is logged there, not refused here.
     from netbbs.ftn.scanner import export_post_if_ftn
+    from netbbs.qwknet.exchange import queue_post_if_qwknet
 
     export_post_if_ftn(db, post, board)
+    queue_post_if_qwknet(db, post, board)  # issue #1481
 
     answer({"status": "posted", "post_id": post.post_id,
                             "board": board.name, "moderated": board.moderated})

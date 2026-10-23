@@ -334,6 +334,8 @@ async def _start_servers(
     # is where the lane and the node identity it needs exist) and
     # served on the web listener's own application.
     transfers=None,
+    # Issue #1482: the QWKnet hub's endpoint, on the same application.
+    qwknet=None,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -453,7 +455,7 @@ async def _start_servers(
                 WebServer(
                     host=config.web.host, port=config.web.port,
                     session_handler=session_handler, transfers=transfers,
-                    trusted_proxies=config.web.trusted_proxies,
+                    trusted_proxies=config.web.trusted_proxies, qwknet=qwknet,
                 ),
             )
             any_interactive_started = True
@@ -700,6 +702,14 @@ async def run(
 
     ftn_mailer = FtnMailer(background_lane, batch_hook=FreqAnswerer(background_lane))
     ftn_listener = FtnListener(background_lane, batch_hook=FreqAnswerer(background_lane))
+    # Issues #1481 and #1482 (design doc §6.11): one QWKnet mailer, which
+    # calls only the hubs of networks a SysOp has enabled, and the hub's
+    # endpoint for the nodes this node serves, on the web listener.
+    from netbbs.qwknet.hub import QwknetHub
+    from netbbs.qwknet.mailer import QwknetMailer
+
+    qwknet_mailer = QwknetMailer(background_lane)
+    qwknet_hub = QwknetHub(background_lane)
     # Issue #466: every door service this node owns. Constructed here so the
     # session handlers below can close over it, but nothing is *started* until
     # inside the lifecycle try/finally -- a supervisor started before that
@@ -891,6 +901,7 @@ async def run(
             mrc_bridge=mrc_bridge,
             ftn_mailer=ftn_mailer,
             ftn_listener=ftn_listener,
+            qwknet_mailer=qwknet_mailer,
             backup_identity_dir=config.identity_dir,
             transfers=transfer_grants,
             door_services=door_services,
@@ -922,6 +933,7 @@ async def run(
             mrc_bridge=mrc_bridge,
             ftn_mailer=ftn_mailer,
             ftn_listener=ftn_listener,
+            qwknet_mailer=qwknet_mailer,
             backup_identity_dir=config.identity_dir,
             transfers=transfer_grants,
             door_services=door_services,
@@ -1373,6 +1385,7 @@ async def run(
         await mrc_bridge.start()
         await ftn_mailer.start()
         await ftn_listener.start()
+        await qwknet_mailer.start()
         # Issue #475: this node's file-transfer grants, and the gateway
         # that redeems them. Only meaningful with the web listener
         # running -- that HTTP server is where the endpoint lives -- so a
@@ -1421,6 +1434,7 @@ async def run(
             # /transfer route and every link printed from the grant
             # table above answers 404 (Codex review).
             transfer_gateway,
+            qwknet=qwknet_hub,
         )
 
         # Issue #555, after the listeners are bound for the same reason
@@ -1738,6 +1752,7 @@ async def run(
         await mrc_bridge.close()
         await ftn_listener.close()
         await ftn_mailer.close()
+        await qwknet_mailer.close()
         foreground_lane.close()
         background_lane.close()
         db.close()

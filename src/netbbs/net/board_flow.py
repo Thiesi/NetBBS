@@ -102,6 +102,8 @@ from netbbs.link.boards import (
 from netbbs.link.polls import queue_board_poll_vote_if_linked
 from netbbs.moderation import BoardPermission, has_permission
 from netbbs.ftn.networks import is_board_ftn
+from netbbs.qwknet.networks import is_board_qwknet
+from netbbs.qwknet.exchange import queue_post_if_qwknet
 from netbbs.ftn.scanner import export_post_if_ftn, real_name_refusal
 from netbbs.mail import MAX_MAIL_SUBJECT_BYTES
 from netbbs.file_refs import FileRef, body_with_link_text, open_ref, refs_some_readers_cannot_open
@@ -1100,7 +1102,7 @@ async def _board_screen(
     # Issue #1299: a poll is a new thread, never on a board gated to an FTN
     # network, which has no way to carry one. On a Linked board it travels
     # with its post, and its votes as signed events.
-    can_poll = can_post and not is_board_ftn(db, board)
+    can_poll = can_post and not is_board_ftn(db, board) and not is_board_qwknet(db, board)  # issue #1481
     name_requirement = get_effective_name_requirement(db, board)
     # The gates this board applies, named under its title (issue #1105),
     # with the ones this caller does not meet marked (issue #1115).
@@ -1946,6 +1948,7 @@ async def _board_screen(
         if link_context is not None:
             queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
         export_post_if_ftn(db, post, board)
+        queue_post_if_qwknet(db, post, board)  # issue #1481
         if post.status == "pending":
             # A moderated board holds the post back: only its author sees
             # it, marked "held" (issue #678), until a moderator approves it.

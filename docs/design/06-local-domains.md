@@ -3154,8 +3154,7 @@ this section; until then the text above is what holds.
 
 - **Stage E:**
   - QWK offline mail for callers (#1389) -- built, see §6.10;
-  - QWKnet as a node (#1481) and as a hub (#1482), reusing §6.10's packet
-    and reply-packet code.
+  - QWKnet as a node (#1481) and as a hub (#1482) -- built, see §6.11.
 
 ### 6.9 The oneliner wall (issue #1391)
 
@@ -3299,3 +3298,183 @@ remembered by digest for 90 days, up to 2,000 per caller. A QWKE reader's
 (`a`, `p` or `g` puts it back); unknown numbers are ignored.
 
 See §16, "Issue #1154 — the FTN round before the feature freeze".
+
+### 6.11 QWKnet (issues #1481 and #1482)
+
+NetBBS takes part in QWK networks -- DOVE-Net and the other networks
+Synchronet systems run -- as a node of a hub, and as a hub other systems
+call. Decided in §16, "Issue #1154", Decision 24 (node and hub, conferences
+mapped to boards like echoes), with Decision 23's format and the batch's
+principle that what arrives is untrusted. It reuses §6.10's packet and
+reply-packet code.
+
+**How QWKnet works** (researched 2026-10-23 from Synchronet's wiki pages on
+DOVE-Net, QWKnet and the QWK format, and its `qnet-ftp.js`, `qnet-http.js`
+and `qwk.ssjs`). A node has an account on its hub's BBS named after the
+node's QWK ID and marked as a network account (Synchronet's `Q`
+restriction: its reply packets may carry any author name, and it sees only
+networked conferences). On each call the node uploads a reply packet named
+for the hub (`VERT.REP`, holding `VERT.MSG`, whose first block is the hub's
+ID) and downloads the hub's packet (`VERT.QWK`); the hub counts the packet
+sent once the transfer completes. Conference 0 is mail; the other
+conferences are the hub's sub-board numbers (DOVE-Net's are 2001-2030).
+Synchronet carries a message's identity in `HEADERS.DAT`, an INI file in
+the packet keyed by each header's byte offset: `Message-ID`,
+`In-Reply-To`, `WhenWritten`, `Sender`, and `SenderNetAddr`, the route back
+to where the message was written, nearest first. Older systems carry the
+same as `@MSGID:`, `@REPLY:`, `@TZ:` and `@VIA:` lines at the top of the
+text. A system drops a message whose route names it ("circular path"). A
+message written on a node ends with a `---` line and a tagline
+(` ■ Synchronet ■ <tagline>`), and its header's last byte is `*`. The
+transport is whatever the hub offers: Synchronet nodes call with
+`qnet-ftp` (FTP: `STOR vert.rep`, `RETR vert.qwk`) or `qnet-http` (HTTP or
+HTTPS against the hub's `qwk.ssjs`, below).
+
+**A network record** (`qwknet_networks`, **Settings ▸ DOVE-Net and QWKnet**)
+holds the network's name; this node's QWK ID there (2-8 letters and digits,
+starting with a letter: the login at the hub, and how routes name this
+node); the hub's QWK ID, host, port and transport, and the password of this
+node's account at the hub; the poll interval (240 minutes by default,
+15-1,440); the tagline (the node's name when empty); and whether node
+accounts may call. A network with no hub ID has no uplink: this node is that
+network's top hub. A network is off until enabled. A new record starts as
+DOVE-Net through Vertrauen (`VERT`, `vert.synchro.net`, HTTPS).
+
+**Calling a hub.** NetBBS speaks what Synchronet's own nodes speak, and
+invents nothing:
+
+- **HTTPS or HTTP**, as `qnet-http` does it, with Basic authentication:
+  `POST /qwk.ssjs` with the reply packet as the body (200), `GET /qwk.ssjs`
+  for the packet (200, or 204 when nothing waits), then
+  `POST /qwk.ssjs?received=<bytes>` once the packet is tossed (204), which is
+  what makes the hub count it sent. Redirects are not followed, so the
+  password goes only to the host the SysOp named. Plain HTTP sends the
+  password readable and is offered only for hubs without TLS.
+- **FTP or FTPS**, as `qnet-ftp` does it. Passive mode only: an active-mode
+  data connection would have the hub connect to this node, so `PORT` is
+  never sent. The data connection goes to the control connection's address,
+  never to an address a `PASV` reply names, so a hub can't point this node
+  at a third host. FTPS adds `AUTH TLS`, protects the data connection too,
+  and checks the certificate against the system's authorities.
+- **Not BinkP.** Two NetBBS systems already reach each other over HTTPS, and
+  a hub's FTP or HTTP is what every existing node speaks, so a BinkP path
+  would be a protocol no other QWKnet system uses.
+
+Every network operation has a timeout, and a downloaded packet stops at
+64 MiB.
+
+**The mailer** (`netbbs.qwknet.mailer`) calls each enabled network's hub
+when the poll interval has passed, when posts wait to go up and the last
+call was at least 15 minutes ago, or at once on **[P]oll now**. A call
+uploads first, and moves the upload cursor only once the hub has taken the
+reply packet; it tosses the fetched packet before telling the hub it
+arrived. A call cut off part way therefore loses nothing, and what comes
+twice is a duplicate. A failed call is retried after 1, 2, 4 ... minutes,
+never later than the poll interval. Each call's outcome is stored on the
+network and listed.
+
+**Conferences map to boards** (`qwknet_conferences`): one conference of one
+network per board, by the board's content id. A board is local, Linked, FTN
+or QWKnet, never two (§16 "Issue #166", Decision 3, as extended by "Issue
+#1154"): mapping refuses a Linked or FTN board, and Link and FTN refuse a
+board that carries a conference. The network's **[M]ap conferences** lists
+the boards that may carry one; picking a board asks for its number, and an
+empty line makes it local again (its posts stay). Polls are not offered on a
+QWKnet board, as on an FTN board: QWKnet's vote packets are not carried.
+
+**Tossing** -- a hub's packet on the node, a node's reply packet on the
+hub -- goes message by message, each in its own transaction:
+
+- **Untrusted and bounded.** Packets are read by §6.10's strict readers.
+  Text is CP437, or UTF-8 where `HEADERS.DAT` says `Utf8`; control
+  characters are dropped, and Synchronet's Ctrl-A colour codes with them.
+  `HEADERS.DAT` values are cut at 1,024 characters, and its sections and
+  fields are bounded. A hub's packet must be the hub's: one that can't be
+  read, or whose `CONTROL.DAT` names another BBS ID, is held whole (the
+  newest 10 per network). A node's reply packet must carry the hub's ID in
+  its first block and is bounded by the node's own limit (4 MiB by default)
+  as it arrives; one that can't be read is refused with the reason, and
+  nothing in it is used.
+- **The route** is the system the message came from (the hub, or the node
+  that uploaded it), then its `SenderNetAddr` or `@VIA:`, read as QWK IDs up
+  to 32 hops. A message whose route names this node is dropped as a loop.
+- **Duplicates** are dropped by Message-ID (`HEADERS.DAT` or `@MSGID:`),
+  else by a digest of the conference, author, subject, date and text, per
+  network (`qwknet_seen`, kept a year). A message carrying a Message-ID this
+  node gave out is its own post coming back.
+- **Posting** is on the board carrying the conference, through
+  `create_labelled_post`: held on a moderated board, and dated by the
+  message (`WhenWritten` with its offset, else the header's date in the
+  node's time zone; never later than now). The author is labelled
+  `Name (ORIGIN)`: the name the message carries and the QWK ID at the far end
+  of its route, where it was written. It never contains `@`, which names a
+  Link address. A node's messages carry the names of its own callers -- a
+  network node speaks for them, as on Synchronet -- and the node's ID shows
+  where they came from.
+- **Threads** follow `In-Reply-To`/`@REPLY:` to the post with that Message-ID
+  on the same board, else the header's reference: the hub's message number
+  in a hub's packet, this node's in a node's reply packet.
+- **An unmapped conference** is held per conference (`qwknet_held`, the
+  newest 2,000 messages per network, for 30 days), like FTN's unknown
+  echoes. Once a board carries it, **[R]e-toss** under **[H]eld** tosses its
+  messages through the same checks; **[D]elete** drops them.
+- **Mail.** A hub's conference 0 is mail for this node: to `SYSOP` or this
+  node's QWK ID it goes to the SysOp, to an account's name to that account
+  (as external mail, labelled like a post), and anything else -- routed
+  `NETMAIL`, a name with no account, a full mailbox -- is held. Conference 0
+  in a node's reply packet (Synchronet control messages, routed netmail) is
+  not carried. Votes (status `V`) are skipped.
+
+**Out.** Every post that becomes visible on a mapped board of an enabled
+network -- written or approved here, or tossed in -- is numbered in
+`qwknet_outbound` by `queue_post_if_qwknet`, which is called beside the FTN
+scanner wherever a post becomes visible: once per post, and never for an
+edit. Each destination keeps a cursor into those numbers, the hub's
+(`uplink_seq`) and each node's (`sent_seq`). A destination never gets a
+post that came from it (what the hub sent never goes back up, what a node
+sent never goes back to it), nor one whose route names it.
+
+- **To the hub**, in the reply packet, up to 1,000 messages a call: the
+  author's name (a local username, or the name a node's message carries),
+  the conference, the hub's number of the message it answers as the
+  reference, and `HEADERS.DAT` with `Message-ID`, `In-Reply-To`, `Sender`,
+  `To`, `Subject` and, for a node's message passed on, `SenderNetAddr`. A
+  post written here gets the Message-ID `<content-id.row@OURID>`, a `---`
+  line, ` ■ NetBBS ■ <tagline>` and the header's network tagline flag. No
+  body kludges are written: `HEADERS.DAT` carries them, as Synchronet 3.15
+  and later read it.
+- **To a node**, in its packet `<OURID>.QWK`: the conferences it carries
+  (QWKE flags `aOE`), up to its packet size (2,000 messages by default,
+  50-10,000) and 16 MiB of text, each message numbered by its local row id.
+  The packet built is kept and served again until the node confirms it, and
+  the node's cursor moves only then.
+
+**The hub** (#1482). Node accounts (`qwknet_nodes`, the network's
+**[N]odes**) log in with their QWK ID -- unique across networks, since the
+login is how a call finds its network -- and a password kept only as an
+Argon2id hash. Each has its conferences (all of the network's when
+created), its packet size and its reply-packet limit, and starts from the
+newest queued post rather than the backlog. Nodes call `/qwk.ssjs` on the
+web listener, which speaks exactly what Synchronet's `qwk.ssjs` speaks: a
+Synchronet node uses its stock call-out command
+`?qnet-http -s %s <host> <password>`, and a NetBBS node its HTTPS
+transport. Every request is a login; there is no anonymous access, and only
+an enabled account on an enabled network that serves nodes gets in. A
+source address that fails 10 logins in 15 minutes is refused for the rest of
+that window (429), at most 4 requests run at once (503 past that), and the
+password is checked on the shared Argon2 pool. A node's reply packet is
+tossed at once and answered 200 with what it came to, and the account shows
+its last fetch, upload and outcome.
+
+**No FTP server.** Serving packets over FTP would mean embedding an FTP
+server -- a second listener, with `PORT` and `PASV` data connections to get
+right -- for what one route on the existing web listener does. Synchronet
+nodes have called hubs over HTTP since `qnet-http` (2019). Basic
+authentication sends the password readable, so a hub's web listener belongs
+behind TLS, as it already does for callers' logins; the SysOp Handbook says
+so where node accounts are set up.
+
+**Not carried:** routed QWKnet netmail (`NETMAIL` with a `name@ID` line) and
+mail between a hub and its nodes; Synchronet's control messages (`ADD`,
+`DROP` and the rest); vote and poll packets (`VOTING.DAT`); file requests
+and attachments; and messages passed between two networks.

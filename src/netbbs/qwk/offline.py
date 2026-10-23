@@ -295,9 +295,15 @@ def _author_name(db: Database, board: Board, post: Post) -> str:
     ))
 
 
-def _post_text(db: Database, board: Board, post: Post) -> str:
+def packet_post_text(db: Database, board: Board, post: Post) -> str:
+    """A post's text as a packet carries it: as a reader with colour off
+    sees it, with its file references as text lines. QWKnet (#1482) sends
+    posts the same way."""
     text = plain_post_body(post.body) if board.allow_color else post_body_text(post.body)
     return body_with_link_text(db, text, shown_post_refs(db, post))
+
+
+_post_text = packet_post_text
 
 
 def _row_id(db: Database, post_id: str | None) -> int | None:
@@ -448,11 +454,13 @@ def _flags(db: Database, user: User, board: Board) -> str:
     """QWKE's AREA flags for a board: all messages, public only, read-only
     when the caller can't post, echomail or local."""
     from netbbs.ftn.networks import is_board_ftn
+    from netbbs.qwknet.networks import is_board_qwknet
 
     flags = "aO"
     if _board_refusal(db, user, board, is_reply=True) is not None:
         flags += "R"
-    flags += "E" if is_board_ftn(db, board) or is_board_linked(db, board) else "L"
+    shared = is_board_ftn(db, board) or is_board_qwknet(db, board) or is_board_linked(db, board)
+    flags += "E" if shared else "L"
     return flags
 
 
@@ -795,8 +803,10 @@ def _post_reply(db: Database, user: User, message: RepMessage, board: Board | No
     if node_identity is not None:
         queue_board_post_if_linked(db, post, board, node_identity=node_identity)
     from netbbs.ftn.scanner import export_post_if_ftn
+    from netbbs.qwknet.exchange import queue_post_if_qwknet
 
     export_post_if_ftn(db, post, board)
+    queue_post_if_qwknet(db, post, board)  # issue #1481
     if post.status == "pending":
         return ReplyOutcome(message.index, subject, where, "held")
     return ReplyOutcome(message.index, subject, where, "posted", note)
