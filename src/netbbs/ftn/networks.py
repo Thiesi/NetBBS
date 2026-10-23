@@ -202,8 +202,10 @@ def validate_robot_name(value: str, label: str) -> str:
     return name
 
 
-def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
-    """Create (no `id`) or update a record; returns it as stored."""
+def save_network(db: Database, network: FtnNetwork, *, commit: bool = True) -> FtnNetwork:
+    """Create (no `id`) or update a record; returns it as stored.
+    `commit=False` leaves the transaction to the caller (issue #1505);
+    a duplicate name still rolls it back."""
     validated = validate_network(network)
     values = (
         validated.name, validated.domain, str(validated.our_address), str(validated.uplink_address),
@@ -262,7 +264,8 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
     except sqlite3.IntegrityError:
         db.connection.rollback()
         raise FtnNetworkError(f"A network called {validated.name!r} already exists.") from None
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return validated
 
 

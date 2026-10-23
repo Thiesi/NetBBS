@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from netbbs.age_requirement import AGE_REQUIREMENTS
 from netbbs.boards.content_id import compute_content_id
 from netbbs.chat.channels import OPEN_ROOM_NAME_PREFIX, Channel, _row_to_channel, purge_channel_rows
-from netbbs.config import get_config, get_node_display_name, set_config
+from netbbs.config import get_config, get_node_display_name, set_config, set_config_without_commit
 from netbbs.mrc.protocol import (
     DEFAULT_HOST,
     DEFAULT_PORT_PLAIN,
@@ -174,19 +174,26 @@ def validate_mrc_settings(settings: MrcSettings) -> MrcSettings:
 
 
 def save_mrc_settings(db: Database, settings: MrcSettings) -> MrcSettings:
+    with db.connection:
+        return save_mrc_settings_without_commit(db, settings)
+
+
+def save_mrc_settings_without_commit(db: Database, settings: MrcSettings) -> MrcSettings:
+    """`save_mrc_settings` inside a transaction the caller commits, so the
+    SysOp's audit entry joins it (issue #1505)."""
     validated = validate_mrc_settings(settings)
-    set_config(db, ENABLED_CONFIG_KEY, "1" if validated.enabled else "0")
-    set_config(db, HOST_CONFIG_KEY, validated.host)
-    set_config(db, PORT_CONFIG_KEY, str(validated.port))
-    set_config(db, TLS_CONFIG_KEY, "1" if validated.tls else "0")
-    set_config(db, SITE_NAME_CONFIG_KEY, validated.site_name)
-    set_config(db, INFO_SYSOP_CONFIG_KEY, validated.info_sysop)
-    set_config(db, INFO_DESCRIPTION_CONFIG_KEY, validated.info_description)
-    set_config(db, INFO_TELNET_CONFIG_KEY, validated.info_telnet)
-    set_config(db, INFO_SSH_CONFIG_KEY, validated.info_ssh)
-    set_config(db, INFO_WEB_CONFIG_KEY, validated.info_web)
-    set_config(db, SEND_CALLER_IP_CONFIG_KEY, "1" if validated.send_caller_ip else "0")
-    set_config(db, SEND_CALLER_META_CONFIG_KEY, "1" if validated.send_caller_meta else "0")
+    set_config_without_commit(db, ENABLED_CONFIG_KEY, "1" if validated.enabled else "0")
+    set_config_without_commit(db, HOST_CONFIG_KEY, validated.host)
+    set_config_without_commit(db, PORT_CONFIG_KEY, str(validated.port))
+    set_config_without_commit(db, TLS_CONFIG_KEY, "1" if validated.tls else "0")
+    set_config_without_commit(db, SITE_NAME_CONFIG_KEY, validated.site_name)
+    set_config_without_commit(db, INFO_SYSOP_CONFIG_KEY, validated.info_sysop)
+    set_config_without_commit(db, INFO_DESCRIPTION_CONFIG_KEY, validated.info_description)
+    set_config_without_commit(db, INFO_TELNET_CONFIG_KEY, validated.info_telnet)
+    set_config_without_commit(db, INFO_SSH_CONFIG_KEY, validated.info_ssh)
+    set_config_without_commit(db, INFO_WEB_CONFIG_KEY, validated.info_web)
+    set_config_without_commit(db, SEND_CALLER_IP_CONFIG_KEY, "1" if validated.send_caller_ip else "0")
+    set_config_without_commit(db, SEND_CALLER_META_CONFIG_KEY, "1" if validated.send_caller_meta else "0")
     return validated
 
 
@@ -406,15 +413,22 @@ def validate_open_room_settings(settings: OpenRoomSettings) -> OpenRoomSettings:
 
 
 def save_open_room_settings(db: Database, settings: OpenRoomSettings) -> OpenRoomSettings:
+    with db.connection:
+        return save_open_room_settings_without_commit(db, settings)
+
+
+def save_open_room_settings_without_commit(db: Database, settings: OpenRoomSettings) -> OpenRoomSettings:
+    """`save_open_room_settings` inside a transaction the caller commits, so the
+    SysOp's audit entry joins it (issue #1505)."""
     validated = validate_open_room_settings(settings)
-    set_config(db, OPEN_ROOMS_ENABLED_KEY, "1" if validated.enabled else "0")
-    set_config(db, OPEN_ROOMS_MIN_LEVEL_KEY, str(validated.min_level))
-    set_config(db, OPEN_ROOMS_MIN_AGE_KEY, "" if validated.min_age is None else str(validated.min_age))
-    set_config(db, OPEN_ROOMS_NAME_REQUIREMENT_KEY, validated.name_requirement or "")
-    set_config(db, OPEN_ROOMS_AGE_REQUIREMENT_KEY, validated.age_requirement or "")
-    set_config(db, OPEN_ROOMS_CAP_KEY, str(validated.cap))
-    set_config(db, OPEN_ROOMS_RETENTION_DAYS_KEY, str(validated.retention_days))
-    set_config(db, OPEN_ROOMS_BLOCKLIST_KEY, json.dumps(list(validated.blocklist)))
+    set_config_without_commit(db, OPEN_ROOMS_ENABLED_KEY, "1" if validated.enabled else "0")
+    set_config_without_commit(db, OPEN_ROOMS_MIN_LEVEL_KEY, str(validated.min_level))
+    set_config_without_commit(db, OPEN_ROOMS_MIN_AGE_KEY, "" if validated.min_age is None else str(validated.min_age))
+    set_config_without_commit(db, OPEN_ROOMS_NAME_REQUIREMENT_KEY, validated.name_requirement or "")
+    set_config_without_commit(db, OPEN_ROOMS_AGE_REQUIREMENT_KEY, validated.age_requirement or "")
+    set_config_without_commit(db, OPEN_ROOMS_CAP_KEY, str(validated.cap))
+    set_config_without_commit(db, OPEN_ROOMS_RETENTION_DAYS_KEY, str(validated.retention_days))
+    set_config_without_commit(db, OPEN_ROOMS_BLOCKLIST_KEY, json.dumps(list(validated.blocklist)))
     return validated
 
 

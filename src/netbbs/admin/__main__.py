@@ -98,7 +98,7 @@ async def run_admin_session(session: Session, db: Database, as_username: str | N
         # running this tool again is where it picks the name. A no-op in
         # the bootstrap session itself (the node still has not started)
         # and on every node that owes no such registration.
-        await offer_deferred_registration(session, lane)
+        await offer_deferred_registration(session, lane, actor)
         await admin_menu(session, lane, actor)
     finally:
         lane.close()

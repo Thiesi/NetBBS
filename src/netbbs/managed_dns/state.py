@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
 
-from netbbs.config import get_config, set_config
+from netbbs.config import get_config, set_config, set_config_without_commit
 from netbbs.storage.database import Database
 
 
@@ -101,13 +101,19 @@ DEFAULT_SERVICE_URL: str | None = "https://dns.netbbs.org"
 def _set_config_values(db: Database, values: tuple[tuple[str, str], ...]) -> None:
     """Commit a related set of node-config values as one transaction."""
     with db.connection:
-        db.connection.executemany(
-            """
-            INSERT INTO node_config (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            values,
-        )
+        _set_config_values_without_commit(db, values)
+
+
+def _set_config_values_without_commit(db: Database, values: tuple[tuple[str, str], ...]) -> None:
+    """The same writes inside a transaction the caller commits -- so an
+    audit entry can join them (issue #1505)."""
+    db.connection.executemany(
+        """
+        INSERT INTO node_config (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        values,
+    )
 
 
 def set_pending_rename_state(
@@ -115,7 +121,19 @@ def set_pending_rename_state(
     previous_status: RegistrationStatus, previous_published: bool,
 ) -> None:
     """Atomically switch the local presentation to a pending replacement."""
-    _set_config_values(db, (
+    with db.connection:
+        set_pending_rename_state_without_commit(
+            db, name=name, previous_name=previous_name,
+            previous_status=previous_status, previous_published=previous_published,
+        )
+
+
+def set_pending_rename_state_without_commit(
+    db: Database, *, name: str, previous_name: str,
+    previous_status: RegistrationStatus, previous_published: bool,
+) -> None:
+    """`set_pending_rename_state` inside the caller's transaction (issue #1505)."""
+    _set_config_values_without_commit(db, (
         (PREVIOUS_NAME_CONFIG_KEY, previous_name),
         (PREVIOUS_STATUS_CONFIG_KEY, previous_status.value),
         (PREVIOUS_PUBLISHED_CONFIG_KEY, "1" if previous_published else "0"),
@@ -134,7 +152,19 @@ def set_registration_result_state(
     came with, recorded in the same transaction as the registration it
     belongs to so the two can never disagree -- see
     `foreign_credential_service_url`."""
-    _set_config_values(db, (
+    with db.connection:
+        set_registration_result_state_without_commit(
+            db, name=name, status=status, dynamic=dynamic, service_url=service_url,
+        )
+
+
+def set_registration_result_state_without_commit(
+    db: Database, *, name: str, status: RegistrationStatus, dynamic: bool, service_url: str,
+) -> None:
+    """`set_registration_result_state` inside a transaction the caller
+    commits, for the SysOp's registration and its audit entry (issue
+    #1505)."""
+    _set_config_values_without_commit(db, (
         (CREDENTIAL_SERVICE_URL_CONFIG_KEY, service_url),
         (NAME_CONFIG_KEY, name),
         (STATUS_CONFIG_KEY, status.value),
@@ -160,7 +190,15 @@ def set_cancelled_rename_state(
     db: Database, *, name: str, status: RegistrationStatus, published: bool,
 ) -> None:
     """Atomically restore the previous registration after cancellation."""
-    _set_config_values(db, (
+    with db.connection:
+        set_cancelled_rename_state_without_commit(db, name=name, status=status, published=published)
+
+
+def set_cancelled_rename_state_without_commit(
+    db: Database, *, name: str, status: RegistrationStatus, published: bool,
+) -> None:
+    """`set_cancelled_rename_state` inside the caller's transaction (issue #1505)."""
+    _set_config_values_without_commit(db, (
         (NAME_CONFIG_KEY, name),
         (STATUS_CONFIG_KEY, status.value),
         (PUBLISHED_CONFIG_KEY, "1" if published else "0"),
@@ -205,6 +243,10 @@ def get_opt_in(db: Database) -> OptIn:
 
 def set_opt_in(db: Database, decision: OptIn) -> None:
     set_config(db, OPT_IN_CONFIG_KEY, decision.value)
+
+
+def set_opt_in_without_commit(db: Database, decision: OptIn) -> None:
+    set_config_without_commit(db, OPT_IN_CONFIG_KEY, decision.value)
 
 
 def get_node_fingerprint(db: Database) -> str | None:
@@ -411,6 +453,10 @@ def get_registration_status(db: Database) -> RegistrationStatus:
 
 def set_registration_status(db: Database, status: RegistrationStatus) -> None:
     set_config(db, STATUS_CONFIG_KEY, status.value)
+
+
+def set_registration_status_without_commit(db: Database, status: RegistrationStatus) -> None:
+    set_config_without_commit(db, STATUS_CONFIG_KEY, status.value)
 
 
 def get_last_contact_at(db: Database) -> str | None:

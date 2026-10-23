@@ -8200,7 +8200,7 @@ def test_managed_dns_abandoned_replacement_still_offers_cancel_change(
 
     cancelled = []
 
-    async def fake_cancel(_session, _lane):
+    async def fake_cancel(_session, _lane, _actor=None):
         cancelled.append(True)
 
     monkeypatch.setattr("netbbs.net.admin_system.cancel_registration_rename", fake_cancel)

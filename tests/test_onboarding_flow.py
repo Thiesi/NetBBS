@@ -397,3 +397,46 @@ def test_baud_with_no_channel_left_after_the_yes_changes_nothing(tmp_path, monke
     _run_as(session, db.path, sysop)
     assert list_bots(db) == [] and house_bot_offer_pending(db)
     assert "asked again next time" in _written(session)
+
+
+def _audit(db) -> list[tuple]:
+    return [
+        (row["actor_user_id"], row["action"], row["detail"])
+        for row in db.connection.execute("SELECT actor_user_id, action, detail FROM moderation_log ORDER BY id")
+    ]
+
+
+def test_onboarding_answers_are_audited_like_their_settings_screens(tmp_path):
+    """Issue #1505: the Link answer writes the entry Settings > Join
+    NetBBS Link writes, the name the one Settings > Node name writes, and
+    the managed-DNS answer its own -- each under the answering SysOp."""
+    from netbbs.auth.users import SYSOP_LEVEL, create_user
+
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter22", user_level=SYSOP_LEVEL)
+    _run_as(FakeSession(["", "The Lighthouse", "n"]), db.path, sysop)
+    assert _audit(db) == [
+        (sysop.id, "set_node_display_name", "'NetBBS' -> 'The Lighthouse'"),
+        (sysop.id, "set_link_participation", "accepted"),
+        (sysop.id, "set_managed_dns_opt_in", "opt_in=declined"),
+    ]
+
+
+def test_declining_link_at_onboarding_is_audited(tmp_path):
+    from netbbs.auth.users import SYSOP_LEVEL, create_user
+
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter22", user_level=SYSOP_LEVEL)
+    set_opt_in(db, OptIn.DECLINED)
+    _run_as(FakeSession(["n"]), db.path, sysop)
+    assert get_participation(db) is Participation.DECLINED
+    assert _audit(db) == [(sysop.id, "set_link_participation", "declined")]
+
+
+def test_declining_baud_at_onboarding_is_audited(tmp_path):
+    """Issue #1505: the no is logged under the action the yes writes."""
+    db, sysop = _baud_node(tmp_path, "lobby")
+    _run_as(FakeSession([""]), db.path, sysop)
+    assert [entry for entry in _audit(db) if entry[1] == "bot_configure"] == [
+        (sysop.id, "bot_configure", "Baud.bot declined at onboarding")
+    ]

@@ -21,6 +21,7 @@ from netbbs.bots.registry import BotError, allowed_channel, require_sysop
 from netbbs.config import get_config, set_config_without_commit
 from netbbs.guest import is_guest_account
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action, decide_user_authorship
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.rendering import sanitize_text
 
 CONFIG_KEY = "bot_model_settings"
@@ -159,7 +160,17 @@ def save_settings(db, value, *, actor, api_key):
         raise BotError("API key must be empty or printable ASCII without spaces (up to 2048 characters).")
     # Same protected database/backup boundary as FTN secrets; no plaintext audit.
     with db.connection:
-        return save_settings_without_commit(db, value, actor=actor, api_key=api_key)
+        before = settings(db)
+        key_changed = api_key != get_config(db, SECRET_KEY, "")
+        saved = save_settings_without_commit(db, value, actor=actor, api_key=api_key)
+        # Issue #1505: every changed setting by name and value, in the same
+        # transaction; the API key only as changed/unchanged, never its value.
+        # (A preset writes its own entry around `save_settings_without_commit`.)
+        changed = [f"{f.name}={getattr(saved, f.name)!r}" for f in fields(ModelSettings)
+                   if f.name != "revision" and getattr(saved, f.name) != getattr(before, f.name)]
+        changed.append(f"api_key={'changed' if key_changed else 'unchanged'}")
+        record_action_without_commit(db, actor=actor, action="set_model_conversation", detail=" ".join(changed))
+    return saved
 
 
 def save_settings_without_commit(db, value, *, actor, api_key=None):

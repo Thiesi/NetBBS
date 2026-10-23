@@ -196,3 +196,36 @@ def test_the_cli_import_is_attributed_to_the_sysop_named_with_as(db, sysop, tmp_
     assert entry.actor_user_id == sysop.id
     with pytest.raises(ValueError, match="not an active SysOp"):
         run_ftn_import_nodelist(db, "fsxNet", path, as_username="nobody")
+
+
+def test_network_save_audits_the_node_wide_listener_keys(db, lane, sysop):
+    """Issue #1505: the entry names the answer port and the other node-wide
+    listener keys the save writes, never a password."""
+    session = FakeSession(["s", "e", "c", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    (entry,) = [a for a in list_recent_actions(db, limit=10) if a.action == "set_ftn_network"]
+    for key in ("ftn_listen_port=24554", "ftn_listen_host=", "ftn_tls_port=(none)", "ftn_tls_cert=(none)",
+                "ftn_tls_key=(none)"):
+        assert key in entry.detail
+    (network,) = list_networks(db)
+    for secret in (network.session_password, network.packet_password, network.areafix_password):
+        assert not secret or secret not in entry.detail
+
+
+def test_network_save_writes_the_row_keys_and_entry_together_or_not_at_all(db, lane, sysop, monkeypatch):
+    """Issue #1505: the row and the node-wide keys used to commit before
+    the audit entry, separately; a failure writing the entry now leaves
+    neither behind."""
+    from netbbs.config import get_config
+    from netbbs.ftn.listener import PORT_CONFIG_KEY
+    from netbbs.net import ftn_console
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("audit refused")
+
+    monkeypatch.setattr(ftn_console, "record_action_without_commit", refuse)
+    session = FakeSession(["s", "e", "c", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
+    with pytest.raises(RuntimeError, match="audit refused"):
+        asyncio.run(admin_menu(session, lane, sysop))
+    assert list_networks(db) == []
+    assert get_config(db, PORT_CONFIG_KEY) is None

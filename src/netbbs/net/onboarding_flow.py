@@ -49,6 +49,7 @@ import asyncio
 from pathlib import Path
 
 from netbbs.auth.users import User
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.bots.registry import (
     BotError,
     HOUSE_BOT_NAME,
@@ -59,15 +60,18 @@ from netbbs.bots.registry import (
 )
 from netbbs.config import (
     MAX_NODE_DISPLAY_NAME_LENGTH,
+    NODE_DISPLAY_NAME_CONFIG_KEY,
+    canonical_node_display_name,
+    get_node_display_name,
     is_node_display_name_placeholder,
     is_placeholder_node_display_name,
-    set_node_display_name,
+    set_config_without_commit,
 )
 from netbbs.link.onboarding import (
+    PARTICIPATION_CONFIG_KEY,
     Participation,
     get_configured_link_enabled,
     get_participation,
-    set_participation,
 )
 from netbbs.link.reliable_nodes import effective_reliable_nodes
 from netbbs.managed_dns.state import OptIn, get_opt_in
@@ -75,6 +79,7 @@ from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.managed_dns_flow import offer_deferred_registration, offer_managed_dns_opt_in
 from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, wrap_to_width
+from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 _INTRO_BLURB = (
@@ -133,17 +138,17 @@ async def offer_onboarding(session: Session, lane: DatabaseLane, actor: User | N
     dns_pending = await lane.run(get_opt_in) is OptIn.UNDECIDED
 
     if participation_pending:
-        await _offer_participation(session, lane)
+        await _offer_participation(session, lane, actor)
 
     if dns_pending:
         # Owns its own once-only lock, blurb, and inline registration;
         # writes its own leading blank line.
-        await offer_managed_dns_opt_in(session, lane)
+        await offer_managed_dns_opt_in(session, lane, actor)
     else:
         # Issue #634: the opt-in was accepted at first-SysOp bootstrap,
         # before the node had started and could register. A no-op unless
         # exactly that is on record and the node can register now.
-        await offer_deferred_registration(session, lane)
+        await offer_deferred_registration(session, lane, actor)
 
     if actor is not None:
         await _offer_house_bot(session, lane, actor)
@@ -163,7 +168,7 @@ async def _offer_house_bot(session: Session, lane: DatabaseLane, actor: User) ->
         if not await prompt_yes_no(
             session, f"Switch on {HOUSE_BOT_NAME}, with help and greetings, in a channel you choose?", default=False
         ):
-            await lane.run(decline_house_bot)
+            await lane.run(decline_house_bot, actor=actor)
             await _write_wrapped(
                 session, f"(Noted. {HOUSE_BOT_NAME} stays off; set it up any time under {_BAUD_CHANGE_LATER}.)"
             )
@@ -213,7 +218,20 @@ async def _prompt_for_channel(session: Session, names: list[str]) -> str | None:
     return None
 
 
-async def _offer_participation(session: Session, lane: DatabaseLane) -> None:
+def _record_participation(db: Database, decision: Participation, actor: User | None) -> bool:
+    """Record the answer, and its audit entry under the same action
+    Settings > Join NetBBS Link writes, in one transaction (issue
+    #1505) -- unless another session answered first. Returns whether
+    this answer was the one recorded."""
+    with db.connection:
+        if get_participation(db) is not Participation.UNDECIDED:
+            return False
+        set_config_without_commit(db, PARTICIPATION_CONFIG_KEY, decision.value)
+        record_action_without_commit(db, actor=actor, action="set_link_participation", detail=decision.value)
+    return True
+
+
+async def _offer_participation(session: Session, lane: DatabaseLane, actor: User | None) -> None:
     key = lane.path.resolve()
     lock = _participation_locks.setdefault(key, asyncio.Lock())
     # Claim, then release before the first prompt (module docstring).
@@ -231,7 +249,7 @@ async def _offer_participation(session: Session, lane: DatabaseLane) -> None:
             session, "Join NetBBS Link through the reliable nodes (seeds and relays)?", default=True
         )
         if not accepted:
-            await lane.run(set_participation, Participation.DECLINED)
+            await lane.run(_record_participation, Participation.DECLINED, actor)
             await _write_wrapped(
                 session,
                 "(Noted. NetBBS Link stays off unless your node's configuration enables "
@@ -242,20 +260,19 @@ async def _offer_participation(session: Session, lane: DatabaseLane) -> None:
         # Decision 6: accepting is only meaningful under a real name --
         # nothing is recorded until one exists.
         if await lane.run(is_node_display_name_placeholder):
-            named = await _prompt_for_node_name(session, lane)
+            named = await _prompt_for_node_name(session, lane, actor)
             if not named:
                 await _write_wrapped(session, _NAME_REQUIRED_NOTE)
                 return
         async with lock:
-            if await lane.run(get_participation) is Participation.UNDECIDED:
-                await lane.run(set_participation, Participation.ACCEPTED)
+            await lane.run(_record_participation, Participation.ACCEPTED, actor)
     finally:
         _participation_in_progress.discard(key)
 
     await _explain_acceptance(session, lane)
 
 
-async def _prompt_for_node_name(session: Session, lane: DatabaseLane) -> bool:
+async def _prompt_for_node_name(session: Session, lane: DatabaseLane, actor: User | None) -> bool:
     """Two tries at a real name; a blank answer twice leaves everything
     untouched (participation stays undecided, so the screen re-asks next
     login) rather than recording an accept the node could never start
@@ -275,7 +292,7 @@ async def _prompt_for_node_name(session: Session, lane: DatabaseLane) -> bool:
             await session.write_line(colored("That's the placeholder itself -- pick a name of your own.", fg_color=MUTED_COLOR))
             continue
         try:
-            await lane.run(set_node_display_name, raw)
+            await lane.run(_record_node_name, raw, actor)
         except ValueError as exc:
             await session.write_line(colored(f"Can't use that: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
             continue
@@ -285,6 +302,16 @@ async def _prompt_for_node_name(session: Session, lane: DatabaseLane) -> bool:
         await session.write_line(colored(f"Node name set to {sanitize_text(raw)!r}.", fg_color=MUTED_COLOR))
         return True
     return False
+
+
+def _record_node_name(db: Database, name: str, actor: User | None) -> None:
+    """Set the name with the audit entry Settings > Node name writes."""
+    current = get_node_display_name(db)
+    with db.connection:
+        set_config_without_commit(db, NODE_DISPLAY_NAME_CONFIG_KEY, canonical_node_display_name(name))
+        record_action_without_commit(
+            db, actor=actor, action="set_node_display_name", detail=f"{current!r} -> {name!r}",
+        )
 
 
 async def _explain_acceptance(session: Session, lane: DatabaseLane) -> None:
