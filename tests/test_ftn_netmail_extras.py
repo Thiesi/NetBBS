@@ -568,3 +568,13 @@ def test_bouncing_is_on_for_a_new_network(db, sysop):
     created = save_network(db, FtnNetwork(name="n", domain="n", our_address=NODE, uplink_address=HUB))
     assert created.bounce_unknown
     assert get_network(db, created.id).attach_area_id is None
+
+
+def test_a_sender_with_a_full_mailbox_does_not_stop_the_drop(db, network, alice, monkeypatch):
+    """Review of #1492: `MailboxFullError` is no `MailError`; telling the
+    sender must never abort the mailer's pass."""
+    send_netmail(db, alice, "Ann (21:7/7)", "Later", "When you call", flavour="hold")
+    monkeypatch.setattr("netbbs.mail.make_room", lambda db, recipient: False)
+    later = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=outbound.HOLD_DAYS + 1)
+    assert outbound.expire_held(db, now=later) == 1
+    assert queue.count_pending_outbound(db, network.id, route="direct") == 0

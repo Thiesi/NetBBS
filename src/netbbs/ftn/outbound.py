@@ -523,7 +523,7 @@ def report_undelivered(db: Database, reference_kind: str, reference_id: str, rea
     if reference_kind != "netmail" or not reference_id.isdigit():
         return
     from netbbs.auth.users import get_user_by_id
-    from netbbs.mail import MailError, send_system_mail
+    from netbbs.mail import MailboxFullError, MailError, send_system_mail
 
     row = db.connection.execute(
         "SELECT sender_user_id, recipient_label, subject FROM mail_messages WHERE id = ?", (int(reference_id),)
@@ -539,5 +539,5 @@ def report_undelivered(db: Database, reference_kind: str, reference_id: str, rea
             f"Your netmail to {row['recipient_label']}, \"{row['subject']}\", was not delivered: {reason}.\n\n"
             "Your copy is still in Sent.",
         )
-    except MailError as exc:  # a full mailbox: the node log has it
+    except (MailboxFullError, MailError) as exc:  # a full mailbox: the node log has it
         _logger.warning("FTN: could not tell %s that netmail %s failed: %s", sender.username, reference_id, exc)

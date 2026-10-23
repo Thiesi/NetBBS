@@ -103,6 +103,7 @@ def record_waits_without_commit(
         db.connection.execute(
             "DELETE FROM ftn_attach_waits WHERE id IN (SELECT id FROM ftn_attach_waits ORDER BY id LIMIT ?)", (over,)
         )
+        _logger.warning("FTN: %d netmail file wait(s) dropped at the %d-wait cap", over, MAX_WAITS)
 
 
 def _wait_for(db: Database, network: FtnNetwork, name: str):
