@@ -1250,7 +1250,77 @@ async def file_area_echo_action(session: Session, lane: DatabaseLane, actor: Use
     return True
 
 
-# --- a board's Origin line (issue #1474) ---------------------------------------
+# --- hatching (issue #1476) ------------------------------------------------------
+
+
+def file_area_hatch_rows(db: Database, area) -> list[Field]:
+    """The file area screen's Auto-hatch row, for an area carrying a file
+    echo; none for any other."""
+    from netbbs.ftn.hatch import auto_hatch_enabled
+
+    if file_area_tic(db, area) is None:
+        return []
+    if auto_hatch_enabled(db, area.id):
+        return [Field("Auto-hatch", "on: approved uploads are hatched into the file echo")]
+    return [Field("Auto-hatch", "off: files are hatched by hand with [H]atch on the listing")]
+
+
+async def auto_hatch_action(session: Session, lane: DatabaseLane, actor: User, area) -> bool:
+    """[A]uto-hatch on the screen of a file area carrying a file echo: a
+    toggle. Returns whether anything changed."""
+    from netbbs.ftn.hatch import auto_hatch_enabled, set_auto_hatch
+
+    if await lane.run(file_area_tic, area) is None:
+        _announce(session, f"{area.name} carries no file echo, so it has nothing to hatch into.", error=True)
+        return False
+    enabled = not await lane.run(auto_hatch_enabled, area.id)
+    await lane.run(lambda db: set_auto_hatch(db, area.id, enabled, actor=actor))
+    _announce(session, f"Auto-hatch on: {area.name}'s uploads are hatched into its file echo once approved."
+              if enabled else f"Auto-hatch off: {area.name}'s files are hatched only by hand.")
+    return True
+
+
+async def hatch_action(session: Session, lane: DatabaseLane, actor: User, entry) -> bool:
+    """[H]atch on a file area's listing: send `entry` into the area's file
+    echo, after one yes/no (it goes to the network). A file hatched before
+    is hatched again only when the SysOp says so, with `Replaces`. Returns
+    whether it was hatched; the outcome is announced either way."""
+    from netbbs.ftn.hatch import HatchError, hatch_file, hatch_target
+    from netbbs.ftn.queue import FtnQueueFullError
+
+    name = sanitize_text(entry.filename)
+    try:
+        target = await lane.run(hatch_target, entry)
+    except HatchError as exc:
+        _announce(session, f"Not hatched: {exc}", error=True)
+        return False
+    uplink = target.network.uplink_address.four_d
+    await session.write_line("")
+    if target.previous is not None:
+        how = "automatically" if target.previous.automatic else "by hand"
+        question = (f"{name} was already hatched into {target.tag} {how} on {target.previous.hatched_at[:10]}. "
+                    f"Hatch it again, replacing that copy?")
+    else:
+        question = f"Hatch {name} into {target.tag} on {target.network.name}? It goes to the uplink {uplink}."
+    if not await prompt_yes_no(session, question, default=False):
+        _announce(session, "Nothing was hatched.", color=MUTED_COLOR)
+        return False
+    try:
+        hatched = await lane.run(hatch_file, entry.file_id, actor=actor, again=target.previous is not None)
+    except (HatchError, FtnQueueFullError) as exc:
+        _announce(session, f"Not hatched: {exc}", error=True)
+        return False
+    sent_as = f" as {hatched.send_name}" if hatched.send_name != hatched.file_name else ""
+    again = ", replacing the earlier copy" if hatched.replaces else ""
+    _announce(session, f"{name} hatched into {hatched.tag}{sent_as}{again}: it goes to {uplink} with the next "
+                       f"session.")
+    return True
+
+
+# --- end hatching ------------------------------------------------------------------
+
+
+# --- a board's Origin line (issue #1474)---------------------------------------
 
 
 def board_origin_rows(db: Database, area: AreaMapping, network: FtnNetwork | None) -> list[Field]:
