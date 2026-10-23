@@ -361,9 +361,11 @@
           <ul class="link-list">
             <li><b>A network in one editor.</b> A new network starts filled in with fsxNet's hub; add the address and passwords your coordinator gives you.</li>
             <li><b>An echo on a message board.</b> Put an echo tag on a message board and ask the hub for more with AreaFix. A message board is local, NetBBS Link or FTN, never two at once.</li>
+            <li><b>Join from the hub's list.</b> Import the hub's echo list, tick the echoes you want, and NetBBS creates their message boards or file areas and asks AreaFix or FileFix for all of them in one request.</li>
+            <li><b>File echoes.</b> Files a network distributes arrive in a file area through its own moderation, each checked against its TIC: password, CRC and size. Echoes you don't carry wait for you instead of being lost.</li>
             <li><b>Polls and answers.</b> NetBBS calls your hub on a schedule, and sooner when mail is waiting. It can also answer calls on the BinkP port, 24554.</li>
             <li><b>Real-name echoes.</b> On a message board that requires verified, displayed real names, posts go to the echo under each author's verified real name, for echoes such as nixNet's NIX_ADMIN.</li>
-            <li><b>Direct netmail.</b> Import a nodelist and netmail goes straight to any node that lists a BinkP host. Everything else goes through your hub.</li>
+            <li><b>Direct netmail.</b> The nodelist imports itself when the network sends it, NODEDIFFs included, and netmail goes straight to any node that lists a BinkP host. Everything else goes through your hub.</li>
           </ul>
         </div>
         <div class="way">
@@ -377,10 +379,10 @@
           </ul>
         </div>
       </div>
-      <p class="qs-note">So far NetBBS has exchanged FTN mail only with itself
-        and with test fixtures. Its first session with a live hub is still to
-        come, so treat your first connection to a real network as a test.
-        File echoes (TIC), file requests, hub mode and QWK are not supported.
+      <p class="qs-note">Since 22 October 2026 ReLink has been a node on nixNet, polling its
+        hub, posting echomail and linking echoes with AreaFix. File echoes and
+        the automatic nodelist are new in v7.36 and have not met a live hub yet.
+        File requests, hub mode and QWK are coming before the feature freeze.
         The <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-SysOp-Handbook.md#ftn-networks-fidonet-fsxnet" target="_blank" rel="noopener">SysOp handbook</a>
         has the setup steps.</p>
     </div>
@@ -838,7 +840,7 @@
         <span class="eyebrow">Get started</span>
         <h2>Start with a local look around.</h2>
         <p>This is a trial on your own machine: only you can connect to it. A node that callers can reach is a permanent installation with its own service account, which the <a href="https://github.com/Thiesi/NetBBS/blob/main/docs/NetBBS-SysOp-Handbook.md#installing-netbbs" target="_blank" rel="noopener">SysOp handbook</a> walks through. The trial database can simply be deleted afterwards.</p>
-        <p>You need Python 3.11 or newer: <code>python3 --version</code> tells you which you have. On Debian and Ubuntu, also run <code>sudo apt install python3-venv</code> first. Download the <code>.whl</code> file (the &ldquo;wheel&rdquo;, a ready-to-install package) from <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">GitHub Releases</a> into a fresh directory. In the commands below, replace VERSION with the version number from the file you downloaded: for <code>netbbs-7.35.0-py3-none-any.whl</code> that is <code>7.35.0</code>. The newest release is always at the top of the Releases page.</p>
+        <p>You need Python 3.11 or newer: <code>python3 --version</code> tells you which you have. On Debian and Ubuntu, also run <code>sudo apt install python3-venv</code> first. Download the <code>.whl</code> file (the &ldquo;wheel&rdquo;, a ready-to-install package) from <a href="https://github.com/Thiesi/NetBBS/releases" target="_blank" rel="noopener">GitHub Releases</a> into a fresh directory. In the commands below, replace VERSION with the version number from the file you downloaded: for <code>netbbs-7.36.0-py3-none-any.whl</code> that is <code>7.36.0</code>. The newest release is always at the top of the Releases page.</p>
       </div>
       <div class="quickstart-box">
         <div class="qs-bar">
