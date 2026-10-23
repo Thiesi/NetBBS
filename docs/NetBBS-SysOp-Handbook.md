@@ -2867,8 +2867,8 @@ the Origin in use.
   within the 79 characters FTN allows. The prompt says how much fits:
   50 characters for the address `21:1/199@fsxnet`. A longer one is
   refused, never cut.
-- Making the board local again with <kbd>E</kbd> **Echo (FTN)** drops its
-  Origin.
+- Making the board local again with <kbd>E</kbd> **Echo (FTN)**, or giving
+  it an echo of another network, drops its Origin.
 
 #### Real-name echoes
 

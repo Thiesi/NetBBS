@@ -142,3 +142,15 @@ def test_the_board_screen_offers_origin_only_while_it_carries_an_echo(db, lane, 
     text = _visible(_written_text(session))
     assert "[O]rigin (FTN)" in text and "at most 50 characters" in text
     assert board_area(db, board).origin_text == "Corner Shop"
+
+
+def test_moving_to_another_network_drops_the_origin_and_another_tag_keeps_it(db, sysop, network, board):
+    other = save_network(db, FtnNetwork(
+        name="FidoNet", domain="fidonet", our_address=FtnAddress(2, 240, 5832, 1), uplink_address=FtnAddress(2, 240, 1),
+        uplink_host="hub.example", enabled=True,
+    ))
+    set_board_origin(db, board, "x" * origin_room(network.our_address))
+    set_board_area(db, board, network.id, "FSX_BOT")
+    assert board_area(db, board).origin_text == "x" * origin_room(network.our_address)
+    set_board_area(db, board, other.id, "FIDO_GEN")
+    assert board_area(db, board).origin_text == ""

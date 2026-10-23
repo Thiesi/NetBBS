@@ -2262,7 +2262,8 @@ per board. Nothing is mapped by default.
   goes back to the network's. A board's Origin is bounded by this node's
   address on its network, so that the whole line fits, and a longer one is
   refused rather than cut. The network's text is cut to fit as before.
-  Making the board local again clears its Origin.
+  Making the board local again, or moving it to another network's echo,
+  clears its Origin.
 
   A copy of a cross-post (issue #1298) is its own message with its own
   `^AMSGID`, and its first body line is `* Crossposted in <ECHO>, <ECHO>`,

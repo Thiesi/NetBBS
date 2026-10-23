@@ -282,7 +282,9 @@ def normalise_area_tag(tag: str) -> str:
 
 def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> AreaMapping:
     """Make `board` carry echo area `tag` of the network. Refuses a Linked
-    board, a missing network, and a tag another board already carries."""
+    board, a missing network, and a tag another board already carries.
+    Moving to another network drops the board's Origin (issue #1474): it
+    was bounded by the old network's address."""
     from netbbs.link.boards import is_board_linked  # netbbs.link imports widely; keep it local
 
     tag = normalise_area_tag(tag)
@@ -297,7 +299,9 @@ def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> Are
     if holder is not None:
         raise FtnNetworkError(f"Echo {tag} is already carried by board {holder['name']!r}.")
     db.connection.execute(
-        "UPDATE boards SET ftn_network_id = ?, ftn_area_tag = ? WHERE id = ?", (network_id, tag, board.id)
+        "UPDATE boards SET ftn_origin_text = CASE WHEN ftn_network_id IS ? THEN ftn_origin_text ELSE '' END, "
+        "ftn_network_id = ?, ftn_area_tag = ? WHERE id = ?",
+        (network_id, network_id, tag, board.id),
     )
     db.connection.commit()
     return AreaMapping(network_id, tag)
