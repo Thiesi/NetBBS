@@ -143,3 +143,23 @@ def test_limits_screen_save_with_nothing_changed_writes_no_audit(db, lane, sysop
 def test_setters_refuse_values_past_their_upper_bound(db, setter, bad):
     with pytest.raises(ValueError):
         setter(db, bad)
+
+
+def test_qwk_settings_save_the_packet_size_and_bbs_id(db, lane, sysop):
+    from netbbs.config import get_qwk_bbs_id, get_qwk_packet_messages
+
+    session = FakeSession(["s", "q", "0", "1", "500", "0", "2", "relink", "s", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert get_qwk_packet_messages(db) == 500
+    assert get_qwk_bbs_id(db) == "RELINK"
+    audit = [a for a in list_recent_actions(db, limit=10) if a.action == "set_qwk_settings"]
+    assert len(audit) == 1 and "qwk_id=RELINK" in audit[0].detail
+
+
+def test_qwk_settings_refuse_a_bad_bbs_id_and_write_nothing(db, lane, sysop):
+    from netbbs.config import get_qwk_bbs_id_setting
+
+    session = FakeSession(["s", "q", "0", "2", "NOT VALID", "s", "b", "y", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert "A QWK BBS ID is 1-8 letters and digits" in _visible(_written_text(session))
+    assert get_qwk_bbs_id_setting(db) == ""

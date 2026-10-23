@@ -5243,4 +5243,44 @@ MIGRATIONS = [
         ALTER TABLE ftn_networks ADD COLUMN bundle_sequence INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1389 (design doc §6.10, §16 \"Issue #1154\", Decisions 21-23): QWK offline mail "
+            "for callers. `qwk_conferences` gives each board a caller has taken in a packet a "
+            "conference number that stays theirs (0, their mail, has no row), keyed by the board's "
+            "content id so a reused `boards.id` never inherits it, with the caller's choice: "
+            "`follow` (in packets while followed), `add` or `remove`. `qwk_sent` lists the posts "
+            "and letters a packet carried that are not marked read yet; the next reply packet or "
+            "[M]ark read marks them and empties it. `qwk_rep_seen` remembers what each reply packet "
+            "posted, by digest, so the same packet uploaded twice posts once. No foreign key points "
+            "at `boards`, `posts` or `mail_messages`, which migrations rebuild: a gone row is "
+            "checked where it is used. Empty on upgrade."
+        ),
+        sql="""
+        CREATE TABLE qwk_conferences (
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            number      INTEGER NOT NULL CHECK (number BETWEEN 1 AND 65535),
+            board_key   TEXT NOT NULL,
+            choice      TEXT NOT NULL DEFAULT 'follow' CHECK (choice IN ('follow', 'add', 'remove')),
+            PRIMARY KEY (user_id, number),
+            UNIQUE (user_id, board_key)
+        );
+
+        CREATE TABLE qwk_sent (
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind        TEXT NOT NULL CHECK (kind IN ('post', 'mail')),
+            ref_id      INTEGER NOT NULL,
+            ref_key     TEXT NOT NULL,
+            sent_at     TEXT NOT NULL,
+            PRIMARY KEY (user_id, kind, ref_id)
+        );
+
+        CREATE TABLE qwk_rep_seen (
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            digest      TEXT NOT NULL,
+            seen_at     TEXT NOT NULL,
+            PRIMARY KEY (user_id, digest)
+        );
+        """,
+    ),
 ]

@@ -3394,6 +3394,34 @@ and applied without a restart:
 | Cross-post boards | 5 boards | The most message boards one new post may go to with **To boards** on its review screen, the board it was written on included. Each board gets its own copy, so this bounds what one post writes. 1 turns cross-posting off. |
 | Oneliner level | 0 | The lowest level that may add a line to the oneliner wall. Every caller can read it. A guest is an ordinary account: set this above the guest account's level to keep guests read-only. |
 
+### Offline mail (QWK)
+
+Callers find offline mail as <kbd>Q</kbd> **QWK offline mail** on the
+message board list. A packet holds their unread mail and the boards they
+follow, to read in a QWK reader such as MultiMail; the reply packet the
+reader makes is posted here.
+
+- **Replies go through the usual checks.** Each reply is posted as if the
+  caller had written it online: a board's write level, name and age gates
+  and moderation all apply, a post on a shared or FTN board goes out to the
+  other BBSes, and each reply is reported back to the caller, refused ones
+  with the reason. The guest account gets no packets.
+- **Transfers** use Zmodem or the browser links the file areas use. A node
+  without a public web address hands browser links only to callers in its
+  browser terminal.
+
+**Settings ▸ QWK offline mail** holds its two node-wide values, saved
+together:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| QWK packet size | 2,000 messages | The most messages one packet holds (50-10,000). The rest wait for the caller's next packet. A packet also stops at 16 MiB of text. |
+| QWK BBS ID | from the node name | The name packets carry (`ID.QWK`) and that a reply packet (`ID.REP`) must match: 1-8 letters and digits. Empty uses the node's display name, cut to fit. |
+
+> [!WARNING]
+> Set the BBS ID once. Readers file packets by it, and reply packets made
+> for an old ID are refused.
+
 ### The guest account
 
 Guest login is set under **Settings ▸ Guest access**. Every guest signs in as
