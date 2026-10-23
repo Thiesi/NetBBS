@@ -177,8 +177,8 @@ def test_columnar_verified_name_display_no_truncation(tmp_path, monkeypatch):
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "verified_docs", creator=alice, name_requirement="verified_and_displayed")
-    upload_file(db, area, alice, "release.zip", b"zip data")
     attest_name(db, alice, "Alice Wonderland", verifier=sysop)
+    upload_file(db, area, alice, "release.zip", b"zip data")
 
     session = FakeSession(keys=["b"], width=80)
     lane = DatabaseLane(db_path)
@@ -284,8 +284,8 @@ def test_a_verified_uploader_does_not_stripe_the_highlighted_bar(tmp_path, monke
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "verified_docs", creator=alice, name_requirement="verified_and_displayed")
-    upload_file(db, area, alice, "release.zip", b"zip data")
     attest_name(db, alice, "Alice Wonderland", verifier=sysop)
+    upload_file(db, area, alice, "release.zip", b"zip data")
 
     session = FakeInteractiveSession(editor_keys=[EditorKey(EditorKeyKind.DOWN)], width=100)
     lane = DatabaseLane(db_path)

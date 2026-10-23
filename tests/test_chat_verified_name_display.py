@@ -131,20 +131,20 @@ async def _join_and_wait(lane, hub, presence, channel, user, session):
 
 def test_non_gated_channel_shows_no_verified_styling(db, open_channel, alice, sysop):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
-    label = chat_flow._chat_author_label(db, open_channel, alice)
+    label = chat_flow._chat_author_label(db, open_channel, alice, verified_name="Alice Smith")
     assert label == "alice"
     assert "(=" not in label
 
 
 def test_gated_channel_unverified_user_shows_no_verified_styling(db, gated_channel, alice):
-    label = chat_flow._chat_author_label(db, gated_channel, alice)
+    label = chat_flow._chat_author_label(db, gated_channel, alice, verified_name=None)
     assert label == "alice"
 
 
 def test_gated_channel_verified_no_nick_uses_display_name_or_username(db, gated_channel, alice, sysop):
     set_display_name(db, alice, "Al")
     attest_name(db, alice, "Alice Smith", verifier=sysop)
-    label = chat_flow._chat_author_label(db, gated_channel, alice)
+    label = chat_flow._chat_author_label(db, gated_channel, alice, verified_name="Alice Smith")
     assert label.startswith("Al ")
     assert "(=Alice Smith=)" in label
     assert fg(VERIFIED_COLOR) in label
@@ -156,7 +156,7 @@ def test_gated_channel_verified_with_nick_is_alias_username_and_real_name(db, ga
     set_display_name(db, alice, "Al")
     set_nick(db, alice, "ali")
     attest_name(db, alice, "Alice Smith", verifier=sysop)
-    label = chat_flow._chat_author_label(db, gated_channel, alice)
+    label = chat_flow._chat_author_label(db, gated_channel, alice, verified_name="Alice Smith")
     assert strip_ansi(label) == "ali (alice) (=Alice Smith=)"
 
 
@@ -264,15 +264,58 @@ def test_join_notice_shows_verified_unit_to_other_participant(db, lane, hub, pre
     assert "(=Alice Smith=)" in text
 
 
+# -- frozen at writing (design doc §5.5) ----------------------------------------
+
+
+def test_a_line_written_before_verification_never_gains_the_unit(db, gated_channel, alice, bob, sysop):
+    recorded = record_message(
+        db, gated_channel, kind="message", author_label=alice.username, body="hi", author_user_id=alice.id,
+    )
+    attest_name(db, alice, "Alice Smith", verifier=sysop)
+    replayed = get_scrollback(db, gated_channel)[0]
+    assert replayed.id == recorded.id and replayed.author_verified_name is None
+    assert "(=" not in chat_flow._render_channel_message(db, gated_channel, bob, replayed)
+
+
+def test_a_line_keeps_the_name_it_was_written_under(db, gated_channel, alice, bob, sysop):
+    from netbbs.attestation import revoke_attestation
+
+    attest_name(db, alice, "Alice Smith", verifier=sysop)
+    record_message(db, gated_channel, kind="message", author_label=alice.username, body="hi", author_user_id=alice.id)
+    attest_name(db, alice, "Alice Jones", verifier=sysop)
+    replayed = get_scrollback(db, gated_channel)[0]
+    rendered = chat_flow._render_channel_message(db, gated_channel, bob, replayed)
+    assert "(=Alice Smith=)" in rendered and "Jones" not in rendered
+    revoke_attestation(db, alice, "name", actor=sysop)
+    assert "(=Alice Smith=)" in chat_flow._render_channel_message(db, gated_channel, bob, replayed)
+
+
+def test_a_channel_that_stops_displaying_names_shows_no_frozen_unit(db, gated_channel, alice, bob, sysop):
+    attest_name(db, alice, "Alice Smith", verifier=sysop)
+    record_message(db, gated_channel, kind="message", author_label=alice.username, body="hi", author_user_id=alice.id)
+    channel = update_channel(
+        db, gated_channel, name=gated_channel.name, description=gated_channel.description,
+        min_level=gated_channel.min_level, category_id=gated_channel.category_id, pinned=gated_channel.pinned,
+        hidden=gated_channel.hidden, members_only=gated_channel.members_only,
+        allow_member_invites=gated_channel.allow_member_invites, min_age=gated_channel.min_age,
+        name_requirement=None, community_id=gated_channel.community_id, changed_by=sysop,
+    )
+    replayed = get_scrollback(db, channel)[0]
+    assert replayed.author_verified_name == "Alice Smith"
+    assert "(=" not in chat_flow._render_channel_message(db, channel, bob, replayed)
+
+
 # -- SGR sequencing: nested colored segments must not swallow the outer color
 
 
 def test_verified_unit_does_not_swallow_trailing_color(db, gated_channel, alice, sysop):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
     recorded = record_message(
-        db, gated_channel, kind="join", author_label=alice.username, author_fingerprint=alice.fingerprint
+        db, gated_channel, kind="join", author_label=alice.username, author_fingerprint=alice.fingerprint,
+        author_user_id=alice.id,
     )
     line = chat_flow._render_channel_message(db, gated_channel, alice, recorded)
+    assert "(=Alice Smith=)" in line
     suffix_index = line.index(" has joined the channel.")
     # MUTED_COLOR must be freshly re-established immediately before the
     # trailing text, not left however the verified unit's own reset left

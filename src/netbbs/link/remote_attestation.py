@@ -29,7 +29,6 @@ from netbbs.link.trust import (
     TrustSubject,
     get_effective_trust_state,
 )
-from netbbs.rendering import VERIFIED_COLOR, colored, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -663,7 +662,7 @@ def get_remote_attestation_state(
         # an unregistered subject fails outright -- and an unknown identity has
         # no accepted attestation anyway, which is the same answer without the
         # write.  This is reachable from every gate (`remote_meets_age`,
-        # `remote_meets_name_requirement`, `format_remote_name_for_resource`),
+        # `remote_meets_name_requirement`, `remote_verified_name_to_freeze`),
         # which before issue #584 had no production caller to reach it.
         return RemoteAttestationState(
             subject, attribute, False, "unknown_link_identity", None,
@@ -811,26 +810,22 @@ def remote_meets_name_requirement(
     return get_remote_attestation_state(db, subject, "name", now_iso=now_iso).accepted
 
 
-def format_remote_name_for_resource(
-    db: Database,
-    subject: TrustSubject,
-    display_label: str,
-    *,
-    name_requirement: str | None,
-    now_iso: str | None = None,
-) -> str:
-    """Render an accepted remote real name only inside a requiring resource."""
-    primary = sanitize_text(display_label)
+def remote_verified_name_to_freeze(
+    db: Database, subject: TrustSubject, *, name_requirement: str | None, now_iso: str | None = None,
+) -> str | None:
+    """The remote real name a record by `subject` stored now in a resource
+    with `name_requirement` keeps: the value of the name attestation this
+    node accepts for them at this moment, or `None` when the resource does
+    not display verified names or no attestation is accepted (design doc
+    §5.5, issue #1453). The remote counterpart of `netbbs.attestation.
+    verified_name_to_freeze`; the stored value is rendered by
+    `netbbs.attestation.format_stored_name_for_resource`."""
     if name_requirement != "verified_and_displayed":
-        return primary
+        return None
     state = get_remote_attestation_state(db, subject, "name", now_iso=now_iso)
     if not state.accepted or state.attestation is None:
-        return primary
-    unit = colored(
-        f"(={sanitize_text(state.attestation.attested_value)}=)",
-        fg_color=VERIFIED_COLOR,
-    )
-    return f"{primary} {unit}"
+        return None
+    return state.attestation.attested_value
 
 
 def _audit(

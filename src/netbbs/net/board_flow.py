@@ -32,7 +32,7 @@ from netbbs.activity import (
     unread_post_ids,
     unfollow,
 )
-from netbbs.attestation import format_name_for_resource, meets_name_requirement
+from netbbs.attestation import format_stored_name_for_resource, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards import (
     MAX_BODY_BYTES,
@@ -85,7 +85,6 @@ from netbbs.communities import (
 )
 from netbbs.age_requirement import age_verification_refusal
 from netbbs.link.node_profiles import identity_for_fingerprint, present_link_author_label
-from netbbs.link.remote_attestation import format_remote_name_for_resource
 from netbbs.link.trust import TrustSubject
 from netbbs.link.boards import (
     LinkContext,
@@ -3266,42 +3265,40 @@ def _reply_quote(db: Database, post: Post, board: Board, *, name_requirement: st
 
 def _author_display_name(db: Database, post: Post, *, name_requirement: str | None) -> str:
     """
-    The author label to render for one post (design doc §18). Only
-    looks up the live account behind `post.author_label`
-    when this board actually requires `verified_and_displayed` names --
-    that's the one case where showing the *current* attested real name
-    is intentional (an attestation, like an age gate, is a living fact
-    re-evaluated at read time, not frozen at post time). Every other
-    case renders the plain, already-sanitized `author_label` exactly as
-    it always has: `author_label` is deliberately denormalized so a
-    post's history still reads correctly even if the account is later
-    renamed or removed (design doc) -- substituting a user's
-    *current* `display_name` there for the ordinary case would quietly
-    break that property, since `display_name` (unlike `username`) is
-    actually mutable.
+    The author label to render for one post (design doc §18, §5.5).
+
+    On a board that displays verified names (`name_requirement` is
+    `verified_and_displayed`, asked now) a post written while it displayed
+    them is shown under what it was shown under then -- the primary name and
+    the attested real name frozen on it (`Post.author_shown_name`/
+    `author_verified_name`), never the author's current ones: a later
+    verification, replacement, revocation, rename or display-name change
+    does not rewrite who an old post says wrote it. The trusted `(=...=)`
+    unit is still made by `netbbs.attestation.verified_name_unit` alone,
+    from a value this node froze from an attestation.
+
+    Every other case renders the plain, already-sanitized `author_label`
+    exactly as it always has: a board that no longer displays names shows
+    no unit, and a post written before its board displayed them shows its
+    label, as it was written. `author_label` is deliberately denormalized so
+    a post's history still reads correctly even if the account is later
+    renamed or removed.
 
     The one resolution that *is* applied: a Link-carried post's
     `user@<home-node-fingerprint>` label is presented by the home node's
     current friendly identity (`present_link_author_label`) -- the
     fingerprint stays in persistence, the presentation follows renames.
     """
-    if name_requirement == "verified_and_displayed":
-        author = get_user_by_id(db, post.author_user_id)
-        if author is not None:
-            return format_name_for_resource(db, author, name_requirement=name_requirement)
-        # A Link-carried post has no local account, so the attested name has
-        # to come from the attestation its home node signed and this node
-        # accepted (design doc §5.5, issue #584). Same `(=...=)` unit, same
-        # resource scoping -- the value appears only inside a board that
-        # requires it, never on an unrelated screen.
-        subject = _remote_author_subject(post.author_label)
-        if subject is not None:
-            return format_remote_name_for_resource(
-                db, subject,
-                sanitize_text(present_link_author_label(db, post.author_label)),
-                name_requirement=name_requirement,
-            )
-    return sanitize_text(present_link_author_label(db, post.author_label))
+    label = sanitize_text(present_link_author_label(db, post.author_label))
+    if name_requirement != "verified_and_displayed" or post.author_shown_name is None:
+        return label
+    # A carried post's primary name is its label, presented as above; a
+    # local post's is the display name or username frozen on it.
+    carried = post.author_user_id is None and _remote_author_subject(post.author_label) is not None
+    return format_stored_name_for_resource(
+        label if carried else post.author_shown_name, post.author_verified_name,
+        name_requirement=name_requirement,
+    )
 
 
 def _remote_author_subject(author_label: str) -> TrustSubject | None:

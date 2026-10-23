@@ -58,6 +58,11 @@ class Database:
         # For a migration that rewrites stored text the way the application
         # now reads it: issue #711 reindexes post bodies as plain text.
         self.connection.create_function("netbbs_plain_post_body", 1, _plain_post_body, deterministic=True)
+        # For the migration that freezes carried posts' verified names: the
+        # Link trust subject a `user@<home node>` author label names.
+        self.connection.create_function(
+            "netbbs_link_user_subject_id", 1, _link_user_subject_id, deterministic=True
+        )
         self._apply_migrations()
 
     def _configure_pragmas(self) -> None:
@@ -159,3 +164,18 @@ def _plain_post_body(body: str | None) -> str | None:
     from netbbs.rendering.post_body import plain_post_body
 
     return plain_post_body(body)
+
+
+def _link_user_subject_id(author_label: str | None) -> str | None:
+    """`TrustSubject.user(home, user).subject_id` for a carried author label
+    `user@<home node fingerprint>`, as the SQL function
+    `netbbs_link_user_subject_id` migrations may call; `None` for a label
+    with no `@` or an empty half. Imported late, as `_plain_post_body` is."""
+    if author_label is None:
+        return None
+    local_user_id, separator, home = author_label.rpartition("@")
+    if not separator or not local_user_id or not home:
+        return None
+    from netbbs.link.trust import TrustSubject
+
+    return TrustSubject.user(home, local_user_id).subject_id

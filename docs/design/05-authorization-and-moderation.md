@@ -343,6 +343,21 @@ echo extends that scope to the echo: with `verified_and_displayed` its posts go
 out under their authors' verified real names, and nothing else the author
 writes does (§6.8, issue #1443).
 
+A record shows what it was written under. A board post, an uploaded file or a
+chat line written in a resource that displays verified names (its effective
+requirement, the Community cascade included) stores the author's primary name
+-- display name, else username -- and their attested real name, if any, at
+that moment. A later verification, replacement or revocation, a rename and a
+display-name change never alter it, so a post written before its author was
+verified never gains the unit, and one written after keeps it. Every revision
+of a post (an edit, a withdrawal, a moderator's edit, a tombstone) carries its
+root's values. Whether the unit is shown is still decided when the record is
+read: a resource that stops displaying names shows the plain label, and a
+record written before the resource displayed them shows its plain label. A chat
+line freezes only the attested name; its alias stays current presentation. The
+stored copy is written by this node from an attestation and never received or
+typed, and the unit is made from it by the same trusted renderer (issue #1453).
+
 Remote propagation of attestations requires:
 
 - the subject’s explicit opt-in;
@@ -460,7 +475,9 @@ configuration, notes, and override reasons remain SysOp-only.
 Remote real-name rendering uses the same trusted `(=...=)` unit as local
 attestations and only within a resource requiring
 `verified_and_displayed`; accepting a remote attestation never exposes that
-value in unrelated screens.
+value in unrelated screens. A carried post keeps the name of the remote
+attestation accepted when this node stored it, as a local post keeps its
+author's (issue #1453).
 
 A carrying node may always apply its own local attestations to its own users
 when enforcing a carried resource’s local age/name policy.

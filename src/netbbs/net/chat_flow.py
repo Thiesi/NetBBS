@@ -80,9 +80,9 @@ from netbbs.rendering.menu import continue_prompt
 from netbbs.activity import follow, is_following, record_channel_seen, unfollow
 from netbbs.attestation import (
     age_gate,
-    format_verified_name_unit,
     get_display_name,
     meets_name_requirement,
+    verified_name_unit,
 )
 from netbbs.auth.renames import ended_session_notice, get_recipient_by_name
 from netbbs.auth.users import (
@@ -1479,7 +1479,7 @@ def _channel_description(hub: ChatHub, channel: Channel, needs_name: set[int] | 
     return f"{base} ({online} online)".strip()
 
 
-def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
+def _chat_author_label(db: Database, channel: Channel, user: User, *, verified_name: str | None) -> str:
     """
     `chat_stream_label(db, user)` — the alias-or-username presentation
     form, design doc, deliberately untouched by this function —
@@ -1489,6 +1489,12 @@ def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
     `verified_and_displayed`: the chat-specific composition of the
     anti-forgery display for the live message stream (GitHub issue #64).
 
+    The unit shows `verified_name`, the name frozen on the line when it
+    was written (`ChannelMessage.author_verified_name`, design doc §5.5),
+    not the account's current attestation: a later verification never
+    badges an old line, and a revocation never unbadges one. Whether to
+    show it is still the channel's current requirement.
+
     Deliberately its own function here in the net layer, not folded
     into `chat_stream_label` itself or into `netbbs.attestation.
     format_name_for_resource`: `chat_stream_label`'s one job is the
@@ -1497,7 +1503,7 @@ def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
     chat/Communities policy it has no other reason to carry.
     `format_name_for_resource` doesn't transfer directly either, since
     chat's primary name may be a nick, not `display_name` — this reuses
-    that function's own extracted primitive, `format_verified_name_unit`,
+    that function's own extracted primitive, `verified_name_unit`,
     rather than either duplicating the coloring or trying
     to parse a fully-composed string back apart.
 
@@ -1508,15 +1514,21 @@ def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
     well; `/whois` still supplies it on demand.
     """
     ordinary = chat_stream_label(db, user)
-    verified_unit = format_verified_name_unit(
-        db, user, name_requirement=get_effective_name_requirement(db, channel)
-    )
+    verified_unit = _frozen_verified_unit(db, channel, verified_name)
     if verified_unit is None:
         return ordinary
     if get_nick(db, user) is not None:
         return f"{ordinary} {verified_unit}"
     primary = sanitize_text(get_display_name(db, user) or user.username)
     return f"{primary} {verified_unit}"
+
+
+def _frozen_verified_unit(db: Database, channel: Channel, verified_name: str | None) -> str | None:
+    """The trusted `(=...=)` unit for a line's frozen `verified_name`, or
+    `None` when it has none or `channel` no longer displays verified names."""
+    if verified_name is None or get_effective_name_requirement(db, channel) != "verified_and_displayed":
+        return None
+    return verified_name_unit(verified_name)
 
 
 def _resolve_message_author(db: Database, message: ChannelMessage) -> User | None:
@@ -1560,12 +1572,13 @@ def _message_author_label(
     The author label to show for one `ChannelMessage` of kind
     `"message"`/`"action"`/`"join"`/`"leave"` — resolves the *current*
     live account behind `message.author_label` and renders it through
-    `_chat_author_label` (current nick/alias, current verified-name
-    unit if `channel` currently calls for one) when possible, exactly
-    the same whether this is a live event or scrollback replay (GitHub
-    issue #64) — there's no per-message alias/attestation
-    snapshot, matching the existing "replay shows current presentation"
-    behavior `chat_stream_label`'s own docstring already establishes.
+    `_chat_author_label` (current nick/alias, and the verified-name unit
+    frozen on the line if `channel` currently calls for one) when
+    possible, exactly the same whether this is a live event or scrollback
+    replay (GitHub issue #64). The alias is live, matching the "replay
+    shows current presentation" behavior `chat_stream_label`'s own
+    docstring establishes; the attested name is the line's (design doc
+    §5.5), since a badge says who was verified when they spoke.
 
     Falls back to the sanitized *stored* label, with no `VERIFIED_COLOR`
     styling at all, if the account can no longer be resolved — a stored
@@ -1580,7 +1593,7 @@ def _message_author_label(
     author = _resolve_message_author(db, message)
     if author is None:
         return sanitize_text(message.author_label)
-    return _chat_author_label(db, channel, author)
+    return _chat_author_label(db, channel, author, verified_name=message.author_verified_name)
 
 
 def _link_author(db: Database, message: ChannelMessage) -> tuple[str, str] | None:
@@ -1639,12 +1652,15 @@ def _speaker_label(
         if author is None:
             middle = colored(sanitize_text(message.author_label), fg_color=color, bold=self_message)
         else:
-            middle = _local_speaker_name(db, channel, author, color=color, self_message=self_message)
+            middle = _local_speaker_name(
+                db, channel, author, verified_name=message.author_verified_name,
+                color=color, self_message=self_message,
+            )
     return colored("<", fg_color=MUTED_COLOR) + middle + colored(">", fg_color=MUTED_COLOR)
 
 
 def _local_speaker_name(
-    db: Database, channel: Channel, author: User, *, color: int, self_message: bool
+    db: Database, channel: Channel, author: User, *, verified_name: str | None, color: int, self_message: bool
 ) -> str:
     """`_chat_author_label`'s composition, styled for `_speaker_label`.
 
@@ -1654,9 +1670,7 @@ def _local_speaker_name(
     the same weight, readers could not tell which of the two was the alias
     (issue #899)."""
     nick = get_nick(db, author)
-    verified_unit = format_verified_name_unit(
-        db, author, name_requirement=get_effective_name_requirement(db, channel)
-    )
+    verified_unit = _frozen_verified_unit(db, channel, verified_name)
     if nick is not None:
         name = colored(
             sanitize_text(nick), fg_color=color if self_message else NICK_COLOR, bold=self_message

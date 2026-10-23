@@ -125,6 +125,16 @@ class Post:
     # from get_post/list_pending_posts, which return exact, unresolved
     # rows and have no concept of "is there a newer version of this."
     is_edited: bool = False
+    # What the post was shown under when it was written on a board that
+    # displays verified names (design doc §5.5, issue #1453): the primary
+    # name -- display name or username, or a carried post's
+    # `user@<fingerprint>` label -- and the attested real name, if the author had one then. `author_shown_name`
+    # is `None` for a post written where names were not displayed, which
+    # shows its plain `author_label` even if the board displays them now.
+    # Every revision of a post carries its root's values: an edit never
+    # changes who the post is shown as by (`frozen_author_of`).
+    author_shown_name: str | None = None
+    author_verified_name: str | None = None
 
 
 def create_post(
@@ -315,10 +325,53 @@ def _insert_new_post_without_commit(
         db.connection.execute("UPDATE posts SET layout = ? WHERE post_id = ?", (layout, post_id))
     if crosspost_group is not None:
         db.connection.execute("UPDATE posts SET crosspost_group = ? WHERE post_id = ?", (crosspost_group, post_id))
+    _freeze_local_author_without_commit(db, board, author, post_id)
     write_post_refs_without_commit(db, post_id, files)
     if poll is not None:
         write_poll_without_commit(db, post_id, poll)
     return post_id
+
+
+def _freeze_local_author_without_commit(db: Database, board: Board, author: User, post_id: str) -> None:
+    """Keep on new post `post_id` what `board` shows `author` as now, when
+    it displays verified names (its own requirement, else its Community's):
+    the primary name and the attested real name, if any (design doc §5.5).
+    Nothing is written on any other board, so the INSERT above stays valid
+    on every schema a post can be created on."""
+    from netbbs.attestation import primary_name_for_resource, verified_name_to_freeze
+    from netbbs.communities import get_effective_name_requirement
+
+    requirement = get_effective_name_requirement(db, board)
+    if requirement != "verified_and_displayed":
+        return
+    set_frozen_author_without_commit(
+        db, post_id, primary_name_for_resource(db, author),
+        verified_name_to_freeze(db, author, name_requirement=requirement),
+    )
+
+
+def set_frozen_author_without_commit(
+    db: Database, post_id: str, shown_name: str | None, verified_name: str | None
+) -> None:
+    """Write the frozen author of posts row `post_id` (`Post.author_shown_name`,
+    `Post.author_verified_name`). A no-op for a post with nothing frozen, so a
+    caller can pass on a root's values unconditionally."""
+    if shown_name is None and verified_name is None:
+        return
+    db.connection.execute(
+        "UPDATE posts SET author_shown_name = ?, author_verified_name = ? WHERE post_id = ?",
+        (shown_name, verified_name, post_id),
+    )
+
+
+def frozen_author_of(row: sqlite3.Row) -> tuple[str | None, str | None]:
+    """A posts row's frozen author, `(shown name, verified name)`, for a new
+    revision of the same post to carry: an edit, a withdrawal or a tombstone
+    is the same post by the same author, and is shown under what the post
+    was first shown under. `(None, None)` on a schema before the columns."""
+    if "author_shown_name" not in row.keys():
+        return None, None
+    return row["author_shown_name"], row["author_verified_name"]
 
 
 # -- one post on several boards (issue #1298) ---------------------------------
@@ -738,6 +791,7 @@ def edit_post(
                 *((1,) if withdrawal else ()),
             ),
         )
+        set_frozen_author_without_commit(db, new_post_id, *frozen_author_of(current))
         write_post_refs_without_commit(db, new_post_id, files)
         if withdrawal:
             # A withdrawal closes the post's poll, and its totals are
@@ -1546,6 +1600,7 @@ def tombstone_post(db: Database, post: Post, board: Board, *, tombstoned_by: Use
             post.root_post_id, current["post_id"], created_at,
         ),
     )
+    set_frozen_author_without_commit(db, new_post_id, *frozen_author_of(current))
     # A takedown closes the post's poll and hides its totals (issue #1299).
     close_poll_for_removal_without_commit(db, post.root_post_id)
     db.connection.commit()
@@ -2046,4 +2101,6 @@ def _row_to_post(row: sqlite3.Row, *, is_edited: bool = False) -> Post:
         layout=row["layout"] if "layout" in row.keys() else "prose",
         # Absent on a schema older than issue #675's migration.
         withdrawn=bool(row["withdrawn"]) if "withdrawn" in row.keys() else False,
+        author_shown_name=frozen_author_of(row)[0],
+        author_verified_name=frozen_author_of(row)[1],
     )

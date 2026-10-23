@@ -78,7 +78,8 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
     if network is None or not network.enabled:
         return False
     row = db.connection.execute(
-        "SELECT ftn_inbound, edit_of_post_id, parent_post_id, author_user_id FROM posts WHERE post_id = ?",
+        "SELECT ftn_inbound, edit_of_post_id, parent_post_id, author_user_id, author_verified_name "
+        "FROM posts WHERE post_id = ?",
         (post.post_id,),
     ).fetchone()
     if row is None or row["ftn_inbound"] or row["edit_of_post_id"] is not None:
@@ -87,7 +88,11 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
     real_names = sends_real_names(db, board)
     from_name = post.author_label
     if real_names:
-        verified = _verified_real_name(db, row["author_user_id"])
+        # The name frozen on the post when it was written, which is what the
+        # board shows it under (design doc §5.5): the network copy and the
+        # local view always agree, whatever has happened to the attestation
+        # since -- an approval on a moderated board can come much later.
+        verified = _frozen_real_name(row)
         if verified is None:
             _logger.warning(
                 "FTN %s: post %s on %s was not exported: the echo takes real names, and its author has no "
@@ -98,7 +103,8 @@ def export_post_if_ftn(db: Database, post: Post, board: Board) -> bool:
     to_name, reply_msgid = TO_ALL, None
     if row["parent_post_id"] is not None:
         parent = db.connection.execute(
-            "SELECT ftn_msgid, ftn_inbound, author_label, author_user_id FROM posts WHERE post_id = ?",
+            "SELECT ftn_msgid, ftn_inbound, author_label, author_user_id, author_verified_name "
+            "FROM posts WHERE post_id = ?",
             (row["parent_post_id"],),
         ).fetchone()
         if parent is not None:
@@ -222,7 +228,8 @@ def real_name_refusal(
         to_name = TO_ALL
         if parent_post_id is not None:
             parent = db.connection.execute(
-                "SELECT ftn_inbound, author_label, author_user_id FROM posts WHERE post_id = ?", (parent_post_id,)
+                "SELECT ftn_inbound, author_label, author_user_id, author_verified_name FROM posts WHERE post_id = ?",
+                (parent_post_id,),
             ).fetchone()
             if parent is not None:
                 to_name = _reply_to_name(db, parent, real_names=True)
@@ -250,13 +257,24 @@ def _verified_real_name(db: Database, user_id: int | None) -> str | None:
     return attestation.attested_value if attestation is not None else None
 
 
+def _frozen_real_name(row) -> str | None:
+    """The verified real name frozen on posts `row` when its local author
+    wrote it (design doc §5.5), or `None`: a carried post's frozen name is
+    not this node's to send, and a post written before its board displayed
+    names has none."""
+    if row["author_user_id"] is None:
+        return None
+    return row["author_verified_name"]
+
+
 def _reply_to_name(db: Database, parent, *, real_names: bool) -> str:
     """The To name of a reply to `parent` (a posts row): the name the network
-    knows its author by. That is the verified real name of a local author on
-    a board that sends real names, else the author's label -- the username,
-    or the name in an FTN author's `Name (zone:net/node)`."""
+    knows its author by. That is the verified real name frozen on a local
+    author's post on a board that sends real names -- the From it went out
+    under -- else the author's label: the username, or the name in an FTN
+    author's `Name (zone:net/node)`."""
     if real_names and not parent["ftn_inbound"]:
-        name = _verified_real_name(db, parent["author_user_id"])
+        name = _frozen_real_name(parent)
         if name is not None:
             return name
     return _name_of(parent["author_label"])

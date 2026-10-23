@@ -20,6 +20,7 @@ from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post, edit_post
 from netbbs.net.location import entered
 from netbbs.net.board_flow import _show_board
+from netbbs.rendering.ansi import strip_ansi
 from netbbs.storage.database import Database
 
 _PAGE_SIZE = posts_module._DEFAULT_PAGE_SIZE
@@ -148,14 +149,64 @@ def test_post_shows_verified_and_displayed_real_name(tmp_path):
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=alice, name_requirement="verified_and_displayed")
-    create_post(db, board, alice, "Hello", "World")
     attest_name(db, alice, "Alice Smith", verifier=sysop)
+    create_post(db, board, alice, "Hello", "World")
 
     # The reader's byline carries the attested name in full (issue #679).
     session = FakeSession(keys=["0", "1", "b", "b"])
     asyncio.run(_show_board(session, db, board, alice))
 
     assert "(=Alice Smith=)" in session.output
+    db.close()
+
+
+def test_a_post_written_before_its_author_was_verified_never_gains_the_name(tmp_path):
+    """The reported bug (design doc §5.5): a post written with no verified
+    name read back as `(=Real Name=)` once the SysOp verified its author."""
+    from netbbs.attestation import attest_name, set_display_name
+    from netbbs.auth.users import SYSOP_LEVEL
+
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=sysop, name_requirement="verified_and_displayed")
+    create_post(db, board, sysop, "Hello", "World")  # the gate lets a SysOp in unverified
+    attest_name(db, sysop, "Sam Sysop", verifier=sysop)
+    set_display_name(db, sysop, "Later Name")
+    attest_name(db, bob, "Bob Brown", verifier=sysop)
+
+    session = FakeSession(keys=["0", "1", "b", "b"])
+    asyncio.run(_show_board(session, db, board, bob))
+
+    assert "Sam Sysop" not in session.output
+    assert "(=" not in session.output
+    assert "Later Name" not in session.output
+    assert "sysop" in session.output
+    del alice
+    db.close()
+
+
+def test_a_verified_post_keeps_its_name_through_replacement_revocation_and_renames(tmp_path):
+    from netbbs.attestation import attest_name, revoke_attestation, set_display_name
+    from netbbs.auth.users import SYSOP_LEVEL
+
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=sysop, name_requirement="verified_and_displayed")
+    set_display_name(db, alice, "Al")
+    attest_name(db, alice, "Alice Smith", verifier=sysop)
+    create_post(db, board, alice, "Hello", "World")
+    attest_name(db, alice, "Alice Jones", verifier=sysop)
+    set_display_name(db, alice, "Changed")
+    revoke_attestation(db, alice, "name", actor=sysop)
+
+    session = FakeSession(keys=["0", "1", "b", "b"])
+    asyncio.run(_show_board(session, db, board, sysop))
+
+    assert "Al (=Alice Smith=)" in strip_ansi(session.output)
+    assert "Jones" not in session.output and "Changed" not in session.output
     db.close()
 
 

@@ -137,14 +137,20 @@ def _accept_remote_name(db, node, peer, *, value="Alice Example"):
     )
 
 
-def test_a_carried_posts_attested_name_is_shown_where_the_board_requires_it(db):
-    """Before issue #584 this branch was unreachable: a carried post has no
-    local account, so the `verified_and_displayed` path fell straight through
-    to the plain label and a remote attestation was never consulted."""
-    node, home = _home_node("home-verified", "The Rusty Anchor", "rusty.netbbs.org")
+def _carried(label: str, *, shown: str | None, verified: str | None):
+    return SimpleNamespace(
+        author_user_id=None, author_label=label, author_shown_name=shown, author_verified_name=verified,
+    )
+
+
+def test_a_carried_posts_frozen_attested_name_is_shown_where_the_board_requires_it(db):
+    """The name comes from the post -- frozen from the attestation this node
+    accepted when it stored it (design doc §5.5) -- presented with the home
+    node's current identity."""
+    _node, home = _home_node("home-verified", "The Rusty Anchor", "rusty.netbbs.org")
     save_peer(db, home)
-    _accept_remote_name(db, node, home)
-    post = SimpleNamespace(author_user_id=None, author_label=f"alice@{home.fingerprint}")
+    label = f"alice@{home.fingerprint}"
+    post = _carried(label, shown=label, verified="Alice Example")
 
     rendered = strip_ansi(_author_display_name(db, post, name_requirement="verified_and_displayed"))
 
@@ -156,22 +162,22 @@ def test_a_carried_posts_attested_name_is_shown_where_the_board_requires_it(db):
     assert "Alice Example" not in _author_display_name(db, post, name_requirement="verified")
 
 
-def test_a_carried_post_with_no_accepted_attestation_shows_only_its_label(db):
-    _node, home = _home_node("home-unverified", "The Rusty Anchor", "rusty.netbbs.org")
+def test_a_carried_post_stored_without_a_name_never_gains_one(db):
+    """An attestation accepted after the post was stored does not badge it."""
+    node, home = _home_node("home-later", "The Rusty Anchor", "rusty.netbbs.org")
     save_peer(db, home)
-    post = SimpleNamespace(author_user_id=None, author_label=f"alice@{home.fingerprint}")
+    _accept_remote_name(db, node, home)
+    label = f"alice@{home.fingerprint}"
 
-    rendered = strip_ansi(_author_display_name(db, post, name_requirement="verified_and_displayed"))
+    for post in (_carried(label, shown=label, verified=None), _carried(label, shown=None, verified=None)):
+        rendered = strip_ansi(_author_display_name(db, post, name_requirement="verified_and_displayed"))
+        assert "(=" not in rendered
+        assert rendered == "alice@The Rusty Anchor · rusty.netbbs.org"
 
-    assert "(=" not in rendered
-    assert rendered == "alice@The Rusty Anchor · rusty.netbbs.org"
 
-
-def test_a_local_or_malformed_label_is_never_looked_up_as_a_link_identity(db):
-    """`alice` has no `@`, so there is no Link identity to ask about -- and a
-    malformed label must not be split into one either."""
+def test_a_local_or_malformed_label_with_nothing_frozen_renders_as_its_label(db):
     for label in ("alice", "@nohome", "nouser@"):
-        post = SimpleNamespace(author_user_id=None, author_label=label)
+        post = _carried(label, shown=None, verified=None)
         assert _author_display_name(
             db, post, name_requirement="verified_and_displayed"
         ) == label

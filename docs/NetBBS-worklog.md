@@ -1236,8 +1236,15 @@ canonical label if it does not. Moderation and addressing remain
 canonical-only.
 
 For channels requiring `verified_and_displayed`, the verified real-name unit
-is generated only from the trusted attestation record. The server-produced
-color and reserved marker are the anti-forgery boundary. Live send and `/me`
+is generated only from the trusted attestation record -- for a stored record
+(post, upload, chat line) from the copy this node froze from it when the record
+was written (`attestation.verified_name_unit`, issue #1453), never from the
+account's current attestation. The server-produced color and reserved marker
+are the anti-forgery boundary, so the frozen columns (`posts.author_*_name`,
+`files.uploader_*_name`, `channel_messages.author_verified_name`) are written
+only by this node's own write paths and never from a peer's payload; a new
+write path for one of those records must freeze too, and a new revision path
+must copy its root's values (`posts.frozen_author_of`). Live send and `/me`
 revalidate current participation requirements so a session cannot keep
 posting after policy or attestation changes.
 
@@ -4303,7 +4310,7 @@ because `Identity.sign()` returns detached bytes while
 never registered raises `sqlite3.IntegrityError` rather than returning "not
 accepted". Every remote gate reaches that recompute
 (`remote_meets_age`, `remote_meets_name_requirement`,
-`format_remote_name_for_resource`), and the overwhelmingly common input to all
+`remote_verified_name_to_freeze`), and the overwhelmingly common input to all
 three is an author with no attestation at all, so
 `get_remote_attestation_state` answers an unregistered subject directly with
 `unknown_link_identity` and writes nothing. Nothing hit this while the three

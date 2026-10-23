@@ -14,11 +14,11 @@ from netbbs.link.remote_attestation import (
     clear_remote_attestation_override,
     configure_attestation_authority,
     get_remote_attestation_state,
-    format_remote_name_for_resource,
     ingest_remote_attestation,
     list_attestation_authorities,
     remote_meets_age,
     remote_meets_name_requirement,
+    remote_verified_name_to_freeze,
     remove_attestation_authority,
     set_remote_attestation_override,
 )
@@ -317,14 +317,11 @@ def test_remote_real_name_disclosure_stays_resource_scoped(db, subject, authorit
         db, attestation_wire(authority_key, subject, value="Private Real Name"),
         issuer_verify_key=authority_key.verify_key, now_iso=stamp(NOW),
     )
-    assert format_remote_name_for_resource(
-        db, subject, "alice@home", name_requirement=None, now_iso=stamp(NOW)
-    ) == "alice@home"
-    disclosed = format_remote_name_for_resource(
-        db, subject, "alice@home", name_requirement="verified_and_displayed", now_iso=stamp(NOW)
-    )
-    assert disclosed.startswith("alice@home ")
-    assert "(=Private Real Name=)" in disclosed
+    assert remote_verified_name_to_freeze(db, subject, name_requirement=None, now_iso=stamp(NOW)) is None
+    assert remote_verified_name_to_freeze(db, subject, name_requirement="verified", now_iso=stamp(NOW)) is None
+    assert remote_verified_name_to_freeze(
+        db, subject, name_requirement="verified_and_displayed", now_iso=stamp(NOW)
+    ) == "Private Real Name"
 
 
 def test_an_unknown_link_identity_is_answered_rather_than_crashed(db):

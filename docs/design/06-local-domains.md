@@ -2224,8 +2224,11 @@ per board. Nothing is mapped by default.
   (§5.5, its own or its Community's) is `verified_and_displayed` sends the
   author's verified real name instead. That board alone does; the same
   author's posts on any other echo, on Link and in chat keep the username.
-  A reply there is addressed to the parent author's verified real name when
-  the parent is a local post, so its To matches the From the network saw.
+  The name is the one frozen on the post when it was written (§5.5, issue
+  #1453), which is also what the board shows, so a post a moderator approves
+  later goes out under the name it was written under. A reply there is
+  addressed to the parent's frozen name when the parent is a local post, so
+  its To matches the From the network saw.
   A post that could not go out under a verified real name is refused before
   it is written: the author has none, or it is longer than the From field's
   35 bytes in the character set the message is written in. The board page
@@ -2233,10 +2236,9 @@ per board. Nothing is mapped by default.
   every way of writing a post meets the same check -- a reply, a cross-post
   copy, a bot's post, and a door's, whose label is nobody's name. It applies
   to a local SysOp too, whom the name gate itself lets through. A post that
-  reaches the exporter without a usable name anyway (its author's
-  verification was revoked or replaced while a moderator held it, or it was
-  carried from elsewhere) stays local with a node-log warning, as for a full
-  queue. It is never sent under the username or with the name cut short.
+  reaches the exporter without a usable name anyway (written before the board
+  displayed names, or carried from elsewhere) stays local with a node-log
+  warning, as for a full queue. It is never sent under the username or with the name cut short.
 
   A post that arrived from FTN is never exported again. SEEN-BY and PATH on
   tossed messages are kept intact, so loop detection works.

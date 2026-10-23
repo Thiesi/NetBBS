@@ -71,6 +71,13 @@ class FileEntry:
     status: str
     pinned: bool
     exempt_from_expiry: bool
+    # What the entry was shown under when it was uploaded to an area that
+    # displays verified names (design doc §5.5): the uploader's display name
+    # or username, and their attested real name if they had one then.
+    # `uploader_shown_name` is `None` for an upload made where names were
+    # not displayed, which shows its plain `uploader_label`.
+    uploader_shown_name: str | None = None
+    uploader_verified_name: str | None = None
 
 
 def upload_file(
@@ -233,6 +240,7 @@ def _finalize_upload(
                 status,
             ),
         )
+        _freeze_uploader_without_commit(db, area, uploader, file_id)
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
         raise FileEntryError(
@@ -241,6 +249,27 @@ def _finalize_upload(
 
     reindex_file(db, area.id, file_id)
     return get_file(db, file_id)
+
+
+def _freeze_uploader_without_commit(db: Database, area: FileArea, uploader: User, file_id: str) -> None:
+    """Keep on new entry `file_id` what `area` shows `uploader` as now, when
+    it displays verified names (its own requirement, else its Community's),
+    as a board post does (design doc §5.5). Nothing is written in any other
+    area, so the INSERT stays valid on older schemas."""
+    from netbbs.attestation import primary_name_for_resource, verified_name_to_freeze
+    from netbbs.communities import get_effective_name_requirement
+
+    requirement = get_effective_name_requirement(db, area)
+    if requirement != "verified_and_displayed":
+        return
+    db.connection.execute(
+        "UPDATE files SET uploader_shown_name = ?, uploader_verified_name = ? WHERE file_id = ?",
+        (
+            primary_name_for_resource(db, uploader),
+            verified_name_to_freeze(db, uploader, name_requirement=requirement),
+            file_id,
+        ),
+    )
 
 
 def get_file(db: Database, file_id: str) -> FileEntry:
@@ -955,4 +984,7 @@ def _row_to_file_entry(row: sqlite3.Row) -> FileEntry:
         status=row["status"],
         pinned=bool(row["pinned"]),
         exempt_from_expiry=bool(row["exempt_from_expiry"]),
+        # Absent on a schema before the verified-name freeze.
+        uploader_shown_name=row["uploader_shown_name"] if "uploader_shown_name" in row.keys() else None,
+        uploader_verified_name=row["uploader_verified_name"] if "uploader_verified_name" in row.keys() else None,
     )

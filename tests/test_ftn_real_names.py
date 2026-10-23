@@ -133,6 +133,21 @@ def test_a_reply_to_a_real_name_post_is_addressed_to_that_name(db, sysop, networ
     assert second.reply == first.msgid
 
 
+def test_a_reply_is_addressed_to_the_name_its_parent_went_out_under(db, sysop, network, admin_echo):
+    """The parent's frozen name, not its author's current one (§5.5)."""
+    member = create_user(db, "night_owl", password="hunter2")
+    attest_name(db, sysop, "Jane Carrier", verifier=sysop)
+    attest_name(db, member, "Owen Night", verifier=sysop)
+    parent = create_post(db, admin_echo, member, "Question", "How?")
+    export_post_if_ftn(db, parent, admin_echo)
+    attest_name(db, member, "Owen Knight", verifier=sysop)
+
+    reply = create_post(db, admin_echo, sysop, "Re: Question", "Thus.", parent_post_id=parent.post_id)
+    export_post_if_ftn(db, reply, admin_echo)
+
+    assert _sent(db, network)[1].to_name == "Owen Night"
+
+
 # -- no verified name ---------------------------------------------------------
 
 
@@ -142,12 +157,38 @@ def test_a_sysop_without_a_verified_name_is_refused_before_the_post_is_written(d
     assert db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0
 
 
-def test_a_post_whose_author_lost_the_name_stays_local_with_a_warning(db, sysop, network, caplog):
+def test_a_held_post_goes_out_under_the_name_it_was_written_under(db, sysop, network):
+    """Design doc §5.5: the name frozen on the post when it was written is
+    what the board shows and what the network gets, even when the author's
+    attestation was revoked before a moderator approved the post."""
     board = create_board(db, "held admin", creator=sysop, name_requirement="verified_and_displayed", moderated=True)
     set_board_area(db, board, network.id, "NIX_ADMIN")
     attest_name(db, sysop, "Jane Carrier", verifier=sysop)
     post = create_post(db, board, sysop, "Hello", "Hi.")
     revoke_attestation(db, sysop, "name", actor=sysop)
+
+    assert export_post_if_ftn(db, approve_post(db, post, approved_by=sysop), board)
+
+    stored = db.connection.execute(
+        "SELECT author_verified_name FROM posts WHERE post_id = ?", (post.post_id,)
+    ).fetchone()[0]
+    assert stored == "Jane Carrier"
+    assert [message.from_name for message in _sent(db, network)] == [stored]
+
+
+def test_a_post_written_before_its_board_sent_real_names_stays_local_with_a_warning(db, sysop, network, caplog):
+    """A post with no frozen name -- written while the board displayed no
+    verified names -- has no name to go out under, whatever its author has
+    now: it is never sent under the username."""
+    board = create_board(db, "held admin", creator=sysop, moderated=True)
+    post = create_post(db, board, sysop, "Hello", "Hi.")
+    db.connection.execute("UPDATE boards SET name_requirement = 'verified_and_displayed' WHERE id = ?", (board.id,))
+    db.connection.commit()
+    from netbbs.boards.boards import get_board_by_name
+
+    board = get_board_by_name(db, "held admin")
+    set_board_area(db, board, network.id, "NIX_ADMIN")
+    attest_name(db, sysop, "Jane Carrier", verifier=sysop)
 
     with caplog.at_level("WARNING"):
         assert not export_post_if_ftn(db, approve_post(db, post, approved_by=sysop), board)
@@ -178,18 +219,16 @@ def test_a_name_too_long_for_the_from_field_is_refused_at_posting(db, sysop, net
         create_post(db, admin_echo, sysop, "Hello", "Hi.")
 
 
-def test_a_name_that_grew_too_long_stays_local_and_is_never_cut(db, sysop, network, caplog):
+def test_a_name_replaced_after_posting_does_not_change_the_from_name(db, sysop, network):
     board = create_board(db, "held admin", creator=sysop, name_requirement="verified_and_displayed", moderated=True)
     set_board_area(db, board, network.id, "NIX_ADMIN")
     attest_name(db, sysop, "Jane Carrier", verifier=sysop)
     post = create_post(db, board, sysop, "Hello", "Hi.")
     attest_name(db, sysop, "Johanna Wilhelmina Carrier-Montgomery", verifier=sysop)
 
-    with caplog.at_level("WARNING"):
-        assert not export_post_if_ftn(db, approve_post(db, post, approved_by=sysop), board)
+    assert export_post_if_ftn(db, approve_post(db, post, approved_by=sysop), board)
 
-    assert _sent(db, network) == []
-    assert "37 bytes" in caplog.text
+    assert [message.from_name for message in _sent(db, network)] == ["Jane Carrier"]
 
 
 def test_the_length_is_counted_in_the_character_set_the_message_goes_out_in(db, sysop, network, admin_echo):

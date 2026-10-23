@@ -646,47 +646,97 @@ def _row_to_attestation(row: sqlite3.Row) -> UserAttestation:
 # -- anti-forgery display (design doc §18) -----------------------------------
 
 
-def format_verified_name_unit(db: Database, user: User, *, name_requirement: str | None) -> str | None:
+def verified_name_unit(attested_value: str) -> str:
     """
-    The trusted, colored `(={attested real name}=)` unit alone, or
-    `None` if `name_requirement` isn't `verified_and_displayed` or
-    `user` has no name attestation — the rendering-layer guarantee the
-    primitive `format_name_for_resource` itself is built from (see
-    GitHub issue #64).
+    The trusted, colored `(={attested real name}=)` unit for one attested
+    value -- the rendering-layer guarantee every verified-name display is
+    built from (see GitHub issue #64). **The one function in the codebase
+    that manufactures this unit**: a live lookup (`format_verified_name_unit`),
+    and a name frozen on a stored record, local or Link-accepted
+    (`format_stored_name_for_resource`), both come here rather than
+    reimplementing the coloring.
 
-    Split out of `format_name_for_resource` specifically because chat's
-    per-message author label (`netbbs.net.chat_flow._chat_author_label`)
-    needs this unit composed with a *different* primary name than
-    `format_name_for_resource` uses (a `/nick` alias when one is set,
-    not `display_name`/`username`) — this is the one function in the
-    codebase capable of manufacturing the trusted colored unit, so every
-    caller composes around it rather than reimplementing the coloring
-    itself.
+    `attested_value` must come from an attestation -- `user_attestations`,
+    an accepted remote attestation, or a record's frozen copy of one written
+    by this node from either (design doc §5.5) -- never from anything a
+    user types: that is what makes the unit trustworthy.
 
-    Sanitizes before coloring, not after (the established
-    ordering) — running `sanitize_text` on an already-colored string
-    would risk stripping this function's own legitimate SGR codes right
-    alongside any genuinely hostile content.
+    Sanitizes before coloring, not after (the established ordering) --
+    running `sanitize_text` on an already-colored string would risk
+    stripping this function's own legitimate SGR codes right alongside any
+    genuinely hostile content.
     """
+    return colored(f"(={sanitize_text(attested_value)}=)", fg_color=VERIFIED_COLOR)
+
+
+def verified_name_to_freeze(db: Database, user: User, *, name_requirement: str | None) -> str | None:
+    """The attested real name a record `user` writes now in a resource with
+    `name_requirement` keeps, or `None`: there is none to keep unless the
+    resource displays verified names and `user` has a name attestation.
+
+    A stored record -- a board post, an uploaded file, a chat line -- is
+    shown later under what was shown when it was written (design doc §5.5,
+    issue #1453): a later verification, replacement or revocation never
+    re-badges it."""
     if name_requirement != "verified_and_displayed":
         return None
     attestation = get_attestation(db, user, "name")
-    if attestation is None:
-        return None
-    return colored(f"(={sanitize_text(attestation.attested_value)}=)", fg_color=VERIFIED_COLOR)
+    return attestation.attested_value if attestation is not None else None
+
+
+def primary_name_for_resource(db: Database, user: User) -> str:
+    """The unsanitized primary name `format_name_for_resource` shows `user`
+    under: their display name, or their username without one. A record
+    written in a resource that displays verified names stores this beside
+    the attested name (`verified_name_to_freeze`)."""
+    return get_display_name(db, user) or user.username
+
+
+def format_stored_name_for_resource(
+    shown_name: str, verified_name: str | None, *, name_requirement: str | None
+) -> str:
+    """
+    A stored record's author as a resource that may display verified names
+    shows it: `shown_name`, sanitized, and the trusted `verified_name_unit`
+    for `verified_name` -- the values frozen on the record when it was
+    written -- when the resource *currently* displays verified names.
+    Whether to show the unit is decided at read time, so a resource that
+    stops displaying names stops showing it; which name it shows is the
+    record's.
+    """
+    primary = sanitize_text(shown_name)
+    if name_requirement != "verified_and_displayed" or verified_name is None:
+        return primary
+    return f"{primary} {verified_name_unit(verified_name)}"
+
+
+def format_verified_name_unit(db: Database, user: User, *, name_requirement: str | None) -> str | None:
+    """
+    The trusted, colored `(={attested real name}=)` unit for `user`'s
+    *current* name attestation, or `None` if `name_requirement` isn't
+    `verified_and_displayed` or `user` has no name attestation. Built on
+    `verified_name_unit`.
+
+    For live presentation only: a stored record shows the name frozen on it
+    instead (`format_stored_name_for_resource`).
+    """
+    verified_name = verified_name_to_freeze(db, user, name_requirement=name_requirement)
+    return verified_name_unit(verified_name) if verified_name is not None else None
 
 
 def format_name_for_resource(db: Database, user: User, *, name_requirement: str | None) -> str:
     """
-    The name `user` should be shown as within one specific resource that
-    may require `verified_and_displayed` real names. **Never used
+    The name `user` should be shown as *now* within one specific resource
+    that may require `verified_and_displayed` real names. **Never used
     outside that resource's own rendering** — real-name display is
     always scoped to the resource that required it, never BBS-wide
-    (design doc §18).
+    (design doc §18). A stored record is shown under the values frozen on
+    it when it was written (`format_stored_name_for_resource`), which are
+    this function's inputs at that moment.
 
     Format: `"{display_name or username} (={attested real name}=)"`,
     with the whole `(=...=)` unit rendered in `VERIFIED_COLOR` via
-    `format_verified_name_unit`, its own extracted primitive. This is a
+    `verified_name_unit`, its own extracted primitive. This is a
     **rendering-layer guarantee, not a text-pattern one**: the color is
     applied directly to the trusted
     `attested_value` from `user_attestations`, never derived from or
@@ -695,8 +745,8 @@ def format_name_for_resource(db: Database, user: User, *, name_requirement: str 
     types can ever produce this exact wrapped form on its own, even in a
     color-stripped view.
     """
-    primary = sanitize_text(get_display_name(db, user) or user.username)
-    verified_unit = format_verified_name_unit(db, user, name_requirement=name_requirement)
-    if verified_unit is None:
-        return primary
-    return f"{primary} {verified_unit}"
+    return format_stored_name_for_resource(
+        primary_name_for_resource(db, user),
+        verified_name_to_freeze(db, user, name_requirement=name_requirement),
+        name_requirement=name_requirement,
+    )

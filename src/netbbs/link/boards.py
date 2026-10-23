@@ -35,7 +35,13 @@ from typing import TYPE_CHECKING
 
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.boards.boards import Board, usable_max_age_days
-from netbbs.boards.posts import WITHDRAWN_PLACEHOLDER, Post, crosspost_group_of
+from netbbs.boards.posts import (
+    WITHDRAWN_PLACEHOLDER,
+    Post,
+    crosspost_group_of,
+    frozen_author_of,
+    set_frozen_author_without_commit,
+)
 from netbbs.age_requirement import carried_age_requirement, row_age_requirement
 from netbbs.communities import get_effective_min_age, get_effective_name_requirement
 from netbbs.file_refs import body_with_link_text, post_refs
@@ -84,6 +90,7 @@ from netbbs.link.protocol import LinkNode, PeerRecord
 from netbbs.link.remote_attestation import (
     remote_meets_age,
     remote_meets_name_requirement,
+    remote_verified_name_to_freeze,
 )
 from netbbs.link.trust import TrustSubject
 from netbbs.search import reindex_post
@@ -480,6 +487,8 @@ def _post_from_row(row) -> Post:
         tombstoned_at=row["tombstoned_at"],
         layout=row["layout"] if "layout" in row.keys() else "prose",
         withdrawn=bool(row["withdrawn"]) if "withdrawn" in row.keys() else False,
+        author_shown_name=frozen_author_of(row)[0],
+        author_verified_name=frozen_author_of(row)[1],
     )
 
 
@@ -587,6 +596,9 @@ def materialize_carried_post(
         # the post from a peer that has no reason to send it again.
         db.connection.commit()
         return None
+    # Asked before the INSERT: the attestation lookup commits what this
+    # transaction holds so far, as the identity gate above already does.
+    frozen_name = _remote_author_name_to_freeze(db, payload["author"], board_row)
     db.connection.execute(
         """
         INSERT INTO posts
@@ -599,6 +611,8 @@ def materialize_carried_post(
             payload["subject"], payload["body"], payload["created_at"], initial_status, post.content_id,
         ),
     )
+    if frozen_name is not None:
+        set_frozen_author_without_commit(db, post.content_id, author_label, frozen_name[0])
     if payload.get("layout") == "art":
         # Issue #711: the only layout besides the default. Anything else --
         # absent, or a value this node does not know -- is prose.
@@ -620,6 +634,32 @@ def materialize_carried_post(
     return _post_from_row(
         db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (post.content_id,)).fetchone()
     )
+
+
+def _remote_author_subject(author: dict) -> TrustSubject | None:
+    """The Link identity a carried post's `author` names, as the board's
+    identity gate asks it, or `None` for an incomplete one."""
+    home = author.get("home_node_fingerprint")
+    opaque = author.get("opaque_user_id") or author.get("local_user_id")
+    if not home or not opaque:
+        return None
+    return TrustSubject.user(home, opaque)
+
+
+def _remote_author_name_to_freeze(db: Database, author: dict, board_row) -> tuple[str | None] | None:
+    """What a carried post by `author` keeps of its author's verified name
+    when this node stores it (design doc §5.5): `None` when the board does
+    not display verified names (nothing is frozen), else a one-tuple of the
+    real name this node accepts for the author now -- `None` inside when it
+    accepts none. Frozen once, when the post is stored; a later acceptance,
+    revocation or replacement leaves the post as it is."""
+    requirement = get_effective_name_requirement(db, _board_from_row(board_row))
+    if requirement != "verified_and_displayed":
+        return None
+    subject = _remote_author_subject(author)
+    if subject is None:
+        return (None,)
+    return (remote_verified_name_to_freeze(db, subject, name_requirement=requirement),)
 
 
 def _remote_author_meets_board_identity_policy(db: Database, author: dict, board_row) -> bool:
@@ -653,11 +693,9 @@ def _remote_author_meets_board_identity_policy(db: Database, author: dict, board
     name_requirement = get_effective_name_requirement(db, board)
     if not min_age and name_requirement is None:
         return True
-    home = author.get("home_node_fingerprint")
-    opaque = author.get("opaque_user_id") or author.get("local_user_id")
-    if not home or not opaque:
+    subject = _remote_author_subject(author)
+    if subject is None:
         return False
-    subject = TrustSubject.user(home, opaque)
     return (
         remote_meets_age(db, subject, min_age)
         and remote_meets_name_requirement(db, subject, name_requirement)
@@ -773,6 +811,8 @@ def materialize_carried_post_edit(
             payload["root_post_id"], payload["previous_event_id"],
         ),
     )
+    # An edit is shown under what its post was first shown under (§5.5).
+    set_frozen_author_without_commit(db, edit.content_id, *frozen_author_of(root_row))
     # Issue #1299: an edit of a poll's post carries its closing date, and a
     # withdrawal closes the poll.
     if "poll" in payload:
@@ -1020,6 +1060,7 @@ def materialize_carried_board_post_moderator_edit(
             local_root, local_previous,
         ),
     )
+    set_frozen_author_without_commit(db, edit.content_id, *frozen_author_of(root_row))
     if "poll" in payload:
         # Issue #1299: the origin's moderator changed a poll's closing date.
         apply_carried_closing_without_commit(db, local_root, payload["poll"])
@@ -1091,6 +1132,7 @@ def materialize_carried_board_post_tombstone(
             local_root, local_previous, payload["created_at"],
         ),
     )
+    set_frozen_author_without_commit(db, tombstone.content_id, *frozen_author_of(root_row))
     # Issue #1299: a takedown closes the poll and hides its totals.
     close_poll_for_removal_without_commit(db, local_root)
     reindex_post(db, root_row["board_id"], local_root)
