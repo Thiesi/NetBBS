@@ -105,11 +105,12 @@ class OutboundMessage:
 
 def enqueue_outbound_without_commit(
     db: Database, network_id: int, *, kind: str, reference_id: str, destination: str,
-    packed: bytes, route: str = "uplink",
+    packed: bytes, route: str = "uplink", flavour: str = "normal",
 ) -> bool:
     """Queue an encoded message; False if this one is already queued (each
     post or letter goes out once per network). Raises `FtnQueueFullError`
-    at `MAX_PENDING_PER_NETWORK` unsent messages."""
+    at `MAX_PENDING_PER_NETWORK` unsent messages. `flavour` is `normal`,
+    `crash` or `hold` (issue #1471, `netbbs.ftn.outbound`)."""
     if db.connection.execute(
         "SELECT 1 FROM ftn_outbound WHERE network_id = ? AND kind = ? AND reference_id = ?",
         (network_id, kind, reference_id),
@@ -124,8 +125,9 @@ def enqueue_outbound_without_commit(
         )
     cursor = db.connection.execute(
         "INSERT OR IGNORE INTO ftn_outbound "
-        "(network_id, kind, reference_id, destination, route, packed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (network_id, kind, reference_id, destination, route, packed, utc_now_iso()),
+        "(network_id, kind, reference_id, destination, route, packed, created_at, flavour) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (network_id, kind, reference_id, destination, route, packed, utc_now_iso(), flavour),
     )
     return cursor.rowcount == 1
 
@@ -174,8 +176,11 @@ def mark_outbound_sent(db: Database, ids: list[int]) -> None:
 
 
 def reroute_outbound_to_uplink(db: Database, ids: list[int]) -> None:
-    """A direct netmail whose calls failed goes via the uplink instead."""
-    db.connection.executemany("UPDATE ftn_outbound SET route = 'uplink' WHERE id = ?", [(i,) for i in ids])
+    """A direct netmail whose calls failed goes via the uplink instead --
+    a normal one: crash never does, and hold makes no calls (issue #1471)."""
+    db.connection.executemany(
+        "UPDATE ftn_outbound SET route = 'uplink' WHERE id = ? AND flavour = 'normal'", [(i,) for i in ids]
+    )
     db.connection.commit()
 
 

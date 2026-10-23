@@ -3006,9 +3006,77 @@ Netmail is personal mail to an address written as `Name (zone:net/node)`.
 | Netmail | |
 | --- | --- |
 | **Who may send it** | Each network has a **Netmail level**, and only accounts at that level may send netmail. It starts at 255, SysOp only, because netmail leaves under this BBS's address. |
-| **Who receives it** | Every account, by username, a username it had before a rename, or its verified real name. Netmail for a name with no account here comes to you, and so does netmail for a real name two accounts share. |
+| **Who receives it** | Every account, by username, a username it had before a rename, or its verified real name. Netmail to `SysOp` always comes to you, even if an account is called that. |
+| **No such account** | Netmail no account here can take goes back to its sender (below). Set **Bounce unknown** to **no** and it comes to you instead. |
 | **Direct delivery** | Keep the network's nodelist current (below). Netmail to a node whose nodelist entry gives a BinkP host then goes to it directly. |
 | **Via the hub** | The rest goes through the hub, and so does anything a direct call fails to deliver after three tries. |
+| **Flavour** | Each netmail is **Normal**, **Crash** or **Hold**, chosen on the review screen with <kbd>F</kbd> **Flavour** (below). |
+| **Files** | Your own netmail can carry files from a file area (below). Files sent to this BBS land in the network's **Attach area**. |
+
+#### Returned netmail
+
+Netmail for a name no account has, for a verified real name two accounts
+share, or for an account that takes no mail goes back to its sender. The
+reply comes from `Mailer-Daemon` at this BBS's address, says why, and
+quotes the first lines. **Bounce unknown**, in the network's **Netmail**
+section, is on for every network; set it to **no** and such netmail comes to
+you instead, with a line saying who it was for.
+
+Some netmail is never returned, and comes to you with a line saying why:
+
+- netmail from a robot, such as AreaFix, FileFix or `Mailer-Daemon`;
+- netmail that is a returned netmail itself;
+- netmail from an address that already got five returned netmails from this
+  BBS today.
+
+That keeps two misconfigured systems from bouncing mail back and forth.
+
+#### Crash and hold
+
+The <kbd>F</kbd> **Flavour** key on the review screen goes round three
+choices:
+
+- **Normal**, the default: direct when the nodelist lists the node, else
+  through the hub.
+- **Crash**: this BBS calls the node directly and at once, never through the
+  hub. It needs a BinkP address for the node in the nodelist, unless the node
+  is your hub. After five failed calls the netmail is dropped, and its sender
+  gets a letter from the BBS saying so.
+- **Hold**: nothing calls out. The netmail waits until the node calls this
+  BBS, or until this BBS calls it for other mail. A node that calls in
+  without a password gets its held mail and nothing else. Held netmail still
+  waiting after 30 days is dropped, and its sender is told.
+
+**Node ▸ Echomail & netmail (FTN)** counts held netmail under **Waiting**.
+
+#### Files with netmail
+
+To send a file to another node, write the netmail and press
+<kbd>A</kbd> **Attach file** on the review screen. Pick it from a file area,
+as for any letter. When you send, the file goes with the netmail, through
+the hub or directly, on the netmail's flavour.
+
+- Only your own netmail sends files. When others who may send netmail point
+  at a file, the far side gets its name and file area as text, as with a
+  letter to a linked BBS.
+- A file is at most the node's upload limit, and never more than 64 MiB.
+- On the network, the netmail's subject is the files' names, as FTN
+  requires. Your Sent copy keeps the subject you wrote.
+
+Files sent to this BBS with a netmail are stored in the network's
+**Attach area**, set in the **Netmail** section, and listed in the letter
+like any file a letter points at.
+
+- A file shows its sender as its uploader, and goes through the area's
+  moderation. In a moderated area, the letter shows it as not available
+  until you approve it.
+- Whoever may read the area may download the file, so pick an area only the
+  right people can read.
+- Without an attach area, each file is held for you, and the letter says
+  so. A file is also held when its name is already in the area, it is over
+  the limit, or it came from a caller that didn't prove a password.
+- A file can come before or after its netmail, in another call. Whichever
+  comes first waits up to 7 days for the other.
 
 #### The nodelist
 
@@ -3068,7 +3136,9 @@ Some packets and files are held instead of tossed:
 - a file echo's file and TIC that failed a check, together;
 - a file waiting for its TIC, or a TIC waiting for its file. A ZIP archive
   with no packets in it is held whole, and any other file inside a mail
-  bundle is held on its own beside the tossed packets.
+  bundle is held on its own beside the tossed packets;
+- a file sent with a netmail that couldn't be stored, such as when the
+  network has no **Attach area** (see [Netmail](#netmail)).
 
 The store holds 200 items and 256 MiB. If it is full, what can't be kept is
 counted as lost in the last call's summary and written to the log.
@@ -3112,7 +3182,8 @@ the status screen counts them.
 
 ### Not supported
 
-- file requests, and sending files out to a file echo;
+- file requests, and sending files out to a file echo (files go out with
+  netmail only);
 - acting as a hub for other nodes;
 - ARC and ARJ bundles. Ask the hub for ZIP bundles or uncompressed packets.
 

@@ -81,6 +81,10 @@ class FtnNetwork:
     # --- file echoes (issue #1462) ---
     tic_password: str = ""  # a TIC's Pw; empty: every TIC is held
     # --- end file echoes ---
+    # --- netmail extras (issues #1470 and #1472) ---
+    bounce_unknown: bool = True  # return netmail no account can take (Decision 26)
+    attach_area_id: int | None = None  # where inbound file attaches are stored; None: held
+    # --- end netmail extras ---
     id: int | None = None
 
     @property
@@ -204,6 +208,12 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
             "UPDATE ftn_networks SET tic_password = ? WHERE id = ?", (validated.tic_password, validated.id)
         )
         # --- end file echoes ---
+        # --- netmail extras (issues #1470 and #1472), on their own ---
+        db.connection.execute(
+            "UPDATE ftn_networks SET bounce_unknown = ?, attach_area_id = ? WHERE id = ?",
+            (int(validated.bounce_unknown), validated.attach_area_id, validated.id),
+        )
+        # --- end netmail extras ---
     except sqlite3.IntegrityError:
         db.connection.rollback()
         raise FtnNetworkError(f"A network called {validated.name!r} already exists.") from None
@@ -255,6 +265,10 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
         nodelist_echo=row["nodelist_echo"], nodelist_name=row["nodelist_name"],
         nodediff_name=row["nodediff_name"],
         tic_password=row["tic_password"] if "tic_password" in row.keys() else "",  # issue #1462
+        # --- netmail extras (issues #1470 and #1472) ---
+        bounce_unknown=bool(row["bounce_unknown"]) if "bounce_unknown" in row.keys() else True,
+        attach_area_id=row["attach_area_id"] if "attach_area_id" in row.keys() else None,
+        # --- end netmail extras ---
     )
 
 

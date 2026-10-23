@@ -7,15 +7,18 @@ calls the uplink when
 
 - the network's poll interval has passed since the last successful call,
   or
-- messages are waiting and the last call was at least `MIN_CALL_GAP` ago,
-  so a new post goes out within minutes without hammering the hub (fsxNet
-  blocks a node that calls several times a minute).
+- messages or files are waiting and the last call was at least
+  `MIN_CALL_GAP` ago, so a new post goes out within minutes without
+  hammering the hub (fsxNet blocks a node that calls several times a
+  minute); crash mail for the hub itself goes at the next check. Held mail
+  never makes it call (issue #1471).
 
-A call sends one packet of up to `exchange.MAX_MESSAGES_PER_PACKET` waiting
-messages, receives whatever the hub holds, and tosses it: bare packets
+A call hands over what `netbbs.ftn.outbound.outbound_for_node` gives the
+node -- one packet of up to `outbound.MAX_MESSAGES_PER_PACKET` waiting
+messages, and the files queued for it -- receives whatever the hub holds, and tosses it: bare packets
 directly, ZIP bundles unpacked first; any other file is held for the
 SysOp. A message is marked sent only when the hub confirms the packet
-holding it (`M_GOT`), so a call cut off part way loses nothing and sends
+holding it (`M_GOT`), and a file only when the hub confirms it, so a call cut off part way loses nothing and sends
 again next time; the hub's dupe check absorbs a packet it did receive but
 could not confirm.
 
@@ -27,11 +30,13 @@ the console.
 Netmail routed direct (Decision 5, `netbbs.ftn.nodelist`) is delivered by
 calling the destination node where the nodelist says it answers, with no
 session password; what that node hands over is held, since nothing proved
-who it is. After `DIRECT_ATTEMPTS` failed calls the netmail goes via the
-uplink instead.
+who it is. After `DIRECT_ATTEMPTS` failed calls normal netmail goes via
+the uplink instead; crash netmail never does, and is dropped and reported
+to its sender after `outbound.CRASH_ATTEMPTS` (issue #1471).
 
 Once a day it prunes the dupe history and the sent-message record
-(`netbbs.ftn.queue`).
+(`netbbs.ftn.queue`), drops held mail older than `outbound.HOLD_DAYS` and
+forgets attached files that never arrived (`netbbs.ftn.attach`).
 """
 
 from __future__ import annotations
@@ -40,22 +45,28 @@ import asyncio
 import contextlib
 import datetime
 import logging
-import secrets
 import time
 from dataclasses import dataclass, replace
 
-from netbbs.ftn.address import FtnAddress, parse_address
+from netbbs.ftn.address import FtnAddress
+from netbbs.ftn.attach import expire_attach_waits
 from netbbs.ftn.binkp import BinkpError, OutgoingFile, SessionResult, SystemInfo, run_session
-from netbbs.ftn.bundle import packet_name
-from netbbs.ftn.exchange import MAX_MESSAGES_PER_PACKET, outbound_packet, summary, system_info, toss_received
+from netbbs.ftn.exchange import summary, system_info, toss_received
 from netbbs.ftn.networks import FtnNetwork, list_networks
 from netbbs.ftn.nodelist import direct_route
-from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
+from netbbs.ftn.outbound import (
+    SessionOutbound,
+    count_callable,
+    direct_nodes_waiting,
+    expire_held,
+    fail_crash_without_route,
+    note_failed_crash,
+    outbound_for_node,
+    reroute_files_to_uplink,
+    waiting_for_node,
+)
 from netbbs.ftn.queue import (
-    count_pending_outbound,
     expire_unpaired,
-    mark_outbound_sent,
-    pending_outbound,
     prune_seen_msgids,
     prune_sent_outbound,
     reroute_outbound_to_uplink,
@@ -128,63 +139,63 @@ class FtnMailer:
             await self._lane.run(prune_seen_msgids)
             await self._lane.run(prune_sent_outbound)
             await self._lane.run(expire_unpaired)  # file-echo halves whose partner never came (issue #1462)
+            await self._lane.run(expire_attach_waits)  # attached files that never came (issue #1470)
+            await self._lane.run(expire_held)  # held mail whose node never called (issue #1471)
         for network in await self._lane.run(list_networks):
             if not network.enabled or not network.uplink_host:
                 continue
-            pending = await self._lane.run(count_pending_outbound, network.id, route="uplink")
-            if self._due(network, pending, now):
+            # Held mail never makes this node call (issue #1471).
+            pending, crash = await self._lane.run(count_callable, network.id, route="uplink")
+            if self._due(network, pending, now, crash=crash):
                 await self.poll(network)
             await self.deliver_direct(network)
 
     async def deliver_direct(self, network: FtnNetwork) -> None:
-        """Call each node that direct netmail waits for (Decision 5), at most
-        once per `MIN_CALL_GAP`. After `DIRECT_ATTEMPTS` failed calls, or
-        once the nodelist no longer lists where the node answers, its
-        netmail goes via the uplink instead."""
-        # The same bound per call as the uplink's packet; the rest goes next time.
-        messages = await self._lane.run(pending_outbound, network.id, route="direct", limit=MAX_MESSAGES_PER_PACKET)
-        groups: dict[tuple[FtnAddress, str, int], list] = {}
-        to_uplink = []
-        for message in messages:
-            target = await self._lane.run(direct_route, network.id, parse_address(message.destination))
-            if target is None:
-                to_uplink.append(message.id)
-            else:
-                groups.setdefault(target, []).append(message)
+        """Call each node that direct netmail or files wait for (Decision 5),
+        at most once per `MIN_CALL_GAP`; the session also hands over what is
+        held for that node. After `DIRECT_ATTEMPTS` failed calls, or once
+        the nodelist no longer lists where the node answers, normal mail
+        goes via the uplink instead. Crash mail never does: it is dropped
+        and its sender told after `outbound.CRASH_ATTEMPTS` failed calls,
+        or at once when the node is no longer listed (issue #1471)."""
         now = self._clock()
-        for (node, host, port), waiting in groups.items():
+        for node in await self._lane.run(direct_nodes_waiting, network, include_hold=False):
+            target = await self._lane.run(direct_route, network.id, node)
+            if target is None:
+                await self._lane.run(_unroutable, network, node)
+                continue
+            _node, host, port = target
             status = self.direct_status.setdefault((network.id, node.four_d), PollStatus())
             if status.last_attempt is not None and now - status.last_attempt < MIN_CALL_GAP:
                 continue
             status.last_attempt = now
-            header = PacketHeader(orig=network.our_address, dest=node, created=datetime.datetime.now())
-            packet = OutgoingFile(packet_name(secrets.randbits(32)),
-                                  build_packet_from_packed(header, [m.packed for m in waiting]))
-            system = await self._lane.run(system_info)
+            outbound = await outbound_for_node(self._lane, network, node, uplink=False)
             try:
-                result = await self._call(host, port, network, system, [packet], password="", expected=node)
-            except (OSError, asyncio.TimeoutError, BinkpError) as exc:
-                status.failures += 1
-                status.last_error = str(exc) or type(exc).__name__
-                _logger.warning("FTN %s: direct call to %s (%s:%s) failed: %s", network.name, node.four_d, host,
-                                port, status.last_error)
-                if status.failures >= DIRECT_ATTEMPTS:
-                    to_uplink.extend(m.id for m in waiting)
-                    status.failures = 0
-                continue
-            if packet.name in result.sent:
-                await self._lane.run(mark_outbound_sent, [m.id for m in waiting])
+                system = await self._lane.run(system_info)
+                try:
+                    result = await self._call(host, port, network, system, outbound.files, password="",
+                                              expected=node)
+                except (OSError, asyncio.TimeoutError, BinkpError) as exc:
+                    status.failures += 1
+                    status.last_error = str(exc) or type(exc).__name__
+                    _logger.warning("FTN %s: direct call to %s (%s:%s) failed: %s", network.name, node.four_d,
+                                    host, port, status.last_error)
+                    await self._lane.run(note_failed_crash, network.id, outbound.message_ids,
+                                         [row.id for row in outbound.file_rows.values()])
+                    if status.failures >= DIRECT_ATTEMPTS:
+                        await self._lane.run(_to_uplink, outbound)
+                        status.failures = 0
+                    continue
+                await outbound.settle(self._lane, result.sent)
+            finally:
+                outbound.close()
             status.failures = 0
             status.last_error = None
             # What a node hands over on a call this node made unasked is held:
             # nothing proved who it is.
             await toss_received(self._lane, network, replace(result, secure=False))
-        if to_uplink:
-            await self._lane.run(reroute_outbound_to_uplink, to_uplink)
-            _logger.info("FTN %s: %d netmail could not go direct and goes via the uplink", network.name,
-                         len(to_uplink))
 
-    def _due(self, network: FtnNetwork, pending: int, now: float) -> bool:
+    def _due(self, network: FtnNetwork, pending: int, now: float, *, crash: int = 0) -> bool:
         status = self.status.get(network.id)
         if status is None or status.last_attempt is None:
             return True
@@ -194,7 +205,9 @@ class FtnMailer:
             return now - status.last_attempt >= retry
         if now - (status.last_success or status.last_attempt) >= interval:
             return True
-        return pending > 0 and now - status.last_attempt >= MIN_CALL_GAP
+        # Crash mail for the uplink goes at the next check, not after the gap.
+        return (crash > 0 and now - status.last_attempt >= self._check_interval) or (
+            pending > 0 and now - status.last_attempt >= MIN_CALL_GAP)
 
     async def poll(self, network: FtnNetwork) -> PollStatus:
         """Call the uplink once; returns the network's updated status. Any
@@ -213,30 +226,33 @@ class FtnMailer:
 
     async def _poll(self, network: FtnNetwork, status: PollStatus) -> PollStatus:
         status.last_attempt = self._clock()
-        packet, message_ids = await outbound_packet(self._lane, network)
-        outgoing = [packet] if packet is not None else []
-        system = await self._lane.run(system_info)
+        outbound = await outbound_for_node(self._lane, network, network.uplink_address, uplink=True)
         try:
-            result = await self._call(network.uplink_host, network.uplink_port, network, system, outgoing,
-                                      password=network.session_password, expected=network.uplink_address)
-        except (OSError, asyncio.TimeoutError, BinkpError) as exc:
-            status.failures += 1
-            status.last_error = str(exc) or type(exc).__name__
-            _logger.warning("FTN %s: call to %s:%s failed: %s", network.name, network.uplink_host,
-                            network.uplink_port, status.last_error)
-            return status
+            system = await self._lane.run(system_info)
+            try:
+                result = await self._call(network.uplink_host, network.uplink_port, network, system, outbound.files,
+                                          password=network.session_password, expected=network.uplink_address)
+            except (OSError, asyncio.TimeoutError, BinkpError) as exc:
+                status.failures += 1
+                status.last_error = str(exc) or type(exc).__name__
+                _logger.warning("FTN %s: call to %s:%s failed: %s", network.name, network.uplink_host,
+                                network.uplink_port, status.last_error)
+                # Crash mail for the uplink itself is reported once its calls keep failing (issue #1471).
+                await self._lane.run(note_failed_crash, network.id, outbound.message_ids,
+                                     [row.id for row in outbound.file_rows.values()])
+                return status
+            sent, files_sent = await outbound.settle(self._lane, result.sent)
+        finally:
+            outbound.close()
         if result.plaintext_password:
             _logger.warning("FTN %s: the uplink offered no CRAM-MD5, so the session password crossed unhashed",
                             network.name)
-        sent = len(message_ids) if packet is not None and packet.name in result.sent else 0
-        if sent:
-            await self._lane.run(mark_outbound_sent, message_ids)
         tossed = await toss_received(self._lane, network, result)
         status.failures = 0
         status.last_error = None
         status.last_success = status.last_attempt
         status.last_success_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-        status.last_summary = summary(sent, len(result.received), tossed)
+        status.last_summary = summary(sent, len(result.received), tossed, files_sent=files_sent)
         _logger.info("FTN %s: call to %s done -- %s", network.name, network.uplink_host, status.last_summary)
         return status
 
@@ -252,3 +268,21 @@ class FtnMailer:
             writer.close()
             with contextlib.suppress(OSError, asyncio.TimeoutError):
                 await asyncio.wait_for(writer.wait_closed(), 5)
+
+
+def _unroutable(db, network: FtnNetwork, node: FtnAddress) -> None:
+    """Mail for a node the nodelist no longer lists as answering BinkP:
+    normal mail goes via the uplink, crash mail is dropped and reported."""
+    messages, files = waiting_for_node(db, network, node, uplink=False)
+    message_ids, file_ids = [m.id for m in messages], [f.id for f in files]
+    reroute_outbound_to_uplink(db, message_ids)
+    reroute_files_to_uplink(db, file_ids)
+    fail_crash_without_route(db, network.id, message_ids, file_ids)
+    _logger.info("FTN %s: %s is not listed as answering BinkP; its normal mail goes via the uplink", network.name,
+                 node.four_d)
+
+
+def _to_uplink(db, outbound: SessionOutbound) -> None:
+    """Normal direct mail whose calls kept failing goes via the uplink."""
+    reroute_outbound_to_uplink(db, outbound.message_ids)
+    reroute_files_to_uplink(db, [row.id for row in outbound.file_rows.values()])

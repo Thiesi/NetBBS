@@ -444,6 +444,16 @@ names the network the letter goes out on.
   choose otherwise, only the SysOp can.
 - **Replies:** **Reply** to a netmail in your Inbox, or to one in Sent, writes
   netmail back.
+- **How urgently:** on the review screen, <kbd>F</kbd> **Flavour** goes round
+  **Normal** (the usual way, through the network), **Crash** (this BBS calls
+  the other BBS at once) and **Hold** (it waits until the other BBS calls
+  here). If a crash or held netmail can't be delivered, the BBS sends you a
+  letter saying so.
+- **Files:** a file you point a netmail at reaches the other BBS as its name,
+  size and file area, in text. Only the SysOp's netmail sends the file
+  itself.
+- **No such person:** netmail to a name nobody on the other BBS has may
+  come back to you, with the reason.
 
 #### Point a letter at files
 

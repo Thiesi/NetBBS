@@ -364,17 +364,33 @@ def store_tic_file(
 ) -> FileEntry:
     """Put a checked file into its area as a TIC file, through the area's
     moderation. `Replaces` waits on the row until the file is visible."""
-    area = _area_by_id(db, verdict.area_id)
+    return store_ftn_file(
+        db, network, area_id=verdict.area_id, name=verdict.name, data=data, description=description,
+        label=uploader_label(network, tic), origin=tic.origin.four_d if tic.origin is not None else None,
+        crc=tic.crc, tag=verdict.tag, replaces=_usable_replaces(tic, network), commit=commit,
+    )
+
+
+def store_ftn_file(
+    db: Database, network: FtnNetwork, *, area_id: int, name: str, data: bytes, description: str | None,
+    label: str, origin: str | None, crc: int, tag: str | None = None, replaces: list[str] = (),
+    commit: bool = True,
+) -> FileEntry:
+    """Put a file that came over FTN into file area `area_id`, through the
+    area's moderation: pending in a moderated area, visible otherwise. It
+    has no local uploader; `label` is what the listing shows instead. A
+    TIC file passes its echo `tag` (what `Replaces` may match) and its
+    `replaces` values; a netmail's attached file (issue #1470) passes
+    neither. `name` must already have passed `tic.name_problem`."""
+    area = _area_by_id(db, area_id)
     description = fit_description(description) if description else None
     sha256, path = store_bytes(db, data)
     status = "pending" if area.moderated else "approved"
     created_at = utc_now_iso()
-    label = uploader_label(network, tic)
     file_id = compute_content_id({
-        "type": "file", "area_id": area.area_id, "filename": verdict.name, "sha256": sha256,
+        "type": "file", "area_id": area.area_id, "filename": name, "sha256": sha256,
         "uploader": f"ftn:{network.domain}:{label}", "created_at": created_at,
     })
-    replaces = _usable_replaces(tic, network)
     db.connection.execute(
         """
         INSERT INTO files
@@ -383,9 +399,8 @@ def store_tic_file(
              ftn_network_id, ftn_file_echo, ftn_origin, ftn_crc32, ftn_replaces)
         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (file_id, area.id, verdict.name, description, len(data), sha256, str(path), label, created_at, status,
-         network.id, verdict.tag, tic.origin.four_d if tic.origin is not None else None, f"{tic.crc:08X}",
-         "\n".join(replaces) or None),
+        (file_id, area.id, name, description, len(data), sha256, str(path), label, created_at, status,
+         network.id, tag, origin, f"{crc:08X}", "\n".join(replaces) or None),
     )
     if commit:
         db.connection.commit()

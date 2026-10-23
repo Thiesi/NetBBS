@@ -2160,8 +2160,9 @@ alternatives rejected for each are in §16, "Issue #166". Stage A of the FTN
 round (§16, "Issue #1154", tracker #1461, planned for v7.36) adds file
 echoes, FileFix and the robot rules, the nodelist from a file echo, echo-list
 import, unknown echoes and the held-item actions. They are described below as
-they are to be built. The round's later stages are listed under "Planned" at
-the end of this section.
+they are to be built, and so are stage B's netmail extras: file attach,
+crash and hold flavours, and bounces (#1470-#1472). The round's later stages
+are listed under "Planned" at the end of this section.
 
 **Networks.** A SysOp adds one network record per FTN network:
 
@@ -2174,6 +2175,9 @@ the end of this section.
 - the TIC password for file echoes;
 - the nodelist echo and the nodelist's file name, with an optional diff file
   name;
+- whether netmail no account here can take is returned to its sender (on by
+  default), and the file area files sent with netmail are stored in (none by
+  default, which holds them);
 - the poll interval, and whether this node answers incoming calls.
 
 Every network is off until the SysOp enables it, and settings take effect
@@ -2202,6 +2206,46 @@ No external mailer or tosser is needed or supported. Packets are Type 2+
 Bundles are ZIP, identified by content rather than by name. Outbound mail is
 queued in the database, modelled on §13.7's work items, not in BSO
 directories.
+
+**Outbound files** (issues #1470 and #1471). Files wait for a session in a
+queue of their own, beside the queued messages, and every session takes
+both from one place, `netbbs.ftn.outbound`. The queue is general: a
+netmail's attached files use it now, and file requests and hatched TIC
+files (stage C) are to use it as they are.
+
+- **A queued file** is a file area entry, read from its stored content, or
+  a file on disk. It is sent under a name BinkP's safe-name rule leaves
+  alone, on a route (`uplink`, or `direct` to a node, a point by its boss)
+  and a flavour, as a message is.
+- **Once it is sent**, its row goes. A file on disk can be kept, deleted or
+  cut to nothing (BSO's `^` and `#`), but only in the node's own spool
+  folder; a file area entry is always kept.
+- **Bounds.** At most 200 files wait per network, and more are refused. A
+  session carries at most 256 MiB of them, the same bound as what a session
+  receives, and leaves the rest for the next.
+- **A file that is gone** (deleted, unapproved, or over 64 MiB) when its
+  session starts is dropped with a node-log line, and the netmail's sender
+  is told by a letter from the BBS.
+- **The session interface.** For one node (the uplink, or a direct node),
+  `outbound_for_node` gives the waiting messages as one packet and the
+  waiting files. The mailer and the listener pass them to the BinkP
+  session, then settle with the names the remote confirmed (`M_GOT`): the
+  messages are marked sent and the files' rows removed. A file is read in
+  chunks as it is sent, so nothing waits in memory before a session.
+
+**Flavours** (issue #1471) apply to messages and files alike:
+
+- **Normal**, the default: direct when the nodelist lists the node, else via
+  the uplink, as "Routing" below says.
+- **Crash**: direct to the destination, at once, never via the uplink. It
+  needs a BinkP address for the node in the nodelist, unless the node is
+  the uplink. After 5 failed calls the netmail is dropped, and its sender
+  is told why in a letter from the BBS.
+- **Hold**: nothing calls out. It goes in the next session with its node,
+  whoever starts it. A node that calls in without proving a password is
+  handed its own held items and nothing else, since nothing proved who it
+  is and this is mail no other path will carry. Held mail still waiting
+  after 30 days is dropped, and its sender told.
 
 **What a session received** is sorted once the session ends (issue #1458):
 
@@ -2301,17 +2345,68 @@ per board. Nothing is mapped by default.
   its entry lists a BinkP host (`IBN`/`INA` flags). Otherwise the netmail
   goes to the uplink for routing, and so does one whose direct call fails
   after its retries. How the nodelist arrives is under "Nodelist" below.
+  That is the **Normal** flavour; **[F]lavour** on the review screen also
+  offers **Crash** and **Hold** (above), to anyone who may send netmail.
+- **File attach** (issue #1470). A netmail the SysOp sends carries the files
+  it points at (§6.4's file refs, attached the usual way). It goes out with
+  FTS-0001's FileAttach attribute and the files' names as its subject on
+  the network, and each file is queued on the netmail's route and flavour.
+  The Sent copy keeps the subject that was typed and points at the files.
+  A file may be at most the node's upload limit and BinkP's 64 MiB, the
+  limit a file echo's file meets (§16 "Issue #1154", Decision 4); two files
+  under one name, or names longer together than the 71-byte subject, are
+  refused. Anyone else's netmail names its files in text, as a letter to
+  another BBS does.
 - **Kludges.** INTL, FMPT and TOPT (FTS-4001) are written whenever zones or
   points need them.
-- **Inbound delivery.** Netmail is delivered by matching the To name,
+- **Inbound delivery.** Netmail to `SysOp` or `Sysop`, in any case, always
+  reaches the SysOp, even when an account has that name (issue #1472).
+  Other netmail is delivered by matching the To name,
   case-insensitively, against a username, or a name an account was renamed
   away from: addressing uses the canonical identity (§6.3), never a chat
   alias. Failing that, it goes to the one account whose verified real name
   it is, compared exactly but for case and surrounding spaces -- the name a
   real-name echo sent (issue #1443). An unverified display name never
-  matches. A netmail matching no account, a verified real name two accounts
-  share, or an account that takes no mail goes to the SysOp, marked as
-  addressed to someone else. It is not bounced.
+  matches.
+- **Bounces** (issue #1472; §16 "Issue #1154", Decision 26, which amends
+  #166's Decision 7 and #1443's Decision 2). A netmail matching no account,
+  a verified real name two accounts share, or an account that takes no mail
+  goes back to its sender, on a network whose **Bounce unknown** is on, as
+  it is by default. The reply is a netmail from `Mailer-Daemon` at this
+  node's address to the sender's name and address, with `^AREPLY` to the
+  original, the reason, and the original's first 10 lines quoted. With
+  bouncing off, such netmail goes to the SysOp, marked as addressed to
+  someone else. A loop guard keeps a bounce from starting a loop. Nothing is
+  bounced
+  - from a robot's name (AreaFix, FileFix, the network's own robot names,
+    `Mailer-Daemon`, `Postmaster` and the like), so nothing is bounced to
+    one;
+  - that is a bounce itself, by its subject (`Undeliverable:` and the
+    like);
+  - from this node's own address;
+  - to an address that got 5 bounces from this node in the last day.
+
+  Such a netmail goes to the SysOp instead, with a line saying why it was
+  not returned, and so does one whose bounce the full outbound queue can't
+  take. A bounce is queued as an ordinary netmail, under the same bound.
+- **Inbound attaches** (issue #1470). A netmail with FileAttach names its
+  files in its subject; a folder part the sender's system wrote is cut off,
+  and a name is checked by the rules a TIC's `File` meets. When the netmail
+  is delivered, each name waits for its file, and the file that arrives
+  under that name in a secure session, in that session or another, is
+  stored in the network's attach area through the area's own moderation,
+  showing the sender as its uploader. The letter points at it with a file
+  ref (§6.4), as at any file here, and opens with a line naming the files.
+  - The file is held for the SysOp instead, with the reason, when the
+    network has no attach area (or it is removed, hidden or Linked), a file
+    of that name is already in the area, or it is over the limit above.
+  - A file that comes first waits in the held store as one waiting for its
+    TIC does, and is claimed when its netmail is delivered. A name still
+    waiting after 7 days is forgotten.
+  - A file from an unsecure session is held unopened, as everything from
+    one is, and is never claimed by a netmail later released from the held
+    store: the SysOp [S]aves it by hand.
+  - A bounced netmail's files are not kept.
 - **Robots.** AreaFix and FileFix requests are netmail too. **[A]reaFix** and
   **[F]ileFix** on the FTN status screen (**Node ▸ Echomail & netmail (FTN)**)
   ask for a request and send it to the uplink's robot of that name, under the
@@ -2519,12 +2614,6 @@ this section; until then the text above is what holds.
   - IPv6 listen and dial, and `ftn_listen_host` in the console (#1467);
   - BinkP over TLS (#1468);
   - binkp/1.1 multi-batch (#1469);
-  - netmail file attach (#1470);
-  - crash and hold flavours (#1471);
-  - netmail bounce for unknown recipients, on by default per network, where
-    netmail to `SysOp` or `Sysop` always reaches the SysOp (#1472). It
-    replaces "goes to the SysOp" in "Inbound delivery" above for networks
-    that keep bouncing on;
   - a ROT-13 toggle in the reader (#1473);
   - a per-board Origin line (#1474).
 - **Stage C:**

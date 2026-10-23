@@ -11,8 +11,10 @@ A caller presenting a configured uplink's address must prove that
 network's session password (CRAM-MD5 offered, plain accepted); a wrong one
 ends the call. A proven caller gets the network's waiting mail and its
 packets are tossed. Any other caller gets a non-secure session: it may
-deliver, but what it brings is held for the SysOp (`netbbs.ftn.tosser`),
-and it is given nothing.
+deliver, but what it brings is held for the SysOp (`netbbs.ftn.tosser`).
+It is given only mail and files held for the node it presents (the hold
+flavour, issue #1471), which wait for exactly that node to call; nothing
+else.
 
 At most `MAX_SESSIONS` calls run at once, one per caller address; another
 caller is told the node is busy (`M_BSY`) and disconnected.
@@ -36,9 +38,9 @@ from netbbs.ftn.binkp import (
     encode_frame,
     run_session,
 )
-from netbbs.ftn.exchange import outbound_packet, summary, system_info, toss_received
+from netbbs.ftn.exchange import summary, system_info, toss_received
 from netbbs.ftn.networks import FtnNetwork, list_networks
-from netbbs.ftn.queue import mark_outbound_sent
+from netbbs.ftn.outbound import direct_nodes_waiting, outbound_for_node
 from netbbs.timeutil import utc_now_iso
 
 _logger = logging.getLogger(__name__)
@@ -48,6 +50,8 @@ HOST_CONFIG_KEY = "ftn_listen_host"
 CHECK_INTERVAL = 60.0
 MAX_SESSIONS = 4
 RECENT_SESSIONS = 20
+# The most nodes with held mail one answered call prepares for (issue #1471).
+MAX_HELD_NODES = 50
 
 
 @dataclass(frozen=True)
@@ -173,41 +177,64 @@ class FtnListener:
         if not networks:
             return
         system = await self._lane.run(system_info)
-        # Packed before the session, so the callbacks inside it need no
-        # database. Only a caller proving it is a network's uplink gets that
-        # network's packet. A hub this node calls at the same moment may get
-        # the same messages twice; its dupe check absorbs that.
-        packets = {network.id: await outbound_packet(self._lane, network) for network in networks}
-        state: dict[str, object] = {}
-
-        def password_for(addresses: list[FtnAddress]) -> str | None:
-            network = _uplink_network(networks, addresses)
-            state["network"] = network
-            return network.session_password if network is not None else None
-
-        def outgoing_for(addresses: list[FtnAddress], secure: bool) -> list[OutgoingFile]:
-            network = state.get("network")
-            if not secure or network is None:
-                return []
-            state["packet"], state["ids"] = packets[network.id]
-            return [state["packet"]] if state["packet"] is not None else []
-
+        # Prepared before the session, so the callbacks inside it need no
+        # database (`netbbs.ftn.outbound.outbound_for_node`; a file is read
+        # only as it is sent). Only a caller proving it is a network's uplink
+        # gets what waits for the uplink. A hub this node calls at the same
+        # moment may get the same messages twice; its dupe check absorbs that.
+        # Any other caller presenting a node held mail waits for gets that,
+        # and only that (issue #1471).
+        prepared: list = []
+        uplinks = {}
+        held: dict[tuple[int, str], object] = {}
         try:
-            result = await run_session(
-                reader, writer, originating=False, our_addresses=[n.our_address for n in networks],
-                system=system, password_for=password_for, outgoing_for=outgoing_for,
-            )
-        except (OSError, asyncio.TimeoutError, BinkpError) as exc:
-            self._record(peer_ip, "", False, f"failed: {exc}")
-            _logger.warning("FTN: call from %s failed: %s", peer_ip, exc)
-            return
-        network = state["network"] if result.secure else _network_for_caller(networks, result.remote_addresses)
-        packet, ids = state.get("packet"), state.get("ids") or []
-        sent = len(ids) if packet is not None and packet.name in result.sent else 0
-        if sent:
-            await self._lane.run(mark_outbound_sent, ids)
+            for network in networks:
+                uplinks[network.id] = await outbound_for_node(self._lane, network, network.uplink_address,
+                                                              uplink=True)
+                prepared.append(uplinks[network.id])
+                for node in (await self._lane.run(direct_nodes_waiting, network, hold_only=True))[:MAX_HELD_NODES]:
+                    held[(network.id, node.four_d)] = await outbound_for_node(self._lane, network, node,
+                                                                              uplink=False, hold_only=True)
+                    prepared.append(held[(network.id, node.four_d)])
+            state: dict[str, object] = {}
+
+            def password_for(addresses: list[FtnAddress]) -> str | None:
+                network = _uplink_network(networks, addresses)
+                state["network"] = network
+                return network.session_password if network is not None else None
+
+            def outgoing_for(addresses: list[FtnAddress], secure: bool) -> list[OutgoingFile]:
+                network = state.get("network")
+                if secure and network is not None:
+                    state["outbound"] = uplinks[network.id]
+                    return list(uplinks[network.id].files)
+                if secure:
+                    return []
+                for address in addresses:
+                    for candidate in networks:
+                        boss = f"{address.zone}:{address.net}/{address.node}"
+                        if (candidate.id, boss) in held:
+                            state["outbound"] = held[(candidate.id, boss)]
+                            return list(held[(candidate.id, boss)].files)
+                return []
+
+            try:
+                result = await run_session(
+                    reader, writer, originating=False, our_addresses=[n.our_address for n in networks],
+                    system=system, password_for=password_for, outgoing_for=outgoing_for,
+                )
+            except (OSError, asyncio.TimeoutError, BinkpError) as exc:
+                self._record(peer_ip, "", False, f"failed: {exc}")
+                _logger.warning("FTN: call from %s failed: %s", peer_ip, exc)
+                return
+            network = state["network"] if result.secure else _network_for_caller(networks, result.remote_addresses)
+            outbound = state.get("outbound")
+            sent, files_sent = await outbound.settle(self._lane, result.sent) if outbound is not None else (0, 0)
+        finally:
+            for item in prepared:
+                item.close()
         tossed = await toss_received(self._lane, network, result)
-        outcome = summary(sent, len(result.received), tossed)
+        outcome = summary(sent, len(result.received), tossed, files_sent=files_sent)
         addresses = " ".join(str(a) for a in result.remote_addresses)
         self._record(peer_ip, addresses, result.secure, outcome)
         _logger.info("FTN %s: answered %s (%s, %s) -- %s", network.name, addresses, peer_ip,

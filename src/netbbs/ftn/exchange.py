@@ -3,20 +3,24 @@ What a BinkP session hands over and what is done with what it receives,
 shared by the calls this node makes (`netbbs.ftn.mailer`) and the calls it
 answers (`netbbs.ftn.listener`). Design doc §6.8.
 
-- `outbound_packet` packs up to `MAX_MESSAGES_PER_PACKET` waiting messages
-  for a network into one Type 2+ packet with a fresh name; the caller marks
-  them sent only when the remote confirms that name.
+- What a session hands over is `netbbs.ftn.outbound.outbound_for_node`:
+  the waiting messages for one node, packed into one Type 2+ packet with a
+  fresh name, and its waiting files; the caller settles it with what the
+  remote confirmed.
 - `toss_received` sorts what a session received, once it has ended (§6.8,
   "What a session received"; issues #1458 and #1462):
   1. `.TIC` files first, each paired with its file from this session or
      from the held store and checked (`netbbs.ftn.fileecho`);
   2. a file a TIC names, here or waiting from an earlier session, is a
      file-echo file and is never opened as a mail bundle;
-  3. bare packets are tossed;
-  4. ZIPs are opened as bundles (off the event loop); a ZIP with no packet
+  3. bare packets are tossed, before any other file, so a FileAttach
+     netmail among them names its files before they are looked at;
+  4. a file a delivered netmail waits for is that netmail's file
+     (`netbbs.ftn.attach`, issue #1470), and is never opened as a bundle;
+  5. ZIPs are opened as bundles (off the event loop); a ZIP with no packet
      is held whole, and a bundle's non-packet members one by one, each
-     waiting for a TIC;
-  5. anything else is held, waiting for a TIC.
+     waiting for a TIC or a netmail;
+  6. anything else is held, waiting for a TIC or a netmail.
 
   A session that wasn't secure has everything held as it came, unopened.
   Nothing received is dropped unrecorded: what the full held store can't
@@ -28,9 +32,7 @@ answers (`netbbs.ftn.listener`). Design doc §6.8.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import logging
-import secrets
 
 from netbbs import __version__
 from netbbs.auth.users import is_usable_sysop, list_users
@@ -39,36 +41,22 @@ from netbbs.files.diz import fit_description, read_archive_description
 from netbbs.files.storage import store_bytes
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn import fileecho
-from netbbs.ftn.binkp import OutgoingFile, ReceivedFile, SessionResult, SystemInfo
-from netbbs.ftn.bundle import archive_kind, packet_name, unpack_bundle
+from netbbs.ftn.attach import claim_received, expire_attach_waits
+from netbbs.ftn.binkp import ReceivedFile, SessionResult, SystemInfo
+from netbbs.ftn.bundle import archive_kind, unpack_bundle
 from netbbs.ftn.networks import FtnNetwork
-from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
-from netbbs.ftn.queue import HELD_TIC, expire_unpaired, held_bad_file_echo_ids, hold_inbound, pending_outbound
+from netbbs.ftn.queue import HELD_TIC, expire_unpaired, held_bad_file_echo_ids, hold_inbound
 from netbbs.ftn.tic import Tic, is_tic_name
 from netbbs.ftn.tosser import TossResult, toss_packet
 
 _logger = logging.getLogger(__name__)
-
-MAX_MESSAGES_PER_PACKET = 500
-
-
-async def outbound_packet(lane, network: FtnNetwork) -> tuple[OutgoingFile | None, list[int]]:
-    """The network's waiting uplink messages as one packet, and their ids;
-    `(None, [])` when nothing waits."""
-    messages = await lane.run(pending_outbound, network.id, limit=MAX_MESSAGES_PER_PACKET)
-    if not messages:
-        return None, []
-    header = PacketHeader(orig=network.our_address, dest=network.uplink_address,
-                          created=datetime.datetime.now(), password=network.packet_password)
-    data = build_packet_from_packed(header, [message.packed for message in messages])
-    return OutgoingFile(packet_name(secrets.randbits(32)), data), [message.id for message in messages]
-
 
 async def toss_received(lane, network: FtnNetwork, result: SessionResult) -> TossResult:
     """Sort and toss every file `result` received, as one total."""
     total = TossResult()
     remote = str(result.remote_addresses[0]) if result.remote_addresses else "?"
     await lane.run(expire_unpaired)
+    await lane.run(expire_attach_waits)
     if not result.secure:
         # Nothing proved who sent it: kept as it came, nothing unpacked or
         # paired, for the SysOp to look at -- a stranger's bundle doesn't get
@@ -80,8 +68,14 @@ async def toss_received(lane, network: FtnNetwork, result: SessionResult) -> Tos
     for received in result.received:
         if is_tic_name(received.name):
             await _toss_tic(lane, network, remote, received, pool, total)
+    # Bare packets first (issue #1470): a netmail's attached files are
+    # known by the time they are looked at.
+    pool.sort(key=lambda received: archive_kind(received.data) != "pkt")
     for received in pool:
         if await _pair_with_waiting_tic(lane, network, remote, received, total):
+            continue
+        if archive_kind(received.data) != "pkt" and await lane.run(
+                claim_received, network, remote, received.name, received.data, total):
             continue
         await _toss_file(lane, network, received, remote, total)
     return total
@@ -177,6 +171,8 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: 
         member = ReceivedFile(name, data)
         if await _pair_with_waiting_tic(lane, network, remote, member, total):
             continue
+        if await lane.run(claim_received, network, remote, member.name, member.data, total):
+            continue
         _logger.warning("FTN %s: %s in bundle %s from %s is not a mail packet; holding it", network.name, name,
                         received.name, remote)
         await _hold_waiting(lane, network, remote, member,
@@ -212,9 +208,11 @@ def system_info(db) -> SystemInfo:
                       version=f"NetBBS/{__version__}")
 
 
-def summary(sent: int, received: int, tossed: TossResult) -> str:
-    return (f"sent {sent}, received {received} files: {tossed.posts} posts, {tossed.netmail} netmail, "
-            + (f"{tossed.files} file-echo files, " if tossed.files else "")
+def summary(sent: int, received: int, tossed: TossResult, *, files_sent: int = 0) -> str:
+    return (f"sent {sent}" + (f" and {files_sent} files" if files_sent else "")
+            + f", received {received} files: {tossed.posts} posts, {tossed.netmail} netmail, "
+            + (f"{tossed.files} files stored, " if tossed.files else "")
+            + (f"{tossed.bounced} netmail returned, " if tossed.bounced else "")
             + (f"{tossed.bad_echo} to unknown echoes, " if tossed.bad_echo else "")
             + f"{tossed.duplicates + tossed.file_duplicates} duplicates, {tossed.held} held"
             + (f", {tossed.lost} lost (held store full)" if tossed.lost else ""))
