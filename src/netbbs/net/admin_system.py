@@ -70,6 +70,14 @@ from netbbs.config import (
     CROSSPOST_BOARD_LIMIT_CONFIG_KEY,
     MAX_CROSSPOST_BOARD_LIMIT,
     get_crosspost_board_limit,
+    MAX_QWK_PACKET_MESSAGES,
+    MIN_QWK_PACKET_MESSAGES,
+    QWK_BBS_ID_CONFIG_KEY,
+    QWK_PACKET_MESSAGES_CONFIG_KEY,
+    derived_qwk_bbs_id,
+    get_qwk_bbs_id_setting,
+    get_qwk_packet_messages,
+    is_valid_qwk_bbs_id,
     is_node_display_name_placeholder,
     set_config_without_commit,
     set_node_display_name,
@@ -327,6 +335,11 @@ async def _system_menu(
         elif choice == "l":
             await session.write_line("")
             await _limits_settings_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "q":
+            await session.write_line("")
+            await _qwk_settings_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "o":
@@ -589,6 +602,7 @@ def _system_menu_entries(stats: dict[str, Any]) -> list[MenuEntry]:
         MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge channels to the MRC network"),
         MenuEntry(label=menu_key("E", "chomail & netmail (FTN)"), brief="FidoNet-style networks"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
+        MenuEntry(label=menu_key("Q", "WK offline mail"), brief="Packet size and BBS ID"),
     ]
     option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
     return option_list
@@ -1952,6 +1966,101 @@ _POLICY_CONFIG_NOTE = (
 
 class _PolicyError(ValueError):
     """A limits save the SysOp must correct; keeps the draft open."""
+
+
+class _QwkSettingsError(ValueError):
+    """A QWK settings save the SysOp must correct; keeps the draft open."""
+
+
+async def _qwk_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Issue #1389 (design doc §6.10): the two node-wide settings of
+    callers' QWK offline mail -- how many messages a packet holds, and the
+    BBS ID packets are named by. A draft, saved together."""
+
+    def _load(db: Database) -> dict:
+        return {"qwk_messages": get_qwk_packet_messages(db), "qwk_id": get_qwk_bbs_id_setting(db)}
+
+    current = await lane.run(_load)
+    qwk_default_id = await lane.run(derived_qwk_bbs_id)
+    draft = dict(current)
+    fields = [
+        FieldSpec(
+            key="qwk_messages",
+            label="QWK packet size",
+            render=lambda d: f"up to {d['qwk_messages']} messages",
+            prompt=_int_field("qwk_messages", "Messages"),
+            brief="Most messages in one packet",
+            help=(
+                "The most messages one QWK packet holds "
+                f"({MIN_QWK_PACKET_MESSAGES}-{MAX_QWK_PACKET_MESSAGES}). The rest wait for the caller's next "
+                "packet. A packet also stops at 16 MiB of text, whatever this says."
+            ),
+        ),
+        FieldSpec(
+            key="qwk_id",
+            label="QWK BBS ID",
+            render=lambda d: d["qwk_id"] or f"{qwk_default_id} (from the node name)",
+            prompt=_optional_text_field("qwk_id"),
+            brief="Name of every packet, NAME.QWK",
+            help=(
+                "The BBS ID QWK packets are named by (ID.QWK) and that a reply packet (ID.REP) must carry: "
+                "1-8 letters and digits. Empty uses the node's name, cut to fit. Changing it makes readers "
+                "treat this node as a new BBS, and reply packets made for the old ID are refused, so set it "
+                "once."
+            ),
+        ),
+    ]
+
+    async def save(draft: dict) -> list[str]:
+        values = {
+            "qwk_messages": draft["qwk_messages"],
+            "qwk_id": (draft["qwk_id"] or "").strip().upper(),
+        }
+        if not MIN_QWK_PACKET_MESSAGES <= values["qwk_messages"] <= MAX_QWK_PACKET_MESSAGES:
+            raise _QwkSettingsError(
+                f"QWK packet size must be {MIN_QWK_PACKET_MESSAGES}-{MAX_QWK_PACKET_MESSAGES} messages."
+            )
+        if values["qwk_id"] and not is_valid_qwk_bbs_id(values["qwk_id"]):
+            raise _QwkSettingsError("A QWK BBS ID is 1-8 letters and digits, or empty for the node name.")
+        changed = [key for key in values if values[key] != current[key]]
+        config_keys = {"qwk_messages": QWK_PACKET_MESSAGES_CONFIG_KEY, "qwk_id": QWK_BBS_ID_CONFIG_KEY}
+
+        def _persist(db: Database) -> None:
+            if not changed:
+                return
+            db.connection.execute("BEGIN IMMEDIATE")
+            try:
+                for key in changed:
+                    set_config_without_commit(db, config_keys[key], str(values[key]))
+                record_action_without_commit(
+                    db, actor=actor, action="set_qwk_settings",
+                    detail=" ".join(f"{key}={values[key]}" for key in changed),
+                )
+            except BaseException:
+                db.connection.rollback()
+                raise
+            else:
+                db.connection.commit()
+
+        await lane.run(_persist)
+        return changed
+
+    changed = await edit_resource_draft(
+        session, lane,
+        title="QWK offline mail",
+        fields=fields, draft=draft, save=save, error_type=_QwkSettingsError,
+        save_menu_text=menu_key("S", "ave"),
+        back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if changed is None:
+        return
+    _announce_line(session, "Saved. Applies from now on." if changed else "Nothing changed.")
 
 
 def _policy_source(view: PolicyView, draft_value: Any = None, *, in_draft: bool = False) -> tuple[str, str]:
