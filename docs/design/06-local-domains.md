@@ -3020,8 +3020,9 @@ this section; until then the text above is what holds.
   - the hub's second part: echomail fan-out, an AreaFix/FileFix server and
     TIC forwarding (#1479), on the link records above.
 - **Stage E:**
-  - QWK offline mail for callers (#1389);
-  - QWKnet as a node (#1481) and as a hub (#1482).
+  - QWK offline mail for callers (#1389) -- built, see §6.10;
+  - QWKnet as a node (#1481) and as a hub (#1482), reusing §6.10's packet
+    and reply-packet code.
 
 ### 6.9 The oneliner wall (issue #1391)
 
@@ -3056,3 +3057,112 @@ need a signed event kind of its own and is a separate, later issue.
   in System settings and governs the logon panel only.
 
 See §16, "Issue #1391 — the oneliner wall".
+
+### 6.10 QWK offline mail (issue #1389)
+
+A caller can take their mail and the boards they follow away as a QWK
+packet, read and answer it offline in a QWK reader such as MultiMail, and
+upload the reply packet the reader makes. Decided in §16, "Issue #1154",
+Decisions 21-23 and 25 and the batch's principle; QWKnet (#1481, #1482)
+builds on the same format code.
+
+**Where.** `[Q]WK offline mail` on the top-level message board list (the
+unfiltered list `[M]essage boards` opens; not a category's or a Community's
+list). Decision 25 named the action `[O]ffline mail`, but that list's `[O]` is
+`[O]rder`, so the key is the first letter of "QWK offline mail". The screen
+shows the packet and reply file names, what is waiting (unread letters,
+unread posts on the boards packets carry), and how many messages earlier
+packets carried that are not yet marked read. Its bar: `[D]ownload packet`,
+`[U]pload replies`, `[M]ark read` (while anything waits to be marked),
+`[C]onferences`, `[R]eport` (after an upload in this call), `[W]eb transfer`
+(when the terminal has Zmodem and the node hands out links) and `[B]ack`.
+The guest account is turned away: its read state and replies would be every
+guest's.
+
+**Transfers** go the way a file area's do (§6.2): Zmodem where the terminal
+has it, otherwise a single-use browser link. The link is a grant like a file
+area's, naming the account and re-checked when used, for a file in no area: a
+packet staged under the file store's staging directory (removed once its
+link is long expired, and at startup), or an upload handed straight to the
+reply reader and never stored.
+
+**Conferences** (Decision 21). Conference 0 is the caller's mail. Each board
+gets a number, per caller, the first time a packet carries it, and keeps it
+(`qwk_conferences`, keyed by the board's content id): a reader files messages
+by number, and renumbering would mix two boards together. A board is carried
+while the caller follows it, unless `[C]onferences` took it out, and a board
+they don't follow is carried when `[C]onferences` put it in; follows are never
+changed. `[C]onferences` is a tick list of every board the caller may read,
+saved with `[S]ave`. Only boards the caller may still read are carried or take
+replies.
+
+**A packet** holds the caller's unread letters (oldest first), then each
+carried board's unread posts as New scan counts them, oldest arrival first,
+up to the SysOp's cap (2,000 messages by default, 50-10,000, **Settings ▸
+Limits & retention**) and 16 MiB of text; the rest wait for the next packet.
+A cross-post is carried once. A carried board the caller has never visited is
+visited when the packet is built, as opening it would be (§6.6): nothing on it
+is new before that, so it adds nothing to that packet and its later posts go
+in the next. A message's number is its local row id (a post's root row, a
+letter's id), which a reply names as its reference.
+
+**Format** (Decision 23). A packet is a ZIP named by the node's QWK BBS ID
+(1-8 letters and digits, a SysOp setting that defaults to the node's display
+name cut to fit) holding `CONTROL.DAT`, `MESSAGES.DAT` (the Qmail copyright
+block, then 128-byte header and text blocks, lines ended by 0xE3), an
+`NNN.NDX` per conference and `PERSONAL.NDX` (block numbers as Microsoft binary
+singles), `DOOR.ID` (`MIXEDCASE = YES`), QWKE's `TOREADER.EXT` (per-conference
+flags: `pP` for mail; `aO` for a board, `R` where the caller can't post, `E`
+for a shared or FTN board, `L` otherwise) and a short `HELLO`. Text is CP437;
+a character it lacks is written `?`. A To, From or Subject longer than QWK's
+25 characters gets a QWKE `To:`/`From:`/`Subject:` line at the top of the text,
+followed by a blank line. Posts are carried as a reader with colour off sees
+them, with their file references as text lines; a reply's To is the author
+of the post it answers.
+
+**Read state** (Decision 22). Building a packet marks nothing read; it
+records what the packet carried (`qwk_sent`). The next reply packet that can
+be read, or `[M]ark read` (after a yes/no), marks every one of them read -- a
+post as opened (`record_post_opened`, so the copies of a cross-post too), a
+letter as read -- and empties the list. A download while messages are still
+listed asks whether to include them again; without them, the packet carries
+only what no packet carried. At most 20,000 messages are listed per caller.
+
+**Reply packets are untrusted input.** The reader (`netbbs.qwk.rep`) bounds
+the upload (2 MiB), the `.MSG` inside it (4 MiB, measured as it inflates,
+whatever the ZIP claims), its members (32), its messages (200) and each text
+(a post's 200,000 bytes). The first block must carry this node's BBS ID. A
+damaged block count ends the walk, reported, since nothing after it can be
+found again. Text is decoded as CP437 and control characters are dropped. The
+conference is the header's ASCII number field, else its binary word. A QWKE
+`To:` or `Subject:` line is used only where it continues the header's 25
+characters; a `From:` line is never used: a reply is always its uploader's.
+A packet that can't be read posts nothing and marks nothing read.
+
+**Each reply** goes the way the same message written online goes, and the
+report names what became of it (posted, held for a moderator, sent, or
+refused and why):
+
+- In a board's conference: refused for a board the caller may not read (or
+  a number they were never given), a private message (a board has none: such
+  a message is written as a letter), a blank subject or text; then the
+  board's own checks before `[P]ost` -- closed, write level, name and age
+  gates, the real-name refusal (#1443), the origin's posting rule. A reference
+  to a post the caller can still see makes it a reply; to one gone, it starts
+  a thread, and the report says so. It is then created by `create_post`
+  (held on a moderated board; the verified name frozen as for any post,
+  #1453), marked read for its author, signed onto Link on a Linked board when
+  Link is on, and queued for its FTN network.
+- In conference 0, a letter, after Mail's own gate: a reply to a letter the
+  caller received goes back to its writer -- locally, over Link (checked as
+  `[R]eply` checks it), or as netmail -- and a letter from the BBS takes no
+  reply. Otherwise the To line names a local account (`SysOp` as the online To
+  prompt reads it) or an FTN address; a new letter to another BBS is written
+  online.
+
+The same reply uploaded twice posts once: what each upload posted is
+remembered by digest for 90 days, up to 2,000 per caller. A QWKE reader's
+`TODOOR.EXT` `AREA n D` takes conference *n* out of the caller's packets
+(`a`, `p` or `g` puts it back); unknown numbers are ignored.
+
+See §16, "Issue #1154 — the FTN round before the feature freeze".

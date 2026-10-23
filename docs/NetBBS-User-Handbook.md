@@ -218,6 +218,7 @@ In this chapter: [Read and reply](#read-and-reply) ·
 [Polls](#polls) ·
 [Point a post at files](#point-a-post-at-files) ·
 [Post to several boards](#post-to-several-boards) ·
+[Read offline (QWK)](#read-offline-qwk) ·
 [The line editor](#the-line-editor) ·
 [The fullscreen editor](#the-fullscreen-editor) ·
 [Drafts](#drafts-come-back-where-you-started) ·
@@ -350,6 +351,57 @@ boards, and nothing is posted until you press <kbd>P</kbd> **Post**.
   out like any post there. In an echo, the copy starts with a line such as
   `* Crossposted in FSX_BBS` naming the other echoes of that network it went
   to.
+
+#### Read offline (QWK)
+
+A **QWK packet** holds your new mail and the new posts on the boards you
+follow, to read and answer offline in a QWK reader such as MultiMail. The
+reader makes a **reply packet** of what you wrote, and uploading it posts
+your replies here.
+
+1. Press <kbd>M</kbd> **Message boards**, then <kbd>Q</kbd> **QWK offline
+   mail**.
+2. Press <kbd>D</kbd> **Download packet**. It arrives as one file named
+   after this BBS, as in `RELINK.QWK`.
+3. Open it in your reader, read, and reply.
+4. Back here, press <kbd>U</kbd> **Upload replies** and send the reply packet
+   the reader made, as in `RELINK.REP`.
+
+Both transfers go the way a file area's do: by Zmodem, or by a browser link
+when your terminal has no Zmodem (<kbd>W</kbd> **Web transfer** asks for one
+on purpose). The screen shows what is waiting and the packet's name.
+
+- **What a packet holds:** your unread letters as conference 0, then the
+  unread posts on each board you follow, oldest first. Each board keeps the
+  conference number it got in your first packet, so your reader files it in
+  the same place every time.
+- **Choosing boards:** <kbd>C</kbd> **Conferences** lists every board you can
+  read. Tick a board to take it into your packets, or untick one you follow
+  but would rather read online, then press <kbd>S</kbd> **Save**. What you
+  follow doesn't change. A board you have never opened starts with the posts
+  that arrive after your first packet, as a first visit would.
+- **Big backlogs:** a packet holds up to 2,000 messages unless the SysOp set
+  another number. The rest wait for your next packet, and the screen says so.
+- **Read or not:** downloading marks nothing read. The messages a packet
+  carried are marked read when your next reply packet arrives, or when you
+  press <kbd>M</kbd> **Mark read**. Download again before either, and you are
+  asked whether to include the same messages again; say yes if the packet
+  never reached your reader.
+- **Your replies:** each reply is posted as if you had written it here, under
+  your own name, with the same rules: a board you can't post on refuses it, a
+  moderated board holds it for approval, and a post on a shared or FTN board
+  goes out to the other BBSes. A reply to a letter goes back to whoever wrote
+  it; a new letter in conference 0 goes to the name in its To line. A board
+  has no private messages, so write those as letters.
+- **What became of them:** after an upload the screen says how many replies
+  went out, and <kbd>R</kbd> **Report** lists each one -- posted, waiting for
+  approval, sent, or refused and why. Uploading the same reply packet twice
+  posts it once.
+
+> [!NOTE]
+> Readers that understand QWKE, MultiMail among them, keep names and
+> subjects longer than QWK's 25 characters. Dropping a conference in such a
+> reader takes the board out of your packets here too.
 
 #### The line editor
 
