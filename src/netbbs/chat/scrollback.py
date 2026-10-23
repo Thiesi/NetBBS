@@ -106,6 +106,12 @@ class ChannelMessage:
     # received with the event's `announcement` marker. Drawn as an
     # announcement, never as the SysOp chatting, and not unread activity.
     announcement: bool = False
+    # The attested real name its author had when the line was written in a
+    # channel that displays verified names (design doc §5.5), or `None`:
+    # what the line's `(=...=)` unit shows, whatever the attestation says
+    # now. The rest of the speaker label stays live (the current alias),
+    # as chat has always shown it.
+    author_verified_name: str | None = None
 
 
 def get_scrollback_limit(db: Database) -> int:
@@ -223,6 +229,7 @@ def record_message(
         db.connection.execute(
             "UPDATE channel_messages SET author_user_id = ? WHERE id = ?", (author_user_id, message_id),
         )
+        _freeze_verified_name_without_commit(db, channel, author_user_id, message_id)
     if block is not None:
         # Issue #1373: `body` is the block's fallback line, so search and
         # older nodes see that; the block itself is what is drawn.
@@ -265,6 +272,25 @@ def record_message(
     prune_channel_message_search(db, channel.id)
     db.connection.commit()
     return _row_to_message(row)
+
+
+def _freeze_verified_name_without_commit(db: Database, channel: Channel, author_user_id: int, message_id: int) -> None:
+    """Keep on line `message_id` the attested real name of its author, when
+    `channel` displays verified names (its own requirement, else its
+    Community's) and they have one (design doc §5.5)."""
+    from netbbs.attestation import verified_name_to_freeze
+    from netbbs.auth.users import get_user_by_id
+    from netbbs.communities import get_effective_name_requirement
+
+    requirement = get_effective_name_requirement(db, channel)
+    if requirement != "verified_and_displayed":
+        return
+    author = get_user_by_id(db, author_user_id) if author_user_id else None
+    verified_name = verified_name_to_freeze(db, author, name_requirement=requirement) if author is not None else None
+    if verified_name is not None:
+        db.connection.execute(
+            "UPDATE channel_messages SET author_verified_name = ? WHERE id = ?", (verified_name, message_id),
+        )
 
 
 def get_scrollback(db: Database, channel: Channel) -> list[ChannelMessage]:
@@ -322,4 +348,5 @@ def _row_to_message(row: sqlite3.Row) -> ChannelMessage:
         author_user_id=row["author_user_id"] if "author_user_id" in columns else None,
         block=block_from_json(row["block_json"]) if "block_json" in columns else None,
         announcement=bool(row["announcement"]) if "announcement" in columns else False,
+        author_verified_name=row["author_verified_name"] if "author_verified_name" in columns else None,
     )

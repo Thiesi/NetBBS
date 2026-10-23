@@ -56,8 +56,8 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from netbbs.activity import follow, is_following, record_file_area_seen, unfollow
-from netbbs.attestation import format_name_for_resource, meets_name_requirement
-from netbbs.auth.users import User, get_user_by_id
+from netbbs.attestation import format_stored_name_for_resource, meets_name_requirement
+from netbbs.auth.users import User
 from netbbs.communities import (
     get_community,
     get_effective_name_requirement,
@@ -1979,21 +1979,23 @@ async def _fetch_remote_file(
 
 
 def _uploader_display_name(db: Database, entry, *, name_requirement: str | None) -> str:
-    """The uploader label to render for one file entry (design doc §18)
-    -- mirrors `netbbs.net.board_flow._author_display_name`
-    exactly: only looks up the live account when the area actually
-    requires `verified_and_displayed` names, otherwise renders the
-    plain historical `uploader_label` unchanged, for the identical
-    reason (a mutable `display_name` must not retroactively rewrite an
-    already-uploaded entry's attribution). Still `db`-first, unchanged
-    -- see this module's own docstring for why. A fetched Link file's
-    `remote@<origin-fingerprint>` label is presented by the origin
-    node's current friendly identity, exactly as a carried post's
-    author is."""
-    if name_requirement == "verified_and_displayed":
-        uploader = get_user_by_id(db, entry.uploader_user_id)
-        if uploader is not None:
-            return format_name_for_resource(db, uploader, name_requirement=name_requirement)
+    """The uploader label to render for one file entry (design doc §18,
+    §5.5) -- mirrors `netbbs.net.board_flow._author_display_name`: in an
+    area that displays verified names (asked now), an entry uploaded while
+    it displayed them is shown under the name and attested real name frozen
+    on it then, never the uploader's current ones; otherwise the plain
+    historical `uploader_label`, unchanged, for the identical reason (a
+    mutable `display_name` or a later verification must not retroactively
+    rewrite an already-uploaded entry's attribution). Still `db`-first,
+    unchanged -- see this module's own docstring for why. A fetched Link
+    file's `remote@<origin-fingerprint>` label is presented by the origin
+    node's current friendly identity, exactly as a carried post's author
+    is."""
+    shown_name = getattr(entry, "uploader_shown_name", None)
+    if name_requirement == "verified_and_displayed" and shown_name is not None:
+        return format_stored_name_for_resource(
+            shown_name, entry.uploader_verified_name, name_requirement=name_requirement,
+        )
     return sanitize_text(present_link_author_label(db, entry.uploader_label))
 
 
@@ -2002,7 +2004,7 @@ def _uploader_cell(padded: str) -> str:
     color of its own.
 
     A verified real name arrives pre-styled from
-    `netbbs.attestation.format_name_for_resource`, and an SGR reset
+    `netbbs.attestation.format_stored_name_for_resource`, and an SGR reset
     restores no outer color -- so wrapping the whole cell would color
     the name, then leave everything after the verified unit uncolored.
     Composed beside it instead of around it, the same way

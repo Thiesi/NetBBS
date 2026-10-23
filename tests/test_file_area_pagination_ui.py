@@ -243,13 +243,39 @@ def test_file_listing_shows_verified_and_displayed_real_name(tmp_path):
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "docs", creator=alice, name_requirement="verified_and_displayed")
-    upload_file(db, area, alice, "file.txt", b"hello")
     attest_name(db, alice, "Alice Smith", verifier=sysop)
+    upload_file(db, area, alice, "file.txt", b"hello")
 
     session = FakeSession(keys=["b"])
     lane = DatabaseLane(db_path)
     asyncio.run(_show_area(session, lane, area, alice))
 
+    assert "(=Alice Smith=)" in session.output
+    lane.close()
+    db.close()
+
+
+def test_an_upload_made_before_its_uploader_was_verified_never_gains_the_name(tmp_path):
+    """The file-area form of the reported bug (design doc §5.5)."""
+    from netbbs.attestation import attest_name, revoke_attestation
+    from netbbs.auth.users import SYSOP_LEVEL
+
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "docs", creator=sysop, name_requirement="verified_and_displayed")
+    upload_file(db, area, sysop, "early.txt", b"early")
+    attest_name(db, sysop, "Sam Sysop", verifier=sysop)
+    attest_name(db, alice, "Alice Smith", verifier=sysop)
+    upload_file(db, area, alice, "late.txt", b"late")
+    revoke_attestation(db, alice, "name", actor=sysop)
+
+    session = FakeSession(keys=["b"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(_show_area(session, lane, area, alice))
+
+    assert "Sam Sysop" not in session.output
     assert "(=Alice Smith=)" in session.output
     lane.close()
     db.close()

@@ -1424,6 +1424,13 @@ A name requirement may also disclose the verified name beside contributions in
 that resource. Ask the SysOp what is required before sharing identity
 information. You cannot grant yourself access by editing your profile.
 
+What you write there keeps the name it was shown under when you wrote it: your
+display name, and your verified name if you had one then. A post, an upload or
+a chat line from before your name was verified stays without it, and one
+written after keeps it even if your display name or verified name changes
+later, or the verification is revoked. An edit keeps the post's original
+name.
+
 ### Verified age and name
 
 An entry marked **needs verification** asks for a verified name, or for a

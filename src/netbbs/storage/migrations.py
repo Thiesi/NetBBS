@@ -4934,4 +4934,117 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1453 (design doc §5.5: verified names are frozen when a record is written): what a "
+            "record written in a resource that displays verified names was shown under then. "
+            "`posts.author_shown_name` is the primary name (a local author's display name or "
+            "username, a carried post's `user@<node>` label) and `posts.author_verified_name` the "
+            "attested real name, if any; `files.uploader_shown_name`/`uploader_verified_name` the "
+            "same for an upload; `channel_messages.author_verified_name` the attested name on a "
+            "chat line, whose alias stays live. NULL shown name: written where names were not "
+            "displayed, shown under its plain label. Backfilled on boards, file areas and channels "
+            "that display names now (own requirement, else their Community's): the primary name "
+            "is the author's current one, which is what such a record showed before; the "
+            "attested name is kept only where the author's current attestation is no newer than "
+            "the record (a carried post: the accepted remote attestation, by its issue time), "
+            "else none. An edit, withdrawal or tombstone carries its post's root values."
+        ),
+        sql="""
+        ALTER TABLE posts ADD COLUMN author_shown_name TEXT;
+        ALTER TABLE posts ADD COLUMN author_verified_name TEXT;
+        ALTER TABLE files ADD COLUMN uploader_shown_name TEXT;
+        ALTER TABLE files ADD COLUMN uploader_verified_name TEXT;
+        ALTER TABLE channel_messages ADD COLUMN author_verified_name TEXT;
+
+        UPDATE posts SET
+            author_shown_name = COALESCE(
+                (SELECT NULLIF(pref.value, '') FROM user_preferences pref
+                 WHERE pref.user_id = posts.author_user_id AND pref.key = 'display_name'),
+                (SELECT u.username FROM users u WHERE u.id = posts.author_user_id)
+            ),
+            author_verified_name = (
+                SELECT a.attested_value FROM user_attestations a
+                WHERE a.subject_user_id = posts.author_user_id AND a.attribute = 'name'
+                  AND a.created_at <= posts.created_at
+            )
+        WHERE post_id = root_post_id
+          AND author_user_id IN (SELECT id FROM users)
+          AND board_id IN (
+              SELECT b.id FROM boards b
+              WHERE COALESCE(
+                  b.name_requirement,
+                  (SELECT c.default_name_requirement FROM communities c WHERE c.id = b.community_id)
+              ) = 'verified_and_displayed'
+          );
+
+        UPDATE posts SET
+            author_shown_name = author_label,
+            author_verified_name = (
+                SELECT r.attested_value
+                FROM link_remote_attestation_effective e
+                JOIN link_remote_attestations r ON r.content_id = e.attestation_content_id
+                WHERE e.subject_id = netbbs_link_user_subject_id(posts.author_label)
+                  AND e.attribute = 'name' AND e.accepted = 1 AND r.revoked_at IS NULL
+                  AND r.issued_at <= posts.created_at
+            )
+        WHERE post_id = root_post_id
+          AND author_user_id IS NULL
+          AND ftn_inbound = 0
+          AND netbbs_link_user_subject_id(author_label) IS NOT NULL
+          AND board_id IN (
+              SELECT b.id FROM boards b
+              WHERE COALESCE(
+                  b.name_requirement,
+                  (SELECT c.default_name_requirement FROM communities c WHERE c.id = b.community_id)
+              ) = 'verified_and_displayed'
+          );
+
+        UPDATE posts SET (author_shown_name, author_verified_name) = (
+            SELECT root.author_shown_name, root.author_verified_name FROM posts root
+            WHERE root.post_id = posts.root_post_id AND root.board_id = posts.board_id
+        )
+        WHERE post_id <> root_post_id
+          AND EXISTS (
+              SELECT 1 FROM posts root
+              WHERE root.post_id = posts.root_post_id AND root.board_id = posts.board_id
+                AND root.author_shown_name IS NOT NULL
+          );
+
+        UPDATE files SET
+            uploader_shown_name = COALESCE(
+                (SELECT NULLIF(pref.value, '') FROM user_preferences pref
+                 WHERE pref.user_id = files.uploader_user_id AND pref.key = 'display_name'),
+                (SELECT u.username FROM users u WHERE u.id = files.uploader_user_id)
+            ),
+            uploader_verified_name = (
+                SELECT a.attested_value FROM user_attestations a
+                WHERE a.subject_user_id = files.uploader_user_id AND a.attribute = 'name'
+                  AND a.created_at <= files.created_at
+            )
+        WHERE uploader_user_id IN (SELECT id FROM users)
+          AND area_id IN (
+              SELECT f.id FROM file_areas f
+              WHERE COALESCE(
+                  f.name_requirement,
+                  (SELECT c.default_name_requirement FROM communities c WHERE c.id = f.community_id)
+              ) = 'verified_and_displayed'
+          );
+
+        UPDATE channel_messages SET
+            author_verified_name = (
+                SELECT a.attested_value FROM user_attestations a
+                WHERE a.subject_user_id = channel_messages.author_user_id AND a.attribute = 'name'
+                  AND a.created_at <= channel_messages.created_at
+            )
+        WHERE author_user_id > 0
+          AND channel_id IN (
+              SELECT ch.id FROM channels ch
+              WHERE COALESCE(
+                  ch.name_requirement,
+                  (SELECT c.default_name_requirement FROM communities c WHERE c.id = ch.community_id)
+              ) = 'verified_and_displayed'
+          );
+        """,
+    ),
 ]

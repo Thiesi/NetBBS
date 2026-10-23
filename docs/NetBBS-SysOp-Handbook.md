@@ -1234,7 +1234,15 @@ A resource's name requirement cycles through:
 | Verified and displayed | Verification is required and the attested name is shown alongside contributions in that resource |
 
 A verified name does not replace the account's chosen display name. Tell
-callers about disclosure before requiring it. Age and name verification are
+callers about disclosure before requiring it.
+
+Each post, upload and chat line keeps the name it was shown under when it was
+written. Verifying someone does not add their real name to what they wrote
+before, and replacing or revoking a verification, or a new display name, does
+not change what they wrote after. An edit, yours included, keeps the post's
+original name; to take a real name down, remove the post. Turning **Verified
+and displayed** off hides the names; turning it on shows names only on what is
+written from then on. Age and name verification are
 separate; review the available attributes and expiry on the attestation
 screen.
 
@@ -2875,9 +2883,11 @@ under the username instead.
 - **Netmail.** Netmail to a verified real name reaches its account (see
   [Netmail](#netmail)).
 - **Doors** can't post there: a door's label is nobody's real name.
-- **Held posts.** If a verification is revoked or changed while a moderator
-  holds a post, the approved post stays on this BBS, and the node log says
-  why.
+- **Held posts.** A post a moderator approves later goes out under the name
+  it was written under, which is also what the board shows, even if the
+  verification was revoked or changed meanwhile. A post written before the
+  board asked for displayed names has none, so it stays on this BBS, and the
+  node log says why.
 
 ### Netmail
 

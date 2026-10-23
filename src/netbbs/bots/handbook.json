@@ -339,7 +339,7 @@
   {
    "chapter": "Preferences and help",
    "title": "Access requirements",
-   "text": "Some resources require an account level, verified age, or verified name. When\nyou open one, a Requires: line under its title says what it asks, for\nexample Requires: age 18+ verified · level 20+ to post. A requirement you\ndon't meet is shown in red, or followed by (not met) if you use plain ASCII,\nso the same line tells you why you can read a board but not post.\n\nA name requirement may also disclose the verified name beside contributions in\nthat resource. Ask the SysOp what is required before sharing identity\ninformation. You cannot grant yourself access by editing your profile."
+   "text": "Some resources require an account level, verified age, or verified name. When\nyou open one, a Requires: line under its title says what it asks, for\nexample Requires: age 18+ verified · level 20+ to post. A requirement you\ndon't meet is shown in red, or followed by (not met) if you use plain ASCII,\nso the same line tells you why you can read a board but not post.\n\nA name requirement may also disclose the verified name beside contributions in\nthat resource. Ask the SysOp what is required before sharing identity\ninformation. You cannot grant yourself access by editing your profile.\n\nWhat you write there keeps the name it was shown under when you wrote it: your\ndisplay name, and your verified name if you had one then. A post, an upload or\na chat line from before your name was verified stays without it, and one\nwritten after keeps it even if your display name or verified name changes\nlater, or the verification is revoked. An edit keeps the post's original\nname."
   },
   {
    "chapter": "Preferences and help",

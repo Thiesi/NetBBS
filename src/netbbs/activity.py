@@ -63,6 +63,7 @@ from netbbs.boards.boards import Board
 from netbbs.boards.posts import (
     Post,
     count_visible_roots,
+    frozen_author_of,
     iter_visible_roots,
     sweep_expired_posts,
     visible_crosspost_copies,
@@ -542,6 +543,8 @@ def _root_row_to_post(row) -> Post:
         root_post_id=row["root_post_id"],
         edit_of_post_id=row["edit_of_post_id"],
         tombstoned_at=row["tombstoned_at"],
+        author_shown_name=frozen_author_of(row)[0],
+        author_verified_name=frozen_author_of(row)[1],
     )
 
 

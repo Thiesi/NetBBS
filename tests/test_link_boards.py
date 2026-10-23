@@ -1824,3 +1824,38 @@ def test_supersession_follows_receipt_order_not_the_clock(db, alice):
     db.connection.commit()
     assert _superseded_by_a_newer_approved_revision(db, get_post(db, first.post_id))
     assert not _superseded_by_a_newer_approved_revision(db, get_post(db, second.post_id))
+
+
+# -- a carried post's verified name is frozen when this node stores it ------
+# -- (design doc §5.5) -------------------------------------------------------
+
+
+def test_a_carried_post_keeps_the_remote_name_accepted_when_it_was_stored(db, remote_node_identity):
+    from netbbs.net.board_flow import _author_display_name
+    from netbbs.rendering.ansi import strip_ansi
+
+    board_id = _gate_board(db, remote_node_identity, name_requirement="verified_and_displayed")
+    _accept_remote_attestation(db, remote_node_identity, attribute="name", value="Wanda Erer")
+    root = _remote_post(remote_node_identity, board_id=board_id)
+    stored = materialize_carried_post(db, root, sender_fingerprint=remote_node_identity.fingerprint)
+    assert stored.author_shown_name == stored.author_label
+    assert stored.author_verified_name == "Wanda Erer"
+
+    # The home node replaces the attestation: the stored post is unchanged.
+    db.connection.execute("UPDATE link_remote_attestations SET attested_value = 'Wanda Other'")
+    db.connection.commit()
+    edit = _remote_edit(remote_node_identity, root, body="second thoughts")
+    edited = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+    # An edit is shown under what its post was first shown under.
+    assert edited.author_verified_name == "Wanda Erer"
+    rendered = strip_ansi(_author_display_name(db, stored, name_requirement="verified_and_displayed"))
+    assert "(=Wanda Erer=)" in rendered and "Other" not in rendered
+
+
+def test_a_carried_post_on_a_board_not_displaying_names_freezes_nothing(db, remote_node_identity):
+    board_id = _gate_board(db, remote_node_identity, name_requirement="verified")
+    _accept_remote_attestation(db, remote_node_identity, attribute="name", value="Wanda Erer")
+    stored = materialize_carried_post(
+        db, _remote_post(remote_node_identity, board_id=board_id), sender_fingerprint=remote_node_identity.fingerprint
+    )
+    assert (stored.author_shown_name, stored.author_verified_name) == (None, None)
