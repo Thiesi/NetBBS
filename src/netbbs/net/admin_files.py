@@ -594,7 +594,7 @@ async def _area_screen(
                 actions.append(DetailAction(
                     "o", area_offer_label(offered),
                     _act(lambda a: toggle_area_offer(session, lane, actor, a)),
-                    brief="Let other FTN nodes request its files"))
+                    brief="Let FTN nodes request its files"))
                 # --- end file requests ---
             return DetailState(
                 draft={**_area_draft(area), **labels},
