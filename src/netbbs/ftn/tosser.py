@@ -179,7 +179,7 @@ def retoss_bad_echo(db: Database, network: FtnNetwork, tag: str) -> TossResult:
             continue
         remote, packet = taken
         total.add(toss_packet(db, network, packet, secure=True, vouched=True, remote_address=remote,
-                              file_name=f"bad echo {tag.upper()}"))
+                              file_name=f"unknown echo {tag.upper()}"))
     return total
 
 

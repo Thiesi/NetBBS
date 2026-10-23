@@ -12,7 +12,7 @@ Configuration and operation are kept apart, as MRC's are:
   last did, what waits, and the work on a running network: poll now,
   AreaFix and FileFix requests, echo-list import, nodelist import, held
   items (packets, files and TICs, with [R]elease, [S]ave, [E]xport and
-  [D]elete) and bad echoes (tags no board or file area carries, with
+  [D]elete) and unknown echoes (tags no board or file area carries, with
   [C]reate, [M]ap and [D]elete). The robot screens live in
   `netbbs.net.ftn_robots_console`.
 - **A board's echo** (`board_echo_action`): which echo area a board carries,
@@ -429,7 +429,7 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
                 parts.append(f"{sum(e.count for e in file_echoes)} items in {len(file_echoes)} file echoes")
             if dropped:
                 parts.append(f"{dropped} oldest dropped (store full)")
-            rows.append(Field("Bad echoes", "; ".join(parts)))
+            rows.append(Field("Unknown echoes", "; ".join(parts)))
         # --- end bad echoes ---
         rows.extend(_nodelist_rows(db, network))
         sections.append(Section(f"{network.name} ({network.our_address.four_d})", rows))
@@ -780,8 +780,8 @@ async def _bad_echoes(session: Session, lane: DatabaseLane, actor: User, network
         stable_id_of=lambda r: f"{r[0]}:{r[1]}",
         description_of=lambda r: (f"{r[2]} {'messages' if r[0] == 'echo' else 'held'}, "
                                   f"first {r[3][:16]}, last {r[4][:16]}"),
-        title=f"Bad echoes ({network.name})",
-        empty_message="No bad echoes: everything that came is carried here.",
+        title=f"Unknown echoes ({network.name})",
+        empty_message="No unknown echoes: everything that came is carried here.",
         refresh=_load, item_keys={"c": _create, "m": _map, "d": _delete},
         live_nav=[MenuEntry(label=menu_key("C", "reate"), brief="A new board or file area for it"),
                   MenuEntry(label=menu_key("M", "ap"), brief="Carry it on an existing one"),
@@ -862,7 +862,7 @@ async def _carry_bad_echo(lane: DatabaseLane, actor: User, network: FtnNetwork, 
                    f"{result.file_duplicates} duplicates, {result.held} still held")
     await lane.run(lambda db: record_action(
         db, actor=actor, action="set_board_echo" if kind == "echo" else "set_file_area_echo",
-        detail=f"{network.name}: {target.name} carries bad echo {tag}"))
+        detail=f"{network.name}: {target.name} carries unknown echo {tag}"))
     return outcome + "."
 
 

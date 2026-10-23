@@ -205,7 +205,7 @@ def judge(db: Database, network: FtnNetwork, tic: Tic, data: bytes | None, *, li
     area_id = file_area_id_for_echo(db, network.id, tag)
     nodelist = _is_nodelist_echo(network, tag)
     if area_id is None and not nodelist:
-        return Verdict(BAD_ECHO, f"no file area carries file echo {tag} (a bad echo)", tag)
+        return Verdict(BAD_ECHO, f"no file area carries file echo {tag} (an unknown echo)", tag)
     try:
         name = stored_name(tic)
     except FtnFormatError as exc:

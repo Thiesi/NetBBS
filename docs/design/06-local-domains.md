@@ -2159,7 +2159,7 @@ model do not change, and FTN content never enters them. Decisions and the
 alternatives rejected for each are in §16, "Issue #166". Stage A of the FTN
 round (§16, "Issue #1154", tracker #1461, planned for v7.36) adds file
 echoes, FileFix and the robot rules, the nodelist from a file echo, echo-list
-import, bad echoes and the held-item actions. They are described below as
+import, unknown echoes and the held-item actions. They are described below as
 they are to be built. The round's later stages are listed under "Planned" at
 the end of this section.
 
@@ -2231,8 +2231,9 @@ per board. Nothing is mapped by default.
     kept as the post's date.
   - **Duplicates.** A message whose MSGID (or, without one, content hash) was
     seen on that area before is dropped.
-  - **Bad echoes.** A message for an area no board carries is held as a *bad
-    echo*, under its network and tag. The **Bad echoes** screen, reached from
+  - **Unknown echoes.** A message for an area no board carries is held as an
+    *unknown echo* (a "bad echo" in tosser terms), under its network and tag.
+    The **Unknown echoes** screen, reached from
     the FTN status screen with **[U]nknown echoes**, shows one row per tag with its message count and
     when it was first and last seen. Its actions:
     - **[C]reate** opens the new-board editor with the tag filled in. Saving
@@ -2242,7 +2243,7 @@ per board. Nothing is mapped by default.
     - **[D]elete** drops the tag's messages.
 
     A re-toss goes through the ordinary tosser, with the board's moderation,
-    duplicate checks and threading. Bad-echo messages are kept apart from the
+    duplicate checks and threading. Unknown-echo messages are kept apart from the
     held store: at most 1,000 per tag and 10,000 or 64 MiB overall. The
     oldest are dropped first, and the drops are counted on the status screen.
     A board is never created without the SysOp (§16, "Issue #1154", Decision
@@ -2364,8 +2365,8 @@ says; at check 10 a duplicate is dropped and counted, not held.
 4. `Pw` matches the network's TIC password, compared case-insensitively. With
    no TIC password set, every TIC is held.
 5. `Area` is mapped to a file area of this network, or is the network's
-   nodelist echo (under "Nodelist" below). Any other tag is a bad echo:
-   unknown file echoes get their own rows on the Bad echoes screen, where
+   nodelist echo (under "Nodelist" below). Any other tag is an unknown echo:
+   unknown file echoes get their own rows on the Unknown echoes screen, where
    **[C]reate** opens the new-file-area editor and **[M]ap** picks a local
    file area. Either one then runs the tag's held pairs through these checks
    again, from check 6, the way echomail is re-tossed. A pair that passes

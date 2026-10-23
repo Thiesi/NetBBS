@@ -215,6 +215,6 @@ def system_info(db) -> SystemInfo:
 def summary(sent: int, received: int, tossed: TossResult) -> str:
     return (f"sent {sent}, received {received} files: {tossed.posts} posts, {tossed.netmail} netmail, "
             + (f"{tossed.files} file-echo files, " if tossed.files else "")
-            + (f"{tossed.bad_echo} to bad echoes, " if tossed.bad_echo else "")
+            + (f"{tossed.bad_echo} to unknown echoes, " if tossed.bad_echo else "")
             + f"{tossed.duplicates + tossed.file_duplicates} duplicates, {tossed.held} held"
             + (f", {tossed.lost} lost (held store full)" if tossed.lost else ""))

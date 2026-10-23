@@ -1,6 +1,6 @@
-"""The console side of file echoes and bad echoes (design doc §6.8, issues
+"""The console side of file echoes and unknown echoes (design doc §6.8, issues
 #1460, #1462, #1466): the held screen's [R]elease, [S]ave and [E]xport,
-the Bad echoes screen's [C]reate and [M]ap, a file area's [F]ile echo and
+the Unknown echoes screen's [C]reate and [M]ap, a file area's [F]ile echo and
 the network's TIC password -- driven by the scripted `FakeSession`."""
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ def test_a_bad_echo_is_mapped_to_a_local_board_and_re_tossed(db, lane, sysop, ne
     board = create_board(db, "new things", creator=sysop)
     toss_packet(db, network, _bad_echo_packet(), secure=True, remote_address="21:1/100", file_name="x.pkt")
     text = _status(lane, sysop, ["u", "m", "1", "1", "", "b", "b"])
-    assert "FSX_NEW" in text
+    assert "FSX_NEW" in text and "Unknown echoes (fsxNet)" in text and "Unknown echoes:" in text
     assert "new things carries FSX_NEW: 1 posts tossed" in text
     (post,) = db.connection.execute("SELECT body FROM posts WHERE board_id = ?", (board.id,)).fetchall()
     assert post["body"].startswith("Waiting for a board")

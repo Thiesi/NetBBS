@@ -2819,7 +2819,7 @@ In this chapter: [Join a network](#join-a-network) ·
 [Join echoes from the hub's list](#join-echoes-from-the-hubs-list) ·
 [File echoes](#file-echoes) · [Netmail](#netmail) ·
 [Held items and status](#held-items-and-status) ·
-[Bad echoes](#bad-echoes) · [Not supported](#not-supported)
+[Unknown echoes](#unknown-echoes) · [Not supported](#not-supported)
 
 ### Join a network
 
@@ -3090,10 +3090,10 @@ Look at them under **Node ▸ Echomail & netmail (FTN)** with
 errors, waiting messages and recently answered calls.
 <kbd>P</kbd> **Poll now** calls the hub at once.
 
-### Bad echoes
+### Unknown echoes
 
 An echo the hub sends that no board carries, or a file echo no file area
-carries, is a *bad echo*. Its messages and files wait for you instead of
+carries, is an *unknown echo*. Its messages and files wait for you instead of
 being lost. **Node ▸ Echomail & netmail (FTN)** counts them, and
 <kbd>U</kbd> **Unknown echoes** lists one row per tag, with how many wait and
 when the first and last came:
