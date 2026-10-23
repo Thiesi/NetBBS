@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+from dataclasses import replace
 
 import pytest
 
@@ -330,7 +331,8 @@ def test_a_username_is_matched_before_a_verified_real_name(db, sysop, network):
     assert list_inbox(db, other) == []
 
 
-def test_a_real_name_two_accounts_share_goes_to_the_sysop(db, sysop, network):
+def test_a_real_name_two_accounts_share_goes_to_the_sysop_when_bouncing_is_off(db, sysop, network):
+    network = save_network(db, replace(network, bounce_unknown=False))
     first = create_user(db, "owen1", password="hunter2")
     second = create_user(db, "owen2", password="hunter2")
     attest_name(db, first, "Owen Night", verifier=sysop)
@@ -343,9 +345,10 @@ def test_a_real_name_two_accounts_share_goes_to_the_sysop(db, sysop, network):
     assert letter.body.startswith("[This netmail was addressed to 'Owen Night'")
 
 
-def test_netmail_to_an_unverified_display_name_goes_to_the_sysop(db, sysop, network):
+def test_netmail_to_an_unverified_display_name_goes_to_the_sysop_when_bouncing_is_off(db, sysop, network):
     from netbbs.attestation import set_display_name
 
+    network = save_network(db, replace(network, bounce_unknown=False))
     member = create_user(db, "night_owl", password="hunter2")
     set_display_name(db, member, "Owen Night")
 

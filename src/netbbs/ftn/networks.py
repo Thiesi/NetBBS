@@ -87,6 +87,11 @@ class FtnNetwork:
     uplink_tls: str = TLS_OFF  # TLS_OFF, TLS_PINNED or TLS_VERIFIED (netbbs.ftn.transport)
     uplink_tls_pin: str = ""  # the hub's certificate's SHA-256, learned on the first TLS call
     # --- end transport ---
+    # --- netmail extras (issues #1470 and #1472) ---
+    bounce_unknown: bool = True  # return netmail no account can take (Decision 26)
+    attach_area_id: int | None = None  # where inbound file attaches are stored; None: held
+    give_held_unproven: bool = False  # hand held mail to a caller without a password (issue #1471)
+    # --- end netmail extras ---
     id: int | None = None
 
     @property
@@ -234,6 +239,13 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
             (validated.uplink_tls, validated.uplink_tls_pin, validated.id),
         )
         # --- end transport ---
+        # --- netmail extras (issues #1470 and #1472), on their own ---
+        db.connection.execute(
+            "UPDATE ftn_networks SET bounce_unknown = ?, attach_area_id = ?, give_held_unproven = ? WHERE id = ?",
+            (int(validated.bounce_unknown), validated.attach_area_id, int(validated.give_held_unproven),
+             validated.id),
+        )
+        # --- end netmail extras ---
     except sqlite3.IntegrityError:
         db.connection.rollback()
         raise FtnNetworkError(f"A network called {validated.name!r} already exists.") from None
@@ -289,6 +301,11 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
         uplink_tls=row["uplink_tls"] if "uplink_tls" in row.keys() else TLS_OFF,
         uplink_tls_pin=row["uplink_tls_pin"] if "uplink_tls_pin" in row.keys() else "",
         # --- end transport ---
+        # --- netmail extras (issues #1470 and #1472) ---
+        bounce_unknown=bool(row["bounce_unknown"]) if "bounce_unknown" in row.keys() else True,
+        attach_area_id=row["attach_area_id"] if "attach_area_id" in row.keys() else None,
+        give_held_unproven=bool(row["give_held_unproven"]) if "give_held_unproven" in row.keys() else False,
+        # --- end netmail extras ---
     )
 
 

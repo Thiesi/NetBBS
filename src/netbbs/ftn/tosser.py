@@ -20,10 +20,15 @@ The tosser: inbound FTN packets into boards and Mail (design doc §6.8).
 - **Netmail** addressed to this node is delivered to the account whose
   username (or a name it was renamed away from) matches its To name,
   case-insensitively, else to the one account whose verified real name it
-  is (issue #1443). A name matching no account, or two accounts' verified
-  real names, or an account that takes no mail, goes to the SysOp with a
-  line saying who it was for (Decision 7). Netmail for another node is
-  not routed: this node is not a hub. It is skipped and counted.
+  is (issue #1443). `SysOp` or `Sysop`, in any case, always reaches the
+  SysOp, whatever the accounts are called (issue #1472). A name matching no
+  account, or two accounts' verified real names, or an account that takes
+  no mail, is returned to its sender when the network bounces
+  (`netbbs.ftn.bounce`, on by default), and otherwise -- or when the loop
+  guard refuses -- goes to the SysOp with a line saying who it was for
+  (Decision 7). A FileAttach netmail's files are claimed for its letter
+  (`netbbs.ftn.attach`, issue #1470). Netmail for another node is not
+  routed: this node is not a hub. It is skipped and counted.
 - **Duplicates** are dropped by MSGID, or by a hash of the message when
   it has none, per area (netmail has its own).
 - **A message that can't be stored** (a full mailbox, a closed board) is
@@ -48,10 +53,12 @@ from netbbs.boards.limits import MAX_BODY_BYTES
 from netbbs.boards.posts import PostError, create_labelled_post
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress
+from netbbs.ftn.attach import attach_names, attach_note, claim_held, record_waits_without_commit, split_names
+from netbbs.ftn.bounce import bounce_refusal, queue_bounce_without_commit
 from netbbs.ftn.message import FtnMessage, decode_message
 from netbbs.ftn.networks import FtnNetwork, board_id_for_area
-from netbbs.ftn.packet import PackedMessage, PacketHeader, build_packet, parse_packet
-from netbbs.ftn.queue import hold_inbound, record_seen_msgid_without_commit
+from netbbs.ftn.packet import ATTR_FILE_ATTACHED, PackedMessage, PacketHeader, build_packet, parse_packet
+from netbbs.ftn.queue import FtnQueueFullError, hold_inbound, record_seen_msgid_without_commit
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
     MAX_MAIL_SUBJECT_BYTES,
@@ -85,13 +92,14 @@ class TossResult:
     refused_packet: str | None = None  # why the whole packet was held
     bad_echo: int = 0  # messages held as bad echoes (issue #1466)
     bad_echo_dropped: int = 0  # older bad-echo messages the bounds dropped for them
-    files: int = 0  # file-echo files stored (issue #1462)
+    files: int = 0  # file-echo files stored (issue #1462), and netmail files (issue #1470)
     file_duplicates: int = 0
+    bounced: int = 0  # netmail returned to its sender (issue #1472)
 
     def add(self, other: TossResult) -> None:
         """Count `other` into this total."""
         for name in ("posts", "netmail", "duplicates", "not_for_us", "blocked", "held", "lost", "bad_echo",
-                     "bad_echo_dropped", "files", "file_duplicates"):
+                     "bad_echo_dropped", "files", "file_duplicates", "bounced"):
             setattr(self, name, getattr(self, name) + getattr(other, name))
         for tag, count in other.unknown_areas.items():
             self.unknown_areas[tag] = self.unknown_areas.get(tag, 0) + count
@@ -236,21 +244,32 @@ def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader
     if not _addressed_to(destination, network.our_address):
         result.not_for_us += 1
         return
-    if not record_seen_msgid_without_commit(db, network.id, NETMAIL_AREA, _dupe_key(message, packed)):
+    dupe_key = _dupe_key(message, packed)
+    if not record_seen_msgid_without_commit(db, network.id, NETMAIL_AREA, dupe_key):
         db.connection.rollback()
         result.duplicates += 1
         return
-    recipient, note = _netmail_recipient(db, message.to_name)
+    origin = netmail_origin(message, header)
+    sender_label = _label(message.from_name, origin)
+    recipient, undeliverable = _netmail_recipient(db, message.to_name)
+    note = None
+    if recipient is None:
+        if _bounced(db, network, message, origin, undeliverable, dupe_key, result):
+            return
+        recipient, note = _sysop_copy(db, network, message, origin, undeliverable)
     body = message.body if note is None else f"{note}\n\n{message.body}"
-    sender_label = _label(message.from_name, netmail_origin(message, header))
     if note is None and mail_sender_refusal(db, recipient, sender_address=sender_label) is not None:
         # The recipient blocked this sender (issue #817's block, by the
         # label it arrives with). Dropped, its MSGID kept, so a resend is too.
         db.connection.commit()
         result.blocked += 1
         return
+    attached = bool(message.attributes & ATTR_FILE_ATTACHED)
+    names, unsafe = split_names(attach_names(message.subject)) if attached else ([], [])
+    if attached and (names or unsafe):
+        body = f"{attach_note(network, names, unsafe)}\n\n{body}"
     try:
-        deliver_external_mail_without_commit(
+        letter = deliver_external_mail_without_commit(
             db, recipient,
             sender_label=sender_label,
             subject=_fit(message.subject.strip() or "(no subject)", MAX_MAIL_SUBJECT_BYTES, note=""),
@@ -259,30 +278,90 @@ def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader
         )
     except (MailboxFullError, MailError) as exc:
         raise _Unstorable(f"could not deliver to {recipient.username}: {exc}") from exc
+    if names:
+        record_waits_without_commit(db, network, letter.id, names, sender_label=sender_label, origin=origin.four_d)
     db.connection.commit()
     result.netmail += 1
+    if names:
+        # Files that came before their netmail wait in the held store.
+        claim_held(db, network, result)
 
 
-def _netmail_recipient(db: Database, to_name: str) -> tuple[User, str | None]:
-    """The account a netmail is for, or the SysOp with a note saying who it
-    was for (Decision 7).
+def _bounced(db, network, message: FtnMessage, origin: FtnAddress, reason: str, dupe_key: str,
+             result: TossResult) -> bool:
+    """Return the netmail to its sender (issue #1472) unless the network
+    doesn't bounce or the loop guard refuses; True when it was returned."""
+    if not network.bounce_unknown or bounce_refusal(db, network, message, origin) is not None:
+        return False
+    try:
+        queue_bounce_without_commit(db, network, message, origin, reason, dupe_key)
+    except FtnQueueFullError as exc:
+        _logger.warning("FTN %s: netmail to %r not returned, the outbound queue is full: %s", network.name,
+                        message.to_name, exc)
+        return False
+    db.connection.commit()
+    result.bounced += 1
+    _logger.info("FTN %s: netmail from %s to %r returned: %s", network.name, origin.four_d, message.to_name, reason)
+    return True
 
-    A username, or one renamed away from, decides first; then a verified
-    real name, which a board sending real names makes the name the network
-    knows its author by (issue #1443), when exactly one account has it."""
+
+def _sysop_copy(db, network, message: FtnMessage, origin: FtnAddress, reason: str) -> tuple[User, str]:
+    """The SysOp, and the line saying who the netmail was for and, on a
+    network that bounces, why it was not returned."""
+    sysop = _first_sysop(db)
+    name = message.to_name.strip()
+    if sysop is None:
+        raise _Unstorable(f"no account named {name!r} and no SysOp to give it to")
+    note = f"[This netmail was addressed to {name!r}, who has no mailbox on this node.]"
+    if network.bounce_unknown:
+        why = bounce_refusal(db, network, message, origin) or "the outbound queue is full"
+        note += f"\n[It was not returned to its sender: {why}.]"
+    return sysop, note
+
+
+SYSOP_ALIAS = "sysop"
+
+
+def _first_sysop(db: Database) -> User | None:
+    sysops = sorted((u for u in list_users(db) if is_usable_sysop(u)), key=lambda u: u.id)
+    return sysops[0] if sysops else None
+
+
+def _netmail_recipient(db: Database, to_name: str) -> tuple[User | None, str]:
+    """The account a netmail is for, or None and why no account can take it.
+
+    `SysOp` (any case) is the SysOp, always (issue #1472), even when an
+    account is called that. Then a username, or one renamed away from;
+    then a verified real name, which a board sending real names makes the
+    name the network knows its author by (issue #1443), when exactly one
+    account has it."""
     name = to_name.strip()
+    if name.casefold() == SYSOP_ALIAS:
+        sysop = _first_sysop(db)
+        if sysop is None:
+            raise _Unstorable("addressed to the SysOp, and this node has no SysOp to give it to")
+        return sysop, ""
     try:
         # A name renamed away from reaches the renamed account (issue #1306):
         # FTN networks have no rename, and keep writing to the old one.
         user = get_recipient_by_name(db, name)
     except AuthError:
         user = _account_with_verified_name(db, name)
-    if user is not None and mail_recipient_refusal(db, user) is None:
-        return user, None
-    sysops = sorted((u for u in list_users(db) if is_usable_sysop(u)), key=lambda u: u.id)
-    if not sysops:
-        raise _Unstorable(f"no account named {name!r} and no SysOp to give it to")
-    return sysops[0], f"[This netmail was addressed to {name!r}, who has no mailbox on this node.]"
+        if user is None:
+            shared = _verified_name_count(db, name) > 1
+            return None, ("two accounts here share that verified real name" if shared
+                          else "no account here has that name")
+    if mail_recipient_refusal(db, user) is not None:
+        return None, "that account takes no mail"
+    return user, ""
+
+
+def _verified_name_count(db: Database, name: str) -> int:
+    wanted = name.strip().casefold()
+    rows = db.connection.execute(
+        "SELECT subject_user_id, attested_value FROM user_attestations WHERE attribute = 'name'"
+    ).fetchall()
+    return len({row["subject_user_id"] for row in rows if row["attested_value"].strip().casefold() == wanted})
 
 
 def _account_with_verified_name(db: Database, name: str) -> User | None:

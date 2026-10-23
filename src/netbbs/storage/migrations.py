@@ -5168,4 +5168,64 @@ MIGRATIONS = [
         ALTER TABLE ftn_networks ADD COLUMN uplink_tls_pin TEXT NOT NULL DEFAULT '';
         """,
     ),
+    Migration(
+        description=(
+            "Issues #1470, #1471 and #1472 (design doc §6.8, §16 \"Issue #1154\", Decisions 12 and 26): "
+            "netmail extras. A network bounces netmail no account can take (`bounce_unknown`, on by "
+            "default and on upgrade: Decision 26 amends #166 Decision 7) and names the file area "
+            "inbound file attaches are stored in (`attach_area_id`; NULL, as on upgrade, holds them). "
+            "A queued message has a flavour (`normal`, `crash` or `hold`; every existing row is "
+            "normal) and counts its failed `attempts`. `ftn_outbound_files` is the general queue of "
+            "files waiting for a session with one node -- a netmail's attaches now, file requests "
+            "and hatched TIC files later -- each a file area entry (`file_id`) or a file on disk "
+            "(`path`), with what happens to a spooled file once it is sent. A row is deleted once "
+            "sent. `ftn_attach_waits` remembers a delivered netmail's attached file names until the "
+            "files arrive. `give_held_unproven` (off by default and on upgrade) lets a caller that "
+            "only presents a node's address, without a password, collect that node's held mail. No "
+            "foreign key points at `file_areas` or `mail_messages`, which later migrations may "
+            "rebuild: a gone area or letter is checked where it is used."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN bounce_unknown INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE ftn_networks ADD COLUMN attach_area_id INTEGER;
+        ALTER TABLE ftn_networks ADD COLUMN give_held_unproven INTEGER NOT NULL DEFAULT 0;
+
+        ALTER TABLE ftn_outbound ADD COLUMN flavour TEXT NOT NULL DEFAULT 'normal'
+            CHECK (flavour IN ('normal', 'crash', 'hold'));
+        ALTER TABLE ftn_outbound ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE ftn_outbound_files (
+            id              INTEGER PRIMARY KEY,
+            network_id      INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            destination     TEXT NOT NULL,
+            route           TEXT NOT NULL DEFAULT 'uplink' CHECK (route IN ('uplink', 'direct')),
+            flavour         TEXT NOT NULL DEFAULT 'normal' CHECK (flavour IN ('normal', 'crash', 'hold')),
+            file_id         TEXT,
+            path            TEXT,
+            send_name       TEXT NOT NULL,
+            size_bytes      INTEGER NOT NULL,
+            after_sent      TEXT NOT NULL DEFAULT 'keep' CHECK (after_sent IN ('keep', 'kill', 'truncate')),
+            reference_kind  TEXT NOT NULL,
+            reference_id    TEXT NOT NULL,
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL,
+            CHECK ((file_id IS NULL) <> (path IS NULL)),
+            CHECK (file_id IS NULL OR after_sent = 'keep')
+        );
+        CREATE INDEX idx_ftn_outbound_files_route ON ftn_outbound_files(network_id, route, destination);
+        CREATE INDEX idx_ftn_outbound_files_reference ON ftn_outbound_files(reference_kind, reference_id);
+
+        CREATE TABLE ftn_attach_waits (
+            id              INTEGER PRIMARY KEY,
+            network_id      INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            mail_id         INTEGER NOT NULL,
+            file_key        TEXT NOT NULL,
+            file_name       TEXT NOT NULL,
+            sender_label    TEXT NOT NULL,
+            origin          TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        );
+        CREATE INDEX idx_ftn_attach_waits_key ON ftn_attach_waits(network_id, file_key);
+        """,
+    ),
 ]

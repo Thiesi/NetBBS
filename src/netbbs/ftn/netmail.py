@@ -1,6 +1,6 @@
 """
 Caller netmail: personal mail to an FTN address (design doc §6.8,
-Decisions 4 and 6).
+Decisions 4 and 6; issues #1470 and #1471).
 
 A caller writes to `Name (zone:net/node[.point])` on Mail's To line -- the
 form an FTN author is shown with on a board and a netmail sender in the
@@ -12,13 +12,22 @@ Inbox, so Reply fills it in. `@` stays Link's (`user@node`).
   SysOp lowers it: netmail leaves under the node's address.
 - `send_netmail` keeps the sender's Sent copy (`recipient_remote_address`
   holds the FTN form, never `@`, so nothing Link reads it as a Link
-  address) and queues the encoded netmail for the uplink in the same
-  transaction, with INTL, FMPT/TOPT where points need them, MSGID, PID,
-  TZUTC and CHRS. Netmail goes to one person at a time.
-- It is routed direct when the network's nodelist lists where the
-  destination (a point's boss node) answers BinkP, and via the uplink
-  otherwise (Decision 5); the mailer falls back to the uplink when direct
-  calls keep failing.
+  address) and queues the encoded netmail in the same transaction, with
+  INTL, FMPT/TOPT where points need them, MSGID, PID, TZUTC and CHRS.
+  Netmail goes to one person at a time.
+- **Flavour** (issue #1471, `netbbs.ftn.outbound`): `normal` is routed
+  direct when the network's nodelist lists where the destination (a
+  point's boss node) answers BinkP, and via the uplink otherwise; the
+  mailer falls back to the uplink when direct calls keep failing. `crash`
+  goes direct only, and is refused when the nodelist lists no BinkP
+  address for the destination (unless it is the uplink itself). `hold`
+  waits for the destination to call.
+- **File attach** (issue #1470): a SysOp's netmail sends the files it
+  points at (§6.4's file refs) with it, as FTS-0001's FileAttach: the
+  netmail's subject on the network is the files' names, and each file is
+  queued in `ftn_outbound_files` on the netmail's route and flavour. A
+  file is at most the node's upload limit and BinkP's 64 MiB. Anyone
+  else's file refs go as text lines, as a letter to another BBS does.
 """
 
 from __future__ import annotations
@@ -26,14 +35,18 @@ from __future__ import annotations
 import datetime
 import re
 
-from netbbs.auth.users import User
+from netbbs.auth.users import User, is_usable_sysop
+from netbbs.config import get_max_upload_bytes
+from netbbs.file_refs import FileRef, write_mail_refs_without_commit
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, parse_address
-from netbbs.ftn.chrs import MAX_NAME_BYTES
+from netbbs.ftn.binkp import MAX_FILE_BYTES, safe_file_name
+from netbbs.ftn.chrs import MAX_NAME_BYTES, MAX_SUBJECT_BYTES
 from netbbs.ftn.message import FtnMessage, encode_message, format_msgid, format_tzutc
 from netbbs.ftn.networks import FtnNetwork, list_networks
 from netbbs.ftn.nodelist import direct_route
-from netbbs.ftn.packet import ATTR_PRIVATE, pack_message
+from netbbs.ftn.outbound import CRASH, FLAVOURS, HOLD, NORMAL, queue_file_without_commit
+from netbbs.ftn.packet import ATTR_CRASH, ATTR_FILE_ATTACHED, ATTR_HOLD, ATTR_PRIVATE, pack_message
 from netbbs.ftn.queue import FtnQueueFullError, enqueue_outbound_without_commit, next_msgid_serial_without_commit
 from netbbs.ftn.scanner import PRODUCT
 from netbbs.mail import MailError, MailMessage, get_mail, validate_mail_fields
@@ -43,6 +56,8 @@ from netbbs.storage.database import Database
 from netbbs.timeutil import get_node_timezone, utc_now_iso
 
 _RECIPIENT = re.compile(r"(?P<name>.*?)\s*\((?P<address>\d+:\d+/\d+(?:\.\d+)?)\)\s*")
+
+FLAVOUR_LABELS = {NORMAL: "Normal", CRASH: "Crash", HOLD: "Hold"}
 
 
 def parse_ftn_recipient(text: str) -> tuple[str, FtnAddress] | None:
@@ -101,10 +116,102 @@ def netmail_notice(db: Database, text: str) -> str | None:
     return f"Netmail via {network.name}. Not private: every system it passes through can read it."
 
 
-def send_netmail(db: Database, sender: User, text: str, subject: str, body: str) -> MailMessage:
+def may_attach_files(sender: User) -> bool:
+    """Whether `sender`'s netmail sends its files rather than naming them
+    (issue #1470): the SysOp's only."""
+    return is_usable_sysop(sender)
+
+
+def attach_limit(db: Database) -> int:
+    """The most one attached file may be: the node's upload limit, at most
+    BinkP's per-file 64 MiB -- the limit a file echo's file meets too (§16
+    "Issue #1154", Decision 4)."""
+    return min(get_max_upload_bytes(db), MAX_FILE_BYTES)
+
+
+def attach_send_name(ref: FileRef) -> str:
+    """The name an attached file goes out under, and is named by in the
+    netmail's subject."""
+    return safe_file_name(ref.filename)
+
+
+def attach_refusal(db: Database, files: list[FileRef]) -> str | None:
+    """Why these files can't all go with one netmail, or None: one too
+    large or gone, two under the same name, or names too long together
+    for FTS-0001's 71-byte subject that carries them."""
+    if not files:
+        return None
+    limit = attach_limit(db)
+    names: list[str] = []
+    for ref in files:
+        row = db.connection.execute(
+            "SELECT size_bytes, status FROM files WHERE file_id = ?", (ref.file_id,)
+        ).fetchone()
+        if row is None or row["status"] != "approved":
+            return f"{ref.filename} is no longer available."
+        if row["size_bytes"] > limit:
+            return f"{ref.filename} is {row['size_bytes']} bytes; a file sent with netmail is at most {limit}."
+        name = attach_send_name(ref)
+        if name.casefold() in {other.casefold() for other in names}:
+            return f"Two of the files would go out as {name}; attach one of them."
+        names.append(name)
+    if len(" ".join(names).encode("ascii")) > MAX_SUBJECT_BYTES:
+        return (f"The files' names carry the netmail's subject, which holds {MAX_SUBJECT_BYTES} characters: "
+                "attach fewer files.")
+    return None
+
+
+def route_for(db: Database, network: FtnNetwork, address: FtnAddress) -> str:
+    """`direct` when the nodelist lists where the node (a point's boss)
+    answers, unless that node is the uplink anyway; `uplink` otherwise."""
+    direct = direct_route(db, network.id, address)
+    return "direct" if direct is not None and not direct[0].same_node(network.uplink_address) else "uplink"
+
+
+def _is_uplink(network: FtnNetwork, address: FtnAddress) -> bool:
+    return FtnAddress(address.zone, address.net, address.node).same_node(network.uplink_address)
+
+
+def flavour_refusal(db: Database, text: str, flavour: str) -> str | None:
+    """Why a netmail to `text` can't go with `flavour`, or None. Crash goes
+    straight to its destination, so the nodelist must say where that
+    answers -- unless the destination is the uplink itself."""
+    if flavour not in FLAVOURS:
+        return f"{flavour!r} is not a netmail flavour."
+    parsed = parse_ftn_recipient(text)
+    network = network_for(db, parsed[1]) if parsed else None
+    if flavour != CRASH or network is None:
+        return None
+    address = parsed[1]
+    if _is_uplink(network, address) or route_for(db, network, address) == "direct":
+        return None
+    return (f"Crash netmail goes straight to {address.four_d}, and the {network.name} nodelist lists no BinkP "
+            "address for it. Send it Normal, through the hub.")
+
+
+def flavour_route(db: Database, network: FtnNetwork, address: FtnAddress, flavour: str) -> str:
+    """Where a netmail of `flavour` to `address` is queued: `hold` waits for
+    the destination itself to call, so it is routed direct unless the
+    destination is the uplink; crash and normal as `route_for` says."""
+    if flavour == HOLD:
+        return "uplink" if _is_uplink(network, address) else "direct"
+    if flavour == CRASH and _is_uplink(network, address):
+        return "uplink"
+    return route_for(db, network, address)
+
+
+def send_netmail(
+    db: Database, sender: User, text: str, subject: str, body: str, *, flavour: str = NORMAL,
+    attach: list[FileRef] = (),
+) -> MailMessage:
     """Keep the Sent copy and queue the netmail; raises `MailError` with a
-    reason the caller is shown."""
-    refusal = netmail_refusal(db, sender, text)
+    reason the caller is shown. `attach` are files that go with it (a
+    SysOp's only, `may_attach_files`); the Sent copy points at them."""
+    refusal = netmail_refusal(db, sender, text) or flavour_refusal(db, text, flavour)
+    attach = list(attach)
+    if refusal is None and attach:
+        refusal = ("Only the SysOp sends files with netmail." if not may_attach_files(sender)
+                   else attach_refusal(db, attach))
     if refusal is not None:
         raise MailError(refusal)
     subject = validate_mail_fields(subject, body)
@@ -112,6 +219,7 @@ def send_netmail(db: Database, sender: User, text: str, subject: str, body: str)
     network = network_for(db, address)
     label = format_ftn_recipient(name, address)
     created_at = utc_now_iso()
+    route = flavour_route(db, network, address, flavour)
     try:
         db.connection.execute(
             """
@@ -123,15 +231,26 @@ def send_netmail(db: Database, sender: User, text: str, subject: str, body: str)
         )
         mail_id = db.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
         index_mail_without_commit(db, mail_id)
-        packed = _encode(db, network, sender, name, address, subject, body)
-        # Decision 5: direct when the nodelist lists where the node (a
-        # point's boss) answers, unless that node is the uplink anyway.
-        direct = direct_route(db, network.id, address)
-        route = "direct" if direct is not None and not direct[0].same_node(network.uplink_address) else "uplink"
+        names = [attach_send_name(ref) for ref in attach]
+        attributes = ATTR_PRIVATE | {NORMAL: 0, CRASH: ATTR_CRASH, HOLD: ATTR_HOLD}[flavour]
+        if attach:
+            write_mail_refs_without_commit(db, mail_id, attach)
+            attributes |= ATTR_FILE_ATTACHED
+        packed = encode_netmail(
+            db, network, from_name=sender.username, to_name=name, address=address,
+            # FTS-0001: a FileAttach netmail's subject is the files' names.
+            subject=" ".join(names) if attach else subject, body=body, attributes=attributes,
+        )
         enqueue_outbound_without_commit(
             db, network.id, kind="netmail", reference_id=str(mail_id), destination=str(address), packed=packed,
-            route=route,
+            route=route, flavour=flavour,
         )
+        for ref, send_name in zip(attach, names):
+            queue_file_without_commit(
+                db, network.id, destination=address, route=route, flavour=flavour, file_id=ref.file_id,
+                send_name=send_name, size_bytes=ref.size_bytes, reference_kind="netmail",
+                reference_id=str(mail_id),
+            )
     except FtnQueueFullError as exc:
         db.connection.rollback()
         raise MailError(f"netmail to {network.name} can't be queued now: {exc}") from exc
@@ -142,7 +261,25 @@ def send_netmail(db: Database, sender: User, text: str, subject: str, body: str)
     return get_mail(db, sender, mail_id)
 
 
-def _encode(db, network: FtnNetwork, sender: User, name: str, address: FtnAddress, subject: str, body: str) -> bytes:
+def sent_outcome(db: Database, text: str, flavour: str, files: int) -> str:
+    """What the compose screen says once a netmail is queued."""
+    parsed = parse_ftn_recipient(text)
+    where = parsed[1].four_d if parsed else "its destination"
+    with_files = f" with {files} file{'s' if files != 1 else ''}" if files else ""
+    if flavour == CRASH:
+        return f"Crash netmail queued{with_files}: this BBS calls {where} now."
+    if flavour == HOLD:
+        return f"Netmail on hold{with_files}: it waits for {where} to call this BBS."
+    return f"Netmail queued{with_files}. It goes out with this BBS's next call to its hub."
+
+
+def encode_netmail(
+    db: Database, network: FtnNetwork, *, from_name: str, to_name: str, address: FtnAddress, subject: str,
+    body: str, attributes: int = ATTR_PRIVATE, reply: str | None = None,
+) -> bytes:
+    """A netmail from this node to `to_name` at `address`, packed, with
+    INTL, FMPT/TOPT where points need them, MSGID, REPLY when given, PID
+    and TZUTC."""
     ours = network.our_address
     moment = datetime.datetime.now(datetime.timezone.utc).astimezone(get_node_timezone(db))
     kludges = [("INTL", f"{address.zone}:{address.net}/{address.node} {ours.zone}:{ours.net}/{ours.node}")]
@@ -150,14 +287,16 @@ def _encode(db, network: FtnNetwork, sender: User, name: str, address: FtnAddres
         kludges.append(("FMPT", str(ours.point)))
     if address.point:
         kludges.append(("TOPT", str(address.point)))
+    kludges.append(("MSGID", format_msgid(ours, next_msgid_serial_without_commit(db))))
+    if reply:
+        kludges.append(("REPLY", reply))
     kludges += [
-        ("MSGID", format_msgid(ours, next_msgid_serial_without_commit(db))),
         ("PID", PRODUCT),
         ("TZUTC", format_tzutc(moment.utcoffset() or datetime.timedelta(0))),
     ]
     message = FtnMessage(
-        to_name=name, from_name=sender.username, subject=subject, body=body, kludges=kludges,
-        date=moment.replace(tzinfo=None), tear_line=PRODUCT, attributes=ATTR_PRIVATE,
+        to_name=to_name, from_name=from_name, subject=subject, body=body, kludges=kludges,
+        date=moment.replace(tzinfo=None), tear_line=PRODUCT, attributes=attributes,
         orig_net=ours.net, orig_node=ours.node, dest_net=address.net, dest_node=address.node,
     )
     return pack_message(encode_message(message))

@@ -206,7 +206,8 @@ def test_netmail_reaches_the_account_its_to_name_matches(db, network, sysop):
     assert letter.body == "A private note"
 
 
-def test_netmail_to_an_unknown_name_goes_to_the_sysop_with_a_note(db, network, sysop):
+def test_netmail_to_an_unknown_name_goes_to_the_sysop_with_a_note_when_bouncing_is_off(db, network, sysop):
+    network = save_network(db, replace(network, bounce_unknown=False))
     _toss(db, network, _packet(_netmail(to="Nobody Here")))
     (letter,) = list_inbox(db, sysop)
     assert letter.body.startswith("[This netmail was addressed to 'Nobody Here'")

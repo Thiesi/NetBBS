@@ -51,13 +51,17 @@ from netbbs.auth.users import (
 from netbbs.identity.addressing import is_valid_user_part, user_part_problem
 from netbbs.link.boards import LinkContext
 from netbbs.ftn.netmail import (
+    FLAVOUR_LABELS,
     format_ftn_recipient,
     is_ftn_recipient,
+    may_attach_files,
     netmail_notice,
     netmail_refusal,
     parse_ftn_recipient,
     send_netmail,
+    sent_outcome,
 )
+from netbbs.ftn.outbound import CRASH, FLAVOURS, HOLD, NORMAL
 from netbbs.link.mail import (
     DELIVERY_STATUS_LABELS, RELAYED_DISPLAY_STATUS, LinkMailError, acknowledge_delivery_notices, compose_link_message,
     delivery_display_status, delivery_explanation, record_resend,
@@ -2009,9 +2013,36 @@ async def _picker_style(lane: DatabaseLane, user: User) -> dict:
 # copied. Who it goes to is checked at Send.
 
 
-def _file_rows(files: list[FileRef], *, accent: int, to_another_bbs: bool) -> list[str]:
+FLAVOUR_KEY = "f"
+_FLAVOUR_MEANING = {
+    NORMAL: "direct when the nodelist allows, else via the hub",
+    CRASH: "this BBS calls the destination directly, now; never via the hub",
+    HOLD: "waits for the destination to call this BBS",
+}
+
+
+def _netmail_rows(recipient_text: str | None, flavour: str, *, accent: int) -> list[str]:
+    """A netmail's Flavour line on the review screen (issue #1471)."""
+    if not is_ftn_recipient(recipient_text):
+        return []
+    return [colored("Flavour: ", fg_color=MUTED_COLOR) + colored(FLAVOUR_LABELS[flavour], fg_color=accent)
+            + colored(f" -- {_FLAVOUR_MEANING[flavour]}", fg_color=MUTED_COLOR)]
+
+
+def _netmail_actions(recipient_text: str | None) -> list[tuple[str, str, str | None]]:
+    if not is_ftn_recipient(recipient_text):
+        return []
+    return [(FLAVOUR_KEY, menu_key("F", "lavour"), "Normal, Crash or Hold: how urgently the netmail goes")]
+
+
+def _file_rows(files: list[FileRef], *, accent: int, to_another_bbs: bool, as_attach: bool = False) -> list[str]:
     rows = attached_rows(files, accent=accent)
-    if files and to_another_bbs:
+    if files and as_attach:
+        rows.append(colored(
+            "The files go with the netmail (file attach). On the network its subject is their names.",
+            fg_color=MUTED_COLOR,
+        ))
+    elif files and to_another_bbs:
         rows.append(colored(
             "Someone on another BBS gets each file's name, size and file area as text at the end of the "
             "letter, not a download.",
@@ -3097,6 +3128,7 @@ async def _compose_mail(
     # from it once is refused if its draft is sent again.
     group_id = resumed.group_id if resumed is not None and resumed.group_id else new_mail_group_id()
     files: list[FileRef] = resumed.files if resumed is not None else list(prefill_files or [])
+    flavour = resumed.flavour if resumed is not None else NORMAL  # a netmail's (issue #1471)
     if resumed is not None and resumed.reply_address is not None:
         prefill_link_address, prefill_recipient = resumed.reply_address, None
     elif resumed is not None and resumed.recipient_text is not None:
@@ -3214,7 +3246,7 @@ async def _compose_mail(
             draft_path,
             {
                 "to": recipient_text, "reply_address": reply_address, "subject": subject, "group": group_id,
-                **_files_field(files),
+                **_files_field(files), **({"flavour": flavour} if flavour != NORMAL else {}),
             },
         )
 
@@ -3262,7 +3294,8 @@ async def _compose_mail(
             reply_address is not None or any("@" in entry for entry in split_recipients(recipient_text))
         )) or is_ftn_recipient(recipient_text)
         too_long = _too_long_to_send(subject, body)
-        if too_long is None and files and to_another_bbs:
+        if too_long is None and files and to_another_bbs and not (
+                is_ftn_recipient(recipient_text) and may_attach_files(user)):
             # A letter to another BBS ends with a line naming each file
             # (issue #830), which counts toward its length there.
             too_long = _file_lines_too_long(await lane.run(body_with_link_text, body, files))
@@ -3289,9 +3322,18 @@ async def _compose_mail(
                 # Previewed as its reader will see it, lines kept (issue #809).
                 body_mode=body_mode,
                 body_layout="lines",
-                extra_rows=_file_rows(files, accent=accent_color, to_another_bbs=to_another_bbs),
-                extra_actions=file_actions(files, noun="letter"),
+                extra_rows=[
+                    *_netmail_rows(recipient_text, flavour, accent=accent_color),
+                    *_file_rows(files, accent=accent_color, to_another_bbs=to_another_bbs,
+                                as_attach=is_ftn_recipient(recipient_text) and may_attach_files(user)),
+                ],
+                extra_actions=[*file_actions(files, noun="letter"), *_netmail_actions(recipient_text)],
             )
+        if action == FLAVOUR_KEY and is_ftn_recipient(recipient_text):
+            # A toggle toggles (§3.5): Normal, Crash, Hold, and round again.
+            flavour = FLAVOURS[(FLAVOURS.index(flavour) + 1) % len(FLAVOURS)]
+            keep_fields()
+            continue
         if isinstance(action, str):
             with entered(session, title):
                 files = await change_attached_files(
@@ -3362,14 +3404,18 @@ async def _compose_mail(
                 if problem is not None:
                     announce(session, problem, tone="error")
                     continue
+            # The SysOp's files go with the netmail (issue #1470); anyone
+            # else's are named in text, as for a letter to another BBS.
+            attach = files if may_attach_files(user) else []
             try:
-                ftn_body = await lane.run(body_with_link_text, body, files)
-                await lane.run(send_netmail, user, recipient_text, subject, ftn_body)
+                ftn_body = body if attach else await lane.run(body_with_link_text, body, files)
+                await lane.run(lambda db: send_netmail(db, user, recipient_text, subject, ftn_body,
+                                                       flavour=flavour, attach=attach))
             except MailError as exc:
                 announce(session, f"Could not send: {exc}", tone="error")
                 continue
             _forget_letter(draft_path)
-            announce(session, "Netmail queued. It goes out with this BBS's next call to its hub.")
+            announce(session, await lane.run(sent_outcome, recipient_text, flavour, len(attach)))
             return True
 
         if link_enabled and (reply_address is not None or "@" in recipient_text):
@@ -3448,6 +3494,8 @@ class _LetterDraft:
     group_id: str | None = None
     # The files it points at (issue #830).
     files: list[FileRef] = field(default_factory=list)
+    # A netmail's flavour (issue #1471).
+    flavour: str = NORMAL
 
 
 def _reply_key(message: MailMessage) -> str:
@@ -3533,6 +3581,7 @@ def _load_letter_draft(path: Path) -> _LetterDraft | None:
         subject=fields.get("subject"),
         group_id=fields.get("group") if isinstance(fields.get("group"), str) else None,
         files=_decode_files(fields.get("files")),
+        flavour=fields.get("flavour") if fields.get("flavour") in FLAVOURS else NORMAL,
     )
 
 

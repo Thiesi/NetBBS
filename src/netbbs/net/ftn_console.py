@@ -79,11 +79,11 @@ from netbbs.ftn.networks import (
 )
 from netbbs.ftn.nodelist import HOW_MANUAL, ImportOutcome, NodelistError, import_list, nodelist_status
 from netbbs.ftn.nodelist_feed import read_list_file
+from netbbs.ftn.outbound import count_waiting
 from netbbs.ftn.queue import (
     HELD_PACKET,
     FtnQueueFullError,
     bad_echo_dropped,
-    count_pending_outbound,
     delete_bad_echo,
     delete_held,
     held_bad_file_echo_ids,
@@ -374,6 +374,76 @@ def _transport_values(draft: dict, candidate: FtnNetwork, listen_port: int,
 
 
 # --- end transport ---
+# --- the Netmail section (issues #1470 and #1472) ---
+
+
+def _netmail_draft(network: FtnNetwork | None) -> dict:
+    if network is None:
+        return {"bounce_unknown": True, "attach_area_id": None, "give_held_unproven": False}
+    return {"bounce_unknown": network.bounce_unknown, "attach_area_id": network.attach_area_id,
+            "give_held_unproven": network.give_held_unproven}
+
+
+def _with_netmail_values(network: FtnNetwork, draft: dict) -> FtnNetwork:
+    return replace(network, bounce_unknown=bool(draft["bounce_unknown"]), attach_area_id=draft["attach_area_id"],
+                   give_held_unproven=bool(draft["give_held_unproven"]))
+
+
+def _area_name(db: Database, area_id: int | None) -> str:
+    if area_id is None:
+        return "(none: files are held for you)"
+    row = db.connection.execute("SELECT name FROM file_areas WHERE id = ?", (area_id,)).fetchone()
+    return sanitize_text(row["name"]) if row is not None else "(removed: files are held for you)"
+
+
+async def _attach_area_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+    """Pick the file area inbound netmail files are stored in, or none."""
+    from netbbs.files.areas import list_file_areas
+
+    areas = await lane.run(list_file_areas)
+    none = object()
+    picked = await pick_item(
+        session, [none, *areas],
+        name_of=lambda a: "No area: hold them for me" if a is none else sanitize_text(a.name),
+        stable_id_of=lambda a: 0 if a is none else a.id,
+        description_of=lambda a: ("Every file sent with a netmail waits in Held items" if a is none
+                                  else sanitize_text(a.description or "")),
+        title="Store netmail files in which file area?", empty_message="No file areas.",
+    )
+    if picked is not None:
+        draft["attach_area_id"] = None if picked is none else picked.id
+        draft["attach_area_label"] = await lane.run(_area_name, draft["attach_area_id"])
+
+
+def _netmail_fields() -> list[FieldSpec]:
+    return [
+        FieldSpec(key="bounce_unknown", label="Bounce unknown",
+                  render=lambda d: "yes" if d["bounce_unknown"] else "no: to the SysOp",
+                  prompt=bool_field("bounce_unknown"), step=bool_step("bounce_unknown"), section="Netmail",
+                  brief="Return netmail no account here can take to its sender",
+                  help="On by default. Off, such netmail comes to you. Netmail to SysOp always reaches you, and "
+                       "a returned netmail, a robot's message or a sender already returned to five times today "
+                       "is never returned."),
+        FieldSpec(key="attach_area_id", label="Attach area",
+                  render=lambda d: d["attach_area_label"],
+                  prompt=_attach_area_prompt, section="Netmail",
+                  brief="Where files sent with a netmail are stored",
+                  help="A file that comes with a netmail is stored here and listed in the letter. Who may read "
+                       "this area may download it. With none, each one is held for you to look at."),
+        FieldSpec(key="give_held_unproven", label="Held mail, no password",
+                  render=lambda d: "give it" if d["give_held_unproven"] else "no: only to a proven caller",
+                  prompt=bool_field("give_held_unproven"), step=bool_step("give_held_unproven"),
+                  section="Netmail",
+                  brief="Give held mail to callers without a password",
+                  help="Off by default. Held netmail waits for its node to call. A node other than your hub "
+                       "has no password here, and anyone can claim its address, so with this on a stranger "
+                       "pretending to be that node collects its held mail and files, and the real node never "
+                       "gets them. Off, held mail goes only in a session with a password (your hub's), or "
+                       "expires after 30 days and its sender is told."),
+    ]
+
+
+# --- end Netmail section ---
 
 
 def _network_from_draft(draft: dict, existing: FtnNetwork | None) -> FtnNetwork:
@@ -410,6 +480,8 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
     # --- file echoes (issue #1462) ---
     draft["tic_password"] = existing.tic_password if existing is not None else ""
     # --- end file echoes ---
+    draft.update(_netmail_draft(existing))  # issues #1470 and #1472
+    draft["attach_area_label"] = await lane.run(_area_name, draft["attach_area_id"])
     secret = lambda key: (lambda d: "set" if d[key] else "(not set)")  # noqa: E731
     fields = [
         FieldSpec(key="enabled", label="Enabled",
@@ -485,16 +557,25 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                           "file echo is held for you to look at."))
     # --- end file echoes ---
     fields += _transport_fields()  # issues #1467, #1468: the Transport section, after File echoes
+    fields += _netmail_fields()  # issues #1470 and #1472: the Netmail section, after File echoes
 
     async def save(draft: dict) -> FtnNetwork:
         candidate = _network_from_draft(draft, existing)
         candidate = replace(candidate, tic_password=draft["tic_password"])  # issue #1462
+        candidate = _with_netmail_values(candidate, draft)  # issues #1470 and #1472
         port = int(draft["listen_port"])
         if not 0 < port < 65536:
             raise FtnNetworkError("The answer port must be between 1 and 65535.")
         candidate, node_wide = _transport_values(draft, candidate, port, existing)  # issues #1467, #1468
 
         def _persist(db: Database) -> FtnNetwork:
+            # --- netmail extras (issue #1470): a Linked area can't take netmail files ---
+            from netbbs.ftn.attach import attach_area_problem
+
+            problem = attach_area_problem(db, candidate.attach_area_id)
+            if problem is not None:
+                raise FtnNetworkError(problem)
+            # --- end netmail extras ---
             saved = save_network(db, candidate)
             set_config(db, PORT_CONFIG_KEY, str(port))
             for key, value in node_wide.items():  # issues #1467, #1468
@@ -539,7 +620,12 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
             rows.append(Field("Last call", f"{status.last_success_at}: {status.last_summary}"))
         if status is not None and status.last_error:
             rows.append(Field("Last error", sanitize_text(status.last_error)))
-        rows.append(Field("Waiting", f"{count_pending_outbound(db, network.id)} messages"))
+        # --- netmail extras (issues #1470 and #1471): files and held mail too ---
+        messages, files_waiting, on_hold = count_waiting(db, network.id)
+        rows.append(Field("Waiting", f"{messages} messages"
+                          + (f", {files_waiting} files" if files_waiting else "")
+                          + (f" ({on_hold} on hold for their node to call)" if on_hold else "")))
+        # --- end netmail extras ---
         # --- transport (issue #1468) ---
         if network.uplink_tls:
             rows.append(Field("TLS", _TLS_LABELS[network.uplink_tls] + (
