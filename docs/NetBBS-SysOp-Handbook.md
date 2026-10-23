@@ -3505,7 +3505,7 @@ last edition, with its day number and CRC-16, and the last failure.
 
 #### List your points
 
-1. On the **Publishing** screen, press <kbd>O</kbd> **Points**. Each point
+1. On the **Publishing** screen, press <kbd>E</kbd> **Entries for points**. Each point
    from your **Links** screen is listed with its line.
 2. Pick a point to fill in its line: **System name**, **Location**,
    **Sysop**, **Phone**, **Speed** and **Flags**. An empty name or sysop

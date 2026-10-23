@@ -503,7 +503,7 @@ def build_pointlist(db: Database, network: FtnNetwork, day: datetime.date) -> by
     `PublishError` with no point to list or a line no list can carry."""
     entries = [e for e in list_point_entries(db, network) if e.listed and e.link.status != DISABLED]
     if not entries:
-        raise PublishError("No point is listed: add points on the Links screen, or list them under P[o]ints.")
+        raise PublishError("No point is listed: add points on the Links screen, or list them under [E]ntries for points.")
     ours = network.our_address
     body = [";A", f";A Points of {ours.four_d}, made by NetBBS {__version__}", ";A",
             f"Boss,{ours.zone}:{ours.net}/{ours.node}"]

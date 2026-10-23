@@ -390,8 +390,8 @@ def test_the_points_screen_edits_a_points_line(db, network, points, sysop):
 
     lane = DatabaseLane(db.path)
     try:
-        # o: Points; 01: Pat; 03: location; s: save.
-        session = FakeSession(["o", "0", "1", "0", "3", "Auckland", "s", "b", "b"])
+        # e: Entries for points; 01: Pat; 03: location; s: save.
+        session = FakeSession(["e", "0", "1", "0", "3", "Auckland", "s", "b", "b"])
         asyncio.run(ftn_publish_screen(session, lane, sysop, network))
     finally:
         lane.close()

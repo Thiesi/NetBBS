@@ -12,7 +12,7 @@ CRC-16, file) -- then the folder, the schedule and the last failure.
   goes to the network.
 - **[S]ettings** is a draft: which lists are on, their names and file
   echoes, the segment's Host line, the folder, ZIP and the schedule.
-- **P[o]ints** lists this node's points; picking one edits its pointlist
+- **[E]ntries for points** lists this node's points; picking one edits its pointlist
   line in a draft (listed or not, system name, location, sysop, phone,
   speed, flags).
 - **[N]odes** is the segment's node lines: picking one edits it,
@@ -158,7 +158,7 @@ async def ftn_publish_screen(session: Session, lane: DatabaseLane, actor: User, 
             session, title=_detail_title(session, chrome, f"Publishing ({network.name})", own=True),
             sections=sections, page=page, message=message,
             actions=[("p", menu_key("P", "ublish now")), ("s", menu_key("S", "ettings")),
-                     ("o", "P" + menu_key("o", "ints")), ("n", menu_key("N", "odes")), _BACK_ACTION],
+                     ("e", menu_key("E", "ntries for points")), ("n", menu_key("N", "odes")), _BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Publishing help",
             help_about=("A pointlist of this BBS's points, and a nodelist segment for the net it coordinates, "
@@ -171,7 +171,7 @@ async def ftn_publish_screen(session: Session, lane: DatabaseLane, actor: User, 
             message = await _publish(session, lane, actor, network)
         elif choice == "s":
             await edit_publish_settings(session, lane, actor, network)
-        elif choice == "o":
+        elif choice == "e":
             await _points_screen(session, lane, actor, network)
         elif choice == "n":
             await _nodes_screen(session, lane, actor, network)
