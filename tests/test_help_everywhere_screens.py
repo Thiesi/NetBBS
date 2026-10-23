@@ -577,8 +577,8 @@ def test_verify_identity_has_help(db, sysop, alice):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_verify_user(session, db, sysop, alice))
     text = session.squeezed()
-    assert "Verify identity help" in text and "[A]ge Attest the birthdate you checked" in text
-    assert "[R]evoke" not in text.split("Verify identity help")[1].split("Keys that work everywhere")[0]
+    assert "Field help" in text and "The date of birth you checked" in text
+    assert "[R]evoke does" in text
     assert text.count("Verifying alice") == 2
     assert session.leftover == []
 
@@ -591,7 +591,11 @@ def test_revoke_which_has_help_and_still_asks(db, sysop, alice):
     attest_name(db, alice, "Alice Liddell", verifier=sysop)
     # Help, then [A]ge, then "no" at the confirmation.
     session = FakeSession([HELP_KEY, _DISMISS, "a", "n"])
-    asyncio.run(_revoke_one(session, db, sysop, alice))
+    lane = DatabaseLane(db.path)
+    try:
+        asyncio.run(_revoke_one(session, lane, sysop, alice))
+    finally:
+        lane.close()
     text = session.squeezed()
     assert "Revoke help" in text and "[A]ge Withdraw the verified age" in text
     assert text.count("Revoke which:") == 2

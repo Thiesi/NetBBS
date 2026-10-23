@@ -96,6 +96,13 @@ _NO_SECTION_YET = object()
 FieldPrompt = Callable[[Session, DatabaseLane, Draft], Awaitable[None]]
 
 
+class SaveDeclined(Exception):
+    """Raised by a `save` that asks one last question before storing (the
+    Verify screen's confirmation) when the answer is no: the editor keeps
+    the draft and shows no error, since nothing failed. The save announces
+    its own outcome."""
+
+
 def inline_field(prompt: FieldPrompt) -> FieldPrompt:
     """Opt a single typed field into the measured edit position.
 
@@ -1097,6 +1104,10 @@ async def edit_resource_draft(
             await session.write_line("")
             try:
                 result = await save(draft)
+            except SaveDeclined:
+                # The save's own last question was answered no: the draft
+                # stays, and the save announced what happened itself.
+                continue
             except error_type as exc:
                 refusal = colored(f"Could not save: {exc}", fg_color=MUTED_COLOR)
                 if redraw_in_place:
