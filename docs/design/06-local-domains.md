@@ -2163,11 +2163,11 @@ echoes, FileFix and the robot rules, the nodelist from a file echo, echo-list
 import, unknown echoes and the held-item actions. They are described below as
 they are to be built, and so are stage B's netmail extras: file attach,
 crash and hold flavours, and bounces (#1470-#1472), and stage C's file
-requests (#1475). Stage D's points and the hub's records, sessions and
-transit netmail (#1478, #1479) are under "Points and downlinks", and its
-publishing (#1480) under "Publishing". The
-round's later stages are listed under "Planned" at the end of this
-section.
+requests (#1475). Stage D's points and the hub -- its records, sessions,
+transit netmail, echomail fan-out, AreaFix/FileFix server and TIC
+forwarding (#1478, #1479) -- are under "Points and downlinks", and its
+publishing (#1480) under "Publishing". The round's later stages are
+listed under "Planned" at the end of this section.
 
 **Networks.** A SysOp adds one network record per FTN network:
 
@@ -2382,10 +2382,11 @@ editor per link):
 
 Each link has a session password, required, and optional packet,
 AreaFix, FileFix and TIC passwords (the last three serve the AreaFix
-server and TIC forwarding, below, and are not yet in the editor), a
-bundle preference (bare packets or ZIP), and a status: *active*;
-*paused*, set by the link's own `%PAUSE`, which stops its echomail but
-not its netmail; or *disabled* by the SysOp. The Links screen shows each
+server and TIC forwarding, below; FileFix falls back to the AreaFix
+password), a bundle preference (bare packets or ZIP), the echoes and file
+echoes it carries, each read-write or read-only, and a status: *active*;
+*paused*, set by the link's own `%PAUSE`, which stops its echomail and
+file echoes but not its netmail; or *disabled* by the SysOp. The Links screen shows each
 link's last call and what waits for it, and the FTN status screen counts
 them per network. Nothing is a link until the SysOp adds it: on a network
 that forbids feeding other systems, nothing changes. nixNet allows a node
@@ -2413,18 +2414,13 @@ there and stays a leaf.
   sender told, as held mail is. Deleting a link drops what waits for it
   the same way. Netmail to a point this node does not serve is refused.
 - **A point's echomail** is tossed here, through the board's moderation as
-  any echomail is, and then sent to the uplink as this node's own: SEEN-BY
-  this node and the uplink, PATH this node, and whatever SEEN-BY and PATH
-  the point's software wrote dropped, since a point is never in either
-  (FTS-0004, FSC-0074). Its MSGID, Origin line and kludges go on as
-  written. On a moderated board it goes once the post is approved, and is
-  forgotten after 30 days unapproved (at most 1,000 wait per network). A
-  point's echomail for an echo no board carries waits as an unknown echo
-  and goes on when the SysOp creates or maps the board; one the SysOp
-  releases from the held store goes on too, by the address it was held
-  under. Echomail or netmail a point sends must say it was written at the
-  point's own address (its Origin line, else its MSGID; its INTL and
-  FMPT, else its packet), or it is held: a point sends its own mail.
+  any echomail is, and then sent on as this node's own (the fan-out below):
+  whatever SEEN-BY and PATH the point's software wrote are dropped, since a
+  point is never in either (FTS-0004, FSC-0074), and this node's are
+  written. Its MSGID, Origin line and kludges go on as written. Echomail or
+  netmail a point sends must say it was written at the point's own address
+  (its Origin line, else its MSGID; its INTL and FMPT, else its packet),
+  or it is held: a point sends its own mail.
 - **Transit netmail**, for another node, is routed with a `^AVia` line
   naming this node (FTS-4009): to the point or downlink it is for, else,
   when a point or downlink sent it, to the uplink. INTL, and FMPT and
@@ -2436,20 +2432,145 @@ there and stays a leaf.
   is counted and dropped, as before. A netmail whose Via lines already
   name this node (a loop), that passed 30 systems, that is addressed back
   to the link that sent it, or that is for a point this node does not
-  serve, is held for the SysOp; a repeat is dropped by its MSGID. Files
-  attached to a transit netmail are not forwarded: they wait in the held
-  store as unclaimed files and expire.
+  serve, is held for the SysOp; a repeat is dropped by its MSGID.
+- **Transit attaches.** Files attached to a transit netmail follow it on
+  its route: each name its subject gives waits, as an inbound attach's
+  does ("Inbound attaches" under "Netmail in Mail"), and the file that
+  arrives under it from the system whose session brought the netmail, in
+  that session or another, is copied to the node's
+  spool folder and queued after the netmail -- for the link it is for, or
+  via the uplink -- under the netmail's own reference, so dropping the
+  netmail drops its files. It is deleted once the next system confirms it
+  and never enters a file area. A file over BinkP's 64 MiB, a name that is
+  not safe, or a file the full queue can't take is held for the SysOp with
+  the reason.
 
-Not built yet, and the subject of the hub's second part (#1479): echomail
-fan-out to points and downlinks, the AreaFix/FileFix server and TIC
-forwarding. They build on these records without a schema change: each
-link's echoes and file echoes go in `ftn_link_areas` (with a read-only
-mode), one encoded message is queued for one link with
-`enqueue_for_link_without_commit` (a copy of one post for several links
-names the link in its reference), and SEEN-BY and PATH are merged by
-`netbbs.ftn.route.merge_seen_by_path`. Until then a downlink's echomail is
-tossed here and goes no further, and a TIC from a link is held (check 3
-below).
+**Echomail fan-out** (issue #1479; FTS-0004, FSC-0074). A hub sends each
+echomail on to the other systems carrying its echo:
+
+- **Who gets it.** Every *active* point and downlink carrying the echo, and
+  the uplink when the message did not come from it. Never the system it
+  came from, and never a downlink whose net/node its SEEN-BY names already.
+  A point is never in a SEEN-BY, so only the sender rule keeps a point from
+  its own message. Paused and disabled links get nothing.
+- **Loops.** A message whose PATH names this node passed here before and
+  goes nowhere.
+- **SEEN-BY and PATH.** Every copy carries the same SEEN-BY: what it came
+  with, this node, and the net/node of the uplink and each downlink it goes
+  to -- never a point's, which its boss stands for. PATH gets this node at
+  the end, unless already last. Only the trailing SEEN-BY and PATH lines
+  and the packed header's net/node fields change: the message is never
+  decoded and re-encoded.
+- **When.** Echomail from the uplink goes on at once, once it is stored,
+  whatever the board's moderation decides about showing it here: the
+  network has it already. Echomail from a point or downlink goes on once
+  its post is visible -- on a moderated board when it is approved, kept
+  until then (`ftn_point_waiting`, at most 1,000 per network, forgotten
+  after 30 days) -- since this node puts it into the network. A duplicate
+  never gets this far: the dupe check comes first. A message held for any
+  reason (an unknown echo, a closed board) goes on once the SysOp releases
+  or re-tosses it, as from the address it was held under.
+- **Who may post.** A point or downlink posts only in an echo it carries
+  read-write. A message for an echo it carries read-only, or doesn't
+  carry, is held with the reason; one the SysOp releases or re-tosses is
+  vouched for and goes on.
+- **Local posts.** A post written here on a board carrying an echo goes to
+  the uplink and to each point and downlink carrying the echo, one message
+  with one MSGID and one SEEN-BY (this node, the uplink, every downlink it
+  goes to), each copy addressed to its system.
+- **No pass-through.** An echo goes to links only when a board here carries
+  it. An echo no board carries is an unknown echo, as before, and a link's
+  request never makes this node ask the uplink for an area.
+- **Bounds.** A copy for a link at its queue bound (2,000 messages) is not
+  queued, with a node-log line; the other copies go.
+
+**The AreaFix and FileFix server** (issue #1479). This node's robots answer
+its points and downlinks the way the uplink's answer this node ("Robots"
+under "Netmail in Mail"):
+
+- **Who is answered.** Netmail to the network's AreaFix or FileFix name, at
+  this node's address, from a point or downlink in a session its own
+  session password proved, written at that link's address. Anyone else's
+  -- the uplink's, a caller's that only presents an address, a downlink's
+  point's -- reaches the SysOp in Mail with a line saying it was not acted
+  on. Nothing a robot request asks is ever done for an unproven caller.
+- **Password.** The first word of the subject: the link's AreaFix password,
+  or for FileFix its FileFix password, else the AreaFix one, compared
+  without case. With none set, or a wrong one, the reply says so and
+  nothing is done.
+- **What a link may link** (§16 "Issue #1154", Decision 17, names the
+  server but not who may link what; this is the rule). The SysOp offers areas to the network's
+  links, one by one, on the Links screen's **[R]obot areas**: any echo a
+  board carries or file echo a file area carries on the network. Nothing
+  is offered by default or on upgrade. A link's `+TAG` links an offered
+  area, read-write; `-TAG` unlinks any area it carries. The SysOp gives
+  any link any carried area, offered or not, and sets it read-only, on
+  the link's **[A]reas**; an area the SysOp made read-only stays so when
+  the link asks for it again, and stopping an offer leaves the links that
+  carry it alone. Rejected: an "open to links" flag on each board and file
+  area, which would put a hub setting on screens that know nothing of
+  links; offering by Community, which networks don't map to; and offering
+  everything a board carries, which on a network like nixNet would hand a
+  point its admin echoes.
+- **Commands**, at most 50 per request, one per line, up to a tear line
+  or an Origin line:
+  - `+TAG` or a bare `TAG`, and `-TAG`; `*` and `?` match several tags
+    (offered ones for `+`, the link's own for `-`);
+  - `%LIST` and `%AVAIL`, the areas offered to the link, marked when it
+    carries them (`%AVAIL` is the same list: this node never asks its
+    uplink for an area on a link's behalf); `%QUERY` or `%LINKED`, what it
+    carries; `%UNLINKED`, what it could link but doesn't; `%HELP`;
+  - `%RESCAN [TAG] [n]` (AreaFix only), with `n` written bare or as `R=n`:
+    the newest `n` posts (50 by default, at most 200 per echo and 500 per
+    request) of the named echo, or of each echo the same request linked,
+    sent again to the link. Each is rebuilt from the post, with its MSGID
+    and REPLY, a `^ARESCANNED` line naming this node, SEEN-BY this node
+    and the link, and PATH this node; a carried post's Origin line names
+    its author's address with the text `rescanned at <this node>`. A post
+    without a MSGID is left out: a receiver's dupe check would have
+    nothing to go by;
+  - `%PAUSE` and `%RESUME` set the link's status (*paused* or *active*); a
+    link the SysOp disabled can't change it;
+  - `%PWD new` sets that robot's password. When AreaFix's changes and
+    FileFix had none of its own, FileFix keeps the old one, as this node's
+    own client does;
+  - anything else is answered as unknown.
+- **The reply** is netmail from the robot's name to the request's From name
+  at the link's address, queued for the link with `^AREPLY` to the
+  request, in parts of at most 8,000 characters (at most 10). A request is
+  answered once: its MSGID passes the netmail dupe check first. A reply
+  the full queue can't take holds the request, and nothing it asked
+  stays done.
+
+**TIC forwarding** (issue #1479; FTS-5006). A file that passed the TIC
+checks below and is stored in its file area goes on to the other systems
+carrying its file echo:
+
+- **Who gets it.** Every active point and downlink carrying the file echo,
+  and the uplink when the file came from a link. Never the system it came
+  from, never one its TIC's `Seenby` names, and never a link with no TIC
+  password set (with a node-log line: the other side would hold a TIC
+  without one).
+- **Loops.** A TIC whose `Path` names this node passed here before: the file
+  goes nowhere.
+- **The TIC** is new per system: the original's Area, Origin, Desc and
+  Ldesc, Replaces, Size and Crc; File the stored file's 8.3 name, with
+  `Lfile` the real one; From this node and To the system; the `Path` lines
+  it came with, then this node's; `Seenby` what it came with plus this node
+  and every system it goes to; Pw the TIC password agreed with that system
+  (the link's, or the network's for the uplink).
+- **The file** goes as its file area entry, kept once sent, paired with its
+  TIC in the outbound queue as a hatch's is: when one of the two can't be
+  sent, the other is dropped with it. The TIC is written to the spool
+  folder and deleted once sent. A system whose queue can't take both is
+  skipped, with a node-log line.
+- **When.** At once when the file is visible; in a moderated area once it
+  is approved (`ftn_tic_waiting` keeps the TIC until then, at most 1,000
+  per network, forgotten after 30 days). A file in a nodelist echo no file
+  area carries is not stored, so it is not forwarded: a hub that feeds its
+  links the nodelist maps the nodelist echo to a file area.
+- **Hatching** sends the file to the links carrying the echo too, each with
+  a TIC under its own TIC password, and every copy's Seenby names them.
 
 **Publishing** (issue #1480; §16, "Issue #1154", Decision 18). A network's
 SysOp can publish a **pointlist** of this node's points and a **nodelist
@@ -2549,7 +2670,9 @@ per board. Nothing is mapped by default.
     oldest are dropped first, and the drops are counted on the status screen.
     A board is never created without the SysOp (§16, "Issue #1154", Decision
     9).
-- *Outbound.* A local post on an FTN board is exported to the uplink:
+- *Outbound.* A local post on an FTN board is exported to the uplink, and
+  to the points and downlinks carrying its echo (under "Points and
+  downlinks"):
   - the `AREA:` line, `^AMSGID` (a persisted serial, unique across restores),
     `^AREPLY`, `^APID`, `^ATZUTC` and `^ACHRS`;
   - a tear line and an Origin line;
@@ -2593,8 +2716,10 @@ per board. Nothing is mapped by default.
   displayed names, or carried from elsewhere) stays local with a node-log
   warning, as for a full queue. It is never sent under the username or with the name cut short.
 
-  A post that arrived from FTN is never exported again. SEEN-BY and PATH on
-  tossed messages are kept intact, so loop detection works.
+  A post that arrived from FTN is never exported again: what a hub sends
+  on to its points and downlinks is the received message itself (the
+  fan-out, under "Points and downlinks"). SEEN-BY and PATH on tossed
+  messages are kept intact, so loop detection works.
 - *Edits and deletions* have no FTN equivalent. A local edit is not
   re-exported, and removing an FTN-sourced post removes only the local copy.
 
@@ -2723,10 +2848,13 @@ says; at check 10 a duplicate is dropped and counted, not held.
 1. The session is secure. Otherwise both halves are held unopened, as above.
 2. The TIC parses: `Area`, `File` and `Crc` are present, and the TIC is at
    most 64 KiB.
-3. `From` is the network's uplink. Until the hub (stage D), no other system
-   sends this node file echoes.
-4. `Pw` matches the network's TIC password, compared case-insensitively. With
-   no TIC password set, every TIC is held.
+3. `From` is the network's uplink -- or, in a session a point's or
+   downlink's password proved (issue #1479), that link. A TIC that waited
+   in the held store is judged by the session that brought it.
+4. `Pw` matches the network's TIC password (a link's: its own TIC
+   password), compared case-insensitively. With no TIC password set, every
+   TIC is held. A link's TIC must also be for a file echo the link carries
+   read-write.
 5. `Area` is mapped to a file area of this network, or is the network's
    nodelist echo (under "Nodelist" below). Any other tag is an unknown echo:
    unknown file echoes get their own rows on the Unknown echoes screen, where
@@ -2783,8 +2911,9 @@ cursor and confirmed with one yes/no, since it goes to the network.
   the name is not 8.3, `Size`, `Date` (when the file was stored, in Unix
   time), `Desc` (the description's first line, else the name) and an
   `Ldesc` line per description line, `Created`, `Crc` (CRC-32 of the stored
-  bytes), one `Path` line (this node, now), `Seenby` for this node and the
-  uplink, and `Pw`, the network's TIC password. Control characters in a
+  bytes), one `Path` line (this node, now), `Seenby` for this node, the
+  uplink and the links that get it too (TIC forwarding, above), and `Pw`,
+  the network's TIC password. Control characters in a
   description become spaces, so no value can start a line of its own.
 - **Names.** A name that is already 8.3 of BinkP's safe characters is sent as
   it is. Any other is sent under up to six letters and digits of its stem,
@@ -3016,9 +3145,6 @@ These are decided in outline and ship before the feature freeze, one stage at
 a time, each live-checked on ReLink. Each stage's PR writes its rules into
 this section; until then the text above is what holds.
 
-- **Stage D:**
-  - the hub's second part: echomail fan-out, an AreaFix/FileFix server and
-    TIC forwarding (#1479), on the link records above.
 - **Stage E:**
   - QWK offline mail for callers (#1389) -- built, see §6.10;
   - QWKnet as a node (#1481) and as a hub (#1482), reusing §6.10's packet

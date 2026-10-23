@@ -83,6 +83,7 @@ from netbbs.ftn.attach import expire_attach_waits
 from netbbs.ftn.binkp import BatchContext, BinkpError, OutgoingFile, SessionResult, SystemInfo, run_session
 from netbbs.ftn.exchange import summary, system_info, toss_received
 from netbbs.ftn.links import get_link, prune_point_waiting, record_link_call
+from netbbs.ftn.ticfwd import prune_tic_waiting
 from netbbs.ftn.networks import FtnNetwork, list_networks, set_uplink_tls_pin
 from netbbs.ftn.nodelist import direct_route
 from netbbs.ftn.outbound import (
@@ -188,6 +189,7 @@ class FtnMailer:
             await self._lane.run(expire_attach_waits)  # attached files that never came (issue #1470)
             await self._lane.run(expire_held)  # held mail whose node never called (issue #1471)
             await self._lane.run(prune_point_waiting)  # a point's posts never approved (issue #1478)
+            await self._lane.run(prune_tic_waiting)  # TIC files never approved (issue #1479)
         for network in await self._lane.run(list_networks):
             # --- publishing (issue #1480): a scheduled pointlist or segment ---
             if network.enabled:

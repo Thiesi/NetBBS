@@ -5500,4 +5500,43 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1479, the hub's second part (design doc §6.8, \"Points and downlinks\"; §16 \"Issue "
+            "#1154\", Decision 17). `ftn_link_offers` is the echoes and file echoes a network's SysOp offers "
+            "to its points and downlinks: the areas their AreaFix and FileFix requests may link. "
+            "`ftn_tic_waiting` keeps a TIC file echo's TIC while its file waits for a moderator, so the file "
+            "is forwarded to the links carrying the echo once it is approved. `ftn_attach_waits` gains the "
+            "route of a transit netmail whose attached files are forwarded with it (`forward_to`, "
+            "`forward_route`, `forward_link_id`, `forward_reference`; NULL for a letter delivered here), "
+            "and `forward_from`, the address of the session the netmail came in, the only one whose "
+            "files it claims. "
+            "`ftn_point_waiting` now keeps any link's echomail, as received, while its post waits for a "
+            "moderator. Nothing is offered on upgrade, so nothing changes."
+        ),
+        sql="""
+        CREATE TABLE ftn_link_offers (
+            network_id  INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            kind        TEXT NOT NULL CHECK (kind IN ('echo', 'file')),
+            tag         TEXT NOT NULL COLLATE NOCASE,
+            created_at  TEXT NOT NULL,
+            PRIMARY KEY (network_id, kind, tag)
+        );
+
+        CREATE TABLE ftn_tic_waiting (
+            file_id     TEXT PRIMARY KEY,
+            network_id  INTEGER NOT NULL REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            from_uplink INTEGER NOT NULL DEFAULT 1,
+            link_id     INTEGER REFERENCES ftn_links(id) ON DELETE SET NULL,
+            tic         BLOB NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_to TEXT;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_route TEXT;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_link_id INTEGER;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_reference TEXT;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_from TEXT;
+        """,
+    ),
 ]

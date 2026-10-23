@@ -26,6 +26,18 @@ cut off). A wait unclaimed after `queue.UNPAIRED_DAYS` is forgotten
 (`expire_attach_waits`); the file, if it comes later, is held as any
 unclaimed file is.
 
+**Transit attaches** (issue #1479). A netmail this node routes on to
+another system (`netbbs.ftn.tosser`, "Transit netmail") that names files
+waits for them the same way (`record_transit_waits_without_commit`), and
+each file that comes is sent on after it, on the netmail's own route: to
+the point or downlink it is for, or via the uplink. The file is copied
+into the node's spool folder and deleted once the next system confirmed
+it; it never enters a file area. A file over BinkP's 64 MiB, or one the
+full queue can't take, is held for the SysOp with the reason. A transit
+wait claims only a file from the system whose session brought its netmail
+(`forward_from`): a link can't name another sender's file and have it sent
+to an address of its choosing.
+
 Security: only a secure session's files ever reach here. A file from an
 unsecure session is held unopened before any of this (`exchange`), and is
 never marked waiting, so a netmail released from the held store can't
@@ -106,18 +118,59 @@ def record_waits_without_commit(
         _logger.warning("FTN: %d netmail file wait(s) dropped at the %d-wait cap", over, MAX_WAITS)
 
 
-def _wait_for(db: Database, network: FtnNetwork, name: str):
+def record_transit_waits_without_commit(
+    db: Database, network: FtnNetwork, names: list[str], *, destination: str, route: str, link_id: int | None,
+    reference: str, sender_label: str, origin: str, remote: str,
+) -> None:
+    """Remember that a routed netmail's files follow it on (issue #1479):
+    each to `destination` on `route` (`link_id` for a point or downlink),
+    queued under the netmail's own reference so they are dropped with it.
+    Only a file from `remote`, the session the netmail came in, is claimed.
+    Bounded with the letters' waits by `MAX_WAITS`."""
+    now = utc_now_iso()
+    for name in names:
+        db.connection.execute(
+            "INSERT INTO ftn_attach_waits (network_id, mail_id, file_key, file_name, sender_label, origin, created_at,"
+            " forward_to, forward_route, forward_link_id, forward_reference, forward_from)"
+            " VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (network.id, pair_key(name), name, sender_label, origin, now, destination, route, link_id, reference,
+             _remote_key(remote)),
+        )
+    over = db.connection.execute("SELECT COUNT(*) FROM ftn_attach_waits").fetchone()[0] - MAX_WAITS
+    if over > 0:
+        db.connection.execute(
+            "DELETE FROM ftn_attach_waits WHERE id IN (SELECT id FROM ftn_attach_waits ORDER BY id LIMIT ?)", (over,)
+        )
+        _logger.warning("FTN: %d netmail file wait(s) dropped at the %d-wait cap", over, MAX_WAITS)
+
+
+def _wait_for(db: Database, network: FtnNetwork, name: str, remote: str):
+    """The oldest wait for a file of this name from `remote`: a letter's
+    wait takes it from any secure session, a transit netmail's only from
+    the session that brought the netmail (issue #1479)."""
     return db.connection.execute(
-        "SELECT * FROM ftn_attach_waits WHERE network_id = ? AND file_key = ? ORDER BY id LIMIT 1",
-        (network.id, pair_key(name)),
+        "SELECT * FROM ftn_attach_waits WHERE network_id = ? AND file_key = ? "
+        "AND (forward_to IS NULL OR forward_from = ?) ORDER BY id LIMIT 1",
+        (network.id, pair_key(name), _remote_key(remote)),
     ).fetchone()
+
+
+def _remote_key(remote: str) -> str:
+    """A session's address as transit waits compare it: 4D, whatever the
+    domain says."""
+    from netbbs.ftn.address import parse_address
+
+    try:
+        return parse_address(remote).four_d
+    except FtnFormatError:
+        return remote
 
 
 def claim_received(db: Database, network: FtnNetwork, remote: str, name: str, data: bytes, result) -> bool:
     """A file a secure session brought: when a delivered netmail waits for
     its name, store it (or hold it with the reason) and return True;
     False when no netmail waits for it. Counts into `result`."""
-    wait = _wait_for(db, network, name)
+    wait = _wait_for(db, network, name, remote)
     if wait is None:
         return False
     _settle(db, network, wait, remote, data, result)
@@ -129,12 +182,13 @@ def claim_held(db: Database, network: FtnNetwork, result) -> None:
     in the held store that a wait names. Run once a netmail's waits are
     committed."""
     for half in waiting_halves(db, network.id, HELD_FILE):
-        wait = _wait_for(db, network, half.file_name)
+        row = db.connection.execute("SELECT remote_address FROM ftn_held_inbound WHERE id = ?", (half.id,)).fetchone()
+        remote = row["remote_address"] if row is not None else "?"
+        wait = _wait_for(db, network, half.file_name, remote)
         data = held_content(db, half.id) if wait is not None else None
         if data is None:
             continue
-        row = db.connection.execute("SELECT remote_address FROM ftn_held_inbound WHERE id = ?", (half.id,)).fetchone()
-        _settle(db, network, wait, row["remote_address"] if row is not None else "?", data, result, held_id=half.id)
+        _settle(db, network, wait, remote, data, result, held_id=half.id)
 
 
 def _settle(db: Database, network: FtnNetwork, wait, remote: str, data: bytes, result, *,
@@ -145,7 +199,12 @@ def _settle(db: Database, network: FtnNetwork, wait, remote: str, data: bytes, r
     waiting, with the new reason -- so a full store can't lose it. What a
     full store can't keep of a file just received is counted lost."""
     name = wait["file_name"]
-    reason = _refusal(db, network, name, data)
+    if "forward_to" in wait.keys() and wait["forward_to"]:
+        reason = _forward(db, network, wait, data, result, held_id=held_id)
+        if reason is None:
+            return
+    else:
+        reason = _refusal(db, network, name, data)
     if reason is None:
         try:
             entry = store_ftn_file(
@@ -187,6 +246,54 @@ def _settle(db: Database, network: FtnNetwork, wait, remote: str, data: bytes, r
     else:
         result.lost += 1
         _logger.error("FTN %s: netmail file %s was lost (held store full): %s", network.name, name, reason)
+
+
+def _forward(db: Database, network: FtnNetwork, wait, data: bytes, result, *, held_id: int | None) -> str | None:
+    """Send a transit netmail's file on after it (issue #1479): copied into
+    the spool folder and queued on the netmail's route, deleted once sent.
+    None when queued; otherwise why it is held instead."""
+    import os
+    import secrets
+
+    from netbbs.ftn.binkp import MAX_FILE_BYTES, safe_file_name
+    from netbbs.ftn.outbound import KILL, queue_file_without_commit, spool_dir
+    from netbbs.ftn.queue import FtnQueueFullError
+
+    name = wait["file_name"]
+    problem = name_problem(name)
+    if problem is not None:
+        return f"{name!r} can't be sent on: {problem}"
+    if len(data) > MAX_FILE_BYTES:
+        return f"it is {len(data)} bytes, over BinkP's limit of {MAX_FILE_BYTES}"
+    folder = spool_dir(db) / "transit"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{secrets.token_hex(8)}.att"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    with os.fdopen(os.open(path, flags, 0o644), "wb") as handle:
+        handle.write(data)
+    try:
+        queue_file_without_commit(
+            db, network.id, destination=wait["forward_to"], route=wait["forward_route"] or "uplink",
+            send_name=safe_file_name(name), size_bytes=len(data), reference_kind="netmail",
+            reference_id=wait["forward_reference"] or "transit", path=path, after_sent=KILL,
+            link_id=wait["forward_link_id"],
+        )
+        db.connection.execute("DELETE FROM ftn_attach_waits WHERE id = ?", (wait["id"],))
+        if held_id is not None:
+            db.connection.execute("DELETE FROM ftn_held_inbound WHERE id = ?", (held_id,))
+        db.connection.commit()
+    except (FtnQueueFullError, ValueError) as exc:
+        db.connection.rollback()
+        path.unlink(missing_ok=True)
+        return f"could not be sent on to {wait['forward_to']}: {exc}"
+    except BaseException:
+        db.connection.rollback()
+        path.unlink(missing_ok=True)
+        raise
+    result.files_routed += 1
+    _logger.info("FTN %s: file %s from %s sent on to %s with its netmail", network.name, name, wait["sender_label"],
+                 wait["forward_to"])
+    return None
 
 
 def _area(db: Database, area_id: int | None):

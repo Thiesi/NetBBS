@@ -91,6 +91,9 @@ def setup(db):
     set_board_area(db, board, network.id, "FSX_GEN")
     point = save_link(db, FtnLink(network_id=network.id, kind=POINT, address=POINT_1, session_password="PTPW",
                                   name="Pat"))
+    # A link posts only in an echo it carries read-write (issue #1479).
+    set_link_area_without_commit(db, point.id, ECHO, "FSX_GEN")
+    db.connection.commit()
     return sysop, network, board, point
 
 
@@ -368,11 +371,12 @@ def test_a_points_post_on_a_moderated_board_goes_on_once_approved(db, setup):
 
 
 def test_echomail_from_the_uplink_is_never_sent_back(db, setup):
-    _sysop, network, _board, _point = setup
+    _sysop, network, _board, point = setup
     echo = _echomail("From the hub", HUB)
     assert toss_packet(db, network, _packet(HUB, echo), secure=True, remote_address=str(HUB),
                        file_name="x.pkt").posts == 1
-    assert _pending(db, network) == []
+    # Only the point carrying the echo gets it (issue #1479); never the uplink.
+    assert [row["link_id"] for row in _pending(db, network)] == [point.id]
 
 
 # --- transit netmail -----------------------------------------------------------------

@@ -570,6 +570,11 @@ def approve_file(db: Database, entry: FileEntry, *, approved_by: User) -> FileEn
     from netbbs.ftn.fileecho import apply_replaces  # netbbs.ftn imports this module
 
     apply_replaces(db, entry.id)
+    # A TIC file goes on to the links carrying its echo once it is visible
+    # (issue #1479); never raises.
+    from netbbs.ftn.ticfwd import forward_approved
+
+    forward_approved(db, entry.file_id)
     # An approved upload in an area that hatches automatically goes into its
     # file echo once (issue #1476).
     from netbbs.ftn.hatch import auto_hatch

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import zlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -113,7 +114,10 @@ def test_a_written_tic_reads_back_through_the_parser():
     tic = _outgoing()
     data = write_tic(tic, to=HUB, path=[(NODE, 1761200000)], seen_by=[NODE, HUB], date=1761100000,
                      created="NetBBS 7.36.0")
-    assert parse_tic(data) == tic
+    parsed = parse_tic(data)
+    # The route it came by is read back too (issue #1479: a forwarded TIC keeps it).
+    assert parsed.seen_by == (NODE, HUB) and parsed.path_addresses == (NODE,)
+    assert replace(parsed, path=(), seen_by=()) == tic
     text = data.decode("cp437")
     assert "\r\n" in text and "\n" not in text.replace("\r\n", "")
     lines = text.split("\r\n")

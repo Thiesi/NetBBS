@@ -35,12 +35,23 @@ The tosser: inbound FTN packets into boards and Mail (design doc §6.8).
   as on a leaf: it is skipped and counted. A netmail whose Via lines name
   this node already (a loop), or that passed `MAX_VIA_HOPS` systems, or
   is for a point this node doesn't serve, is held for the SysOp.
-- **From a point** (`link` is a point's record): its echomail is tossed
-  here and then sent to the uplink as this node's own, with this node's
-  SEEN-BY and PATH (`netbbs.ftn.route.point_echomail_for_uplink`); its
-  post's moderation decides when (`netbbs.ftn.links`). Echomail or netmail
-  a point sends must say it was written at the point's address, or it is
-  held: a point sends its own mail, nobody else's.
+- **Echomail fan-out** (issue #1479): a stored echomail goes on to every
+  other system carrying its echo (`netbbs.ftn.fanout`): from the uplink,
+  to the points and downlinks that carry it, at once; from a point or
+  downlink (`link`), to the uplink and the other links, once its post is
+  visible -- on a moderated board, when it is approved
+  (`netbbs.ftn.links.hold_link_echomail_without_commit`). A link must
+  carry the echo read-write to post in it; otherwise its message is held
+  with the reason.
+- **From a point** (`link` is a point's record): echomail or netmail a
+  point sends must say it was written at the point's address, or it is
+  held: a point sends its own mail, nobody else's. Its echomail goes on as
+  this node's own: the fan-out drops whatever SEEN-BY and PATH the point's
+  software wrote (FSC-0074).
+- **Robot requests** (issue #1479): netmail to this node's AreaFix or
+  FileFix name from a point or downlink is answered by
+  `netbbs.ftn.robot_server`, never delivered. From anyone else it goes to
+  the SysOp, not acted on.
 - **Duplicates** are dropped by MSGID, or by a hash of the message when
   it has none, per area (netmail has its own).
 - **A message that can't be stored** (a full mailbox, a closed board) is
@@ -124,12 +135,15 @@ class TossResult:
     file_duplicates: int = 0
     bounced: int = 0  # netmail returned to its sender (issue #1472)
     routed: int = 0  # transit netmail routed on (issues #1478, #1479)
-    forwarded: int = 0  # a point's echomail queued for the uplink (issue #1478)
+    forwarded: int = 0  # echomail sent on to the uplink or links (issues #1478, #1479)
+    robot: int = 0  # AreaFix/FileFix requests from links answered (issue #1479)
+    files_routed: int = 0  # files attached to transit netmail sent on with it (issue #1479)
 
     def add(self, other: TossResult) -> None:
         """Count `other` into this total."""
         for name in ("posts", "netmail", "duplicates", "not_for_us", "blocked", "held", "lost", "bad_echo",
-                     "bad_echo_dropped", "files", "file_duplicates", "bounced", "routed", "forwarded"):
+                     "bad_echo_dropped", "files", "file_duplicates", "bounced", "routed", "forwarded", "robot",
+                     "files_routed"):
             setattr(self, name, getattr(self, name) + getattr(other, name))
         for tag, count in other.unknown_areas.items():
             self.unknown_areas[tag] = self.unknown_areas.get(tag, 0) + count
@@ -166,9 +180,9 @@ def toss_packet(
             message = decode_message(packed, default_charset=network.default_charset)
             if message.is_echomail:
                 _toss_echomail(db, network, message, packed, header, result, data=data,
-                               remote_address=remote_address, link=link)
+                               remote_address=remote_address, link=link, vouched=vouched)
             else:
-                _toss_netmail(db, network, message, packed, header, result, link=link)
+                _toss_netmail(db, network, message, packed, header, result, link=link, remote_address=remote_address)
         except (_Unstorable, FtnFormatError) as exc:
             db.connection.rollback()
             _hold_message(db, network, header, packed, data, remote_address, file_name, str(exc), result)
@@ -245,13 +259,15 @@ class _Unstorable(Exception):
 
 
 def _toss_echomail(db, network, message: FtnMessage, packed, header, result: TossResult, *, data: bytes,
-                   remote_address: str, link=None) -> None:
+                   remote_address: str, link=None, vouched: bool = False) -> None:
     point = link if link is not None and link.is_point else None
     if point is not None:
         written_at = message.origin_address
         if written_at is None or not written_at.same_node(point.address):
             raise _Unstorable(f"echomail from point {point.address.four_d} that says it was written at "
                               f"{written_at.four_d if written_at is not None else 'no address'}")
+    if link is not None and not vouched:
+        _check_link_may_post(db, link, message.area)
     board_id = board_id_for_area(db, network.id, message.area)
     if board_id is None:
         tag = message.area.upper()
@@ -289,43 +305,53 @@ def _toss_echomail(db, network, message: FtnMessage, packed, header, result: Tos
     db.connection.execute(
         "UPDATE posts SET ftn_msgid = ?, ftn_inbound = 1 WHERE post_id = ?", (message.msgid, post.post_id)
     )
-    if point is not None and _forward_point_echomail_without_commit(db, network, point, packed, post):
+    if _forward_echomail_without_commit(db, network, message.area.upper(), link, packed, post):
         result.forwarded += 1
     db.connection.commit()
     reindex_post(db, board.id, post.post_id)
     result.posts += 1
 
 
-def _forward_point_echomail_without_commit(db, network: FtnNetwork, point, packed: PackedMessage, post) -> bool:
-    """A point's echomail on its way to the uplink as this node's own
-    (issue #1478): queued now when its post is visible, else kept until a
-    moderator approves it (`netbbs.ftn.links`). A full queue keeps it local
-    with a node-log line, as for a local post. True when queued now."""
-    from netbbs.ftn.links import hold_point_echomail_without_commit
-    from netbbs.ftn.route import point_echomail_for_uplink
+def _check_link_may_post(db, link, tag: str) -> None:
+    """A point or downlink posts only in an echo it carries read-write
+    (issue #1479); raises `_Unstorable` -- the message is held -- otherwise."""
+    from netbbs.ftn.links import ECHO, link_areas
 
     try:
-        forwarded = pack_message(point_echomail_for_uplink(packed, network.our_address, network.uplink_address))
-    except FtnFormatError as exc:
-        _logger.warning("FTN %s: point %s's message %s stays local: %s", network.name, point.address.four_d,
-                        post.post_id, exc)
-        return False
+        modes = {area.tag.upper(): area.mode for area in link_areas(db, link.id, ECHO)}
+    except sqlite3.OperationalError:  # a schema older than links
+        return
+    mode = modes.get(tag.strip().upper())
+    if mode is None:
+        raise _Unstorable(f"{link.address.four_d} does not carry {tag.upper()}: it links the echo with AreaFix, "
+                          "or the SysOp adds it on the link's areas")
+    if mode != "rw":
+        raise _Unstorable(f"{link.address.four_d} carries {tag.upper()} read-only, so it can't post in it")
+
+
+def _forward_echomail_without_commit(db, network: FtnNetwork, tag: str, link, packed: PackedMessage, post) -> bool:
+    """Send a stored echomail on (issue #1479; `netbbs.ftn.fanout`): one
+    from the uplink to the links carrying the echo, at once; one from a
+    point or downlink to the uplink and the other links once its post is
+    visible, kept until a moderator approves it otherwise. True when any
+    copy was queued now."""
+    from netbbs.ftn.fanout import fan_out_without_commit
+    from netbbs.ftn.links import hold_link_echomail_without_commit
+
+    if link is None:
+        return fan_out_without_commit(db, network, packed, tag, post.post_id, from_uplink=True).copies > 0
     if post.status != "approved":
-        hold_point_echomail_without_commit(db, network.id, point.id, post.post_id, forwarded)
+        try:
+            hold_link_echomail_without_commit(db, network.id, link.id, post.post_id, pack_message(packed))
+        except FtnFormatError as exc:
+            _logger.warning("FTN %s: %s's message %s stays local: %s", network.name, link.address.four_d,
+                            post.post_id, exc)
         return False
-    try:
-        return enqueue_outbound_without_commit(
-            db, network.id, kind="echomail", reference_id=post.post_id, destination=str(network.uplink_address),
-            packed=forwarded,
-        )
-    except FtnQueueFullError as exc:
-        _logger.warning("FTN %s: point %s's message %s was not sent on: %s", network.name, point.address.four_d,
-                        post.post_id, exc)
-        return False
+    return fan_out_without_commit(db, network, packed, tag, post.post_id, sender=link).copies > 0
 
 
 def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader, result: TossResult,
-                  link=None) -> None:
+                  link=None, remote_address: str = "?") -> None:
     destination = netmail_destination(message, header)
     if link is not None and link.is_point:
         written_at = netmail_origin(message, header)
@@ -333,7 +359,7 @@ def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader
             raise _Unstorable(f"netmail from point {link.address.four_d} that says it was written at "
                               f"{written_at.four_d}")
     if not _addressed_to(destination, network.our_address):
-        _route_transit(db, network, message, packed, header, destination, result, link)
+        _route_transit(db, network, message, packed, header, destination, result, link, remote_address)
         return
     dupe_key = _dupe_key(message, packed)
     if not record_seen_msgid_without_commit(db, network.id, NETMAIL_AREA, dupe_key):
@@ -342,8 +368,16 @@ def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader
         return
     origin = netmail_origin(message, header)
     sender_label = _label(message.from_name, origin)
-    recipient, undeliverable = _netmail_recipient(db, message.to_name)
+    # --- the AreaFix/FileFix server (issue #1479) ---
+    robot = _robot_request(db, network, message, origin, link, dupe_key, result)
+    if robot is True:
+        return
+    # --- end AreaFix/FileFix server ---
     note = None
+    if robot is not None:
+        recipient, note = robot
+    else:
+        recipient, undeliverable = _netmail_recipient(db, message.to_name)
     if recipient is None:
         if _bounced(db, network, message, origin, undeliverable, dupe_key, result):
             return
@@ -378,8 +412,32 @@ def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader
         claim_held(db, network, result)
 
 
+def _robot_request(db, network: FtnNetwork, message: FtnMessage, origin: FtnAddress, link, dupe_key: str,
+                   result: TossResult):
+    """A netmail to this node's AreaFix or FileFix (issue #1479): True once a
+    proven link's request is answered; `(SysOp, note)` for anyone else's,
+    which goes to the SysOp, not acted on; None when it isn't for a robot."""
+    from netbbs.ftn.robot_server import answer_request_without_commit, not_acted_note, robot_for
+
+    robot = robot_for(network, message.to_name)
+    if robot is None:
+        return None
+    if link is not None and link.enabled and link.address.same_node(origin):
+        try:
+            answer_request_without_commit(db, network, robot, link, message, dupe_key)
+        except (FtnQueueFullError, FtnFormatError) as exc:
+            raise _Unstorable(f"a robot request from {link.address.four_d} could not be answered: {exc}") from exc
+        db.connection.commit()
+        result.robot += 1
+        return True
+    sysop = _first_sysop(db)
+    if sysop is None:
+        raise _Unstorable("a robot request from someone who is not a link here, and no SysOp to give it to")
+    return sysop, not_acted_note(network, robot, origin)
+
+
 def _route_transit(db, network: FtnNetwork, message: FtnMessage, packed: PackedMessage, header: PacketHeader,
-                   destination: FtnAddress, result: TossResult, link) -> None:
+                   destination: FtnAddress, result: TossResult, link, remote_address: str = "?") -> None:
     """Route a netmail for another node on (issues #1478, #1479): to the
     point or downlink it is for, else to the uplink when a point or
     downlink sent it. Anything else is not this node's to route: counted,
@@ -421,18 +479,36 @@ def _route_transit(db, network: FtnNetwork, message: FtnMessage, packed: PackedM
         kludges.append(("FMPT", str(origin.point)))
     if destination.point and not message.kludge("TOPT"):
         kludges.append(("TOPT", str(destination.point)))
+    route = "direct" if target is not None else "uplink"
+    reference = f"transit:{dupe_key}"
     try:
         forwarded = append_via(packed, network.our_address, PRODUCT, kludges=kludges,
                                attributes=(packed.attributes | ATTR_IN_TRANSIT) & ~ATTR_LOCAL)
         enqueue_outbound_without_commit(
-            db, network.id, kind="netmail", reference_id=f"transit:{dupe_key}", destination=str(destination),
-            packed=pack_message(forwarded), route="direct" if target is not None else "uplink",
-            link_id=target.id if target is not None else None,
+            db, network.id, kind="netmail", reference_id=reference, destination=str(destination),
+            packed=pack_message(forwarded), route=route, link_id=target.id if target is not None else None,
         )
     except (FtnQueueFullError, FtnFormatError) as exc:
         raise _Unstorable(f"could not route it on to {destination.four_d}: {exc}") from exc
+    # --- transit attaches (issue #1479): its files follow it on the same route ---
+    names: list[str] = []
+    if packed.attributes & ATTR_FILE_ATTACHED:
+        from netbbs.ftn.attach import record_transit_waits_without_commit
+
+        names, unsafe = split_names(attach_names(message.subject))
+        if unsafe:
+            _logger.warning("FTN %s: transit netmail from %s names files with unsafe names, not forwarded: %s",
+                            network.name, origin.four_d, ", ".join(unsafe)[:200])
+        record_transit_waits_without_commit(
+            db, network, names, destination=str(destination), route=route,
+            link_id=target.id if target is not None else None, reference=reference,
+            sender_label=_label(message.from_name, origin), origin=origin.four_d, remote=remote_address,
+        )
+    # --- end transit attaches ---
     db.connection.commit()
     result.routed += 1
+    if names:
+        claim_held(db, network, result)  # files that came before their netmail
     _logger.info("FTN %s: routed netmail from %s to %s via %s", network.name, origin.four_d, destination.four_d,
                  target.address.four_d if target is not None else f"the uplink {network.uplink_address.four_d}")
 
