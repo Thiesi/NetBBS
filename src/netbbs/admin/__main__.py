@@ -396,6 +396,81 @@ def run_ftn_import_nodelist(db: Database, network_name: str, path: Path, *, as_u
     return f"Imported {count} nodes for {network.name} from {path.name}{day}."
 
 
+# --- FTN transport (issues #1467, #1468) ---
+
+
+def run_ftn_listen(db: Database, *, host: str | None = None, port: str | None = None, tls_port: str | None = None,
+                   tls_cert: str | None = None, tls_key: str | None = None,
+                   as_username: str | None = None) -> list[str]:
+    """`ftn-listen`: change the options given, then the lines describing
+    where the node answers BinkP (design doc §6.8). Raises `ValueError`
+    saying why nothing was changed. The running node picks a change up
+    within a minute."""
+    from netbbs.config import get_config, set_config
+    from netbbs.ftn.listener import (
+        HOST_CONFIG_KEY,
+        PORT_CONFIG_KEY,
+        TLS_CERT_CONFIG_KEY,
+        TLS_KEY_CONFIG_KEY,
+        TLS_PORT_CONFIG_KEY,
+        listen_settings,
+    )
+    from netbbs.ftn.binkp import DEFAULT_PORT
+    from netbbs.ftn.transport import parse_listen_hosts
+    from netbbs.moderation.log import record_action
+
+    def _port(text: str, label: str, *, allow_off: bool) -> str:
+        text = text.strip().lower()
+        if allow_off and text in ("", "off"):
+            return ""
+        if not text.isdigit() or not 0 < int(text) < 65536:
+            raise ValueError(f"{label} must be 1-65535{' or off' if allow_off else ''}")
+        return str(int(text))
+
+    changes: dict[str, str] = {}
+    if host is not None:
+        changes[HOST_CONFIG_KEY] = " ".join(parse_listen_hosts(host))
+    if port is not None:
+        changes[PORT_CONFIG_KEY] = _port(port, "--port", allow_off=False)
+    if tls_port is not None:
+        changes[TLS_PORT_CONFIG_KEY] = _port(tls_port, "--tls-port", allow_off=True)
+    for value, key, label in ((tls_cert, TLS_CERT_CONFIG_KEY, "--tls-cert"), (tls_key, TLS_KEY_CONFIG_KEY, "--tls-key")):
+        if value is not None:
+            if value and not Path(value).is_file():
+                raise ValueError(f"{label}: {value} is not a file")
+            changes[key] = str(Path(value).resolve()) if value else ""
+    if changes:
+        actor = None
+        if as_username is not None:
+            actor = next((u for u in list_users(db) if u.username == as_username and u.user_level >= SYSOP_LEVEL
+                          and u.disabled_at is None), None)
+            if actor is None:
+                raise ValueError(f"--as {as_username!r} is not an active SysOp-level account")
+        merged = {key: get_config(db, key) or "" for key in (PORT_CONFIG_KEY, TLS_PORT_CONFIG_KEY, TLS_CERT_CONFIG_KEY)}
+        merged.update(changes)
+        if merged[TLS_PORT_CONFIG_KEY] and merged[TLS_PORT_CONFIG_KEY] == (merged[PORT_CONFIG_KEY] or str(DEFAULT_PORT)):
+            raise ValueError("the TLS port must differ from the answer port")
+        if merged[TLS_PORT_CONFIG_KEY] and not merged[TLS_CERT_CONFIG_KEY]:
+            raise ValueError("answering over TLS needs --tls-cert")
+        for key, value in changes.items():
+            set_config(db, key, value)
+        record_action(db, actor=actor, action="set_ftn_listen",
+                      detail=" ".join(f"{key}={value or '(none)'}" for key, value in changes.items()))
+    settings = listen_settings(db)
+    lines = [
+        f"Answers BinkP on port {settings.port}, "
+        f"{'on ' + ', '.join(settings.hosts) if settings.hosts else 'on every address, IPv6 and IPv4'}.",
+        (f"Answers BinkP over TLS on port {settings.tls_port} with {settings.tls_cert}"
+         + (f" and {settings.tls_key}." if settings.tls_key else ".")) if settings.tls_port
+        else "Does not answer over TLS.",
+        "Only while an enabled network answers calls; a running node picks a change up within a minute.",
+    ]
+    return lines
+
+
+# --- end FTN transport ---
+
+
 def run_export_node_map(db: Database, identity_dir: Path, output: Path | None) -> str | None:
     """Issue #1165: the caller's node map as JSON (design doc §8.13), for
     the www.netbbs.org node pages. Printed, or written to `output` through
@@ -513,6 +588,23 @@ def build_parser() -> argparse.ArgumentParser:
     nodelist.add_argument("network", help="the network's name, as in Settings, FTN networks")
     nodelist.add_argument("path", type=Path, help="the nodelist file, e.g. FSXNET.123, or a ZIP of it")
     _add_common(nodelist, defaults=False)
+    # --- FTN transport (issues #1467, #1468) ---
+    listen = subcommands.add_parser(
+        "ftn-listen",
+        help="show or set where the node answers FTN (BinkP) calls",
+        description=(
+            "Show where the node answers BinkP calls, for every FTN network, or change it with the "
+            "options below. The console sets the same in Settings, Echomail & netmail (FTN), under a "
+            "network's Calls and Transport. Safe while the node runs."
+        ),
+    )
+    listen.add_argument("--host", help="IP addresses to answer on, separated by spaces or commas; '' for every address")
+    listen.add_argument("--port", help="the answer port (24554 by default)")
+    listen.add_argument("--tls-port", help="also answer BinkP over TLS on this port (usually 24553); 'off' to stop")
+    listen.add_argument("--tls-cert", help="PEM certificate file for the TLS port; '' to clear")
+    listen.add_argument("--tls-key", help="PEM private key file, if not in the certificate file; '' to clear")
+    _add_common(listen, defaults=False)
+    # --- end FTN transport ---
     export_map = subcommands.add_parser(
         "export-node-map",
         help="print the node map as a caller sees it, as JSON",
@@ -575,6 +667,18 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(terminal_wrapped(f"Not imported: {exc}", stream=sys.stderr)) from exc
         finally:
             db.close()
+        return
+
+    if args.command == "ftn-listen":  # issues #1467, #1468
+        try:
+            lines = run_ftn_listen(db, host=args.host, port=args.port, tls_port=args.tls_port,
+                                   tls_cert=args.tls_cert, tls_key=args.tls_key, as_username=args.as_username)
+        except ValueError as exc:
+            raise SystemExit(terminal_wrapped(f"Not changed: {exc}", stream=sys.stderr)) from exc
+        finally:
+            db.close()
+        for line in lines:
+            print_wrapped(line)
         return
 
     if args.command == "export-node-map":

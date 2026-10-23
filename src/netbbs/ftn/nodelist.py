@@ -15,7 +15,8 @@ Lines starting `;` are comments; a trailing Ctrl-Z ends the file.
 
 The BinkP flags say where a node answers: `IBN` (FTS-5004), optionally
 `IBN:host`, `IBN:port` or `IBN:host:port`, with `INA:host` giving the host
-for a bare `IBN` or a port-only one. A node with `IBN` but no host anywhere
+for a bare `IBN` or a port-only one. An IPv6 address is written in brackets,
+`IBN:[2001:db8::1]:24554` or `INA:[2001:db8::1]` (FTS-5004). A node with `IBN` but no host anywhere
 is not reachable directly.
 
 `import_list` replaces a network's whole stored list in one transaction,
@@ -45,12 +46,12 @@ from dataclasses import dataclass
 
 from netbbs.ftn.address import FtnAddress
 from netbbs.ftn.binkp import DEFAULT_PORT
+from netbbs.ftn.transport import parse_host_port
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
 MAX_NODELIST_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 200_000
-_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\]")
 _LINE_END = re.compile(rb"\r\n|\n|\r")
 _DIFF_COMMAND = re.compile(rb"([ACDacd])(\d{1,6})")
 _TRAILING_DAY = re.compile(rb"(\d{1,3})\s*$")
@@ -121,18 +122,20 @@ def _binkp_target(flags: list[str]) -> tuple[str | None, int | None]:
     if ibn is None:
         return None, None
     host, port = None, DEFAULT_PORT
-    if ibn:
-        first, _, second = ibn.partition(":")
-        if first.isdigit() and not second:
-            port = int(first)
-        else:
-            host = first
-            if second.isdigit():
-                port = int(second)
-    host = host or ina
-    if host is None or not _HOST.fullmatch(host) or not 0 < port < 65536:
+    try:
+        if ibn.isdigit():
+            port = int(ibn)
+        elif ibn:
+            # IPv6 in brackets, with or without a port (issue #1467).
+            host, written = parse_host_port(ibn)
+            port = written or port
+        if host is None and ina is not None:
+            host, _ = parse_host_port(ina)
+    except ValueError:
         return None, None
-    return host.strip("[]"), port
+    if host is None or not 0 < port < 65536:
+        return None, None
+    return host, port
 
 
 # --- CRC-16, the first line and NODEDIFF (issue #1464) -----------------------

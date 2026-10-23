@@ -26,6 +26,7 @@ from netbbs.files.areas import FileArea
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import FtnAddress, parse_address
 from netbbs.ftn.chrs import DEFAULT_CHARSET, kludge_for_codec
+from netbbs.ftn.transport import TLS_MODES, TLS_OFF, normalise_fingerprint, parse_host_port
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -81,6 +82,10 @@ class FtnNetwork:
     # --- file echoes (issue #1462) ---
     tic_password: str = ""  # a TIC's Pw; empty: every TIC is held
     # --- end file echoes ---
+    # --- transport (issues #1467, #1468) ---
+    uplink_tls: str = TLS_OFF  # TLS_OFF, TLS_PINNED or TLS_VERIFIED (netbbs.ftn.transport)
+    uplink_tls_pin: str = ""  # the hub's certificate's SHA-256, learned on the first TLS call
+    # --- end transport ---
     id: int | None = None
 
     @property
@@ -104,11 +109,21 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
     if our.same_node(uplink):
         raise FtnNetworkError("This node's address and the uplink's must differ.")
     host = network.uplink_host.strip()
+    port = network.uplink_port
     if any(character.isspace() for character in host):
         raise FtnNetworkError("Uplink host must be a single host name or address.")
+    # --- transport (issue #1467): a port written into the host wins ---
+    if host:
+        try:
+            host, written_port = parse_host_port(host)
+        except ValueError as exc:
+            raise FtnNetworkError(f"Uplink host: {exc}. Write an IPv6 address with its port as "
+                                  f"[2001:db8::1]:24554.") from None
+        port = written_port or port
+    # --- end transport ---
     if network.enabled and not host:
         raise FtnNetworkError("An enabled network needs the uplink's host.")
-    if not 1 <= network.uplink_port <= 65535:
+    if not 1 <= port <= 65535:
         raise FtnNetworkError("Uplink port must be between 1 and 65535.")
     for value, limit, label in (
         (network.session_password, MAX_SESSION_PASSWORD, "Session password"),
@@ -147,10 +162,18 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
     if nodelist_name and nodelist_name == nodediff_name:
         raise FtnNetworkError("The nodelist and its diffs need different names (e.g. NODELIST and NODEDIFF).")
     # --- end nodelist echo ---
+    # --- transport (issue #1468) ---
+    if network.uplink_tls not in TLS_MODES:
+        raise FtnNetworkError("TLS must be off, pinned or verified.")
+    try:
+        tls_pin = normalise_fingerprint(network.uplink_tls_pin)
+    except ValueError as exc:
+        raise FtnNetworkError(str(exc)) from None
+    # --- end transport ---
     robots = {label: validate_robot_name(value, label)
               for value, label in ((network.areafix_robot, "AreaFix"), (network.filefix_robot, "FileFix"))}
     return replace(network, name=name, domain=domain, our_address=our, uplink_address=uplink,
-                   uplink_host=host, origin_text=origin_text,
+                   uplink_host=host, uplink_port=port, uplink_tls_pin=tls_pin, origin_text=origin_text,
                    areafix_robot=robots["AreaFix"], filefix_robot=robots["FileFix"],
                    nodelist_echo=nodelist_echo, nodelist_name=nodelist_name, nodediff_name=nodediff_name)
 
@@ -204,6 +227,12 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
             "UPDATE ftn_networks SET tic_password = ? WHERE id = ?", (validated.tic_password, validated.id)
         )
         # --- end file echoes ---
+        # --- transport (issue #1468): TLS for calls out, on its own ---
+        db.connection.execute(
+            "UPDATE ftn_networks SET uplink_tls = ?, uplink_tls_pin = ? WHERE id = ?",
+            (validated.uplink_tls, validated.uplink_tls_pin, validated.id),
+        )
+        # --- end transport ---
     except sqlite3.IntegrityError:
         db.connection.rollback()
         raise FtnNetworkError(f"A network called {validated.name!r} already exists.") from None
@@ -255,7 +284,29 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
         nodelist_echo=row["nodelist_echo"], nodelist_name=row["nodelist_name"],
         nodediff_name=row["nodediff_name"],
         tic_password=row["tic_password"] if "tic_password" in row.keys() else "",  # issue #1462
+        # --- transport (issue #1468) ---
+        uplink_tls=row["uplink_tls"] if "uplink_tls" in row.keys() else TLS_OFF,
+        uplink_tls_pin=row["uplink_tls_pin"] if "uplink_tls_pin" in row.keys() else "",
+        # --- end transport ---
     )
+
+
+# --- transport (issue #1468) --------------------------------------------------
+
+
+def set_uplink_tls_pin(db: Database, network_id: int, fingerprint: str) -> bool:
+    """Learn the hub's certificate on the first TLS call that completes.
+    Writes only while no pin is held, so a SysOp's pin is never replaced;
+    True when this call stored it."""
+    cursor = db.connection.execute(
+        "UPDATE ftn_networks SET uplink_tls_pin = ? WHERE id = ? AND uplink_tls_pin = ''",
+        (normalise_fingerprint(fingerprint), network_id),
+    )
+    db.connection.commit()
+    return cursor.rowcount > 0
+
+
+# --- end transport ---
 
 
 # --- board <-> echo area ----------------------------------------------------
