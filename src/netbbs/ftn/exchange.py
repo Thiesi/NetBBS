@@ -7,7 +7,10 @@ answers (`netbbs.ftn.listener`). Design doc §6.8.
   for a network into one Type 2+ packet with a fresh name; the caller marks
   them sent only when the remote confirms that name.
 - `toss_received` tosses bare packets and ZIP bundles (unpacked off the
-  event loop) and holds any other file for the SysOp.
+  event loop) and holds any other file for the SysOp: a ZIP with no
+  packet whole, and each non-packet member of a bundle on its own.
+  Nothing received is dropped unrecorded: what the full held store
+  can't keep is counted as lost and logged.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from netbbs.auth.users import is_usable_sysop, list_users
 from netbbs.config import get_node_display_name
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.binkp import OutgoingFile, ReceivedFile, SessionResult, SystemInfo
-from netbbs.ftn.bundle import archive_kind, extract_packets, packet_name
+from netbbs.ftn.bundle import archive_kind, packet_name, unpack_bundle
 from netbbs.ftn.networks import FtnNetwork
 from netbbs.ftn.packet import PacketHeader, build_packet_from_packed
 from netbbs.ftn.queue import hold_inbound, pending_outbound
@@ -61,13 +64,19 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, secure:
         await _hold(lane, network, remote, received, "unsecure session", total)
         return
     kind = archive_kind(received.data)
+    others: list[tuple[str, bytes]] = []
     if kind == "pkt":
         packets = [(received.name, received.data)]
     elif kind == "zip":
         try:
-            packets = await asyncio.to_thread(extract_packets, received.data)
+            packets, others = await asyncio.to_thread(unpack_bundle, received.data)
         except FtnFormatError as exc:
             await _hold(lane, network, remote, received, f"bundle could not be unpacked: {exc}", total)
+            return
+        if not packets:
+            # Not a mail bundle -- a file echo's archive, say: kept whole.
+            await _hold(lane, network, remote, received,
+                        "ZIP archive with no mail packets (a file echo or attach file?)", total)
             return
     else:
         await _hold(lane, network, remote, received, f"not a packet or ZIP bundle ({kind or 'unknown'})", total)
@@ -79,6 +88,13 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, secure:
         total.duplicates += one.duplicates
         total.held += one.held
         total.lost += one.lost
+    for name, data in others:
+        # Whatever else rode in the bundle is the SysOp's to look at, never
+        # dropped: each member is its own held item.
+        _logger.warning("FTN %s: %s in bundle %s from %s is not a mail packet; holding it", network.name, name,
+                        received.name, remote)
+        await _hold(lane, network, remote, ReceivedFile(name, data),
+                    f"not a mail packet, found in bundle {received.name}", total)
 
 
 async def _hold(lane, network, remote: str, received: ReceivedFile, reason: str, total: TossResult) -> None:
@@ -102,4 +118,5 @@ def system_info(db) -> SystemInfo:
 
 def summary(sent: int, received: int, tossed: TossResult) -> str:
     return (f"sent {sent}, received {received} files: {tossed.posts} posts, {tossed.netmail} netmail, "
-            f"{tossed.duplicates} duplicates, {tossed.held} held")
+            f"{tossed.duplicates} duplicates, {tossed.held} held"
+            + (f", {tossed.lost} lost (held store full)" if tossed.lost else ""))
