@@ -910,6 +910,47 @@ result. A flow shared with first-run onboarding (managed-DNS register, release,
 rename, cancel) writes its own outcome; the console runs it behind a stand-in
 session that holds what it wrote after its last question and announces that.
 
+**Presets are per area, and they are templates (issue #1395).** A preset sets
+several related values on one area's settings at once. It is offered as a key
+on the screen that owns those values. There are three:
+
+- **Model conversation budgets:** Frugal, Normal or Generous.
+- **Link capacity**, under Operating limits: Small, Default or Hub.
+- **Levels ladder**, under Users ▸ Levels.
+
+There is no node-wide "kind of node" preset, and onboarding does not offer
+presets.
+
+A preset works in four steps:
+
+1. **Choose.** The key opens a short pick of the tiers.
+2. **Preview.** A detail panel lists every value the tier would change, as
+   `before → after`. It also lists every value the preset cannot change and
+   why, such as "set in config". Below that come the tier's warnings and when
+   the change takes effect.
+3. **Confirm.** Nothing is written until the SysOp confirms.
+4. **Apply.** Every value and one audit entry listing each
+   `key=before→after` are written in one transaction.
+
+A preset leaves nothing behind. No record says which preset was applied, and
+there is no "drifted from preset" state. Every value stays editable on its
+own screen.
+
+A preset never sets the following:
+
+- secrets
+- hosts, addresses, ports, paths or certificates
+- identity material, or trust configuration tied to fingerprints
+- the node name or timezone
+- per-user preferences
+- the SysOp's own text
+
+A preset never switches on anything that sends data off the node. Turning
+such a thing on stays behind its own confirmation.
+
+The tiers' values and the rejected node-wide presets are in the
+[decision](decisions/1395-sysop-configuration-presets.md).
+
 ### 3.5 Interaction model for screens (issue #282)
 
 Every screen reached by a hotkey shows its content first and can be left with
