@@ -2953,7 +2953,13 @@ Some packets are held instead of tossed:
 
 - a packet from a caller that didn't prove a password;
 - a packet addressed to another address;
-- a message that couldn't be stored, for example because a mailbox was full.
+- a message that couldn't be stored, for example because a mailbox was full;
+- a file that isn't mail: a ZIP archive with no packets in it (a file echo's
+  archive, say) is held whole, and any other file inside a mail bundle is
+  held on its own beside the tossed packets.
+
+If the held store is full, what can't be kept is counted as lost in the last
+call's summary and written to the log.
 
 Look at them under **Node ▸ Echomail & netmail (FTN)** with
 <kbd>H</kbd> **Held packets**, then <kbd>R</kbd> **Release** (toss) or
