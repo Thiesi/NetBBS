@@ -932,8 +932,8 @@ A preset works in four steps:
 4. **Apply.** Every value and one audit entry listing each
    `key=before→after` are written in one transaction.
 
-A preset leaves nothing behind. No record says which preset was applied, and
-there is no "drifted from preset" state. Every value stays editable on its
+A preset leaves nothing behind but that audit entry. The node keeps no state
+about which preset was applied, and there is no "drifted from preset" state. Every value stays editable on its
 own screen.
 
 A preset never sets the following:

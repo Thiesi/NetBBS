@@ -74,9 +74,10 @@ Rejected alternatives:
   screens don't already offer.
 
 **Decision 2 — a preset is a template, not a profile (locked in).** Applying a
-preset writes values and nothing more. No record is kept of which preset was
-applied, and no screen says "you are on Hub" or "you have drifted from your
-preset". A value changed later is just a value.
+preset writes values and nothing more. Apart from the audit entry (Decision 4),
+the node keeps no state about which preset was applied. No screen says "you are
+on Hub" or "you have drifted from your preset". A value changed later is just a
+value.
 
 Rejected: **a remembered profile**. It creates a "drifted" state that every
 later edit must explain, and nothing the node does depends on knowing it.
@@ -125,8 +126,8 @@ any of the following:
   enabling the model conversation, logging prompts, letting guests use the
   model
 
-A preset may turn any of these off, but never on. Turning one on stays behind
-its existing confirmation.
+The last group is the only one a preset may change at all, and only to turn
+something off, never on. Turning one on stays behind its existing confirmation.
 
 **Decision 6 — Model conversation budget tiers (locked in).** The tiers set only
 the eight bounded numbers:
