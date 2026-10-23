@@ -5238,7 +5238,9 @@ MIGRATIONS = [
             "by their content-addressed `area_id`, never the reusable row id; no foreign key points "
             "at `file_areas`, which later migrations may rebuild, so a gone area is checked where it "
             "is used. `ftn_freq_requests` records every request made (`out`) and every request "
-            "received (`in`), answered or refused, for the daily limits and the status screen."
+            "received (`in`), answered or refused, for the daily limits and the status screen. "
+            "`ftn_held_inbound.requested` marks a held file that answers a request made here: it "
+            "waits for a TIC like any file but never expires (0 for every item on upgrade)."
         ),
         sql="""
         CREATE TABLE ftn_freq_settings (
@@ -5273,6 +5275,8 @@ MIGRATIONS = [
             created_at      TEXT NOT NULL
         );
         CREATE INDEX idx_ftn_freq_requests_node ON ftn_freq_requests(network_id, direction, node, created_at);
+
+        ALTER TABLE ftn_held_inbound ADD COLUMN requested INTEGER NOT NULL DEFAULT 0;
         """,
     ),
 ]

@@ -49,7 +49,7 @@ from netbbs.ftn.attach import claim_received, expire_attach_waits
 from netbbs.ftn.binkp import ReceivedFile, SessionResult, SystemInfo
 from netbbs.ftn.bundle import archive_kind, unpack_bundle
 from netbbs.ftn.networks import FtnNetwork
-from netbbs.ftn.queue import HELD_TIC, expire_unpaired, held_bad_file_echo_ids, hold_inbound
+from netbbs.ftn.queue import HELD_FILE, HELD_TIC, expire_unpaired, held_bad_file_echo_ids, hold_inbound
 from netbbs.ftn.tic import Tic, is_tic_name
 from netbbs.ftn.tosser import TossResult, toss_packet
 
@@ -209,8 +209,19 @@ async def _hold_requested(lane, network, remote: str, received: ReceivedFile, re
     reason = await freq.hold_reply_or_none(lane, network, result, received.name, received.data)
     if reason is None:
         return False
-    await _hold(lane, network, remote, received, reason, total)
+    # Waiting all the same: a file echo's file that happens to match still
+    # pairs with a TIC that comes later (review of #1498).
+    if await lane.run(_hold_requested_file, network.id, remote, received.name, received.data, reason):
+        total.held += 1
+    else:
+        total.lost += 1
+        _logger.error("FTN %s: %s from %s was lost (held store full): %s", network.name, received.name, remote, reason)
     return True
+
+
+def _hold_requested_file(db, network_id, remote, name, data, reason) -> bool:
+    return hold_inbound(db, network_id=network_id, remote_address=remote, file_name=name, content=data,
+                        reason=reason, kind=HELD_FILE, waiting=True, requested=True)
 
 
 # --- end file requests ---

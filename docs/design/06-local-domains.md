@@ -2617,7 +2617,10 @@ to its node: net and node in hex, `000C0002.REQ` for 1/2.
   an open request to it within 14 days (a magic name matches the names its
   answer usually has: `FILES*`, `ALLFILES*`, the nodelist's name). It is
   held, as requested, without the 7-day expiry of a file waiting for its
-  TIC, and the SysOp [S]aves it to a file area. Held rather than stored
+  TIC, and the SysOp [S]aves it to a file area. It still waits for a TIC
+  all the same: a file echo's file that happens to match (the nodelist
+  echo's list, after a request for `NODELIST`) pairs with its TIC when that
+  comes, as any file does. Held rather than stored
   at once: the remote chose its name and content, and a file area entry
   needs an uploader and a description that a SysOp vouches for -- the same
   reason a file from an unproven session is held. From a session without
@@ -2668,7 +2671,8 @@ to its node: net and node in hex, `000C0002.REQ` for 1/2.
 - **Logging.** Every request, answered or refused, is a node-log line with
   the node, whether the session was secure, the names and the outcome
   (sent, not found, over the limits, refused), and a record kept 30 days
-  (at most 2,000). The FTN status screen shows, per network, whether it
+  (at most 2,000 each of requests made and received, so a flood of
+  received requests never evicts the requests made here). The FTN status screen shows, per network, whether it
   answers, how many areas are offered, and its last five requests, made
   and answered.
 

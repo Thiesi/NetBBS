@@ -6,6 +6,7 @@ databases, in both roles."""
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import socket
 from dataclasses import replace
@@ -16,7 +17,7 @@ from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.config import set_config
 from netbbs.files.areas import create_file_area, update_file_area
 from netbbs.files.entries import upload_file
-from netbbs.ftn import binkp, freq, outbound
+from netbbs.ftn import binkp, freq, outbound, queue
 from netbbs.ftn import listener as listener_module
 from netbbs.ftn.address import FtnAddress
 from netbbs.ftn.binkp import OutgoingFile, ReceivedFile, SessionResult, SystemInfo, run_session
@@ -328,12 +329,24 @@ def test_a_reply_in_a_later_call_is_known_by_its_name_and_never_expires(node):
     assert held["GAME2.ZIP"].reason.startswith("requested from 21:1/100")
     assert held["ALLFILES.TXT"].reason.startswith("requested from 21:1/100")
     assert held["OTHER.ZIP"].reason.startswith("waiting for its .TIC")
-    assert not held["GAME2.ZIP"].waiting and held["OTHER.ZIP"].waiting
+    # Both still wait for a TIC, but only the requested one never expires.
+    assert held["GAME2.ZIP"].waiting and held["OTHER.ZIP"].waiting
+    later = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)
+    expired = {h.file_name for h in queue.expire_unpaired(node.db, now=later)}
+    assert "OTHER.ZIP" in expired and "GAME2.ZIP" not in expired
     # From another node, the same name answers nothing.
     _toss(node, [("GAME3.ZIP", b"PK")], remote=JOE)
     assert next(h for h in list_held(node.db) if h.file_name == "GAME3.ZIP").reason.startswith("waiting")
     (record,) = node.records("out")
     assert record.files == 2
+
+
+def test_received_requests_never_evict_the_requests_made_here(node, monkeypatch):
+    monkeypatch.setattr(freq, "MAX_LOG_ROWS", 3)
+    freq.queue_request(node.db, node.network, HUB, freq.request_lines_from_text("FILES"))
+    for _ in range(5):
+        _answer(node, b"README.ZIP\r\n")
+    assert len(node.records("out")) == 1 and len(node.records("in")) == 3
 
 
 def test_a_reply_from_an_unproven_session_is_held_unopened_and_says_so(node):

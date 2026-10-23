@@ -392,9 +392,12 @@ def _record_without_commit(db: Database, network_id: int, direction: str, node: 
                            files: int = 0, size: int = 0) -> int:
     cutoff = utc_iso(_utcnow() - datetime.timedelta(days=LOG_DAYS))
     db.connection.execute("DELETE FROM ftn_freq_requests WHERE created_at < ?", (cutoff,))
+    # Per direction: a flood of received requests, which need no password,
+    # never evicts the requests made here (review of #1498).
     db.connection.execute(
-        "DELETE FROM ftn_freq_requests WHERE id NOT IN (SELECT id FROM ftn_freq_requests ORDER BY id DESC LIMIT ?)",
-        (MAX_LOG_ROWS - 1,),
+        "DELETE FROM ftn_freq_requests WHERE direction = ? AND id NOT IN "
+        "(SELECT id FROM ftn_freq_requests WHERE direction = ? ORDER BY id DESC LIMIT ?)",
+        (direction, direction, MAX_LOG_ROWS - 1),
     )
     cursor = db.connection.execute(
         "INSERT INTO ftn_freq_requests (network_id, direction, node, names, secure, send_name, outcome, files, bytes, "
