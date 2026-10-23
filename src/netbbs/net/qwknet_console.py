@@ -1,7 +1,7 @@
 """
 The SysOp console's QWKnet screens (issues #1481 and #1482, design doc §6.11).
 
-**Settings → QWKnet networks** (`qwknet_networks_screen`) lists the
+**Settings → DOVE-Net and QWKnet** (`qwknet_networks_screen`) lists the
 networks with what each last call came to, and on the bar:
 
 - picking a network edits it in one draft: our QWK ID, the hub's QWK ID,
@@ -110,7 +110,7 @@ def _describe(network: QwknetNetwork, waiting: int, nodes: int) -> str:
     return ", ".join(parts)
 
 
-# --- Settings → QWKnet networks ---------------------------------------------------
+# --- Settings → DOVE-Net and QWKnet ---------------------------------------------------
 
 
 @located("QWKnet networks")

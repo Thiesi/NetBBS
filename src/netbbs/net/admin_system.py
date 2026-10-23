@@ -397,7 +397,7 @@ async def _system_menu(
             await _mrc_settings_screen(session, lane, actor, node_controls=node_controls)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
-        elif choice == "k":
+        elif choice == "d":
             await session.write_line("")
             await qwknet_networks_screen(session, lane, actor, node_controls=node_controls)
             stats = await lane.run(_load_settings_stats)
@@ -609,8 +609,9 @@ def _system_menu_entries(stats: dict[str, Any]) -> list[MenuEntry]:
         MenuEntry(label=menu_key("E", "chomail & netmail (FTN)"), brief="FidoNet-style networks"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
         MenuEntry(label=menu_key("Q", "WK offline mail"), brief="Packet size and BBS ID"),
-        # Issues #1481 and #1482: Q is offline mail's, so QWKnet takes its K.
-        MenuEntry(label=menu_key("K", "net networks", prefix="QW", capitalize=True), brief="QWK networks: node and hub"),
+        # Issues #1481 and #1482: Q is offline mail's, so QWKnet goes by the
+        # network most SysOps join it for.
+        MenuEntry(label=menu_key("D", "OVE-Net and QWKnet"), brief="QWK networks: node and hub"),
     ]
     option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
     return option_list

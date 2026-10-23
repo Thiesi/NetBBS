@@ -3567,7 +3567,7 @@ refused too, since some list processors drop it.
 
 | At a glance | |
 | --- | --- |
-| **Set up under** | **Settings ▸ QWKnet networks** |
+| **Set up under** | **Settings ▸ DOVE-Net and QWKnet** |
 | **Decide first** | Which network to join, and whether other systems will call yours for it |
 
 NetBBS can join a QWK network, such as DOVE-Net, the network most
@@ -3595,7 +3595,7 @@ In this chapter: [Join a QWK network](#join-a-qwk-network) ·
    QWK Networking (DOVE-Net)?". Note the password.
 3. In the account's QWK settings at the hub, turn **Include HEADERS.DAT** on.
    Ctrl-A codes may stay in; NetBBS strips them.
-4. In **Settings ▸ QWKnet networks**, press <kbd>C</kbd> **Create**. A new
+4. In **Settings ▸ DOVE-Net and QWKnet**, press <kbd>C</kbd> **Create**. A new
    network starts as DOVE-Net through Vertrauen. Check **Our QWK ID**, then
    set **Password** to the account's password and **Enabled** to yes.
 5. Press <kbd>S</kbd> **Save**, then map the conferences (below), and press

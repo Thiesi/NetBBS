@@ -3197,7 +3197,7 @@ transport is whatever the hub offers: Synchronet nodes call with
 `qnet-ftp` (FTP: `STOR vert.rep`, `RETR vert.qwk`) or `qnet-http` (HTTP or
 HTTPS against the hub's `qwk.ssjs`, below).
 
-**A network record** (`qwknet_networks`, **Settings ▸ QWKnet networks**)
+**A network record** (`qwknet_networks`, **Settings ▸ DOVE-Net and QWKnet**)
 holds the network's name; this node's QWK ID there (2-8 letters and digits,
 starting with a letter: the login at the hub, and how routes name this
 node); the hub's QWK ID, host, port and transport, and the password of this

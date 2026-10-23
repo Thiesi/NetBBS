@@ -1,5 +1,5 @@
 """The SysOp console's QWKnet screens (#1481, #1482; design doc §6.11):
-Settings → QWKnet networks, conference mapping, node accounts and held
+Settings → DOVE-Net and QWKnet, conference mapping, node accounts and held
 messages -- driven through the real console with the scripted
 `FakeSession` of `tests.test_admin_flow`."""
 
@@ -53,11 +53,11 @@ def sysop(db):
 
 
 def test_a_new_network_starts_as_dove_net_through_vertrauen(db, lane, sysop):
-    # s: Settings, k: QWKnet networks, c: create, s: save, then back out.
-    session = FakeSession(["s", "k", "c", "s", "b", "b", "b", "b"])
+    # s: Settings, d: DOVE-Net and QWKnet, c: create, s: save, then back out.
+    session = FakeSession(["s", "d", "c", "s", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _visible(_written_text(session))
-    assert "QW[k]net networks" in text or "net networks" in text
+    assert "[D]OVE-Net and QWKnet" in text
     assert "starts as DOVE-Net through Vertrauen" in text
     (network,) = list_networks(db)
     assert (network.name, network.hub_id, network.host, network.transport) == (
