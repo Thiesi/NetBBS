@@ -38,8 +38,8 @@ anti-forgery guarantee is unchanged.
 
 **Decision 3 — an edit keeps its post's values.** Every revision row (an edit,
 a withdrawal, a moderator's edit, a tombstone, locally or from Link) carries
-its root's frozen values. The maintainer's first thought was to freeze at edit
-time, since an edit is written now; rejected because the byline is already
+its root's frozen values. Rejected: freezing at edit time, since an edit is
+written now, because the byline is already
 read from the root row whatever the revision (`_resolve_current_version`), a
 moderator's edit is not the author writing anything, and FTN never re-sends an
 edit (§6.8), so an edit-time name could differ from what the network was given.
