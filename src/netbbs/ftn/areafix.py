@@ -107,8 +107,9 @@ def robot_commands(text: str) -> list[str]:
             name = word.upper()
             if name in PASSWORD_COMMANDS:
                 raise AreaFixError(
-                    f"{name} is not sent from here. {CHANGE_PASSWORD_ACTION}, on the network under Settings → "
-                    f"Echomail & netmail (FTN), sends a robot its new password and stores it in one step; packet "
+                    f"{name} is not sent from here. {CHANGE_PASSWORD_ACTION}: [R]obot password, on the network "
+                    f"under Settings → Echomail & netmail (FTN), sends a robot its new password and stores it in "
+                    f"one step; packet "
                     f"and TIC passwords are agreed with the hub and set in the network editor."
                 )
             if name in NO_ARGUMENT_COMMANDS:

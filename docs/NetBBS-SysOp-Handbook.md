@@ -2923,7 +2923,7 @@ The robots' names and FileFix's password are in the network's editor under
   both, as most do.
 
 **Change a robot's password.** Under **Settings ▸ Echomail & netmail (FTN)**,
-press <kbd>P</kbd> **Change robot password** on the network:
+press <kbd>R</kbd> **Robot password** on the network:
 
 1. Choose AreaFix or FileFix.
 2. Type the new password twice. It is sent to the robot as `%PWD`, under the

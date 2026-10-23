@@ -5,7 +5,7 @@ The SysOp console's FTN robot screens (design doc §6.8, issues #1463 and
 - **[A]reaFix** and **[F]ileFix** on the FTN status screen
   (`robot_request`): one request line, checked by
   `netbbs.ftn.areafix.robot_commands`, queued to the uplink's robot.
-- **[P]assword** on the FTN networks list (`change_robot_password`):
+- **[R]obot password** on the FTN networks list (`change_robot_password`):
   Change robot password -- pick the robot, type the new password masked,
   twice (§3.5's credential exception), and it is sent as `%PWD` and stored
   in one step.

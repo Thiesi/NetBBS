@@ -255,9 +255,9 @@ def test_a_refused_change_stores_nothing(db, sysop, monkeypatch):
 
 def test_the_networks_screen_changes_a_robot_password_typed_twice(db, lane, sysop):
     network = _network(db)
-    # p: Change robot password on network 1, robot 1 (AreaFix), the new
-    # password twice, then Back.
-    session = FakeSession(["p", "1", "0", "1", "NEWFIX", "NEWFIX", "b"])
+    # r: Robot password (Change robot password) on network 1, robot 1
+    # (AreaFix), the new password twice, then Back.
+    session = FakeSession(["r", "1", "0", "1", "NEWFIX", "NEWFIX", "b"])
     asyncio.run(ftn_networks_screen(session, lane, sysop))
     assert "AreaFix password change queued and stored" in _visible(_written_text(session))
     assert get_network(db, network.id).areafix_password == "NEWFIX"
@@ -269,7 +269,7 @@ def test_the_networks_screen_changes_a_robot_password_typed_twice(db, lane, syso
 
 def test_mismatched_passwords_send_nothing(db, lane, sysop):
     network = _network(db)
-    session = FakeSession(["p", "1", "0", "1", "NEWFIX", "OTHER", "b"])
+    session = FakeSession(["r", "1", "0", "1", "NEWFIX", "OTHER", "b"])
     asyncio.run(ftn_networks_screen(session, lane, sysop))
     assert "did not match" in _visible(_written_text(session))
     assert get_network(db, network.id).areafix_password == "FIXPW"
