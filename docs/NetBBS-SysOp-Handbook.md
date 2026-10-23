@@ -332,6 +332,40 @@ real-time relay bounds, login throttle and shutdown delays, grouped.
   shows it as *set in config* and does not let you change it there. Remove it
   from the TOML file to manage it from the console.
 
+<kbd>A</kbd> **Apply capacity preset** sets the Link groups (carry caps,
+peering, Link limits and real-time relay) for the size of node you run:
+
+| Setting | Small | Default | Hub |
+| --- | --- | --- | --- |
+| Carried boards / channels / file areas | 50 each | built-in | 2,000 each |
+| Peers remembered | 200 | built-in | 5,000 |
+| Relay for others | — | built-in | on |
+| Relay clients | — | built-in | 100 |
+| Files per carried area | 1,000 | built-in | 20,000 |
+| Request burst / per minute | — | built-in | 60 / 180 |
+| Diagnostics kept (days / entries) | 14 / 2,000 | built-in | 90 / 20,000 |
+| Live bridges / pending rendezvous | — | built-in | 32 / 128 |
+| Relay bytes per second | — | built-in | 262,144 |
+
+"—" leaves the value as it is. **Default** forgets the values saved on this
+screen, so the built-in defaults apply, including any later change to them.
+
+1. Pick a tier. The preview lists each value it would change as
+   `before → after`, and under **Not changed** each key your config file or
+   command line sets.
+2. Read the warnings. Hub's say that higher caps let other nodes fill your
+   storage and that relaying spends bandwidth on nodes you do not know.
+3. Press <kbd>A</kbd> **Apply**, or <kbd>B</kbd> **Back** to write nothing.
+   The values apply at the next start, and one audit entry lists them all.
+
+> [!NOTE]
+> A preset cannot make an outgoing-only node a full peer, so on one Hub's
+> relay settings do nothing. The preview shows the TOML still to set; see
+> [Run as a full peer](#run-as-a-full-peer).
+
+The login throttle, shutdown delays, seeds and sync interval are not part of
+any tier.
+
 #### Settings kept out of the console
 
 The listeners, `public_url`, Link addresses, paths and managed-DNS service
@@ -809,6 +843,28 @@ their next login (**ready**), and what the step opens. How the rules apply:
 The account screen shows **Auto promotion: on**, **off (level set by hand)**,
 or **on, but skipped** with the reason (a pending account, for example).
 <kbd>U</kbd> **Use promotion rules** turns it on or off.
+
+#### Start with a ladder
+
+<kbd>A</kbd> **Apply levels ladder** under **Users ▸ Levels (LAST)** sets up
+the club plan above in one step:
+
+- level 0 is named **New** and level 10 **Member**;
+- a rule raises accounts from 0 to 10 after 24 hours and 2 logins;
+- the Mail level and the Oneliner level become 10.
+
+It replaces only those: a name you gave level 0 or 10, or your rule from
+level 0, shows in the preview as `before → after`, and every other name and
+rule stays. A name another level already has is listed under **Not changed**.
+
+> [!WARNING]
+> Accounts at level 0 lose mail and the oneliner wall until the rule raises
+> them at a later login. The preview counts the level-0 accounts the rule never
+> raises (level set by hand, staff, pending, disabled, the guest account):
+> raise those by hand if they should keep mail.
+
+Press <kbd>A</kbd> **Apply** to write it all at once, with one audit entry.
+It applies straight away.
 
 #### See what every level opens (LAST)
 
@@ -2740,6 +2796,31 @@ What callers and you see:
   cost, the busiest callers and which limits callers reached.
 - Prompt logging is off by default.
 
+#### Budget presets
+
+<kbd>A</kbd> **Apply budget preset**, beside **Model settings**, sets the
+eight limits at once:
+
+| Field | Frugal | Normal | Generous |
+| --- | --- | --- | --- |
+| Node daily token budget | 25,000 | 100,000 | 1,000,000 |
+| Node monthly token budget | 250,000 | 1,000,000 | 20,000,000 |
+| Requests per caller per day | 5 | 20 | 100 |
+| Caller cooldown (seconds) | 60 | 10 | 5 |
+| Model requests per channel/minute | 1 | 2 | 6 |
+| Maximum output tokens | 128 | 256 | 512 |
+| Maximum reply characters | 300 | 400 | 500 |
+| Prior exchange lines | 2 | 6 | 10 |
+
+Normal is the default. The preview lists only what would change; press
+<kbd>A</kbd> **Apply** to save it, and it applies from the next request. A
+preset never changes prices, money budgets, the provider, the key, the system
+prompt, prompt logging, guest access, or whether model conversation is on.
+
+> [!WARNING]
+> When a tier raises the token budgets and no money budget is set, the preview
+> warns you: with a paid provider, only the token counts then cap the bill.
+
 ## MRC chat bridge
 
 | At a glance | |
@@ -3002,7 +3083,9 @@ its CRC and a password.
 #### How file echoes behave
 
 - A file is checked before it is stored: it came from your hub in a secure
-  session, its TIC password matches, its area is carried here, its name is
+  session (or from one of your points or downlinks, under its own TIC
+  password: see [Points and downlinks](#points-and-downlinks)), its TIC
+  password matches, its area is carried here, its name is
   a plain file name, and its size and CRC match what arrived. It must be
   within your **Upload cap** (Settings, Limits & retention), and never over
   64 MiB. A file that fails a check is held with its TIC and the reason.
@@ -3023,7 +3106,8 @@ its CRC and a password.
 #### Hatching your own files
 
 To send one of your own files into a file echo, *hatch* it. Your hub passes it
-on to every system that carries the echo.
+on to every system that carries the echo, and your own points and downlinks
+that carry it get it from you.
 
 1. Open the file area that carries the echo from the **Files** menu, as a
    caller would, and put the cursor on the file.
@@ -3416,6 +3500,7 @@ user's own offline reader setup, and **downlinks**, other nodes you feed.
 | **A point** | Your address with a point number: `21:1/199.1`, `.2` ... It calls you for its mail; you never call it. |
 | **A downlink** | A node you feed, such as `21:1/200`. It calls you, or you call it when mail waits. Its own points are reached through it. |
 | **Password** | Every link needs a session password. Only a call that proves it gets the link's mail. |
+| **Areas** | <kbd>A</kbd> **Areas** on a link: the echoes and file echoes it carries. <kbd>R</kbd> **Robot areas**: what links may link themselves. |
 | **Status** | **Node ▸ Echomail & netmail (FTN)** counts each network's links and what waits for them. |
 
 > [!IMPORTANT]
@@ -3428,8 +3513,12 @@ user's own offline reader setup, and **downlinks**, other nodes you feed.
    press <kbd>L</kbd> **Links**.
 2. Press <kbd>C</kbd> **Create**. A new link starts as your next free point.
 3. Set **Session password**, and **Packet password** if the point uses one.
-   Give the point's owner both, with your address and the answer port.
+   Set **AreaFix password** so it can link echoes itself, and **TIC
+   password** if it is to get file echoes. Give the point's owner the
+   passwords, with your address and the answer port.
 4. Press <kbd>S</kbd> **Save**.
+5. Give it its echoes: press <kbd>A</kbd> **Areas** on the point, then
+   <kbd>A</kbd> **Add** for each one (see below).
 
 The point's software calls your answer port, so **Answer calls** must be on
 for the network.
@@ -3445,45 +3534,97 @@ address. Under **Calls**:
 
 **Bundle mail** sends its packets in a ZIP, if it prefers that.
 
+#### Give a link its echoes and file echoes
+
+A link gets an echo or a file echo only when it carries it, and it can post
+only in an echo it carries read-write.
+
+1. On **Links**, highlight the link and press <kbd>A</kbd> **Areas**.
+2. Press <kbd>A</kbd> **Add** and pick an echo or file echo. Only areas a
+   board or file area of yours carries are offered.
+3. Pick an area in the list to switch it between **read-write** and
+   **read-only**. A read-only link gets the area's messages and files, but
+   what it sends to that area is held for you.
+4. <kbd>D</kbd> **Delete** takes an area away from the link.
+
+#### Let links link areas themselves (AreaFix and FileFix)
+
+Your BBS answers its points' and downlinks' AreaFix and FileFix requests,
+as your hub answers yours. A link can link only the areas you offer.
+
+1. On **Links**, press <kbd>R</kbd> **Robot areas**.
+2. Pick each echo or file echo you want links to be able to link. Pick it
+   again to stop offering it; links that carry it keep it.
+3. Give each link an **AreaFix password** (and a **FileFix password**, or it
+   uses the AreaFix one) in its editor.
+
+A request is netmail to `AreaFix` or `FileFix` (the names set on the
+network) at your address, with the link's password as the subject. Your BBS
+acts on it only when it comes in a call that proved the link's session
+password; anyone else's request reaches you in Mail, not acted on. It
+answers by netmail with what it did. A link can send:
+
+| Command | What it does |
+| --- | --- |
+| `+TAG` or `TAG` | Link an area you offer; `*` and `?` match several |
+| `-TAG` | Unlink an area |
+| `%LIST`, `%AVAIL` | The areas offered to it, marking the ones it carries |
+| `%QUERY`, `%UNLINKED` | What it carries; what it could link but doesn't |
+| `%RESCAN [TAG] [n]` | AreaFix only: send the newest `n` messages again (50 by default, at most 200 per echo) |
+| `%PAUSE`, `%RESUME` | Stop and start its echomail and file echoes; netmail still goes |
+| `%PWD new` | Change its own AreaFix or FileFix password |
+| `%HELP` | The list of commands |
+
+> [!NOTE]
+> A link's request never makes your BBS ask your hub for an area. To carry a
+> new echo, link it from your hub and map a board to it first, then offer it.
+
 #### What a link gets
 
+- **Echomail** in the echoes it carries: what your hub sends, what your
+  other links post, and what is written on your boards. Your BBS adds itself
+  and each downlink to SEEN-BY and itself to PATH, so nothing is sent to a
+  system that has seen it, and a message that has passed through your BBS
+  before goes nowhere. Points never appear in SEEN-BY.
+- **Echomail a link posts** goes on to your hub and your other links, with
+  your address in SEEN-BY and PATH. A point's goes as if you wrote it. On a
+  moderated board it goes once you approve the post.
+- **File echoes** it carries: each file that arrives by TIC, from your hub
+  or another link, and each one you hatch, goes on with a TIC under that
+  link's **TIC password**. A link with no TIC password gets no files. A
+  file the link sends goes on to your hub and your other links. In a
+  moderated file area a file goes once you approve it.
 - **Netmail** to a point, a downlink or one of the downlink's points waits
   for that link alone, of any flavour, and goes in its next call that
   proves the password. Netmail to a point you haven't set up is refused.
-- **A point's echomail** is posted here and then sent to your hub as if you
-  wrote it: your hub sees your address in SEEN-BY and PATH, never the
-  point's. On a moderated board it goes once you approve the post.
 - **Netmail a point or downlink sends** to another node goes to your hub,
   with a Via line naming your BBS. Netmail your hub sends for one of your
-  links goes to that link. Netmail for any other node that reaches you is
-  still not yours to route, as before.
+  links goes to that link. Files attached to such netmail follow it on the
+  same way. Netmail for any other node that reaches you is still not yours
+  to route, as before.
 - **File requests** from a link are answered in its call, as from any
   secure link, when the network answers them. A request you make to a
   point or downlink waits for its next call.
 - A point's mail must say it was written at the point. Anything else it
   sends is held for you, under **Held items**.
 
-Some netmail is held instead of routed, with the reason: one that has
-passed through your BBS before (a loop), one that has passed 30 systems, and
-one for a point you don't serve.
+Some mail is held instead of passed on, with the reason: echomail or a TIC
+for an area the link doesn't carry read-write, a TIC with the wrong
+password, a netmail that has passed through your BBS before (a loop), one
+that has passed 30 systems, and one for a point you don't serve.
 
 Mail a link hasn't collected after 30 days is dropped, and its sender is
-told. At most 2,000 messages and 50 files wait for one link.
+told. At most 2,000 messages and 50 files wait for one link; past that,
+what doesn't fit is not sent to it, and the node log says so.
 
 #### Switch a link off or remove it
 
 - **Status** **disabled** keeps the link's address safe: a caller claiming
   it must still know the password, but gets nothing, and what it sends is
-  held for you. **paused** is set by the link itself through AreaFix and
-  stops only its echomail.
+  held for you. **paused** is set by the link itself with `%PAUSE` and
+  stops its echomail and file echoes, not its netmail.
 - <kbd>D</kbd> **Delete** removes a link after asking. Mail waiting for it is
   dropped, and its senders are told.
-
-> [!NOTE]
-> Sending your echoes on to points and downlinks, answering their AreaFix
-> and FileFix requests, and passing file echoes on are not built yet. Until
-> then a downlink gets its netmail from you, and its echomail is posted here
-> and goes no further.
 
 ### Publish a pointlist and a nodelist segment
 
@@ -3556,8 +3697,8 @@ refused too, since some list processors drop it.
 
 ### Not supported
 
-- sending echomail and file echoes on to points and downlinks, and an
-  AreaFix or FileFix robot of your own;
+- carrying an echo for links without a board of your own (pass-through
+  areas), or asking your hub for an area a link wants;
 - sending bundles in any format but ZIP.
 
 > [!NOTE]

@@ -298,3 +298,27 @@ def test_headers_dat_kludges_ctrl_a_and_utf8_are_read():
                                          body="b", headers={"Subject": long_subject, "Utf8": "false"})])
     (message,) = read_packet(packet).messages
     assert message.subject == long_subject and message.headers["utf8"] == "false"
+
+
+def test_a_qwknet_board_never_goes_over_ftn_and_an_ftn_board_never_over_qwknet(db, network, general, sysop):
+    from netbbs.ftn import queue
+    from netbbs.ftn.scanner import export_post_if_ftn
+
+    ftn = save_ftn_network(db, FtnNetwork(name="fsxNet", domain="fsxnet", our_address=FtnAddress(21, 1, 199),
+                                          uplink_address=FtnAddress(21, 1, 100), uplink_host="hub.example",
+                                          enabled=True))
+    echo = create_board(db, "fsx general", creator=sysop)
+    set_board_area(db, echo, ftn.id, "FSX_GEN")
+
+    on_qwknet = create_post(db, general, sysop, "QWK", "Only to DOVE-Net")
+    assert not export_post_if_ftn(db, on_qwknet, general)
+    assert queue_post_if_qwknet(db, on_qwknet, general)
+    on_ftn = create_post(db, echo, sysop, "FTN", "Only to fsxNet")
+    assert export_post_if_ftn(db, on_ftn, echo)
+    assert not queue_post_if_qwknet(db, on_ftn, echo)
+    assert queue.count_pending_outbound(db, ftn.id) == 1
+    queued = [row["post_id"] for row in db.connection.execute("SELECT post_id FROM qwknet_outbound")]
+    assert queued == [on_qwknet.post_id]
+    # A message tossed in from the QWK hub is not queued for FTN either.
+    toss_hub_packet(db, network, _hub_packet(_message(headers={"Message-ID": "<5@VERT>"})))
+    assert queue.count_pending_outbound(db, ftn.id) == 1

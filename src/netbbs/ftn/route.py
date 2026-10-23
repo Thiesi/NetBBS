@@ -15,8 +15,9 @@ forwarded on is byte for byte the message received, but for those.
   the point's software wrote are replaced by this node and its uplink in
   SEEN-BY and this node in PATH.
 - `merge_seen_by_path`: SEEN-BY merged and this node added to PATH, as a
-  hub forwards echomail to its downlinks (the fan-out of #1479 part 2
-  uses it).
+  hub forwards echomail to its downlinks.
+- `forwarded_copy`: one copy of a fanned-out echomail with the SEEN-BY and
+  PATH every copy of it carries (`netbbs.ftn.fanout`, issue #1479).
 - `via_addresses`, `append_via`: the netmail Via lines a loop check and a
   hop limit read, and the one this node adds when it routes a netmail on.
 """
@@ -86,6 +87,15 @@ def _with_seen_by_path(packed: PackedMessage, seen_by: list[tuple[int, int]], pa
                    dest_net=dest.net, dest_node=dest.node)
 
 
+def forwarded_copy(packed: PackedMessage, seen_by: list[tuple[int, int]], path: list[tuple[int, int]], *,
+                   orig: FtnAddress, dest: FtnAddress) -> PackedMessage:
+    """`packed` with exactly this SEEN-BY (sorted, each once) and PATH at its
+    end, in place of whatever it carried, and the packed header from
+    `orig` to `dest` (issue #1479). Raises `FtnFormatError` when the result
+    would be over the packed text's bound."""
+    return _with_seen_by_path(packed, seen_by, path, orig=orig, dest=dest)
+
+
 def point_echomail_for_uplink(packed: PackedMessage, ours: FtnAddress, uplink: FtnAddress) -> PackedMessage:
     """An echomail a point of this node wrote, as this node sends it to its
     uplink: SEEN-BY this node and the uplink, PATH this node, and the
@@ -96,7 +106,7 @@ def point_echomail_for_uplink(packed: PackedMessage, ours: FtnAddress, uplink: F
 
 def merge_seen_by_path(packed: PackedMessage, ours: FtnAddress, dest: FtnAddress,
                        seen_by: list[tuple[int, int]]) -> PackedMessage:
-    """An echomail forwarded to `dest` (a downlink, #1479 part 2): `seen_by`
+    """An echomail forwarded to `dest` (a downlink, issue #1479): `seen_by`
     -- this node and every system it is sent to -- merged into its SEEN-BY,
     and this node added to the end of its PATH unless already last."""
     old_seen_by, path = seen_by_and_path(packed.text)

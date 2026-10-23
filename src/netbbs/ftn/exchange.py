@@ -144,13 +144,17 @@ async def settle_pair(lane, network, remote: str, tic_half, tic: Tic, file_half,
     no description in its TIC is read for a `FILE_ID.DIZ` first (§6.2),
     which may run a sandboxed unpacker, so it happens off the lane."""
     description = fit_description(tic.description) if tic.description else None
+    # The TIC's own session says who sent it (issue #1479): this one's, or
+    # the one it waited from in the held store.
+    sender_remote = remote if tic_half.held_id is None else await lane.run(_remote_of, tic_half.held_id)
     if description is None and file_half is not None:
-        first = await lane.run(fileecho.judge, network, tic, file_half.data, link_checks=link_checks)
+        sender = await lane.run(fileecho.tic_sender, network, sender_remote)
+        first = await lane.run(fileecho.judge, network, tic, file_half.data, link_checks=link_checks, sender=sender)
         if first.outcome == fileecho.ACCEPT and first.area_id is not None:
             _sha256, path = await lane.run(store_bytes, file_half.data)
             description = await read_archive_description(path, first.name)
     await lane.run(fileecho.judge_and_settle, network, remote, tic_half, tic, file_half, description, total,
-                   link_checks=link_checks)
+                   link_checks=link_checks, sender_remote=sender_remote)
 
 
 async def rerun_bad_file_echo(lane, network: FtnNetwork, tag: str) -> TossResult:
@@ -317,7 +321,9 @@ def summary(sent: int, received: int, tossed: TossResult, *, files_sent: int = 0
             + (f"{tossed.files} files stored, " if tossed.files else "")
             + (f"{tossed.bounced} netmail returned, " if tossed.bounced else "")
             + (f"{tossed.routed} netmail routed on, " if tossed.routed else "")
-            + (f"{tossed.forwarded} sent on to the uplink, " if tossed.forwarded else "")
+            + (f"{tossed.forwarded} echomail sent on, " if tossed.forwarded else "")
+            + (f"{tossed.robot} robot requests answered, " if tossed.robot else "")
+            + (f"{tossed.files_routed} files sent on with netmail, " if tossed.files_routed else "")
             + (f"{tossed.bad_echo} to unknown echoes, " if tossed.bad_echo else "")
             + f"{tossed.duplicates + tossed.file_duplicates} duplicates, {tossed.held} held"
             + (f", {tossed.lost} lost (held store full)" if tossed.lost else ""))

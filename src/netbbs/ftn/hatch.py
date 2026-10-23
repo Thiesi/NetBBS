@@ -16,6 +16,10 @@ Everything here is synchronous and `db`-first.
   To is the uplink; Desc is the description's first line and Ldesc every
   line; Crc, Size and Date are the stored file's; one Path line (this node,
   now); Seenby this node and the uplink; Pw the network's TIC password.
+- **Links** (issue #1479). The points and downlinks carrying the file echo
+  get the file too, each with a TIC under its own TIC password
+  (`netbbs.ftn.ticfwd`); every TIC's Seenby names them all. A link with no
+  TIC password, or whose queue is full, is skipped with a node-log line.
 - **Once.** Each hatch is recorded in `ftn_hatches` and audit-logged. A file
   already hatched into a network is hatched again only when the SysOp asks
   for it again on purpose, and that TIC carries `Replaces` with the names
@@ -261,6 +265,7 @@ def hatch_file(
     lines = _description_lines(entry)
     now = datetime.datetime.now(datetime.timezone.utc)
     us = network.our_address
+    links = _links_carrying(db, network, tag)  # issue #1479
     tic = Tic(
         area=tag, file=send_name, crc=crc, long_name=entry.filename if entry.filename != send_name else None,
         size=size, desc=lines[0] if lines else entry.filename, ldesc=tuple(lines), replaces=replaces,
@@ -268,11 +273,13 @@ def hatch_file(
     )
     try:
         data = write_tic(tic, to=network.uplink_address, path=[(us, int(now.timestamp()))],
-                         seen_by=[us, network.uplink_address], date=_unix(entry.created_at),
+                         seen_by=[us, network.uplink_address, *(link.address for link in links)],
+                         date=_unix(entry.created_at),
                          created=f"NetBBS {__version__}")
     except FtnFormatError as exc:
         raise HatchError(f"{entry.filename} can't be hatched: {exc}.") from None
     tic_path, tic_name = _write_spool_tic(db, data)
+    spooled: list[Path] = []
     try:
         cursor = db.connection.execute(
             "INSERT INTO ftn_hatches (network_id, file_id, area_id, tag, file_name, send_name, tic_name, crc32, "
@@ -287,18 +294,66 @@ def hatch_file(
                                   **common)
         queue_file_without_commit(db, network.id, send_name=tic_name, size_bytes=len(data), path=tic_path,
                                   after_sent=KILL, **common)
+        sent_to = _queue_for_links(db, network, entry, tic, links, now, reference, spooled)
         db.connection.commit()
     except BaseException:
         db.connection.rollback()
         tic_path.unlink(missing_ok=True)
+        for path in spooled:
+            path.unlink(missing_ok=True)
         raise
     how = "automatically" if automatic else ("again" if replaces else "")
     detail = (f"hatched {entry.filename} into {tag} on {network.name}{' ' + how if how else ''} "
-              f"(as {send_name}, CRC-32 {crc:08X}, {size} bytes)")
+              f"(as {send_name}, CRC-32 {crc:08X}, {size} bytes)"
+              + (f"; also to {', '.join(sent_to)}" if sent_to else ""))
     record_action(db, actor=actor, action="hatch_ftn_file", object_type="file_area", object_id=entry.area_id,
                   detail=detail)
     _logger.info("FTN %s: %s", network.name, detail)
     return Hatched(network.name, tag, entry.filename, send_name, tic_name, replaces)
+
+
+def _links_carrying(db: Database, network: FtnNetwork, tag: str) -> list:
+    import sqlite3
+
+    from netbbs.ftn.links import FILE_ECHO, links_carrying
+
+    try:
+        links = links_carrying(db, network.id, FILE_ECHO, tag)
+    except sqlite3.OperationalError:  # a schema older than links
+        return []
+    for link in links:
+        if not link.tic_password:
+            _logger.warning("FTN %s: hatches into %s are not sent to %s: no TIC password is set for it",
+                            network.name, tag, link.label)
+    # Only the links that get it are named in every TIC's Seenby.
+    return [link for link in links if link.tic_password]
+
+
+def _queue_for_links(db: Database, network: FtnNetwork, entry: FileEntry, tic: Tic, links: list,
+                     now: datetime.datetime, reference: str, spooled: list[Path]) -> list[str]:
+    """Queue the hatched file for each link carrying the echo (issue #1479);
+    returns the addresses it went to."""
+    from netbbs.ftn.ticfwd import queue_tic_copy_without_commit
+
+    us = network.our_address
+    seen_by = [us, network.uplink_address, *(link.address for link in links)]
+    sent_to = []
+    for link in links:
+        try:
+            queued = queue_tic_copy_without_commit(
+                db, network, entry, tic, to=link.address,
+                password=link.tic_password, link_id=link.id, earlier_path=(), path=[(us, int(now.timestamp()))],
+                seen_by=seen_by, reference=f"hatch{reference}>{link.id}", spooled=spooled,
+            )
+        except (FtnFormatError, ValueError) as exc:
+            _logger.warning("FTN %s: hatched %s not sent to %s: %s", network.name, entry.filename, link.label, exc)
+            continue
+        if queued:
+            sent_to.append(link.address.four_d)
+        else:
+            _logger.warning("FTN %s: hatched %s not sent to %s: its outbound files queue is full", network.name,
+                            entry.filename, link.label)
+    return sent_to
 
 
 def auto_hatch(db: Database, file_id: str) -> Hatched | None:

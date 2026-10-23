@@ -10,9 +10,23 @@ next free point; **[D]elete** removes the highlighted one after a yes/no,
 dropping what waits for it (its senders are told). Every screen follows
 §3.5: content first, actions on the bar, a draft that persists nothing
 before Save.
+
+The hub's second part (issue #1479) adds:
+
+- the AreaFix, FileFix and TIC password fields in the link's draft;
+- **[A]reas** on the highlighted link: the echoes and file echoes it
+  carries, where picking one switches it between read-write and
+  read-only, **[A]dd** gives it any area this BBS carries and **[D]elete**
+  takes one away;
+- **[R]obot areas**: every area this BBS carries on the network, where
+  picking one offers it to the links' AreaFix and FileFix requests, or
+  stops offering it. (`O` is the picker's own [O]rder.)
 """
 
 from __future__ import annotations
+
+import zlib
+from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.ftn import FtnFormatError
@@ -22,6 +36,8 @@ from netbbs.ftn.links import (
     ACTIVE,
     DISABLED,
     DOWNLINK,
+    ECHO,
+    FILE_ECHO,
     HOLD_LINK,
     KINDS,
     LINK_FLAVOURS,
@@ -33,9 +49,12 @@ from netbbs.ftn.links import (
     FtnLinkError,
     count_link_waiting,
     delete_link,
+    link_areas,
     list_links,
     next_point_number,
+    remove_link_area_without_commit,
     save_link,
+    set_link_area_without_commit,
 )
 from netbbs.ftn.networks import BUNDLE_MODES, BUNDLE_OFF, BUNDLE_ZIP, FtnNetwork, get_network
 from netbbs.moderation.log import record_action
@@ -79,7 +98,12 @@ def link_description(db: Database, link: FtnLink) -> str:
         parts.append(link.status)
     last = (f"last call {link.last_call_at[:16].replace('T', ' ')}" if link.last_call_at else "never called")
     waiting = f"{messages} messages" + (f", {files} files" if files else "") + " waiting"
-    return ", ".join(parts) + f"; {last}; {waiting}"
+    # --- the hub's areas (issue #1479) ---
+    echoes, file_echoes = len(link_areas(db, link.id, ECHO)), len(link_areas(db, link.id, FILE_ECHO))
+    areas = f"; {echoes} echo{'' if echoes == 1 else 'es'}" + (
+        f", {file_echoes} file echo{'' if file_echoes == 1 else 'es'}" if file_echoes else "")
+    # --- end hub's areas ---
+    return ", ".join(parts) + f"{areas}; {last}; {waiting}"
 
 
 def links_summary(db: Database, network: FtnNetwork) -> str | None:
@@ -123,6 +147,16 @@ async def ftn_links_screen(session: Session, lane: DatabaseLane, actor: User, ne
         status = f"Deleted {link.address.four_d}." + (f" {dropped} waiting items dropped." if dropped else "")
         return await _load()
 
+    # --- the hub's areas (issue #1479) ---
+    async def _areas(link: FtnLink) -> list[FtnLink]:
+        await link_areas_screen(session, lane, actor, network, link)
+        return await _refresh()
+
+    async def _offered() -> list[FtnLink]:
+        await offered_areas_screen(session, lane, actor, network)
+        return await _refresh()
+    # --- end hub's areas ---
+
     descriptions: dict[int, str] = {}
 
     async def _refresh() -> list[FtnLink]:
@@ -144,8 +178,11 @@ async def ftn_links_screen(session: Session, lane: DatabaseLane, actor: User, ne
             title=f"Links ({network.name})", own=True,
             empty_message=f"No points or downlinks. [C]reate one: it starts as point "
                           f"{network.our_address.four_d}.1.",
-            refresh=_refresh, on_create=_create, item_keys={"d": _delete},
-            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a point or downlink")],
+            refresh=_refresh, on_create=_create, item_keys={"d": _delete, "a": _areas},
+            live_keys={"r": _offered},
+            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a point or downlink"),
+                      MenuEntry(label=menu_key("A", "reas"), brief="What the highlighted link carries"),
+                      MenuEntry(label=menu_key("R", "obot areas"), brief="What AreaFix and FileFix offer links")],
             live_label=lambda: status or "Points and downlinks this BBS serves on this network",
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
@@ -177,10 +214,14 @@ def _link_draft(network: FtnNetwork, link: FtnLink | None, next_point: int) -> d
     if link is None:
         return {"kind": POINT, "address": f"{network.our_address.four_d}.{next_point}", "name": "",
                 "status": ACTIVE, "session_password": "", "packet_password": "", "flavour": HOLD_LINK,
-                "host": "", "port": DEFAULT_PORT, "bundle": BUNDLE_OFF}
+                "host": "", "port": DEFAULT_PORT, "bundle": BUNDLE_OFF,
+                "areafix_password": "", "filefix_password": "", "tic_password": ""}
     return {"kind": link.kind, "address": link.address.four_d, "name": link.name, "status": link.status,
             "session_password": link.session_password, "packet_password": link.packet_password,
-            "flavour": link.flavour, "host": link.host, "port": link.port, "bundle": link.bundle}
+            "flavour": link.flavour, "host": link.host, "port": link.port, "bundle": link.bundle,
+            # --- robot and TIC passwords (issue #1479) ---
+            "areafix_password": link.areafix_password, "filefix_password": link.filefix_password,
+            "tic_password": link.tic_password}
 
 
 def _link_from_draft(network: FtnNetwork, draft: dict, existing: FtnLink | None) -> FtnLink:
@@ -192,9 +233,9 @@ def _link_from_draft(network: FtnNetwork, draft: dict, existing: FtnLink | None)
     return FtnLink(
         id=base.id, network_id=network.id, kind=draft["kind"], address=address, name=draft["name"],
         session_password=draft["session_password"], packet_password=draft["packet_password"],
-        # Kept for the AreaFix/FileFix server and TIC forwarding (#1479 part 2).
-        areafix_password=base.areafix_password, filefix_password=base.filefix_password,
-        tic_password=base.tic_password,
+        # --- robot and TIC passwords (issue #1479) ---
+        areafix_password=draft["areafix_password"], filefix_password=draft["filefix_password"],
+        tic_password=draft["tic_password"],
         flavour=draft["flavour"], host=draft["host"], port=int(draft["port"]), bundle=draft["bundle"],
         status=draft["status"],
     )
@@ -218,9 +259,9 @@ def link_fields() -> list[FieldSpec]:
         FieldSpec(key="status", label="Status", render=lambda d: STATUS_LABELS[d["status"]],
                   prompt=choice_field("status", statuses), step=choice_step("status", statuses), section="Link",
                   brief="Disabled: it must still log in, but gets nothing",
-                  help="Active serves it. Paused stops its echomail but not its netmail; it is set by the link "
-                       "itself through AreaFix. Disabled keeps its address safe -- a caller claiming it must "
-                       "still know its password -- but hands it nothing and holds what it sends."),
+                  help="Active serves it. Paused stops its echomail and file echoes but not its netmail; it "
+                       "is set by the link itself through AreaFix. Disabled keeps its address safe -- a caller "
+                       "claiming it must still know its password -- but hands it nothing and holds what it sends."),
         FieldSpec(key="session_password", label="Session password", render=secret("session_password"),
                   prompt=_secret("session_password", "Session password"), section="Passwords",
                   brief="Required: it proves the link when it calls",
@@ -229,6 +270,23 @@ def link_fields() -> list[FieldSpec]:
         FieldSpec(key="packet_password", label="Packet password", render=secret("packet_password"),
                   prompt=_secret("packet_password", "Packet password"), section="Passwords",
                   brief="Up to 8 characters, if the link uses one"),
+        # --- robot and TIC passwords (issue #1479) ---
+        FieldSpec(key="areafix_password", label="AreaFix password", render=secret("areafix_password"),
+                  prompt=_secret("areafix_password", "AreaFix password"), section="Passwords",
+                  brief="What its AreaFix requests carry; none: AreaFix doesn't act for it",
+                  help="The link writes it as the subject of its netmail to this BBS's AreaFix. It can change it "
+                       "itself with %PWD."),
+        FieldSpec(key="filefix_password", label="FileFix password",
+                  render=lambda d: "set" if d["filefix_password"] else (
+                      "(the AreaFix password)" if d["areafix_password"] else "(not set)"),
+                  prompt=_secret("filefix_password", "FileFix password"), section="Passwords",
+                  brief="What its FileFix requests carry; empty uses the AreaFix password"),
+        FieldSpec(key="tic_password", label="TIC password", render=secret("tic_password"),
+                  prompt=_secret("tic_password", "TIC password"), section="Passwords",
+                  brief="The Pw of TICs both ways; none: no file echoes to or from it",
+                  help="A TIC from the link must carry it, and every TIC this BBS sends the link carries it. "
+                       "Without one, the link's TICs are held and it is sent no file echoes."),
+        # --- end robot and TIC passwords ---
         FieldSpec(key="flavour", label="Calls", render=lambda d: FLAVOUR_LABELS[d["flavour"]],
                   prompt=choice_field("flavour", flavours), step=choice_step("flavour", flavours), section="Calls",
                   brief="Hold until it calls, or call it when mail waits",
@@ -281,3 +339,173 @@ async def edit_link(session: Session, lane: DatabaseLane, actor: User, network: 
         if mailer is not None:
             mailer.kick()
     return saved
+
+
+# --- the hub's areas (issue #1479) ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AreaRow:
+    kind: str  # ECHO or FILE_ECHO
+    tag: str
+    name: str
+    mode: str = "rw"  # a link's areas: "rw" or "read"
+    offered: bool = False  # the offered-areas screen
+
+    @property
+    def stable_id(self) -> int:
+        return zlib.crc32(f"{self.kind}:{self.tag}".encode("utf-8")) & 0x7FFFFFFF
+
+    @property
+    def kind_label(self) -> str:
+        return "echo" if self.kind == ECHO else "file echo"
+
+
+def _carried(db: Database, network: FtnNetwork) -> list[AreaRow]:
+    from netbbs.ftn.robot_server import carried_areas, offered_tags
+
+    rows = []
+    for kind in (ECHO, FILE_ECHO):
+        offered = offered_tags(db, network.id, kind)
+        rows += [AreaRow(kind, tag, name, offered=tag in offered) for tag, name in carried_areas(db, network.id, kind)]
+    return rows
+
+
+def link_area_rows(db: Database, network: FtnNetwork, link: FtnLink) -> list[AreaRow]:
+    """The areas a link carries, echoes first, with the names of the board
+    or file area carrying each here."""
+    names = {(row.kind, row.tag): row.name for row in _carried(db, network)}
+    return [AreaRow(kind, area.tag.upper(), names.get((kind, area.tag.upper()), "(no longer carried here)"),
+                    mode=area.mode)
+            for kind in (ECHO, FILE_ECHO) for area in link_areas(db, link.id, kind)]
+
+
+@located("FTN link areas")
+async def link_areas_screen(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork,
+                            link: FtnLink) -> None:
+    """What one link carries; see the module docstring."""
+    status: str | None = None
+
+    async def _load() -> list[AreaRow]:
+        return await lane.run(link_area_rows, network, link)
+
+    async def _add() -> list[AreaRow] | None:
+        nonlocal status
+        carried = await lane.run(_carried, network)
+        have = {(row.kind, row.tag) for row in await _load()}
+        choices = [row for row in carried if (row.kind, row.tag) not in have]
+        if not choices:
+            status = "It carries every area this BBS carries on the network."
+            return await _load()
+        chosen = await pick_item(
+            session, choices, name_of=lambda row: sanitize_text(row.tag), stable_id_of=lambda row: row.stable_id,
+            description_of=lambda row: f"{row.kind_label}: {sanitize_text(row.name)}",
+            title=f"Add an area for {link.address.four_d}", own=True, empty_message="Nothing to add.",
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed, accent_color=chrome.accent_color, header_color=chrome.header_color,
+        )
+        if chosen is None:
+            return await _load()
+
+        def _persist(db: Database) -> None:
+            set_link_area_without_commit(db, link.id, chosen.kind, chosen.tag, "rw")
+            db.connection.commit()
+            record_action(db, actor=actor, action="set_ftn_link_area",
+                          detail=f"{network.name}: {link.address.four_d} carries {chosen.kind_label} {chosen.tag}")
+
+        await lane.run(_persist)
+        status = f"{link.address.four_d} carries {chosen.tag} now, read-write."
+        return await _load()
+
+    async def _remove(row: AreaRow) -> list[AreaRow]:
+        nonlocal status
+
+        def _persist(db: Database) -> None:
+            remove_link_area_without_commit(db, link.id, row.kind, row.tag)
+            db.connection.commit()
+            record_action(db, actor=actor, action="remove_ftn_link_area",
+                          detail=f"{network.name}: {link.address.four_d} no longer carries {row.kind_label} {row.tag}")
+
+        await lane.run(_persist)
+        status = f"{link.address.four_d} no longer carries {row.tag}."
+        return await _load()
+
+    chrome = await _load_chrome(lane, actor)
+    start = None
+    while True:
+        rows = await _load()
+        picked = await pick_item(
+            session, rows,
+            name_of=lambda row: sanitize_text(row.tag), stable_id_of=lambda row: row.stable_id,
+            description_of=lambda row: (f"{row.kind_label}, {'read-write' if row.mode == 'rw' else 'read-only'}: "
+                                        f"{sanitize_text(row.name)}"),
+            title=f"Areas of {sanitize_text(link.label)}", own=True,
+            empty_message="It carries nothing yet. [A]dd an area, or offer areas so it can link them by AreaFix.",
+            refresh=_load, live_keys={"a": _add}, item_keys={"d": _remove},
+            live_nav=[MenuEntry(label=menu_key("A", "dd"), brief="Give it an area this BBS carries"),
+                      MenuEntry(label=menu_key("D", "elete"), brief="Take the highlighted area away")],
+            live_label=lambda: status or "Pick an area to switch it between read-write and read-only",
+            start_stable_id=start,
+            description_level=await lane.run(menu_description_level, actor),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed, accent_color=chrome.accent_color, header_color=chrome.header_color,
+        )
+        if picked is None:
+            return
+        start = picked.stable_id
+        mode = "read" if picked.mode == "rw" else "rw"
+
+        def _toggle(db: Database, row: AreaRow = picked, mode: str = mode) -> None:
+            set_link_area_without_commit(db, link.id, row.kind, row.tag, mode)
+            db.connection.commit()
+            record_action(db, actor=actor, action="set_ftn_link_area",
+                          detail=f"{network.name}: {link.address.four_d} carries {row.kind_label} {row.tag} "
+                                 f"{'read-only' if mode == 'read' else 'read-write'}")
+
+        await lane.run(_toggle)
+        status = f"{picked.tag} is {'read-only' if mode == 'read' else 'read-write'} for {link.address.four_d}."
+
+
+@located("FTN offered areas")
+async def offered_areas_screen(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork) -> None:
+    """The areas this BBS offers to its links' AreaFix and FileFix requests;
+    picking one offers it or stops offering it."""
+    from netbbs.ftn.robot_server import set_offered
+
+    status: str | None = None
+
+    async def _load() -> list[AreaRow]:
+        return await lane.run(_carried, network)
+
+    chrome = await _load_chrome(lane, actor)
+    start = None
+    while True:
+        rows = await _load()
+        picked = await pick_item(
+            session, rows,
+            name_of=lambda row: sanitize_text(row.tag), stable_id_of=lambda row: row.stable_id,
+            description_of=lambda row: (f"{row.kind_label}, {'offered to links' if row.offered else 'not offered'}: "
+                                        f"{sanitize_text(row.name)}"),
+            title=f"Robot areas ({network.name})", own=True,
+            empty_message="This BBS carries no echo or file echo on the network yet: map a board or file area first.",
+            refresh=_load,
+            live_label=lambda: status or "Pick an area to offer it to points and downlinks, or stop offering it",
+            start_stable_id=start,
+            description_level=await lane.run(menu_description_level, actor),
+            redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            collapsed=chrome.collapsed, accent_color=chrome.accent_color, header_color=chrome.header_color,
+        )
+        if picked is None:
+            return
+        start = picked.stable_id
+        offered = not picked.offered
+
+        def _persist(db: Database, row: AreaRow = picked, offered: bool = offered) -> None:
+            set_offered(db, network.id, row.kind, row.tag, offered)
+            record_action(db, actor=actor, action="set_ftn_link_offer",
+                          detail=f"{network.name}: {row.kind_label} {row.tag} "
+                                 f"{'offered to links' if offered else 'no longer offered'}")
+
+        await lane.run(_persist)
+        status = (f"{picked.tag} is offered to links: their AreaFix or FileFix can link it." if offered
+                  else f"{picked.tag} is no longer offered; links that carry it keep it.")

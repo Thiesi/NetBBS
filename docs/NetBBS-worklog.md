@@ -1767,6 +1767,27 @@ session needs the same treatment.
   bytes (the trailing SEEN-BY/PATH run, an appended Via line, inserted
   INTL/FMPT/TOPT) so a forwarded message keeps its character set and
   kludges exactly; `decode_message`/`encode_message` would normalise them.
+- **Every fan-out copy shares one SEEN-BY.** `netbbs.ftn.fanout` computes
+  the target set first and writes the same SEEN-BY (old + this node + every
+  downlink and the uplink it goes to, never a point) into every copy; a
+  per-copy SEEN-BY would let two downlinks that also talk to each other
+  exchange the message again. Loop detection reads PATH, not SEEN-BY: an
+  uplink normally puts this node in SEEN-BY before sending.
+- **`ftn_point_waiting` keeps a link's message as received**, not a
+  forwarded form: the fan-out runs at approval time against the links
+  carrying the echo then. Rows written by the first part (already in the
+  uplink form) still fan out correctly, as a point's SEEN-BY/PATH are
+  replaced anyway.
+- **A TIC's sender is the session that brought the TIC**, not its `From`
+  line: for a TIC that waited in the held store it is that held row's
+  `remote_address` (`exchange.settle_pair`). Judging it by the session that
+  brought the *file* would let a link's file pair with an uplink TIC and be
+  checked against the wrong password.
+- **A rescan never reuses a fan-out reference.** The queue's reference is
+  unique per network and kind and sent rows linger for
+  `SENT_RETENTION_DAYS`, so rescans are keyed by the request
+  (`rescan:<request>:<post>><link>`); a fan-out key would silently skip
+  every message the link already got once.
 
 ### FTN publishing (issue #1480)
 

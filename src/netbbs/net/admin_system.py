@@ -1959,9 +1959,11 @@ _POLICY_GROUP_KEYS = {group: group[0].lower() for group in POLICY_GROUPS}
 
 
 _NODE_CONFIGURATION_KEY = "n"
+# Issue #1504: the Link capacity preset, beside the group editors.
+_CAPACITY_PRESET_KEY = "a"
 
 
-if len({*_POLICY_GROUP_KEYS.values(), _NODE_CONFIGURATION_KEY, "b"}) != len(_POLICY_GROUP_KEYS) + 2:
+if len({*_POLICY_GROUP_KEYS.values(), _NODE_CONFIGURATION_KEY, _CAPACITY_PRESET_KEY, "b"}) != len(_POLICY_GROUP_KEYS) + 3:
     raise RuntimeError(f"policy groups need different first letters: {sorted(_POLICY_GROUP_KEYS)}")
 
 
@@ -2139,6 +2141,7 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
             sections=[Section(None, rows), Section(None, notes)],
             actions=[
                 *((key, menu_key(group[0], group[1:])) for group, key in _POLICY_GROUP_KEYS.items()),
+                (_CAPACITY_PRESET_KEY, menu_key("A", "pply capacity preset")),
                 (_NODE_CONFIGURATION_KEY, menu_key("N", "ode configuration")),
                 _BACK_ACTION,
             ],
@@ -2146,11 +2149,16 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
             help_title="Operating limits help",
             help_about=(
                 "Link limits, the login throttle and shutdown delays. Changes apply at the next start; a "
-                "value set in the config file or on the command line wins and is shown as such."
+                "value set in the config file or on the command line wins and is shown as such. A capacity "
+                "preset (Small, Default or Hub) sets the Link groups at once, after showing what it changes."
             ),
         )
         if choice == "b":
             return
+        if choice == _CAPACITY_PRESET_KEY:
+            from netbbs.net.presets import LINK_CAPACITY, run_preset
+            await run_preset(session, lane, actor, LINK_CAPACITY)
+            continue
         if choice == _NODE_CONFIGURATION_KEY:
             await _node_configuration_screen(session, lane, actor)
             continue

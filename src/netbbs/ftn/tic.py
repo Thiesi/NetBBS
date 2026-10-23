@@ -40,6 +40,10 @@ MAX_TIC_BYTES = 64 * 1024
 MAX_NAME_BYTES = 255
 MAX_LDESC_LINES = 64
 MAX_REPLACES = 16
+# A forwarded TIC's history (issue #1479): what one keeps of its Path and
+# Seenby lines, far more than any real echo's route.
+MAX_PATH_LINES = 64
+MAX_SEEN_BY = 1_000
 _MAX_LINE = 1024
 
 
@@ -56,6 +60,16 @@ class Tic:
     origin: FtnAddress | None = None
     from_address: FtnAddress | None = None
     password: str = ""
+    # --- TIC forwarding (issue #1479): the route it came by ---
+    path: tuple[str, ...] = ()  # each Path line's value, as written
+    seen_by: tuple[FtnAddress, ...] = ()
+    # --- end TIC forwarding ---
+
+    @property
+    def path_addresses(self) -> tuple[FtnAddress, ...]:
+        """The address each Path line names first: the systems the file
+        passed through (issue #1479)."""
+        return tuple(address for address in (_address(line) for line in self.path) if address is not None)
 
     @property
     def description(self) -> str | None:
@@ -78,6 +92,8 @@ def parse_tic(data: bytes) -> Tic:
     values: dict[str, str] = {}
     ldesc: list[str] = []
     replaces: list[str] = []
+    path: list[str] = []
+    seen_by: list[FtnAddress] = []
     for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         line = raw[:_MAX_LINE].strip("\x00 \t\x1a")
         if not line:
@@ -91,6 +107,14 @@ def parse_tic(data: bytes) -> Tic:
         elif keyword == "replaces":
             if value and len(replaces) < MAX_REPLACES:
                 replaces.append(value)
+        elif keyword == "path":
+            if value and len(path) < MAX_PATH_LINES:
+                path.append(" ".join(value.split()))
+        elif keyword == "seenby":
+            for word in value.split():
+                address = _address(word)
+                if address is not None and len(seen_by) < MAX_SEEN_BY:
+                    seen_by.append(address)
         elif keyword and keyword not in values:
             values[keyword] = value
     area, file_name, crc_text = values.get("area", ""), values.get("file", ""), values.get("crc", "")
@@ -118,6 +142,8 @@ def parse_tic(data: bytes) -> Tic:
         origin=_address(values.get("origin")),
         from_address=_address(values.get("from")),
         password=values.get("pw", ""),
+        path=tuple(path),
+        seen_by=tuple(seen_by),
     )
 
 
@@ -246,13 +272,14 @@ def _plain(value: str, what: str) -> str:
 
 def write_tic(
     tic: Tic, *, to: FtnAddress, path: Sequence[tuple[FtnAddress, int]], seen_by: Sequence[FtnAddress],
-    date: int | None = None, created: str | None = None,
+    date: int | None = None, created: str | None = None, earlier_path: Sequence[str] = (),
 ) -> bytes:
     """The TIC (FTS-5006) for `tic`, from `tic.from_address` to `to`: its
     Area, Origin, From, To, File and Lfile, Size, Date, Desc and Ldesc,
     Replaces, Crc, the `path` lines (address, Unix time), the Seenby lines
-    and Pw. `tic.origin` and `tic.from_address` must be set, and `File`
-    must be an 8.3 name. Raises `FtnFormatError` for a value no TIC can
+    and Pw. `earlier_path` is the Path lines a forwarded TIC came with
+    (issue #1479), written as they were before this node's own. `tic.origin`
+    and `tic.from_address` must be set, and `File` must be an 8.3 name. Raises `FtnFormatError` for a value no TIC can
     carry."""
     if tic.origin is None or tic.from_address is None:
         raise FtnFormatError("a TIC this node writes names its Origin and From")
@@ -286,6 +313,7 @@ def write_tic(
     if created:
         lines.append(f"Created {_one_line(created)}")
     lines.append(f"Crc {tic.crc & 0xFFFFFFFF:08X}")
+    lines += [f"Path {_one_line(value)}" for value in earlier_path[:MAX_PATH_LINES] if _one_line(value)]
     for address, when in path:
         stamp = datetime.datetime.fromtimestamp(when, datetime.timezone.utc)
         lines.append(f"Path {address.four_d} {when} {stamp:%a %b} {stamp.day} {stamp:%H:%M:%S %Y} UTC")
