@@ -381,18 +381,19 @@ def run_ftn_import_nodelist(db: Database, network_name: str, path: Path, *, as_u
         if actor is None:
             raise ValueError(f"--as {as_username!r} is not an active SysOp-level account")
     from netbbs.ftn.networks import list_networks
-    from netbbs.ftn.nodelist import MAX_NODELIST_BYTES, import_nodelist
+    from netbbs.ftn.nodelist import HOW_MANUAL, import_list
+    from netbbs.ftn.nodelist_feed import read_list_file
     from netbbs.moderation.log import record_action
 
     network = next((n for n in list_networks(db) if n.name.casefold() == network_name.casefold()), None)
     if network is None:
         names = ", ".join(n.name for n in list_networks(db)) or "none"
         raise ValueError(f"no FTN network called {network_name!r} (networks: {names})")
-    if path.stat().st_size > MAX_NODELIST_BYTES:
-        raise ValueError(f"{path.name} is over {MAX_NODELIST_BYTES // (1024 * 1024)} MiB")
-    count = import_nodelist(db, network.id, path.read_bytes().decode("cp437", errors="replace"))
+    outcome = import_list(db, network.id, read_list_file(path, network), how=HOW_MANUAL, require_crc=False)
+    count = outcome.nodes
     record_action(db, actor=actor, action="import_ftn_nodelist", detail=f"{network.name}: {count} nodes from {path.name}")
-    return f"Imported {count} nodes for {network.name} from {path.name}."
+    day = f" (day {outcome.day:03d})" if outcome.day is not None else ""
+    return f"Imported {count} nodes for {network.name} from {path.name}{day}."
 
 
 def run_export_node_map(db: Database, identity_dir: Path, output: Path | None) -> str | None:
@@ -502,14 +503,15 @@ def build_parser() -> argparse.ArgumentParser:
         "ftn-import-nodelist",
         help="import an FTN network's nodelist, for direct netmail",
         description=(
-            "Replace an FTN network's stored nodelist with the given (unpacked) nodelist file. "
+            "Replace an FTN network's stored nodelist with the given nodelist file, or the list in a ZIP; "
+            "its CRC-16 is checked when its first line carries one. "
             "Netmail to a node the list says answers BinkP then goes to it directly; the rest goes "
             "via the uplink. The console does the same from Node, Echomail & netmail (FTN), [N]odelist import. "
             "Safe while the node runs."
         ),
     )
     nodelist.add_argument("network", help="the network's name, as in Settings, FTN networks")
-    nodelist.add_argument("path", type=Path, help="the nodelist file, e.g. FSXNET.123")
+    nodelist.add_argument("path", type=Path, help="the nodelist file, e.g. FSXNET.123, or a ZIP of it")
     _add_common(nodelist, defaults=False)
     export_map = subcommands.add_parser(
         "export-node-map",
