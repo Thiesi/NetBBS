@@ -10,7 +10,8 @@ Configuration and operation are kept apart, as MRC's are:
   network for a new BBS; the SysOp fills in the address fsxNet gave them.
 - **Node → Echomail & netmail (FTN)** (`ftn_status_screen`): what the mailer and listener
   last did, what waits, and the work on a running network: poll now,
-  AreaFix requests, nodelist import, held packets.
+  AreaFix and FileFix requests, echo-list import, nodelist import, held
+  packets. The robot screens live in `netbbs.net.ftn_robots_console`.
 - **A board's echo** (`board_echo_action`): which echo area a board carries,
   from the board's own screen.
 
@@ -33,7 +34,7 @@ from netbbs.boards import Board
 from netbbs.config import get_config, set_config
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import parse_address
-from netbbs.ftn.areafix import AreaFixError, areafix_commands, queue_areafix
+from netbbs.ftn.areafix import AREAFIX, FILEFIX
 from netbbs.ftn.binkp import DEFAULT_PORT
 from netbbs.ftn.chrs import CP437
 from netbbs.ftn.listener import HOST_CONFIG_KEY, PORT_CONFIG_KEY
@@ -49,7 +50,7 @@ from netbbs.ftn.networks import (
     set_board_area,
 )
 from netbbs.ftn.nodelist import MAX_NODELIST_BYTES, NodelistError, import_nodelist
-from netbbs.ftn.queue import FtnQueueFullError, count_pending_outbound, delete_held, list_held
+from netbbs.ftn.queue import count_pending_outbound, delete_held, list_held
 from netbbs.ftn.tosser import release_held
 from netbbs.moderation.log import record_action
 from netbbs.net.admin_fields import _int_field, _optional_text_field
@@ -65,6 +66,14 @@ from netbbs.net.admin_ui import (
 )
 from netbbs.net.char_input import InputCancelled
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.ftn_robots_console import (
+    change_robot_password,
+    import_echolist,
+    robot_draft,
+    robot_field_specs,
+    robot_request,
+    robot_values,
+)
 from netbbs.net.location import located
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.picker import pick_item as _pick_item
@@ -124,6 +133,17 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
         status = f"Deleted {network.name}."
         return await _load()
 
+    # --- robots (issue #1463): Change robot password ---
+    async def _robot_password(network: FtnNetwork) -> list[FtnNetwork] | None:
+        nonlocal status
+        mailer = getattr(node_controls, "ftn_mailer", None) if node_controls is not None else None
+        outcome = await change_robot_password(session, lane, actor, network, mailer)
+        if outcome is None:
+            return None
+        status = outcome
+        return await _load()
+    # --- end robots ---
+
     chrome = await _load_chrome(lane, actor)
     start = None
     while True:
@@ -136,8 +156,9 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
                                       + (", answers calls" if n.answers_calls else "")),
             title="FTN networks", own=True,
             empty_message="No FTN networks. [C]reate one: it starts as fsxNet's hub.",
-            refresh=_load, on_create=_create, item_keys={"d": _delete},
-            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network")],
+            refresh=_load, on_create=_create, item_keys={"d": _delete, "r": _robot_password},
+            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network"),
+                      MenuEntry(label=menu_key("R", "obot password"), brief="Change robot password: send %PWD")],
             live_label=lambda: status or "FidoNet-style networks: echomail on boards, netmail in Mail",
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
@@ -171,7 +192,8 @@ def _network_draft(network: FtnNetwork | None, listen_port: int) -> dict:
                 "uplink_address": FSXNET["uplink_address"], "uplink_host": FSXNET["uplink_host"],
                 "uplink_port": DEFAULT_PORT, "session_password": "", "packet_password": "", "areafix_password": "",
                 "poll_minutes": 60, "answers_calls": False, "enabled": False, "default_charset": CP437.codec,
-                "origin_text": "", "netmail_min_level": SYSOP_LEVEL, "listen_port": listen_port}
+                "origin_text": "", "netmail_min_level": SYSOP_LEVEL, "listen_port": listen_port,
+                **robot_draft(None)}
     return {"name": network.name, "domain": network.domain, "our_address": network.our_address.four_d,
             "uplink_address": network.uplink_address.four_d, "uplink_host": network.uplink_host,
             "uplink_port": network.uplink_port, "session_password": network.session_password,
@@ -179,7 +201,7 @@ def _network_draft(network: FtnNetwork | None, listen_port: int) -> dict:
             "poll_minutes": network.poll_minutes, "answers_calls": network.answers_calls,
             "enabled": network.enabled, "default_charset": network.default_charset,
             "origin_text": network.origin_text, "netmail_min_level": network.netmail_min_level,
-            "listen_port": listen_port}
+            "listen_port": listen_port, **robot_draft(network)}
 
 
 def _network_from_draft(draft: dict, existing: FtnNetwork | None) -> FtnNetwork:
@@ -198,6 +220,7 @@ def _network_from_draft(draft: dict, existing: FtnNetwork | None) -> FtnNetwork:
         poll_minutes=int(draft["poll_minutes"]), answers_calls=bool(draft["answers_calls"]),
         enabled=bool(draft["enabled"]), default_charset=draft["default_charset"], origin_text=draft["origin_text"],
         netmail_min_level=int(draft["netmail_min_level"]),
+        **robot_values(draft),
     )
 
 
@@ -272,6 +295,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                      prompt=_int_field("listen_port", "Answer port"), section="Calls",
                      brief="Where this BBS answers BinkP, for all networks"),
     ]
+    fields += robot_field_specs(_secret_field)  # issue #1463: the Robots section
 
     async def save(draft: dict) -> FtnNetwork:
         candidate = _network_from_draft(draft, existing)
@@ -360,7 +384,8 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
         choice, page = await show_detail(
             session, title=_detail_title(session, chrome, "Echomail & netmail (FTN)", own=True),
             sections=sections, page=page, message=message,
-            actions=[("p", menu_key("P", "oll now")), ("a", menu_key("A", "reaFix")),
+            actions=[("p", menu_key("P", "oll now")), ("a", menu_key("A", "reaFix")), ("f", menu_key("F", "ileFix")),
+                     ("i", menu_key("I", "mport echo list")),
                      ("n", menu_key("N", "odelist import")), ("h", menu_key("H", "eld packets")), _BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Echomail & netmail help",
@@ -382,8 +407,10 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
             status = await mailer.poll(network)
             message = (f"Called {network.name}: {status.last_summary}" if status.last_error is None
                        else colored(f"Call failed: {sanitize_text(status.last_error)}", fg_color=ERROR_COLOR))
-        elif choice == "a":
-            await _areafix(session, lane, actor, network, mailer)
+        elif choice in ("a", "f"):  # issue #1463
+            await robot_request(session, lane, actor, network, mailer, AREAFIX if choice == "a" else FILEFIX)
+        elif choice == "i":  # issue #1465
+            await import_echolist(session, lane, actor, network, mailer)
         elif choice == "n":
             await _import_nodelist(session, lane, actor, network)
         elif choice == "h":
@@ -404,30 +431,6 @@ async def _pick_network(session: Session, lane: DatabaseLane, actor: User) -> Ft
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,
     )
-
-
-async def _areafix(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork, mailer) -> None:
-    await session.write_line("")
-    await session.write_line(colored(
-        f"AreaFix at {network.uplink_address.four_d}: +TAG links an echo, -TAG unlinks it, %LIST asks what "
-        f"the hub carries. The hub's answer comes to your Mail.", fg_color=MUTED_COLOR))
-    await write_prompt(session, "Request: ")
-    try:
-        text = await session.read_line(cancellable=True)
-    except InputCancelled:
-        text = ""
-    if not text.strip():
-        _announce(session, "Nothing sent.", color=MUTED_COLOR)
-        return
-    try:
-        commands = areafix_commands(text)
-        await lane.run(lambda db: queue_areafix(db, get_network(db, network.id), actor, commands))
-    except (AreaFixError, FtnQueueFullError) as exc:
-        _announce(session, str(exc), error=True)
-        return
-    if mailer is not None:
-        mailer.kick()
-    _announce(session, f"AreaFix request queued: {' '.join(commands)}. It goes out with the next call.")
 
 
 async def _import_nodelist(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork) -> None:

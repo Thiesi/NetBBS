@@ -1,0 +1,10 @@
+NIX_ADMIN           NixNet Administration (SysOps/Real Names Only)
+NIX_LINUX           Linux (all distributions)
+NIX_BSD             FreeBSD, OpenBSD, NetBSD, etc.
+NIX_OTHER           Other *nix systems (AIX, HP-UX, etc.)
+NIX_SHELL           Shells (Bash, zsh, csh, etc.)
+NIX_XWIN            X Windows Related
+NIX_SECURITY        Securing your *nix system(s)
+NIX_BBS             Running a BBS under *nix
+NIX_AUTO            NixNet Automated Announcements
+NIX_NTWK            Networking your *nix system(s)

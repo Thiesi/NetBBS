@@ -2813,7 +2813,9 @@ node. Echomail arrives on boards and netmail in Mail.
 > It is a gateway, not NetBBS Link. An FTN board is never also a Linked
 > board, and nothing that arrives over FTN is trust-evaluated.
 
-In this chapter: [Join a network](#join-a-network) · [Netmail](#netmail) ·
+In this chapter: [Join a network](#join-a-network) ·
+[AreaFix and FileFix](#areafix-and-filefix) ·
+[Join echoes from the hub's list](#join-echoes-from-the-hubs-list) · [Netmail](#netmail) ·
 [Held packets and status](#held-packets-and-status) ·
 [Not supported](#not-supported)
 
@@ -2837,7 +2839,8 @@ In this chapter: [Join a network](#join-a-network) · [Netmail](#netmail) ·
 4. Ask the hub to send those echoes. Under
    **Node ▸ Echomail & netmail (FTN)**, press <kbd>A</kbd> **AreaFix** and
    enter `+FSX_GEN`, or `%LIST` to see what the hub carries. The hub's answer
-   arrives in your Mail.
+   arrives in your Mail. To join many echoes at once, import the hub's echo
+   list instead (see [Join echoes from the hub's list](#join-echoes-from-the-hubs-list)).
 
 #### How echomail behaves
 
@@ -2888,6 +2891,75 @@ under the username instead.
   verification was revoked or changed meanwhile. A post written before the
   board asked for displayed names has none, so it stays on this BBS, and the
   node log says why.
+
+### AreaFix and FileFix
+
+The hub's robots link and unlink echoes for you: AreaFix for echomail,
+FileFix for file echoes. Under **Node ▸ Echomail & netmail (FTN)**, press
+<kbd>A</kbd> **AreaFix** or <kbd>F</kbd> **FileFix** and type the request on
+one line. The robot's answer arrives as netmail in your Mail.
+
+| You type | It asks |
+| --- | --- |
+| `+NIX_BSD` or `NIX_BSD` | Link the echo |
+| `-NIX_BSD` | Unlink it |
+| `%LIST`, `%QUERY`, `%LINKED`, `%UNLINKED`, `%AVAIL`, `%HELP` | Lists and help |
+| `%PAUSE`, `%RESUME` | Stop and restart all your echoes for a while |
+| `%RESCAN NIX_BSD R=10` | Send an echo's old messages again, with the robot's own options |
+
+- One request holds up to 50 commands, such as `+NIX_BSD +NIX_BBS %LIST`.
+- A `%` command NetBBS doesn't know goes to the robot exactly as you typed
+  it, with the words after it, up to the next `%` command. Put it last on the
+  line.
+- `%PWD`, `%PASSWORD`, `%PKTPWD` and `%TICPWD` are refused here: they change a
+  password NetBBS stores.
+
+The robots' names and FileFix's password are in the network's editor under
+**Robots**:
+
+- **AreaFix name** and **FileFix name** are `AreaFix` and `FileFix` unless
+  the hub's robots answer to others, such as `AllFix` or `FileMgr`.
+- **FileFix password** stays empty when the hub uses the AreaFix password for
+  both, as most do.
+
+**Change a robot's password.** Under **Settings ▸ Echomail & netmail (FTN)**,
+press <kbd>R</kbd> **Robot password** on the network:
+
+1. Choose AreaFix or FileFix.
+2. Type the new password twice. It is sent to the robot as `%PWD`, under the
+   old password, and stored at once.
+3. Read the robot's reply in your Mail. If it refused, set the old password
+   back in the network's editor.
+
+When AreaFix's password changes and FileFix had none of its own, FileFix keeps
+the old one: the hub only heard about AreaFix. If your hub uses one password
+for both robots, set **FileFix password** once AreaFix confirms. Session and
+packet passwords are agreed with the hub's coordinator and are set in the
+editor.
+
+### Join echoes from the hub's list
+
+A hub's infopack lists its echoes: a `.NA` file for echomail and a `.FA`
+file for file echoes, such as nixNet's `NIXNET.NA`. To join many at once:
+
+1. Unpack the list onto the host.
+2. Under **Node ▸ Echomail & netmail (FTN)**, press <kbd>I</kbd> **Import
+   echo list** and enter the file's path.
+3. In the draft:
+   - **List of** says whether the list is echomail (boards) or file echoes
+     (file areas). It follows the file's extension; change it for a list
+     named otherwise.
+   - **Echoes** opens the checklist. Echoes this network already carries are
+     marked `[=]` and can't be checked.
+   - **Community** is where the new boards or file areas go.
+4. <kbd>S</kbd> **Save**. Each checked echo gets a board or file area named
+   from its description, cut to 40 characters, or from its tag when that
+   name is already taken. Each is mapped to its echo, and one AreaFix or
+   FileFix request asks for all of them, split into requests of 50.
+
+Nothing is created before **Save**. If anything can't be created, nothing is,
+and the draft says why. The list may be up to 1 MiB and 10,000 lines; lines
+that aren't `TAG description` are skipped and counted.
 
 ### Netmail
 
