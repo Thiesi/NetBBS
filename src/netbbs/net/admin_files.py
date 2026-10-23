@@ -35,6 +35,7 @@ from netbbs.files.entries import (
     expired_file_purge_at,
     list_expired_files,
 )
+from netbbs.ftn.freq import is_area_offered
 from netbbs.ftn.networks import list_networks
 from netbbs.link.boards import LinkContext
 from netbbs.link.files import linked_area_ids, LinkFilesError, is_area_linked, link_file_area
@@ -46,6 +47,7 @@ from netbbs.link.carry import (
 )
 from netbbs.net.char_input import HELP_KEY, reject_unhandled_key
 from netbbs.net.ftn_console import file_area_echo_action, file_area_echo_rows
+from netbbs.net.ftn_freq_console import area_offer_label, area_offer_rows, toggle_area_offer
 from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.location import crumbs, entered, located
 from netbbs.net.picker import ListColumn
@@ -547,6 +549,7 @@ async def _area_screen(
             ftn_networks = [] if linked else await lane.run(list_networks)
             if ftn_networks:
                 ftn_rows = await lane.run(file_area_echo_rows, area)
+                ftn_rows += await lane.run(area_offer_rows, area)  # issue #1475
                 after = (after + "\r\n" if after else "") + _sections_text(
                     [Section("FTN", ftn_rows)], width=session.terminal_width,
                     unicode_style=await lane.run(unicode_style_enabled, actor),
@@ -570,6 +573,13 @@ async def _area_screen(
                     "f", menu_key("F", "ile echo (FTN)"),
                     _act(lambda a: file_area_echo_action(session, lane, actor, a)),
                     brief="Carry an FTN file echo here"))
+                # --- file requests (issue #1475) ---
+                offered = await lane.run(is_area_offered, area)
+                actions.append(DetailAction(
+                    "o", area_offer_label(offered),
+                    _act(lambda a: toggle_area_offer(session, lane, actor, a)),
+                    brief="Let other FTN nodes request its files"))
+                # --- end file requests ---
             return DetailState(
                 draft={**_area_draft(area), **labels},
                 title=sanitize_text(area.name),

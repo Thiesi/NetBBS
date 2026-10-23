@@ -9,6 +9,8 @@ answers (`netbbs.ftn.listener`). Design doc §6.8.
   remote confirmed.
 - `toss_received` sorts what a session received, once it has ended (§6.8,
   "What a session received"; issues #1458 and #1462):
+  0. a `.REQ` is a file request (`netbbs.ftn.freq`, issue #1475): answered
+     during the session or refused, and never held;
   1. `.TIC` files first, each paired with its file from this session or
      from the held store and checked (`netbbs.ftn.fileecho`);
   2. a file a TIC names, here or waiting from an earlier session, is a
@@ -20,7 +22,9 @@ answers (`netbbs.ftn.listener`). Design doc §6.8.
   5. ZIPs are opened as bundles (off the event loop); a ZIP with no packet
      is held whole, and a bundle's non-packet members one by one, each
      waiting for a TIC or a netmail;
-  6. anything else is held, waiting for a TIC or a netmail.
+  6. anything else is held, waiting for a TIC or a netmail -- unless it
+     answers a file request made here, when it is held as requested and
+     never expires.
 
   A session that wasn't secure has everything held as it came, unopened.
   Nothing received is dropped unrecorded: what the full held store can't
@@ -40,7 +44,7 @@ from netbbs.config import get_node_display_name
 from netbbs.files.diz import fit_description, read_archive_description
 from netbbs.files.storage import store_bytes
 from netbbs.ftn import FtnFormatError
-from netbbs.ftn import fileecho
+from netbbs.ftn import fileecho, freq
 from netbbs.ftn.attach import claim_received, expire_attach_waits
 from netbbs.ftn.binkp import ReceivedFile, SessionResult, SystemInfo
 from netbbs.ftn.bundle import archive_kind, unpack_bundle
@@ -57,12 +61,22 @@ async def toss_received(lane, network: FtnNetwork, result: SessionResult) -> Tos
     remote = str(result.remote_addresses[0]) if result.remote_addresses else "?"
     await lane.run(expire_unpaired)
     await lane.run(expire_attach_waits)
+    # --- file requests (issue #1475): a .REQ is answered or refused, never held ---
+    result = await freq.take_requests(lane, network, result)
+    # --- end file requests ---
     if not result.secure:
         # Nothing proved who sent it: kept as it came, nothing unpacked or
         # paired, for the SysOp to look at -- a stranger's bundle doesn't get
         # to expand, nor a stranger's TIC to claim a file.
         for received in result.received:
-            await _hold(lane, network, remote, received, "unsecure session", total)
+            reason = "unsecure session"
+            # --- file requests (issue #1475): a reply to a request made here says so ---
+            if archive_kind(received.data) != "pkt" and not is_tic_name(received.name):
+                requested = await freq.hold_reply_or_none(lane, network, result, received.name, received.data)
+                if requested is not None:
+                    reason = f"{requested}; unsecure session"
+            # --- end file requests ---
+            await _hold(lane, network, remote, received, reason, total)
         return total
     pool = [received for received in result.received if not is_tic_name(received.name)]
     for received in result.received:
@@ -77,7 +91,7 @@ async def toss_received(lane, network: FtnNetwork, result: SessionResult) -> Tos
         if archive_kind(received.data) != "pkt" and await lane.run(
                 claim_received, network, remote, received.name, received.data, total):
             continue
-        await _toss_file(lane, network, received, remote, total)
+        await _toss_file(lane, network, received, remote, total, result)
     return total
 
 
@@ -141,7 +155,8 @@ def _remote_of(db, held_id: int) -> str:
     return row["remote_address"] if row is not None else "?"
 
 
-async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: TossResult) -> None:
+async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: TossResult,
+                     result: SessionResult | None = None) -> None:
     kind = archive_kind(received.data)
     others: list[tuple[str, bytes]] = []
     if kind == "pkt":
@@ -155,12 +170,14 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: 
         if not packets:
             # Not a mail bundle -- a file echo's archive, say: kept whole, for
             # its TIC to claim.
-            await _hold_waiting(lane, network, remote, received,
-                                "waiting for its .TIC (a ZIP archive with no mail packets)", total)
+            if not await _hold_requested(lane, network, remote, received, result, total):  # issue #1475
+                await _hold_waiting(lane, network, remote, received,
+                                    "waiting for its .TIC (a ZIP archive with no mail packets)", total)
             return
     else:
-        await _hold_waiting(lane, network, remote, received,
-                            f"waiting for its .TIC (not a packet or ZIP bundle: {kind or 'unknown'})", total)
+        if not await _hold_requested(lane, network, remote, received, result, total):  # issue #1475
+            await _hold_waiting(lane, network, remote, received,
+                                f"waiting for its .TIC (not a packet or ZIP bundle: {kind or 'unknown'})", total)
         return
     for name, data in packets:
         one = await lane.run(toss_packet, network, data, secure=True, remote_address=remote, file_name=name)
@@ -177,6 +194,26 @@ async def _toss_file(lane, network, received: ReceivedFile, remote: str, total: 
                         received.name, remote)
         await _hold_waiting(lane, network, remote, member,
                             f"waiting for its .TIC (not a mail packet, found in bundle {received.name})", total)
+
+
+# --- file requests (issue #1475) ---
+
+
+async def _hold_requested(lane, network, remote: str, received: ReceivedFile, result: SessionResult | None,
+                          total: TossResult) -> bool:
+    """Hold a file that answers a file request made here, for the SysOp to
+    save to a file area. It never expires, as a file waiting for its TIC
+    does. False when it answers none."""
+    if result is None:
+        return False
+    reason = await freq.hold_reply_or_none(lane, network, result, received.name, received.data)
+    if reason is None:
+        return False
+    await _hold(lane, network, remote, received, reason, total)
+    return True
+
+
+# --- end file requests ---
 
 
 async def _hold_waiting(lane, network, remote: str, received: ReceivedFile, reason: str, total: TossResult) -> None:

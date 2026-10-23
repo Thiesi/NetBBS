@@ -368,6 +368,9 @@ class SessionOutbound:
         done = [row for name, row in self.file_rows.items() if name in confirmed]
         if done:
             await lane.run(_delete_file_rows, [row.id for row in done])
+            # The session is over: let go of the files before deleting any
+            # (Windows refuses to delete an open file).
+            self.close()
             for row in done:
                 if row.path is not None and row.after_sent != KEEP:
                     await asyncio.to_thread(_after_sent, Path(row.path), row.after_sent)
@@ -532,7 +535,12 @@ def report_undelivered(db: Database, reference_kind: str, reference_id: str, rea
     """Tell a netmail's sender it was not delivered, as mail from the BBS
     (issue #1471: crash mail is reported to its sender on failure). Only a
     caller's netmail has a sender to tell: a robot request or a bounce is
-    logged and nothing more."""
+    logged and nothing more. A file request's record says why (issue #1475)."""
+    if reference_kind == "freq":
+        from netbbs.ftn.freq import note_request_dropped
+
+        note_request_dropped(db, reference_id, reason)
+        return
     if reference_kind != "netmail" or not reference_id.isdigit():
         return
     from netbbs.auth.users import get_user_by_id

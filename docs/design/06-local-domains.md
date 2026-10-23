@@ -2161,8 +2161,9 @@ round (§16, "Issue #1154", tracker #1461, planned for v7.36) adds file
 echoes, FileFix and the robot rules, the nodelist from a file echo, echo-list
 import, unknown echoes and the held-item actions. They are described below as
 they are to be built, and so are stage B's netmail extras: file attach,
-crash and hold flavours, and bounces (#1470-#1472). The round's later stages
-are listed under "Planned" at the end of this section.
+crash and hold flavours, and bounces (#1470-#1472), and stage C's file
+requests (#1475). The round's later stages are listed under "Planned" at
+the end of this section.
 
 **Networks.** A SysOp adds one network record per FTN network:
 
@@ -2251,7 +2252,7 @@ every file sent in it is confirmed. In multi-batch mode a batch in which
 either side sent a file is followed by another, and the session ends after a
 batch in which neither did. Before each batch after the first, the session
 asks a hook (`batch_hook` on the mailer and the listener) for more files,
-telling it what the remote sent since: file requests (stage C) are answered
+telling it what the remote sent since: file requests (below) are answered
 this way, in the same call. A remote that claims binkp/1.1 but hangs up
 between batches, with nothing outstanding, has completed the call. Every
 bound holds across batches, per session: files, bytes, the idle, handshake
@@ -2323,6 +2324,8 @@ files (stage C) are to use it as they are.
 
 **What a session received** is sorted once the session ends (issue #1458):
 
+0. A `.REQ` file is a file request (below): answered during the session or
+   refused, and never held or tossed.
 1. `.TIC` files first (file echoes, below).
 2. A file a TIC names, in this session or waiting from an earlier one, is a
    file-echo file. It is never opened as a mail bundle.
@@ -2330,7 +2333,9 @@ files (stage C) are to use it as they are.
 4. ZIPs are opened as bundles. A ZIP with no `.pkt` member is held whole, as
    a file that may still be waiting for its TIC. A bundle's non-packet members
    are held one by one.
-5. Anything else is held, waiting for a TIC.
+5. Anything else is held, waiting for a TIC -- unless it answers a file
+   request made here (below), when it is held as requested and never
+   expires.
 
 Nothing a session received is dropped without being held or counted. A file
 from an unsecure session is held as it came, unopened, before any of this.
@@ -2589,6 +2594,84 @@ shows the network and the TIC's `Origin` address in place of a username, as
   `?` match within the name. A value containing `/`, `\`, `:` or `..` is
   ignored, with a node-log line. The new file never replaces itself.
 
+**File requests** (issue #1475, §16 "Issue #1154", Decision 13). A
+request is a WaZOO `.REQ` file (FTS-0006): a line per file, a name or a
+pattern with `*` and `?`, optionally followed by ` !password` and by an
+update word (`+time` newer than, `-time` at most as new as, in Unix
+seconds). It travels as an ordinary file, named as FTS-5005 names a request
+to its node: net and node in hex, `000C0002.REQ` for 1/2.
+
+- **Making one.** **[R]equest files** on the FTN status screen is a draft:
+  the node to ask, the uplink by default, and the names, which may include
+  the magic names below and `!password` after a name. [S]end writes the
+  `.REQ` into the node's spool folder and queues it on the outbound files
+  queue, crash: it goes at once, never via the uplink to someone else, and
+  the file is deleted once the remote confirms it. Only the uplink, or a
+  node the nodelist lists as answering BinkP, can be asked; a second
+  request to a node whose first still waits goes under a random hex name.
+  A request dropped by the queue (its crash calls kept failing) says so on
+  its record.
+- **What comes back** is received like any other file. A file that is not
+  mail and that no TIC or netmail claims answers the request when the
+  session carried a request of ours to that node, or when its name matches
+  an open request to it within 14 days (a magic name matches the names its
+  answer usually has: `FILES*`, `ALLFILES*`, the nodelist's name). It is
+  held, as requested, without the 7-day expiry of a file waiting for its
+  TIC, and the SysOp [S]aves it to a file area. Held rather than stored
+  at once: the remote chose its name and content, and a file area entry
+  needs an uploader and a description that a SysOp vouches for -- the same
+  reason a file from an unproven session is held. From a session without
+  a password it is held unopened, as everything from one is, with the
+  request named in the reason.
+- **Answering** is off by default, per network: with no settings row, or
+  with **Answer requests** off, a `.REQ` is refused. When on, a `.REQ`
+  received in a binkp/1.1 multi-batch session is answered in the session's
+  next batch, through the batch hook. **A binkp/1.0 session is not
+  answered**, and its request is not queued for a later session: it is
+  refused with a node-log line. Queuing would keep a stranger's request
+  as state until a call that may never come, and an answer in a later
+  session goes to whoever then presents the address, which proves nothing
+  without a password.
+- **Who may ask:** secure links only (a session password proved the
+  caller: the uplink, until stage D), the default, or anyone.
+- **What is served:** the files of the file areas the SysOp offers, with
+  **[O]ffer to file requests** on the area's screen, a toggle stored by the
+  area's content-addressed id. An area is served only while any caller
+  could read it -- no read level, age gate, verified-name requirement or
+  hidden Community -- and is checked again at each request, so an area that
+  gains a read level stops being served. A Linked area can't be offered:
+  Link content never enters FTN. An area carrying one network's file echo
+  is served only on that network. Only approved, unexpired files are
+  served, under BinkP's safe form of their name. The magic names:
+  - `FILES`: a listing of every file a request could get, area by area,
+    generated as `FILES.TXT` (CP437, at most 4 MiB);
+  - `ABOUT`: a file on the host the SysOp names, not served when none is
+    named;
+  - `NODELIST`: a file the SysOp names, else the network's nodelist as this
+    node kept it, named `<list name>.<day>`; **Serve NODELIST** off refuses
+    it.
+- **Safety.** A line with a folder part, a drive colon, `..`, a leading dot
+  or anything outside printable ASCII is refused, and so is a pattern of
+  wildcards and dots alone: the listing is `FILES`. A pattern matches only
+  the files above, with the linear matcher `Replaces` uses, so nothing
+  restricted is enumerated. Offered files are public, so a password is not
+  checked; it is never stored, logged or shown. A file deleted or gone
+  since it was listed is skipped. A `.REQ` is read up to 16 KiB and 50
+  lines.
+- **Limits:** files and bytes per session (10 and 50 MiB by default, at
+  most 100 and 256 MiB), and files and bytes per requesting node per day
+  (25 and 100 MiB, at most 1,000 and 1 GiB), counted from the records of
+  the last 24 hours. Whatever the settings, a network answers at most 1,000
+  files and 1 GiB a day: an unproven caller can claim any address. A name
+  over a limit is reported as such, and a file already sent in the session
+  is not sent twice.
+- **Logging.** Every request, answered or refused, is a node-log line with
+  the node, whether the session was secure, the names and the outcome
+  (sent, not found, over the limits, refused), and a record kept 30 days
+  (at most 2,000). The FTN status screen shows, per network, whether it
+  answers, how many areas are offered, and its last five requests, made
+  and answered.
+
 **Held items.** The held store keeps packets, files and TICs, each with its
 network, sender, size, time and reason. The **Held** screen lists them, and
 its actions are:
@@ -2707,7 +2790,6 @@ a time, each live-checked on ReLink. Each stage's PR writes its rules into
 this section; until then the text above is what holds.
 
 - **Stage C:**
-  - file requests, made and answered (#1475);
   - TIC hatching (#1476);
   - LHA, ARC, 7z and RAR bundles, and optional outbound ZIP bundling (#1477).
 - **Stage D:**

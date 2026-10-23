@@ -125,6 +125,9 @@ class SessionResult:
     sent: list[str] = field(default_factory=list)  # names the remote confirmed
     multi_batch: bool = False  # binkp/1.1 multiple batches were in force
     batches: int = 0  # batches completed
+    # What a batch hook keeps for the rest of the session (the file
+    # requests it answered, issue #1475); nothing here reads it.
+    hook_state: dict[str, object] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
