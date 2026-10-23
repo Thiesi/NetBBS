@@ -504,6 +504,20 @@ def test_files_attached_to_transit_netmail_follow_it(db, hub):
     assert db.connection.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0  # never in a file area
 
 
+def test_a_transit_netmail_claims_only_files_from_the_system_that_sent_it(db, hub):
+    # Review of #1508: a link naming another sender's file must not get it
+    # sent to an address of its choosing.
+    _sysop, network, _board, _point, down = hub
+    _toss(db, network, _packet(DOWN, _attach(DOWN, FAR, "NODEDIFF.Z01")), link=down)
+    total = TossResult()
+    assert not claim_received(db, network, str(HUB), "NODEDIFF.Z01", DATA, total)
+    assert fileecho.hold_waiting_file(db, network, str(HUB), "NODEDIFF.Z01", DATA, "waiting for its .TIC")
+    _toss(db, network, _packet(DOWN, replace(_attach(DOWN, FAR, "NODEDIFF.Z01"),
+                                             kludges=[("MSGID", "21:1/200 0000a77b")])), link=down)
+    assert db.connection.execute("SELECT COUNT(*) FROM ftn_outbound_files").fetchone()[0] == 0
+    assert len(queue.list_held(db)) == 1  # the hub's file still waits for its TIC
+
+
 def test_a_transit_file_that_came_first_is_claimed_by_its_netmail(db, hub):
     _sysop, network, _board, point, down = hub
     assert fileecho.hold_waiting_file(db, network, str(DOWN), "TOOLS.ZIP", DATA, "waiting for its .TIC")

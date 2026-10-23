@@ -182,7 +182,7 @@ def toss_packet(
                 _toss_echomail(db, network, message, packed, header, result, data=data,
                                remote_address=remote_address, link=link, vouched=vouched)
             else:
-                _toss_netmail(db, network, message, packed, header, result, link=link)
+                _toss_netmail(db, network, message, packed, header, result, link=link, remote_address=remote_address)
         except (_Unstorable, FtnFormatError) as exc:
             db.connection.rollback()
             _hold_message(db, network, header, packed, data, remote_address, file_name, str(exc), result)
@@ -351,7 +351,7 @@ def _forward_echomail_without_commit(db, network: FtnNetwork, tag: str, link, pa
 
 
 def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader, result: TossResult,
-                  link=None) -> None:
+                  link=None, remote_address: str = "?") -> None:
     destination = netmail_destination(message, header)
     if link is not None and link.is_point:
         written_at = netmail_origin(message, header)
@@ -359,7 +359,7 @@ def _toss_netmail(db, network, message: FtnMessage, packed, header: PacketHeader
             raise _Unstorable(f"netmail from point {link.address.four_d} that says it was written at "
                               f"{written_at.four_d}")
     if not _addressed_to(destination, network.our_address):
-        _route_transit(db, network, message, packed, header, destination, result, link)
+        _route_transit(db, network, message, packed, header, destination, result, link, remote_address)
         return
     dupe_key = _dupe_key(message, packed)
     if not record_seen_msgid_without_commit(db, network.id, NETMAIL_AREA, dupe_key):
@@ -437,7 +437,7 @@ def _robot_request(db, network: FtnNetwork, message: FtnMessage, origin: FtnAddr
 
 
 def _route_transit(db, network: FtnNetwork, message: FtnMessage, packed: PackedMessage, header: PacketHeader,
-                   destination: FtnAddress, result: TossResult, link) -> None:
+                   destination: FtnAddress, result: TossResult, link, remote_address: str = "?") -> None:
     """Route a netmail for another node on (issues #1478, #1479): to the
     point or downlink it is for, else to the uplink when a point or
     downlink sent it. Anything else is not this node's to route: counted,
@@ -502,7 +502,7 @@ def _route_transit(db, network: FtnNetwork, message: FtnMessage, packed: PackedM
         record_transit_waits_without_commit(
             db, network, names, destination=str(destination), route=route,
             link_id=target.id if target is not None else None, reference=reference,
-            sender_label=_label(message.from_name, origin), origin=origin.four_d,
+            sender_label=_label(message.from_name, origin), origin=origin.four_d, remote=remote_address,
         )
     # --- end transit attaches ---
     db.connection.commit()

@@ -2435,7 +2435,8 @@ there and stays a leaf.
 - **Transit attaches.** Files attached to a transit netmail follow it on
   its route: each name its subject gives waits, as an inbound attach's
   does ("Inbound attaches" under "Netmail in Mail"), and the file that
-  arrives under it, in that session or another, is copied to the node's
+  arrives under it from the system whose session brought the netmail, in
+  that session or another, is copied to the node's
   spool folder and queued after the netmail -- for the link it is for, or
   via the uplink -- under the netmail's own reference, so dropping the
   netmail drops its files. It is deleted once the next system confirms it

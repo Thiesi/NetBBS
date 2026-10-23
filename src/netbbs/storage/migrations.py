@@ -5438,7 +5438,9 @@ MIGRATIONS = [
             "`ftn_tic_waiting` keeps a TIC file echo's TIC while its file waits for a moderator, so the file "
             "is forwarded to the links carrying the echo once it is approved. `ftn_attach_waits` gains the "
             "route of a transit netmail whose attached files are forwarded with it (`forward_to`, "
-            "`forward_route`, `forward_link_id`, `forward_reference`; NULL for a letter delivered here). "
+            "`forward_route`, `forward_link_id`, `forward_reference`; NULL for a letter delivered here), "
+            "and `forward_from`, the address of the session the netmail came in, the only one whose "
+            "files it claims. "
             "`ftn_point_waiting` now keeps any link's echomail, as received, while its post waits for a "
             "moderator. Nothing is offered on upgrade, so nothing changes."
         ),
@@ -5464,6 +5466,7 @@ MIGRATIONS = [
         ALTER TABLE ftn_attach_waits ADD COLUMN forward_route TEXT;
         ALTER TABLE ftn_attach_waits ADD COLUMN forward_link_id INTEGER;
         ALTER TABLE ftn_attach_waits ADD COLUMN forward_reference TEXT;
+        ALTER TABLE ftn_attach_waits ADD COLUMN forward_from TEXT;
         """,
     ),
 ]
