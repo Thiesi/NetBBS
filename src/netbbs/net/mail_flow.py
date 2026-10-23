@@ -200,7 +200,6 @@ from netbbs.rendering import (
     LABEL_COLOR,
     METADATA_COLOR,
     MUTED_COLOR,
-    RULE_COLOR,
     SUCCESS_COLOR,
     VALUE_COLOR,
     WARNING_COLOR,
@@ -208,6 +207,8 @@ from netbbs.rendering import (
     action_bar,
     colored,
     display_width,
+    list_rule,
+    list_width,
     menu_grid,
     menu_key,
     sanitize_text,
@@ -561,16 +562,16 @@ def _mail_column_widths(
     if width < _TABLE_MIN_WIDTH:
         return None
     date_width = max([display_width(row.when) for row in rows] + [len("Date")])
-    # The two-column lead ("> " or "  "), two spaces between columns, and
-    # one column kept free: a row that reaches the last column makes many
-    # terminals wrap the cursor onto the next row.
+    # The two-column lead ("> " or "  ") and two spaces between columns,
+    # in `list_width`: the terminal less the last column, which a row that
+    # reached it would make many terminals wrap the cursor from.
     fixed = [ROW_NUMBER_WIDTH, date_width]
     if not sent:
         fixed.append(_MARKER_WIDTH)
     if show_status:
         fixed.append(_STATUS_WIDTH)
     gaps = 2 * (len(fixed) + 1)
-    available = width - 2 - sum(fixed) - gaps - 1
+    available = list_width(width) - 2 - sum(fixed) - gaps
     heading = "To" if sent else "From"
     name_width = min(
         max([display_width(_name_text(row)) for row in rows] + [len(heading)]),
@@ -657,10 +658,10 @@ def _mail_list_rows(
             # it is comes first; the message view shows the date.
             tag = marker or status
             # The name takes at most half the row, so the subject shows.
-            name = truncate_to_width(_name_text(row), max(8, (width - 1) // 2), ellipsis=ellipsis)
+            name = truncate_to_width(_name_text(row), max(8, list_width(width) // 2), ellipsis=ellipsis)
             lead = _MARK if is_marked else ""
             plain = truncate_to_width(
-                f"{lead}{number} {tag + ' ' if tag else ''}{name}: {row.shown_subject}", max(1, width - 1),
+                f"{lead}{number} {tag + ' ' if tag else ''}{name}: {row.shown_subject}", list_width(width),
                 ellipsis=ellipsis,
             )
             if index == highlighted:
@@ -1492,7 +1493,8 @@ class _MailboxScreen:
         pages = (top + limit < len(self.rows), top > 0)
         above, below = self._frame(row_count=len(page_rows), pages=pages)
         roomy = self._roomy()
-        rule = colored(("─" if self.unicode_style else "-") * min(width, 78), fg_color=RULE_COLOR)
+        # As wide as the rows, which fill the terminal less its last column.
+        rule = list_rule(width, unicode_style=self.unicode_style)
         lines = [above]
         if roomy:
             lines.append("")
