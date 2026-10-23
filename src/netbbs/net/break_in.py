@@ -33,6 +33,7 @@ from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.rendering.ansi import CSI, strip_ansi
 from netbbs.rendering.charset import input_codec
+from netbbs.rendering.prose_buffer import soft_wrap
 from netbbs.rendering.screen_buffer import ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
 from netbbs.rendering.theme import ACCENT_COLOR, ERROR_COLOR, HEADER_COLOR, PRIVILEGE_COLOR, VALUE_COLOR
 from netbbs.rendering.width import wrap_to_width
@@ -97,7 +98,9 @@ def _paint_pane(buffer: ScreenBuffer, top: int, rows: int, label: str, color: in
     wrapped: list[str] = []
     for line in pane.lines:
         wrapped.extend(wrap_to_width(line, width) or [""])
-    typing = wrap_to_width(pane.typing + "_", width) or ["_"]
+    # Wrapped keeping every typed character (`soft_wrap`): a finished line
+    # may have its spaces squeezed, but a space being typed must show.
+    typing = soft_wrap(pane.typing + "_", width)
     wrapped.extend(typing)
     for offset, line in enumerate(wrapped[-body:]):
         paint_text(buffer, top + 1 + offset, 1, line, fg=VALUE_COLOR)

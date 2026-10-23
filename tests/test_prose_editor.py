@@ -326,7 +326,7 @@ def test_flush_positions_the_cursor_at_the_correct_display_column_after_cjk_text
     # display_width("你好") == 4, so the real terminal cursor must land
     # at column 5 (1-indexed) -- a character-count-based `pos.col + 1`
     # would instead produce column 3.
-    assert session.written[-1] == "\x1b[1;5H"
+    assert session.written[-1].endswith("\x1b[1;5H")
 
 
 def test_render_places_a_wide_character_across_two_grid_columns():
@@ -717,3 +717,62 @@ def test_a_draft_handed_in_as_the_text_gets_no_second_blank_line(tmp_path):
         )
 
     assert asyncio.run(scenario()) == "bob wrote:\n> hi\n\nmy answer\nmore"
+
+
+# -- a typed space reaches the screen at once (reported by the maintainer) ----
+
+
+class _KeyMarkingSession(FakeSession):
+    """Notes how much had been written when each key was asked for, so a
+    test can replay the screen exactly as it stood after any keystroke."""
+
+    def __init__(self, inputs: list[str], **kwargs):
+        super().__init__(inputs, **kwargs)
+        self.marks: list[int] = []
+
+    async def read_editor_key(self) -> EditorKey:
+        self.marks.append(len(self.written))
+        return await super().read_editor_key()
+
+
+def _cursor_after_each_key(keys: list[str], tmp_path, *, initial_text=None, width=80, height=24):
+    """The terminal's (row, col) once each of `keys` has been echoed, and the
+    writes each one cost."""
+    from netbbs.rendering.terminal_emulator import TerminalEmulator
+
+    session = _KeyMarkingSession(keys + ["CTRL+O"], width=width, height=height)
+    asyncio.run(
+        edit_prose(
+            session, initial_text=initial_text, draft_path=tmp_path / "d.draft", max_bytes=100_000,
+            cursor_at_end=initial_text is not None,
+        )
+    )
+    emulator = TerminalEmulator(width, height)
+    positions, writes = [], []
+    marks = session.marks
+    emulator.feed("".join(session.written[: marks[0]]))
+    for before, after in zip(marks, marks[1:]):
+        emulator.feed("".join(session.written[before:after]))
+        positions.append((emulator.row, emulator.col))
+        writes.append(after - before)
+    return positions, writes
+
+
+def test_a_typed_space_moves_the_cursor_at_once(tmp_path):
+    positions, _ = _cursor_after_each_key(["a", "b", " ", " ", "c"], tmp_path)
+    # Columns 0-based: after "ab" the cursor is at 2; each space moves it on
+    # by itself, without waiting for the next letter.
+    assert [col for _row, col in positions] == [1, 2, 3, 4, 5]
+
+
+def test_a_space_typed_at_the_right_edge_moves_the_cursor_to_the_next_row(tmp_path):
+    positions, _ = _cursor_after_each_key([" "], tmp_path, initial_text="x" * 40, width=40)
+    assert positions == [(1, 0)]
+
+
+def test_a_keystroke_is_echoed_in_a_single_write(tmp_path):
+    # One write per key: split into five, each went out as its own TCP
+    # segment, SSH packet or websocket message, and the caret visibly
+    # visited the status line between a letter and its echo.
+    _, writes = _cursor_after_each_key(list("hello there"), tmp_path)
+    assert writes == [1] * len("hello there")

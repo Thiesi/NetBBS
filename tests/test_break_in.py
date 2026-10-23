@@ -239,6 +239,16 @@ def test_the_chat_layout_on_both_sides():
         assert any("hi!" in row for row in text)
 
 
+def test_spaces_being_typed_in_the_chat_show_as_typed():
+    # The typing line kept only one of two spaces, so the second looked
+    # eaten until the next letter arrived.
+    state = ChatState(sysop_name="sysop", caller_name="alice")
+    state.sysop.type("a  b ")
+    buffer = ScreenBuffer(40, 12)
+    paint_chat(buffer, state, for_sysop=True)
+    assert any("a  b _" in row for row in _rows(buffer))
+
+
 # -- from the Monitor --------------------------------------------------------
 
 

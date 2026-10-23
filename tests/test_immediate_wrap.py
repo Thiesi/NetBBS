@@ -188,8 +188,10 @@ def test_art_editor_status_line_never_reaches_the_last_column(tmp_path):
         return session
 
     session = asyncio.run(scenario())
+    # A keystroke's redraw is one write, the changed cells first: the status
+    # line is what follows its line clear.
     status = [
-        re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", chunk)
+        re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", chunk.rsplit("\x1b[2K", 1)[-1])
         for chunk in session.written
         if "Ctrl+G help" in chunk
     ]
