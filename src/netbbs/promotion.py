@@ -25,7 +25,7 @@ import json
 from dataclasses import asdict, dataclass
 
 from netbbs.auth.users import SYSOP_LEVEL, User, promote_automatically
-from netbbs.config import get_config, set_config
+from netbbs.config import get_config, set_config_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import parse_utc_iso
 
@@ -95,6 +95,19 @@ def save_promotion_rules(db: Database, rules: list[PromotionRule], *, changed_by
     would apply would be a guess)."""
     from netbbs.moderation.log import record_action
 
+    ordered = save_promotion_rules_without_commit(db, rules)
+    db.connection.commit()
+    record_action(
+        db, actor=changed_by, action="promotion_rules",
+        detail="; ".join(f"{r.from_level} -> {r.to_level} ({r.describe()})" for r in ordered) or "no rules",
+    )
+    return ordered
+
+
+def save_promotion_rules_without_commit(db: Database, rules: list[PromotionRule]) -> list[PromotionRule]:
+    """`save_promotion_rules` for a caller that owns the transaction and
+    writes its own audit entry (a preset, issue #1504): checked the same
+    way, but neither committed nor audited."""
     for rule in rules:
         validate_rule(rule)
     starts = [rule.from_level for rule in rules]
@@ -102,11 +115,7 @@ def save_promotion_rules(db: Database, rules: list[PromotionRule], *, changed_by
     if clash is not None:
         raise PromotionRuleError(f"Two rules start from level {clash}; one level, one rule.")
     ordered = sorted(rules, key=lambda rule: rule.from_level)
-    set_config(db, PROMOTION_RULES_CONFIG_KEY, json.dumps([asdict(rule) for rule in ordered]))
-    record_action(
-        db, actor=changed_by, action="promotion_rules",
-        detail="; ".join(f"{r.from_level} -> {r.to_level} ({r.describe()})" for r in ordered) or "no rules",
-    )
+    set_config_without_commit(db, PROMOTION_RULES_CONFIG_KEY, json.dumps([asdict(rule) for rule in ordered]))
     return ordered
 
 
