@@ -316,9 +316,9 @@ class BuiltPacket:
     messages: int
     mail: int
     boards: int
-    #: Messages left for the next packet: past the cap, or held back
-    #: because they were already carried and the caller didn't want them
-    #: again.
+    #: Messages left for the next packet: past the cap or the size limit.
+    #: `skipped_sent` counts those earlier packets carried and the caller
+    #: did not want again.
     more_waiting: bool
     skipped_sent: int = 0
     first_visits: list[str] = field(default_factory=list)
@@ -375,7 +375,6 @@ def build_caller_packet(db: Database, user: User, *, include_sent: bool) -> Buil
                 continue
             if ("mail", letter.id) in sent and not include_sent:
                 skipped += 1
-                more = True
                 continue
             if not take("mail", letter.id, _mail_message(db, letter, user_name), str(letter.id)):
                 break
@@ -387,7 +386,8 @@ def build_caller_packet(db: Database, user: User, *, include_sent: bool) -> Buil
     for conference in conferences:
         board = conference.board
         board_conferences.append(Conference(conference.number, sanitize_text(board.name), _flags(db, user, board)))
-        if more and len(messages) >= cap:
+        if len(messages) >= cap:
+            more = True
             continue
         unread = unread_root_posts(db, user, board)
         if unread is None:
@@ -399,7 +399,6 @@ def build_caller_packet(db: Database, user: User, *, include_sent: bool) -> Buil
                 continue
             if ("post", row_id) in sent and not include_sent:
                 skipped += 1
-                more = True
                 continue
             post = visible_post(db, post_id)
             if post is None:
