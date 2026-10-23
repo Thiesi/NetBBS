@@ -5049,6 +5049,50 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
+            "Issue #1463 (design doc §6.8, §16 \"Issue #1154\", Decision 6): the FTN robots' names "
+            "and FileFix's password. `ftn_networks.areafix_robot` and `filefix_robot` are the names "
+            "AreaFix and FileFix requests are addressed to, `AreaFix` and `FileFix` by default and on "
+            "upgrade. `filefix_password` is FileFix's own password; empty, as on upgrade, means the "
+            "AreaFix password is used, so nothing changes."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN areafix_robot TEXT NOT NULL DEFAULT 'AreaFix';
+        ALTER TABLE ftn_networks ADD COLUMN filefix_robot TEXT NOT NULL DEFAULT 'FileFix';
+        ALTER TABLE ftn_networks ADD COLUMN filefix_password TEXT NOT NULL DEFAULT '';
+        """,
+    ),
+    Migration(
+        description=(
+            "Issue #1464 (design doc §6.8, §16 Issue #1154 Decision 5): the nodelist arrives in a "
+            "file echo. Per network: `nodelist_echo` (the echo's tag), `nodelist_name` and "
+            "`nodediff_name` (the base names of the full list and of its diffs; empty = none); "
+            "for the status screen, the stored list's `nodelist_day`, `nodelist_how` (full, diff "
+            "or manual) and verified `nodelist_crc`, the last failure and `nodelist_waiting_full` "
+            "(a diff could not be applied: diffs wait for a full list). `ftn_nodelist_raw` keeps "
+            "the last list's raw text per network, so a NODEDIFF can be applied to it. A list "
+            "imported before this was imported by hand, and has no raw text kept."
+        ),
+        sql="""
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_echo TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_name TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ftn_networks ADD COLUMN nodediff_name TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_day INTEGER;
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_how TEXT
+            CHECK (nodelist_how IS NULL OR nodelist_how IN ('full', 'diff', 'manual'));
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_crc INTEGER;
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_failure TEXT;
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_failed_at TEXT;
+        ALTER TABLE ftn_networks ADD COLUMN nodelist_waiting_full INTEGER NOT NULL DEFAULT 0;
+        UPDATE ftn_networks SET nodelist_how = 'manual' WHERE nodelist_imported_at IS NOT NULL;
+        CREATE TABLE ftn_nodelist_raw (
+            network_id  INTEGER PRIMARY KEY REFERENCES ftn_networks(id) ON DELETE CASCADE,
+            content     BLOB NOT NULL,
+            kept_at     TEXT NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        description=(
             "Issues #1462 and #1466 (design doc §6.8, §16 \"Issue #1154\"): FTN file echoes and bad "
             "echoes. A network gets a `tic_password` (empty: every TIC is held). A file area carries "
             "one file echo through `file_areas.ftn_network_id`/`ftn_file_echo`, unique per network, "

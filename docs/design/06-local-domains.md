@@ -2233,7 +2233,7 @@ per board. Nothing is mapped by default.
     seen on that area before is dropped.
   - **Bad echoes.** A message for an area no board carries is held as a *bad
     echo*, under its network and tag. The **Bad echoes** screen, reached from
-    the FTN status screen, shows one row per tag with its message count and
+    the FTN status screen with **[U]nknown echoes**, shows one row per tag with its message count and
     when it was first and last seen. Its actions:
     - **[C]reate** opens the new-board editor with the tag filled in. Saving
       maps the board and re-tosses the tag's messages.
@@ -2318,17 +2318,32 @@ per board. Nothing is mapped by default.
   not on the console. The same rules apply to both robots' requests:
   - `+TAG` (or a bare `TAG`) links an area, and `-TAG` unlinks one.
   - The known `%` commands are checked: `%LIST`, `%QUERY`, `%LINKED`,
-    `%UNLINKED`, `%AVAIL`, `%HELP`, `%RESCAN`, `%PAUSE` and `%RESUME`.
-    `%RESCAN` may name a tag, followed by the robot's own arguments.
-  - Any other line starting with `%` is sent verbatim, as one line. It is
-    never turned into a `+%...` link request (issue #1459).
-  - `%PWD`, `%PASSWORD` and `%PKTPWD` are refused. The reason names
+    `%UNLINKED`, `%AVAIL`, `%HELP`, `%RESCAN`, `%PAUSE` and `%RESUME`. All
+    but `%RESCAN` take nothing after them, so a word that follows one is the
+    next command. `%RESCAN` may name a tag, followed by the robot's own
+    arguments.
+  - Any other command starting with `%` is sent verbatim, as one line. It is
+    never turned into a `+%...` link request (issue #1459), and `+%...` or
+    `-%...` typed as such is refused.
+  - The request is typed on one line. `%RESCAN` and a verbatim command take
+    the words after them as their arguments, up to the next word starting
+    with `%` or the end of the line.
+  - `%PWD`, `%PASSWORD`, `%PKTPWD` and `%TICPWD` are refused. `%TICPWD`
+    is FileFix's counterpart of `%PKTPWD` and is refused for the same
+    reason: each changes a password this node stores. The reason names
     **Change robot password**, a Networks action: the new password is typed
-    masked, twice, then sent to the chosen robot as `%PWD` and stored for that
-    robot in the same step. If the robot refuses, its reply in Mail says so,
-    and the SysOp sets the old password back in the network editor. Session
-    and packet passwords are agreed with the hub's coordinator and stay
-    editor fields.
+    masked, twice, then sent to the chosen robot as `%PWD`, under its current
+    password, and stored for that robot in the same step. If the robot
+    refuses, its reply in Mail says so, and the SysOp sets the old password
+    back in the network editor.
+    - Only the robot that was sent `%PWD` changes. A FileFix with no password
+      of its own keeps the old AreaFix password as its own when AreaFix's
+      changes, since the hub heard only about AreaFix's, and the outcome
+      says so.
+    - Session, packet and TIC passwords are agreed with the hub's
+      coordinator and stay editor fields.
+  - A robot's name is 1-35 printable ASCII characters, the To field's 35
+    bytes.
   - A request holds at most 50 commands.
 
 **File echoes (TIC, FTS-5006).** A file area can carry one file echo tag of
@@ -2403,7 +2418,7 @@ its actions are:
   SysOp's own upload, through that area's normal path. A file held together
   with its TIC keeps the TIC's description. A name already in the area is
   refused.
-- **[X] export** asks for a path on the host and writes the file there with
+- **[E]xport** asks for a path on the host and writes the file there with
   the rules for SysOp uploads (§6.2): written beside the destination and
   renamed, never over an existing file, no symlink followed, and
   audit-logged. A folder as the path writes the file into it under its own
@@ -2417,11 +2432,17 @@ the status screen, as before.
 **Nodelist.** A network's nodelist (FTS-5000) arrives in one of two ways:
 
 - **By hand:** [N]odelist import on the FTN status screen, or
-  `ftn-import-nodelist`, from an unpacked file on the host.
+  `ftn-import-nodelist`, from a file on the host: the list itself, or a ZIP
+  holding it (the network's `<name>.<ddd>`, or the one list the ZIP holds).
 - **From the nodelist echo**, automatically. A file that arrives by TIC in the
   network's nodelist echo and passes the TIC checks is handled by its name:
   - `<name>.<ddd>`, or an archive of it, is a full list;
   - `<diff name>.<ddd>`, or an archive of it, is a diff.
+
+  An archive's name may end in the day number, in FTS-5000's archive letter
+  and the day's last two digits (`NODELIST.Z89`), or in `.ZIP`. The names
+  are compared case-insensitively, and a file of any other name is not the
+  nodelist's.
 
   An archive is recognised by content: ZIP now, and the other formats with
   stage C, until which they are held. It is opened in-process within the
@@ -2433,39 +2454,52 @@ What happens to each kind:
 
 - **A full list** has its CRC-16 checked against the first line, as FTS-5000
   specifies: computed from the second line to the end, before the end-of-file
-  byte. On a mismatch nothing is imported, the file is held, and the current
-  list stays in use. On a match the list replaces the stored entries, and its
-  raw text is kept, one per network.
+  byte, as if every line ended CR LF. A list from the echo whose first line
+  carries no check value fails the check. On a mismatch nothing is imported,
+  the file is held, and the current list stays in use. On a match the list
+  replaces the stored entries, and its raw text is kept, one per network.
 - **A diff** (FTS-5000's `A`, `C` and `D` commands) is applied to the kept
   raw text. Its first line must equal the kept list's first line, and the
   result's CRC-16 must match. Then the result becomes the kept list and is
   imported. If any of this fails, nothing changes: the diff is held, and the
   status says the network is waiting for a full list. That is the fall-back
-  (§16, "Issue #1154", Decision 5).
+  (§16, "Issue #1154", Decision 5). The next full list ends the wait. A diff
+  whose result is the kept list already (its full list came first) is
+  skipped, without a failure.
 - **A list imported by hand** is kept as raw text too, so later diffs apply
-  to it.
+  to it. Its CRC-16 is checked when its first line carries one, and a
+  mismatch is refused; a hand-made list without a check value is imported.
 
 The FTN status screen shows, per network, the list's day number, when it was
-imported and how (full, diff or by hand), its node count, and the last
-failure.
+imported and how (full, diff or by hand), its node count, its verified
+CRC-16, the nodelist echo and names, whether it is waiting for a full list,
+and the last failure.
 
 **Echo lists.** A hub's list of echoes, `.NA` for echomail or `.FA` for file
 echoes, is imported from a path on the host, from the FTN status screen. The
 file holds one `TAG description` per line, with `;` comments. It may be up to
-1 MiB and 10,000 lines. Tags are normalised as a board's echo tag is, and
-invalid lines are skipped and counted. The import is a draft editor (§3.5):
+1 MiB and 10,000 lines. It is read as UTF-8 when it decodes as such, else
+as CP437. Tags are normalised as a board's echo tag is. Invalid lines, a tag
+starting with `%`, and a tag listed twice are skipped and counted. The
+import is a draft editor (§3.5):
 
+- whether the list is echomail or file echoes, from the extension (`.FA` is
+  file echoes, anything else echomail), which the SysOp can switch;
 - a checklist of the tags and their descriptions, where tags already mapped
   on that network are marked and can't be checked;
 - the Community the new boards or file areas go into.
 
 **[S]ave** creates one board (for `.NA`) or file area (for `.FA`) per checked
-tag in that Community. Each is named from the description, cut to the name
-limit, or from the tag, and is mapped. Then one AreaFix or FileFix request
-with `+TAG` for each tag is queued, split into requests of at most 50
-commands. Nothing is written before [S]ave. A save that can't create
-everything, a name already taken for example, writes nothing and keeps the
-draft with the reason.
+tag in that Community. Each is named from the description, cut to 40
+characters at a word where it can be, or from the tag when there is no
+description or that name is already taken, and is mapped. Then one AreaFix
+or FileFix request with `+TAG` for each tag is queued, split into requests
+of at most 50 commands. Nothing is written before [S]ave. A save that can't
+create everything, an echo whose description and tag are both names
+already taken for example,
+writes nothing and keeps the draft with the reason. Creating a board
+commits, so a failure after the first one was made removes what was made
+before the draft is shown again.
 
 **Character sets.** Text is decoded by its `^ACHRS` kludge (FTS-5003). Without
 one, the network's default is used, CP437 unless the SysOp sets another.

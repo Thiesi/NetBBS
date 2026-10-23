@@ -2815,6 +2815,8 @@ Mail.
 > Linked, and nothing that arrives over FTN is trust-evaluated.
 
 In this chapter: [Join a network](#join-a-network) ·
+[AreaFix and FileFix](#areafix-and-filefix) ·
+[Join echoes from the hub's list](#join-echoes-from-the-hubs-list) ·
 [File echoes](#file-echoes) · [Netmail](#netmail) ·
 [Held items and status](#held-items-and-status) ·
 [Bad echoes](#bad-echoes) · [Not supported](#not-supported)
@@ -2839,7 +2841,8 @@ In this chapter: [Join a network](#join-a-network) ·
 4. Ask the hub to send those echoes. Under
    **Node ▸ Echomail & netmail (FTN)**, press <kbd>A</kbd> **AreaFix** and
    enter `+FSX_GEN`, or `%LIST` to see what the hub carries. The hub's answer
-   arrives in your Mail.
+   arrives in your Mail. To join many echoes at once, import the hub's echo
+   list instead (see [Join echoes from the hub's list](#join-echoes-from-the-hubs-list)).
 
 #### How echomail behaves
 
@@ -2891,6 +2894,75 @@ under the username instead.
   board asked for displayed names has none, so it stays on this BBS, and the
   node log says why.
 
+### AreaFix and FileFix
+
+The hub's robots link and unlink echoes for you: AreaFix for echomail,
+FileFix for file echoes. Under **Node ▸ Echomail & netmail (FTN)**, press
+<kbd>A</kbd> **AreaFix** or <kbd>F</kbd> **FileFix** and type the request on
+one line. The robot's answer arrives as netmail in your Mail.
+
+| You type | It asks |
+| --- | --- |
+| `+NIX_BSD` or `NIX_BSD` | Link the echo |
+| `-NIX_BSD` | Unlink it |
+| `%LIST`, `%QUERY`, `%LINKED`, `%UNLINKED`, `%AVAIL`, `%HELP` | Lists and help |
+| `%PAUSE`, `%RESUME` | Stop and restart all your echoes for a while |
+| `%RESCAN NIX_BSD R=10` | Send an echo's old messages again, with the robot's own options |
+
+- One request holds up to 50 commands, such as `+NIX_BSD +NIX_BBS %LIST`.
+- A `%` command NetBBS doesn't know goes to the robot exactly as you typed
+  it, with the words after it, up to the next `%` command. Put it last on the
+  line.
+- `%PWD`, `%PASSWORD`, `%PKTPWD` and `%TICPWD` are refused here: they change a
+  password NetBBS stores.
+
+The robots' names and FileFix's password are in the network's editor under
+**Robots**:
+
+- **AreaFix name** and **FileFix name** are `AreaFix` and `FileFix` unless
+  the hub's robots answer to others, such as `AllFix` or `FileMgr`.
+- **FileFix password** stays empty when the hub uses the AreaFix password for
+  both, as most do.
+
+**Change a robot's password.** Under **Settings ▸ Echomail & netmail (FTN)**,
+press <kbd>R</kbd> **Robot password** on the network:
+
+1. Choose AreaFix or FileFix.
+2. Type the new password twice. It is sent to the robot as `%PWD`, under the
+   old password, and stored at once.
+3. Read the robot's reply in your Mail. If it refused, set the old password
+   back in the network's editor.
+
+When AreaFix's password changes and FileFix had none of its own, FileFix keeps
+the old one: the hub only heard about AreaFix. If your hub uses one password
+for both robots, set **FileFix password** once AreaFix confirms. Session and
+packet passwords are agreed with the hub's coordinator and are set in the
+editor.
+
+### Join echoes from the hub's list
+
+A hub's infopack lists its echoes: a `.NA` file for echomail and a `.FA`
+file for file echoes, such as nixNet's `NIXNET.NA`. To join many at once:
+
+1. Unpack the list onto the host.
+2. Under **Node ▸ Echomail & netmail (FTN)**, press <kbd>I</kbd> **Import
+   echo list** and enter the file's path.
+3. In the draft:
+   - **List of** says whether the list is echomail (boards) or file echoes
+     (file areas). It follows the file's extension; change it for a list
+     named otherwise.
+   - **Echoes** opens the checklist. Echoes this network already carries are
+     marked `[=]` and can't be checked.
+   - **Community** is where the new boards or file areas go.
+4. <kbd>S</kbd> **Save**. Each checked echo gets a board or file area named
+   from its description, cut to 40 characters, or from its tag when that
+   name is already taken. Each is mapped to its echo, and one AreaFix or
+   FileFix request asks for all of them, split into requests of 50.
+
+Nothing is created before **Save**. If anything can't be created, nothing is,
+and the draft says why. The list may be up to 1 MiB and 10,000 lines; lines
+that aren't `TAG description` are skipped and counted.
+
 ### File echoes
 
 A file echo distributes files the way an echo distributes messages. nixNet,
@@ -2935,15 +3007,56 @@ Netmail is personal mail to an address written as `Name (zone:net/node)`.
 | --- | --- |
 | **Who may send it** | Each network has a **Netmail level**, and only accounts at that level may send netmail. It starts at 255, SysOp only, because netmail leaves under this BBS's address. |
 | **Who receives it** | Every account, by username, a username it had before a rename, or its verified real name. Netmail for a name with no account here comes to you, and so does netmail for a real name two accounts share. |
-| **Direct delivery** | Import the network's nodelist (below). Netmail to a node whose nodelist entry gives a BinkP host then goes to it directly. |
+| **Direct delivery** | Keep the network's nodelist current (below). Netmail to a node whose nodelist entry gives a BinkP host then goes to it directly. |
 | **Via the hub** | The rest goes through the hub, and so does anything a direct call fails to deliver after three tries. |
 
-Import the nodelist either from **Node ▸ Echomail & netmail (FTN)** with
-<kbd>N</kbd> **Nodelist import**, or on the host:
+#### The nodelist
+
+Most networks send their nodelist every week in a file echo, such as nixNet's
+`NIX_LIST`, and some send a small daily diff in between. NetBBS can import
+both as they arrive:
+
+1. Under **Settings ▸ Echomail & netmail (FTN)**, open the network and fill in
+   the **Nodelist** fields:
+   - **Nodelist echo**: the echo's tag, such as `NIX_LIST`;
+   - **List name**: the list's file name without the day number, such as
+     `NIXLIST` for `NIXLIST.289`, or `NODELIST` on FidoNet;
+   - **Diff name**: the diffs' file name, such as `NODEDIFF`, if the network
+     sends diffs. Leave it empty if it doesn't.
+2. Ask the hub to send the echo: press <kbd>F</kbd> **FileFix** and enter
+   `+NIX_LIST` (see [AreaFix and FileFix](#areafix-and-filefix)). The echo
+   needs no file area. If you map it to one as well, the files are stored
+   there too.
+
+What happens to each file:
+
+- **A full list**, plain or in a ZIP (such as `NIXLIST.Z89`), is imported once
+  its CRC-16 matches the check value in its first line.
+- **A diff** is applied to the last list, and the list it makes must pass the
+  same check.
+- **A file that fails** changes nothing: the list you have stays in use, and
+  the file goes to **Held** with the reason. After a failed diff, the network
+  waits for the next full list, and later diffs are not applied until it
+  arrives.
+
+> [!NOTE]
+> Other archive kinds (ARC, ARJ, LHA, RAR, 7-Zip) are held for now. Ask the
+> hub for ZIP.
+
+**Node ▸ Echomail & netmail (FTN)** shows, for each network, the list's day
+number, how many nodes it lists, when it was imported and how (full list,
+diff or by hand), whether its CRC-16 was verified, and the last failure.
+
+To import a list by hand, press <kbd>N</kbd> **Nodelist import** on that
+screen, or run on the host:
 
 ```sh
 python -m netbbs.admin ftn-import-nodelist fsxNet FSXNET.280
 ```
+
+Either way the file may be the list itself or a ZIP holding it. A list whose
+first line carries a check value that doesn't match is refused. A list
+imported by hand is kept like one from the echo, so later diffs apply to it.
 
 ### Held items and status
 
@@ -2968,7 +3081,7 @@ Look at them under **Node ▸ Echomail & netmail (FTN)** with
 - <kbd>S</kbd> **Save** stores a held file in a file area you pick, as your
   own upload. A file held with its TIC keeps the TIC's description. A name
   already in the area is refused.
-- <kbd>X</kbd> **Export** writes a held file to a folder or path on the
+- <kbd>E</kbd> **Export** writes a held file to a folder or path on the
   host. An existing file is never overwritten, nothing is written through a
   symbolic link, and the item stays held until you delete it.
 - <kbd>D</kbd> **Delete** throws it away.
@@ -2982,7 +3095,7 @@ errors, waiting messages and recently answered calls.
 An echo the hub sends that no board carries, or a file echo no file area
 carries, is a *bad echo*. Its messages and files wait for you instead of
 being lost. **Node ▸ Echomail & netmail (FTN)** counts them, and
-<kbd>E</kbd> **Bad echoes** lists one row per tag, with how many wait and
+<kbd>U</kbd> **Unknown echoes** lists one row per tag, with how many wait and
 when the first and last came:
 
 - <kbd>C</kbd> **Create** opens a new board, or a new file area for a file

@@ -30,3 +30,7 @@ src/netbbs/web/static/*.ico binary
 
 # Guest-side scripts run inside a Linux VM; a CR would break their shebang.
 examples/doors/vm/* text eol=lf
+
+# Echo lists from a hub's infopack (nixNet), kept as published: CR LF line ends.
+tests/fixtures/ftn/*.NA binary
+tests/fixtures/ftn/*.FA binary

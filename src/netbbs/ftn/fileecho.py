@@ -25,14 +25,13 @@ session, and the console after a SysOp maps a bad file echo.
   matches only files that arrived by TIC in the same area.
 - **Nodelist echo.** A file in the network's nodelist echo is handed to
   `netbbs.ftn.nodelist_feed.handle_received_file` after it passed, whether
-  or not a file area carries the echo; that module is optional here.
+  or not a file area carries the echo.
 - **Held items.** `held_file_for_saving`, `save_held_to_area` and
-  `export_held` are the held screen's [S]ave and [X] export (issue #1460).
+  `export_held` are the held screen's [S]ave and [E]xport (issue #1460).
 """
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import os
 import secrets
@@ -48,6 +47,7 @@ from netbbs.files.entries import FileEntry, get_file, upload_file
 from netbbs.files.storage import new_incoming_temp_path, store_bytes
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.binkp import MAX_FILE_BYTES, safe_file_name
+from netbbs.ftn import nodelist_feed
 from netbbs.ftn.networks import FtnNetwork, file_area_id_for_echo
 from netbbs.ftn.queue import (
     HELD_FILE,
@@ -240,8 +240,7 @@ def judge(db: Database, network: FtnNetwork, tic: Tic, data: bytes | None, *, li
 
 
 def _is_nodelist_echo(network: FtnNetwork, tag: str) -> bool:
-    echo = getattr(network, "nodelist_echo", "") or ""  # issue #1464's setting, when it is built
-    return bool(echo) and echo.upper() == tag.upper()
+    return bool(network.nodelist_echo) and network.nodelist_echo.upper() == tag.upper()
 
 
 def _usable_replaces(tic: Tic, network: FtnNetwork) -> list[str]:
@@ -422,12 +421,8 @@ def apply_replaces(db: Database, file_row_id: int) -> int:
 
 
 def _nodelist_feed(db: Database, network: FtnNetwork, tag: str, name: str, path: Path) -> bool:
-    """Hand a passed file to the nodelist import (issue #1464) when that is
-    built; False when it isn't, or the file isn't the network's list."""
-    if importlib.util.find_spec("netbbs.ftn.nodelist_feed") is None:
-        return False
-    from netbbs.ftn import nodelist_feed
-
+    """Hand a passed file to the nodelist import (issue #1464); False when
+    it isn't the network's list or diff."""
     try:
         return bool(nodelist_feed.handle_received_file(db, network, tag, name, path))
     except Exception:  # noqa: BLE001 -- a nodelist failure must not lose the file the area stored
@@ -451,7 +446,7 @@ def _feed_without_area(db: Database, network: FtnNetwork, verdict: Verdict, data
             _logger.warning("could not remove %s: %s", staging, exc)
 
 
-# --- the held screen's [S]ave and [X] export (issue #1460) -------------------
+# --- the held screen's [S]ave and [E]xport (issue #1460) -------------------
 
 
 @dataclass(frozen=True)

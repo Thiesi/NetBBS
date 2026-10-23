@@ -1,5 +1,5 @@
 """The console side of file echoes and bad echoes (design doc §6.8, issues
-#1460, #1462, #1466): the held screen's [R]elease, [S]ave and [X] export,
+#1460, #1462, #1466): the held screen's [R]elease, [S]ave and [E]xport,
 the Bad echoes screen's [C]reate and [M]ap, a file area's [F]ile echo and
 the network's TIC password -- driven by the scripted `FakeSession`."""
 
@@ -99,11 +99,11 @@ def test_a_held_file_is_exported_to_a_folder_and_stays_held(db, lane, sysop, net
     out = tmp_path / "out"
     out.mkdir()
     _toss(lane, network, ("stray.zip", b"a file"))
-    text = _status(lane, sysop, ["h", "x", "1", str(out), "b", "b"])
+    text = _status(lane, sysop, ["h", "e", "1", str(out), "b", "b"])
     assert "Exported to" in text
     assert (out / "stray.zip").read_bytes() == b"a file"
     assert len(queue.list_held(db)) == 1
-    text = _status(lane, sysop, ["h", "x", "1", str(out), "b", "b"])
+    text = _status(lane, sysop, ["h", "e", "1", str(out), "b", "b"])
     assert "already exists" in text
     assert any(a.action == "export_ftn_held" for a in list_recent_actions(db, limit=5))
 
@@ -118,7 +118,7 @@ def _bad_echo_packet():
 def test_a_bad_echo_is_mapped_to_a_local_board_and_re_tossed(db, lane, sysop, network):
     board = create_board(db, "new things", creator=sysop)
     toss_packet(db, network, _bad_echo_packet(), secure=True, remote_address="21:1/100", file_name="x.pkt")
-    text = _status(lane, sysop, ["e", "m", "1", "1", "", "b", "b"])
+    text = _status(lane, sysop, ["u", "m", "1", "1", "", "b", "b"])
     assert "FSX_NEW" in text
     assert "new things carries FSX_NEW: 1 posts tossed" in text
     (post,) = db.connection.execute("SELECT body FROM posts WHERE board_id = ?", (board.id,)).fetchall()
@@ -128,7 +128,7 @@ def test_a_bad_echo_is_mapped_to_a_local_board_and_re_tossed(db, lane, sysop, ne
 
 def test_a_bad_file_echo_gets_a_new_file_area_named_after_its_tag(db, lane, sysop, network):
     _toss(lane, network, ("a.tic", _tic("NEWS.ZIP", b"news", area="FSX_NEWS")), ("NEWS.ZIP", b"news"))
-    text = _status(lane, sysop, ["e", "c", "1", "s", "b", "b"])
+    text = _status(lane, sysop, ["u", "c", "1", "s", "b", "b"])
     assert "FSX_NEWS (file echo)" in text
     (area,) = list_file_areas(db)
     assert area.name == "FSX_NEWS"

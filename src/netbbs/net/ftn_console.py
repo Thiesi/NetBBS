@@ -10,9 +10,11 @@ Configuration and operation are kept apart, as MRC's are:
   network for a new BBS; the SysOp fills in the address fsxNet gave them.
 - **Node → Echomail & netmail (FTN)** (`ftn_status_screen`): what the mailer and listener
   last did, what waits, and the work on a running network: poll now,
-  AreaFix requests, nodelist import, held items (packets, files and TICs,
-  with [R]elease, [S]ave, [X] export and [D]elete) and bad echoes (tags no
-  board or file area carries, with [C]reate, [M]ap and [D]elete).
+  AreaFix and FileFix requests, echo-list import, nodelist import, held
+  items (packets, files and TICs, with [R]elease, [S]ave, [E]xport and
+  [D]elete) and bad echoes (tags no board or file area carries, with
+  [C]reate, [M]ap and [D]elete). The robot screens live in
+  `netbbs.net.ftn_robots_console`.
 - **A board's echo** (`board_echo_action`): which echo area a board carries,
   from the board's own screen; **a file area's file echo**
   (`file_area_echo_action`) likewise, from the area's screen.
@@ -36,7 +38,7 @@ from netbbs.boards import Board
 from netbbs.config import get_config, set_config
 from netbbs.ftn import FtnFormatError
 from netbbs.ftn.address import parse_address
-from netbbs.ftn.areafix import AreaFixError, areafix_commands, queue_areafix
+from netbbs.ftn.areafix import AREAFIX, FILEFIX
 from netbbs.ftn.binkp import DEFAULT_PORT
 from netbbs.ftn.chrs import CP437
 from netbbs.ftn.listener import HOST_CONFIG_KEY, PORT_CONFIG_KEY
@@ -54,7 +56,8 @@ from netbbs.ftn.networks import (
     set_board_area,
     set_file_area_tic,
 )
-from netbbs.ftn.nodelist import MAX_NODELIST_BYTES, NodelistError, import_nodelist
+from netbbs.ftn.nodelist import HOW_MANUAL, ImportOutcome, NodelistError, import_list, nodelist_status
+from netbbs.ftn.nodelist_feed import read_list_file
 from netbbs.ftn.queue import (
     HELD_PACKET,
     FtnQueueFullError,
@@ -82,6 +85,14 @@ from netbbs.net.admin_ui import (
 )
 from netbbs.net.char_input import InputCancelled
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.ftn_robots_console import (
+    change_robot_password,
+    import_echolist,
+    robot_draft,
+    robot_field_specs,
+    robot_request,
+    robot_values,
+)
 from netbbs.net.location import located
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.picker import pick_item as _pick_item
@@ -141,6 +152,17 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
         status = f"Deleted {network.name}."
         return await _load()
 
+    # --- robots (issue #1463): Change robot password ---
+    async def _robot_password(network: FtnNetwork) -> list[FtnNetwork] | None:
+        nonlocal status
+        mailer = getattr(node_controls, "ftn_mailer", None) if node_controls is not None else None
+        outcome = await change_robot_password(session, lane, actor, network, mailer)
+        if outcome is None:
+            return None
+        status = outcome
+        return await _load()
+    # --- end robots ---
+
     chrome = await _load_chrome(lane, actor)
     start = None
     while True:
@@ -153,8 +175,9 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
                                       + (", answers calls" if n.answers_calls else "")),
             title="FTN networks", own=True,
             empty_message="No FTN networks. [C]reate one: it starts as fsxNet's hub.",
-            refresh=_load, on_create=_create, item_keys={"d": _delete},
-            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network")],
+            refresh=_load, on_create=_create, item_keys={"d": _delete, "r": _robot_password},
+            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network"),
+                      MenuEntry(label=menu_key("R", "obot password"), brief="Change robot password: send %PWD")],
             live_label=lambda: status or "FidoNet-style networks: echomail on boards, netmail in Mail",
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
@@ -188,7 +211,8 @@ def _network_draft(network: FtnNetwork | None, listen_port: int) -> dict:
                 "uplink_address": FSXNET["uplink_address"], "uplink_host": FSXNET["uplink_host"],
                 "uplink_port": DEFAULT_PORT, "session_password": "", "packet_password": "", "areafix_password": "",
                 "poll_minutes": 60, "answers_calls": False, "enabled": False, "default_charset": CP437.codec,
-                "origin_text": "", "netmail_min_level": SYSOP_LEVEL, "listen_port": listen_port}
+                "origin_text": "", "netmail_min_level": SYSOP_LEVEL, "listen_port": listen_port,
+                **robot_draft(None), **_nodelist_draft(None)}
     return {"name": network.name, "domain": network.domain, "our_address": network.our_address.four_d,
             "uplink_address": network.uplink_address.four_d, "uplink_host": network.uplink_host,
             "uplink_port": network.uplink_port, "session_password": network.session_password,
@@ -196,7 +220,39 @@ def _network_draft(network: FtnNetwork | None, listen_port: int) -> dict:
             "poll_minutes": network.poll_minutes, "answers_calls": network.answers_calls,
             "enabled": network.enabled, "default_charset": network.default_charset,
             "origin_text": network.origin_text, "netmail_min_level": network.netmail_min_level,
-            "listen_port": listen_port}
+            "listen_port": listen_port, **robot_draft(network), **_nodelist_draft(network)}
+
+
+# --- the nodelist echo's fields (issue #1464) ---
+
+
+def _nodelist_draft(network: FtnNetwork | None) -> dict:
+    if network is None:
+        return {"nodelist_echo": "", "nodelist_name": "", "nodediff_name": ""}
+    return {"nodelist_echo": network.nodelist_echo, "nodelist_name": network.nodelist_name,
+            "nodediff_name": network.nodediff_name}
+
+
+def _nodelist_fields() -> list[FieldSpec]:
+    return [
+        FieldSpec(key="nodelist_echo", label="Nodelist echo",
+                     render=lambda d: d["nodelist_echo"] or "(none: import by hand)",
+                     prompt=_optional_text_field("nodelist_echo"), section="Nodelist",
+                     brief="The file echo the network's nodelist arrives in (NIX_LIST)",
+                     help="A list arriving there is imported once its CRC-16 checks. "
+                          "The echo needs no file area."),
+        FieldSpec(key="nodelist_name", label="List name",
+                     render=lambda d: (f"{d['nodelist_name']}.nnn" if d["nodelist_name"] else "(not set)"),
+                     prompt=_optional_text_field("nodelist_name"), section="Nodelist",
+                     brief="The list's file name without the day (NODELIST, NIXLIST)"),
+        FieldSpec(key="nodediff_name", label="Diff name",
+                     render=lambda d: (f"{d['nodediff_name']}.nnn" if d["nodediff_name"] else "(none: full lists only)"),
+                     prompt=_optional_text_field("nodediff_name"), section="Nodelist",
+                     brief="The daily diffs' file name, if the network sends them (NODEDIFF)"),
+    ]
+
+
+# --- end nodelist echo fields ---
 
 
 def _network_from_draft(draft: dict, existing: FtnNetwork | None) -> FtnNetwork:
@@ -215,6 +271,9 @@ def _network_from_draft(draft: dict, existing: FtnNetwork | None) -> FtnNetwork:
         poll_minutes=int(draft["poll_minutes"]), answers_calls=bool(draft["answers_calls"]),
         enabled=bool(draft["enabled"]), default_charset=draft["default_charset"], origin_text=draft["origin_text"],
         netmail_min_level=int(draft["netmail_min_level"]),
+        **robot_values(draft),
+        nodelist_echo=draft["nodelist_echo"], nodelist_name=draft["nodelist_name"],
+        nodediff_name=draft["nodediff_name"],
     )
 
 
@@ -291,15 +350,18 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                      label="Answer port", render=lambda d: f"{d['listen_port']} (every network)",
                      prompt=_int_field("listen_port", "Answer port"), section="Calls",
                      brief="Where this BBS answers BinkP, for all networks"),
-        # --- file echoes (issue #1462) ---
+    ]
+    fields += robot_field_specs(_secret_field)  # issue #1463: the Robots section
+    fields += _nodelist_fields()  # issue #1464: the Nodelist section, after Robots
+    # --- file echoes (issue #1462): the File echoes section, after Nodelist ---
+    fields.append(
         FieldSpec(key="tic_password",
                      label="TIC password", render=secret("tic_password"),
                      prompt=_secret_field("tic_password", "TIC password"), section="File echoes",
                      brief="The Pw line of the hub's TIC files",
                      help="File echoes arrive with a TIC file carrying this password. With none set, every "
-                          "file echo is held for you to look at."),
-        # --- end file echoes ---
-    ]
+                          "file echo is held for you to look at."))
+    # --- end file echoes ---
 
     async def save(draft: dict) -> FtnNetwork:
         candidate = _network_from_draft(draft, existing)
@@ -369,11 +431,7 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
                 parts.append(f"{dropped} oldest dropped (store full)")
             rows.append(Field("Bad echoes", "; ".join(parts)))
         # --- end bad echoes ---
-        imported = db.connection.execute(
-            "SELECT nodelist_imported_at, nodelist_entries FROM ftn_networks WHERE id = ?", (network.id,)
-        ).fetchone()
-        rows.append(Field("Nodelist", f"{imported['nodelist_entries']} nodes, imported {imported['nodelist_imported_at']}"
-                          if imported["nodelist_imported_at"] else "none imported: netmail goes via the uplink"))
+        rows.extend(_nodelist_rows(db, network))
         sections.append(Section(f"{network.name} ({network.our_address.four_d})", rows))
     if not sections:
         sections.append(Section(None, [Note("No FTN networks yet: add one under Settings → Echomail & netmail (FTN).")]))
@@ -390,6 +448,36 @@ def _status_sections(db: Database, mailer, listener, *, unicode_style: bool) -> 
     return sections
 
 
+# --- the nodelist's status (issue #1464) ---
+
+_HOW = {"full": "full list", "diff": "diff", "manual": "by hand"}
+
+
+def _nodelist_rows(db: Database, network: FtnNetwork) -> list:
+    status = nodelist_status(db, network.id)
+    rows: list = []
+    if status is None or not status.imported_at:
+        rows.append(Field("Nodelist", "none imported: netmail goes via the uplink"))
+    else:
+        day = f"day {status.day:03d}, " if status.day is not None else ""
+        rows.append(Field("Nodelist", f"{day}{status.entries} nodes"))
+        rows.append(Field("Imported", f"{status.imported_at} ({_HOW.get(status.how or '', 'by hand')})"))
+        rows.append(Field("CRC-16", f"{status.crc:05d} verified" if status.crc is not None
+                          else "none in the first line"))
+    if network.nodelist_echo:
+        names = f"{network.nodelist_name}.nnn" + (f", diffs {network.nodediff_name}.nnn"
+                                                  if network.nodediff_name else "")
+        rows.append(Field("Nodelist echo", f"{network.nodelist_echo}: {names}"))
+    if status is not None and status.waiting_for_full:
+        rows.append(Field("Waiting", "for a full list: a diff could not be applied"))
+    if status is not None and status.failure:
+        rows.append(Field("Last failure", sanitize_text(f"{status.failed_at}: {status.failure}")))
+    return rows
+
+
+# --- end nodelist status ---
+
+
 @located("Echomail & netmail (FTN)")
 async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, node_controls) -> None:
     """What the FTN gateway last did, and the work on it."""
@@ -403,9 +491,10 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
         choice, page = await show_detail(
             session, title=_detail_title(session, chrome, "Echomail & netmail (FTN)", own=True),
             sections=sections, page=page, message=message,
-            actions=[("p", menu_key("P", "oll now")), ("a", menu_key("A", "reaFix")),
+            actions=[("p", menu_key("P", "oll now")), ("a", menu_key("A", "reaFix")), ("f", menu_key("F", "ileFix")),
+                     ("i", menu_key("I", "mport echo list")),
                      ("n", menu_key("N", "odelist import")), ("h", menu_key("H", "eld items")),
-                     ("e", menu_key("e", "choes", prefix="Bad ")), _BACK_ACTION],
+                     ("u", menu_key("U", "nknown echoes")), _BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Echomail & netmail help",
             help_about=(
@@ -426,13 +515,15 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
             status = await mailer.poll(network)
             message = (f"Called {network.name}: {status.last_summary}" if status.last_error is None
                        else colored(f"Call failed: {sanitize_text(status.last_error)}", fg_color=ERROR_COLOR))
-        elif choice == "a":
-            await _areafix(session, lane, actor, network, mailer)
+        elif choice in ("a", "f"):  # issue #1463
+            await robot_request(session, lane, actor, network, mailer, AREAFIX if choice == "a" else FILEFIX)
+        elif choice == "i":  # issue #1465
+            await import_echolist(session, lane, actor, network, mailer)
         elif choice == "n":
             await _import_nodelist(session, lane, actor, network)
         elif choice == "h":
             await _held_packets(session, lane, actor, network)
-        elif choice == "e":
+        elif choice == "u":
             await _bad_echoes(session, lane, actor, network)
 
 
@@ -452,34 +543,11 @@ async def _pick_network(session: Session, lane: DatabaseLane, actor: User) -> Ft
     )
 
 
-async def _areafix(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork, mailer) -> None:
-    await session.write_line("")
-    await session.write_line(colored(
-        f"AreaFix at {network.uplink_address.four_d}: +TAG links an echo, -TAG unlinks it, %LIST asks what "
-        f"the hub carries. The hub's answer comes to your Mail.", fg_color=MUTED_COLOR))
-    await write_prompt(session, "Request: ")
-    try:
-        text = await session.read_line(cancellable=True)
-    except InputCancelled:
-        text = ""
-    if not text.strip():
-        _announce(session, "Nothing sent.", color=MUTED_COLOR)
-        return
-    try:
-        commands = areafix_commands(text)
-        await lane.run(lambda db: queue_areafix(db, get_network(db, network.id), actor, commands))
-    except (AreaFixError, FtnQueueFullError) as exc:
-        _announce(session, str(exc), error=True)
-        return
-    if mailer is not None:
-        mailer.kick()
-    _announce(session, f"AreaFix request queued: {' '.join(commands)}. It goes out with the next call.")
-
-
 async def _import_nodelist(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork) -> None:
     await session.write_line("")
     await session.write_line(colored(
-        f"The {network.name} nodelist, as a file on this machine (unpacked, e.g. /bbs/nodelist/FSXNET.123).",
+        f"The {network.name} nodelist, as a file on this machine: the list itself (e.g. "
+        f"/bbs/nodelist/FSXNET.123) or a ZIP holding it.",
         fg_color=MUTED_COLOR))
     await write_prompt(session, "Nodelist file: ")
     try:
@@ -490,32 +558,33 @@ async def _import_nodelist(session: Session, lane: DatabaseLane, actor: User, ne
         _announce(session, "Nothing imported.", color=MUTED_COLOR)
         return
     try:
-        count = await import_nodelist_file(lane, actor, network, Path(os.path.expanduser(path_text)))
+        outcome = await import_nodelist_file(lane, actor, network, Path(os.path.expanduser(path_text)))
     except (OSError, NodelistError) as exc:
         _announce(session, f"Not imported: {exc}", error=True)
         return
-    _announce(session, f"Imported {count} nodes for {network.name}. Netmail to listed BinkP nodes now goes direct.")
+    day = f" (day {outcome.day:03d})" if outcome.day is not None else ""
+    _announce(session, f"Imported {outcome.nodes} nodes for {network.name}{day}. "
+                       f"Netmail to listed BinkP nodes now goes direct.")
 
 
-async def import_nodelist_file(lane: DatabaseLane, actor: User | None, network: FtnNetwork, path: Path) -> int:
-    """Read and import a nodelist file; shared by the console and the CLI."""
-    size = await asyncio.to_thread(lambda: path.stat().st_size)
-    if size > MAX_NODELIST_BYTES:
-        raise NodelistError(f"{path.name} is over {MAX_NODELIST_BYTES // (1024 * 1024)} MiB")
-    text = await asyncio.to_thread(lambda: path.read_bytes().decode("cp437", errors="replace"))
+async def import_nodelist_file(lane: DatabaseLane, actor: User | None, network: FtnNetwork,
+                               path: Path) -> ImportOutcome:
+    """Read and import a nodelist file, or the list in a ZIP; the CRC-16 is
+    checked when the first line carries one (issue #1464)."""
+    data = await asyncio.to_thread(read_list_file, path, network)
 
-    def _persist(db: Database) -> int:
-        count = import_nodelist(db, network.id, text)
+    def _persist(db: Database) -> ImportOutcome:
+        outcome = import_list(db, network.id, data, how=HOW_MANUAL, require_crc=False)
         record_action(db, actor=actor, action="import_ftn_nodelist",
-                      detail=f"{network.name}: {count} nodes from {path.name}")
-        return count
+                      detail=f"{network.name}: {outcome.nodes} nodes from {path.name}")
+        return outcome
 
     return await lane.run(_persist)
 
 
 async def _held_packets(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork) -> None:
     """The held items: packets, files and TICs. [R]elease re-tosses a
-    packet; a file or TIC is [S]aved to a file area or e[X]ported to the
+    packet; a file or TIC is [S]aved to a file area or [E]xported to the
     host instead (issue #1460)."""
     status: str | None = None
 
@@ -561,10 +630,10 @@ async def _held_packets(session: Session, lane: DatabaseLane, actor: User, netwo
                                   f"{sanitize_text(h.reason)}"),
         title=f"Held items ({network.name})",
         empty_message="Nothing is held.",
-        refresh=_load, item_keys={"r": _release, "s": _save, "x": _export, "d": _delete},
+        refresh=_load, item_keys={"r": _release, "s": _save, "e": _export, "d": _delete},
         live_nav=[MenuEntry(label=menu_key("R", "elease"), brief="Toss a packet as from a known system"),
                   MenuEntry(label=menu_key("S", "ave"), brief="Store a file in a file area"),
-                  MenuEntry(label=menu_key("x", "port", prefix="E"), brief="Write a file to this machine"),
+                  MenuEntry(label=menu_key("E", "xport"), brief="Write a file to this machine"),
                   MenuEntry(label=menu_key("D", "elete"), brief="Throw it away")],
         live_label=lambda: status or "Held: from an unknown caller, or what could not be stored",
         description_level=await lane.run(menu_description_level, actor),
@@ -618,7 +687,7 @@ async def _save_held_to_area(session: Session, lane: DatabaseLane, actor: User, 
 
 
 async def _export_held(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork, held) -> str:
-    """[X] export: one path on the host, a folder or the file to write. The
+    """[E]xport: one path on the host, a folder or the file to write. The
     rules are a SysOp upload's (§6.2): nothing overwritten, no symbolic
     link followed, audit-logged. The item stays held."""
     from netbbs.ftn.fileecho import HeldItemError, export_held, held_file_for_saving

@@ -157,7 +157,7 @@ def release_held(db: Database, network: FtnNetwork, held_id: int) -> TossResult:
     if held.kind != HELD_PACKET:
         raise FtnFormatError(
             f"{held.file_name} is a {'TIC' if held.kind == 'tic' else 'file'}, not a mail packet, so it can't be "
-            "released: [S]ave it to a file area or e[X]port it"
+            "released: [S]ave it to a file area or [E]xport it"
         )
     delete_held(db, held_id)
     return toss_packet(db, network, content, secure=True, vouched=True, remote_address=held.remote_address,

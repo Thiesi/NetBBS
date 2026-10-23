@@ -1,6 +1,6 @@
 """File echoes (design doc §6.8, issue #1462) and bad echoes (issue #1466):
 TIC pairs from a session into file areas, the held store's pairing,
-[S]ave and [X] export, and echomail for tags no board carries -- against
+[S]ave and [E]xport, and echomail for tags no board carries -- against
 real SQLite files and a real database lane."""
 
 from __future__ import annotations
@@ -364,6 +364,25 @@ def test_a_nodelist_echo_file_that_is_not_the_list_is_held_without_an_area(db, l
     _toss(lane, network, ("a.tic", _tic("README.TXT", b"hi", area="FSX_NODE")), ("README.TXT", b"hi"))
     (held,) = queue.list_held(db)
     assert "is not its nodelist" in held.reason
+
+
+def test_a_real_nodelist_by_tic_is_imported_with_and_without_an_area(db, lane, network, sysop):
+    from netbbs.ftn.nodelist import nodelist_status
+    from tests.test_ftn_nodelist_feed import BODY_289, BODY_296, _nodelist
+
+    network = save_network(db, FtnNetwork(**{**network.__dict__, "nodelist_echo": "FSX_NODE",
+                                             "nodelist_name": "FSXNET"}))
+    first = _nodelist(289, BODY_289)
+    result = _toss(lane, network, ("a.tic", _tic("FSXNET.289", first, area="FSX_NODE")), ("FSXNET.289", first))
+    assert result.files == 1 and queue.list_held(db) == []
+    assert nodelist_status(db, network.id).day == 289
+
+    area = create_file_area(db, "nodelists", creator=sysop)
+    set_file_area_tic(db, area, network, "FSX_NODE")
+    second = _nodelist(296, BODY_296)
+    _toss(lane, network, ("b.tic", _tic("FSXNET.296", second, area="FSX_NODE")), ("FSXNET.296", second))
+    assert nodelist_status(db, network.id).day == 296
+    assert [r["filename"] for r in _files(db, area)] == ["FSXNET.296"]
 
 
 # --- bad file echoes ----------------------------------------------------------
