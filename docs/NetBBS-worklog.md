@@ -1768,6 +1768,25 @@ session needs the same treatment.
   INTL/FMPT/TOPT) so a forwarded message keeps its character set and
   kludges exactly; `decode_message`/`encode_message` would normalise them.
 
+### FTN publishing (issue #1480)
+
+- **A published list's CRC-16 comes from the importer's own code.**
+  `netbbs.ftn.publish` computes the first line's check value with
+  `nodelist.list_crc`, the function `check_crc` verifies received lists
+  with, and the tests import a generated segment through `import_list` with
+  the check required. Change either side and the round-trip test is what
+  catches it.
+- **A net's segment has no Zone line.** `parse_nodelist`/`import_list` take
+  a `zone=` for that; without it a segment starting at `Host` is refused
+  ("a net is listed before any Zone line"), as a received partial list
+  always was.
+- **A generated file hatched from outside a file area** goes through
+  `hatch.hatch_generated_file`, not `hatch_file`: it is spooled under a
+  random prefix (`ABCD1234-POINTS.Z96`, sent as `POINTS.Z96`) so a second
+  edition queued the same day never overwrites one still waiting, its rows
+  use reference kind `publish` (paired with the TIC like `hatch`), and it
+  is not recorded in `ftn_hatches`, whose `file_id` is a file area entry's.
+
 ### Read cursors and follows (issue #56)
 
 A per-user read cursor is a position marker `(user_id, object_type,

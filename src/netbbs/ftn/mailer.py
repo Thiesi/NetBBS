@@ -63,6 +63,10 @@ before each batch after the first of a binkp/1.1 multi-batch session
 (`netbbs.ftn.binkp.BatchContext`): the node sets it to
 `netbbs.ftn.freq.FreqAnswerer`, which answers the file requests received in
 the session (issue #1475).
+
+**Publishing.** Each check also publishes an enabled network's pointlist
+and nodelist segment when their schedule says so
+(`netbbs.ftn.publish.publish_scheduled`, issue #1480), at most once a day.
 """
 
 from __future__ import annotations
@@ -94,6 +98,7 @@ from netbbs.ftn.outbound import (
     reroute_files_to_uplink,
     waiting_for_node,
 )
+from netbbs.ftn.publish import publish_scheduled  # issue #1480
 from netbbs.ftn.queue import (
     expire_unpaired,
     prune_seen_msgids,
@@ -184,6 +189,10 @@ class FtnMailer:
             await self._lane.run(expire_held)  # held mail whose node never called (issue #1471)
             await self._lane.run(prune_point_waiting)  # a point's posts never approved (issue #1478)
         for network in await self._lane.run(list_networks):
+            # --- publishing (issue #1480): a scheduled pointlist or segment ---
+            if network.enabled:
+                await self._lane.run(publish_scheduled, network.id)
+            # --- end publishing ---
             if not network.enabled or not network.uplink_host:
                 continue
             # Held mail never makes this node call (issue #1471).

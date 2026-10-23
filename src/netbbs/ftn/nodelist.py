@@ -74,11 +74,13 @@ class NodelistEntry:
     binkp_port: int | None = None
 
 
-def parse_nodelist(text: str) -> list[NodelistEntry]:
+def parse_nodelist(text: str, *, zone: int | None = None) -> list[NodelistEntry]:
     """Every reachable-or-not node in `text`, `Hold`/`Down` ones left out.
-    Raises `NodelistError` if no zone line comes before the first node."""
+    Raises `NodelistError` if no zone line comes before the first node.
+    `zone` is the zone a segment without a Zone line is in (a net's
+    segment starts at its Host line, FTS-5000 §7; issue #1480)."""
     entries: list[NodelistEntry] = []
-    zone = net = None
+    net = zone
     for raw in text.split("\x1a", 1)[0].splitlines():
         line = raw.strip()
         if not line or line.startswith(";"):
@@ -267,15 +269,17 @@ class ImportOutcome:
     crc: int | None  # the verified check value; None for a by-hand list without one
 
 
-def import_list(db: Database, network_id: int, data: bytes, *, how: str, require_crc: bool) -> ImportOutcome:
+def import_list(db: Database, network_id: int, data: bytes, *, how: str, require_crc: bool,
+                zone: int | None = None) -> ImportOutcome:
     """Check `data`'s CRC-16, then replace the network's stored nodelist with
     it and keep its raw text for later diffs, in one transaction. Nothing
-    changes if it can't be read: `NodelistError` says why."""
+    changes if it can't be read: `NodelistError` says why. `zone` as for
+    `parse_nodelist`, for a segment without a Zone line."""
     if len(data) > MAX_NODELIST_BYTES:
         raise NodelistError(f"a nodelist over {MAX_NODELIST_BYTES // (1024 * 1024)} MiB is not imported")
     lines = list_lines(data)
     header = check_crc(lines, required=require_crc)
-    entries = parse_nodelist("\n".join(line.decode("cp437") for line in lines))
+    entries = parse_nodelist("\n".join(line.decode("cp437") for line in lines), zone=zone)
     if not entries:
         raise NodelistError("no nodes found: is this a nodelist?")
     now = utc_now_iso()
