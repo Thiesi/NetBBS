@@ -511,8 +511,13 @@ def save_held_to_area(
     content = held_content(db, held_id)
     if content is None:
         raise HeldItemError("That held item is gone.")
+    item = get_held(db, held_id)
     entry = upload_file(db, area, actor, name, content, description=fit_description(description) if description
                         else None)
+    # It came over FTN, whoever saved it: never hatched back (issue #1476).
+    db.connection.execute("UPDATE files SET ftn_network_id = ?, ftn_origin = ? WHERE id = ?",
+                          (item.network_id if item is not None else None,
+                           item.remote_address if item is not None else "held", entry.id))
     db.connection.execute("DELETE FROM ftn_held_inbound WHERE id = ?", (held_id,))
     db.connection.commit()
     record_action(db, actor=actor, action="save_ftn_held", object_type="file_area", object_id=area.id,

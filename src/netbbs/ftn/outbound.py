@@ -89,6 +89,8 @@ MAX_SESSION_FILE_BYTES = 256 * 1024 * 1024
 MAX_MESSAGES_PER_PACKET = 500
 CRASH_ATTEMPTS = 5
 HOLD_DAYS = 30
+# Rows of these reference kinds travel together: a hatch's file and TIC.
+_PAIRED_KINDS = frozenset({"hatch"})
 
 
 @dataclass(frozen=True)
@@ -426,6 +428,15 @@ def _prepare(db: Database, network: FtnNetwork, node: FtnAddress, uplink: bool, 
         names.add(row.send_name.casefold())
         budget -= stat.st_size
         files.append((row, path, stat.st_size, int(stat.st_mtime)))
+    # A hatched file and its TIC go together (issue #1476): when one can't
+    # be sent, the other is dropped with it rather than arrive alone.
+    broken = {row.reference_id for row, _reason in dropped if row.reference_kind in _PAIRED_KINDS}
+    if broken:
+        for row in [row for row in rows if row.reference_kind in _PAIRED_KINDS and row.reference_id in broken]:
+            if all(row.id != gone.id for gone, _reason in dropped):
+                dropped.append((row, f"{row.send_name}'s partner can't be sent"))
+        files = [entry for entry in files if not (entry[0].reference_kind in _PAIRED_KINDS
+                                                  and entry[0].reference_id in broken)]
     return _Prepared(messages, files, dropped)
 
 
@@ -434,6 +445,10 @@ def _drop_unsendable(db: Database, dropped: list[tuple[OutboundFile, str]]) -> N
         db.connection.execute("DELETE FROM ftn_outbound_files WHERE id = ?", (row.id,))
         _logger.warning("FTN: queued file %s for %s dropped: %s", row.send_name, row.destination, reason)
     db.connection.commit()
+    for row, _reason in dropped:
+        # A spooled file made only to be sent (a hatch's TIC) goes with its row.
+        if row.path is not None and row.after_sent == KILL and _in_spool(db, Path(row.path)):
+            _after_sent(Path(row.path), KILL)
     for row, reason in dropped:
         report_undelivered(db, row.reference_kind, row.reference_id, f"its file {row.send_name} could not be sent: "
                                                                      f"{reason}")
