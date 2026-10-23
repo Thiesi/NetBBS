@@ -265,9 +265,13 @@ async def unpack_with_tools(
         archive.write_bytes(data)
         problems: list[str] = []
         for tool, prefix in installed:
-            listed = await _list(tool, prefix, archive, data, deadline, workdir, label)
+            try:
+                listed = await _list(tool, prefix, archive, data, deadline, workdir, label)
+            except ArchiveError as exc:  # a listing refused: the next tool may list it differently
+                listed = str(exc)
             if isinstance(listed, str):
-                problems.append(listed)
+                if listed not in problems:
+                    problems.append(listed)
                 continue
             if len(listed) > max_members:
                 raise ArchiveError(f"the archive holds {len(listed)} files, more than {max_members}")
