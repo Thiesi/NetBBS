@@ -179,10 +179,18 @@ def upload_file_from_temp(
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
-    return _finalize_upload(
+    entry = _finalize_upload(
         db, area, uploader, filename,
         sha256=sha256, size_bytes=size_bytes, storage_path=storage_path, description=description,
     )
+    if entry.status == "approved":
+        # A caller's upload (this is its path, Zmodem and browser alike) in
+        # an area that hatches automatically goes into its file echo now
+        # (issue #1476); in a moderated area, on approval instead.
+        from netbbs.ftn.hatch import auto_hatch  # netbbs.ftn imports this module
+
+        auto_hatch(db, entry.file_id)
+    return entry
 
 
 def _finalize_upload(
@@ -562,6 +570,11 @@ def approve_file(db: Database, entry: FileEntry, *, approved_by: User) -> FileEn
     from netbbs.ftn.fileecho import apply_replaces  # netbbs.ftn imports this module
 
     apply_replaces(db, entry.id)
+    # An approved upload in an area that hatches automatically goes into its
+    # file echo once (issue #1476).
+    from netbbs.ftn.hatch import auto_hatch
+
+    auto_hatch(db, entry.file_id)
     return get_file(db, entry.file_id)
 
 

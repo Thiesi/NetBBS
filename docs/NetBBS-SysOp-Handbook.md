@@ -3017,6 +3017,46 @@ its CRC and a password.
   in the held store and is paired when the other comes. One still alone
   after 7 days is deleted, and the log says so.
 
+#### Hatching your own files
+
+To send one of your own files into a file echo, *hatch* it. Your hub passes it
+on to every system that carries the echo.
+
+1. Open the file area that carries the echo from the **Files** menu, as a
+   caller would, and put the cursor on the file.
+2. Press <kbd>H</kbd> **Hatch**. Only a SysOp sees the key, and only in an area
+   that carries a file echo.
+3. Answer <kbd>Y</kbd>. The file and its TIC wait for the next call with your
+   hub, and **Status** counts them as files waiting.
+
+- The file keeps its name. A name longer than DOS's 8.3 is sent under a short
+  name, such as `NETBBS4F.ZIP`, and the TIC carries the long one for the
+  systems that read it.
+- The TIC's description is the file's own, so describe the file before you
+  hatch it.
+- A file is hatched once. Press <kbd>H</kbd> on it again and you are asked
+  whether to hatch it again: the new copy tells the receiving systems that it
+  replaces the first one.
+- These files are refused, with the reason:
+  - a file that came over FTN (by TIC, with a netmail, or saved from the held
+    store), so nothing is sent back to the network it came from;
+  - a file still waiting for approval;
+  - a file over 64 MiB;
+  - a file named like a control file (`.TIC`, `.PKT` or `.REQ`);
+  - any file, while the network has no **TIC password**.
+- Each hatch is in the area's <kbd>H</kbd> **History**.
+
+> [!NOTE]
+> **Auto-hatch** sends callers' uploads into the network without you looking
+> at them first. Turn it on only where that is what you want, and keep the
+> area moderated if you want to see each file first.
+
+To hatch callers' uploads automatically, press <kbd>A</kbd> **Auto-hatch** on
+the file area's screen, beside <kbd>F</kbd> **File echo (FTN)**. It is off until you turn it
+on. With it on, each upload is hatched once, as soon as it is approved: at
+once in an unmoderated area, or when you approve it in a moderated one. An
+upload that can't be hatched is still stored, and the log says why.
+
 ### Netmail
 
 Netmail is personal mail to an address written as `Name (zone:net/node)`.

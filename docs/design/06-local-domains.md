@@ -2280,8 +2280,8 @@ directories.
 **Outbound files** (issues #1470 and #1471). Files wait for a session in a
 queue of their own, beside the queued messages, and every session takes
 both from one place, `netbbs.ftn.outbound`. The queue is general: a
-netmail's attached files use it now, and file requests and hatched TIC
-files (stage C) are to use it as they are.
+netmail's attached files and hatched files with their TICs use it, and file
+requests (stage C) are to use it as it is.
 
 - **A queued file** is a file area entry, read from its stored content, or
   a file on disk. It is sent under a name BinkP's safe-name rule leaves
@@ -2589,6 +2589,49 @@ shows the network and the TIC's `Origin` address in place of a username, as
   `?` match within the name. A value containing `/`, `\`, `:` or `..` is
   ignored, with a node-log line. The new file never replaces itself.
 
+**Hatching** (issue #1476; §16, "Issue #1154", Decision 14). A SysOp sends
+one of this node's own files into a file echo with **[H]atch** on the
+listing of a file area that carries one, acting on the file under the
+cursor and confirmed with one yes/no, since it goes to the network.
+
+- **The TIC** (FTS-5006) is written with CR LF lines, in CP437 when every
+  character fits and UTF-8 otherwise. It has `Area` (the area's tag),
+  `Origin` and `From` (this node), `To` (the uplink), `File`, `Lfile` when
+  the name is not 8.3, `Size`, `Date` (when the file was stored, in Unix
+  time), `Desc` (the description's first line, else the name) and an
+  `Ldesc` line per description line, `Created`, `Crc` (CRC-32 of the stored
+  bytes), one `Path` line (this node, now), `Seenby` for this node and the
+  uplink, and `Pw`, the network's TIC password. Control characters in a
+  description become spaces, so no value can start a line of its own.
+- **Names.** A name that is already 8.3 of BinkP's safe characters is sent as
+  it is. Any other is sent under up to six letters and digits of its stem,
+  two hex digits of the long name's CRC-32, and up to three of its last
+  extension, upper case (`NETBBS4F.ZIP`), with `Lfile` carrying the real
+  name. The TIC gets a fresh random 8.3 name.
+- **Queued** to the uplink through the outbound files queue, normal
+  flavour: the file area entry (always kept), then the TIC, written to the
+  node's spool folder and deleted once sent. The two travel together: when
+  one of them can't be sent at its session (the file was deleted or
+  unapproved), the other is dropped with it and the spooled TIC removed.
+- **Once.** Each hatch is recorded (`ftn_hatches`: the file, network, tag,
+  names, CRC-32, size, who, when) and audit-logged on the area. A file
+  already hatched into a network is hatched again only when the SysOp
+  confirms that on purpose; that TIC carries `Replaces` with the earlier
+  copy's names.
+- **Refused**, with the reason and nothing queued: a file not approved; a
+  file that came over FTN (by TIC, as a netmail's file, or saved from the
+  held store, which records its sender for this), so nothing echoes back;
+  an area with no file echo; a network with no TIC password; a file over
+  BinkP's 64 MiB; a name a receiver would take for a control file (`.TIC`,
+  `.PKT`, `.REQ`); a network with fewer than two free places in its files
+  queue.
+- **Auto-hatch** is a file area setting, off by default and on upgrade,
+  toggled with **[A]uto-hatch** on the area's screen. With it on, a
+  caller's upload is hatched once when it becomes approved: when it is
+  stored in an unmoderated area, or when it is approved in a moderated one.
+  An automatic hatch that is refused is a node-log line; the upload and the
+  approval stand.
+
 **Held items.** The held store keeps packets, files and TICs, each with its
 network, sender, size, time and reason. The **Held** screen lists them, and
 its actions are:
@@ -2708,7 +2751,6 @@ this section; until then the text above is what holds.
 
 - **Stage C:**
   - file requests, made and answered (#1475);
-  - TIC hatching (#1476);
   - LHA, ARC, 7z and RAR bundles, and optional outbound ZIP bundling (#1477).
 - **Stage D:**
   - points (#1478);
