@@ -340,6 +340,44 @@ def _node_name_renderer(gradient: str, *, bold: bool) -> Callable[[str], str]:
     return _render
 
 
+LIST_SPARE_COLUMNS = 1
+"""The columns a list fitted to the terminal leaves free at its right edge: a
+row that reaches the last column makes many terminals wrap the cursor onto
+the next row."""
+
+
+def list_width(terminal_width: int) -> int:
+    """The display width a list fitted to the terminal draws its rows at --
+    the terminal less `LIST_SPARE_COLUMNS` -- and so its rules too.
+
+    A board's posts, the mailbox and a file area fit their rows to this, and
+    draw the rules above, between and below them with `list_rule`, so a rule
+    is exactly as wide as the rows it frames at every terminal width. They
+    used to cap the rules at the 78 columns a frame or a box uses while the
+    rows took the whole terminal: one column short at 80, half a screen
+    short at 132."""
+    return max(1, terminal_width - LIST_SPARE_COLUMNS)
+
+
+def horizontal_rule(
+    width: int, *, unicode_style: bool, color: int | tuple[int, int, int] = RULE_COLOR, label: str | None = None
+) -> str:
+    """A horizontal rule `width` display columns wide, `-- label ----` with a
+    `label` set into it; `─` where the caller has Unicode style, else `-`."""
+    char = "─" if unicode_style else "-"
+    text = f"{char * 2} {label} " if label else ""
+    return colored(text + char * max(0, width - display_width(text)), fg_color=color)
+
+
+def list_rule(
+    terminal_width: int, *, unicode_style: bool, color: int | tuple[int, int, int] = RULE_COLOR,
+    label: str | None = None,
+) -> str:
+    """A rule as wide as a list's rows (`list_width`), for the rules above,
+    between and below a list fitted to the terminal."""
+    return horizontal_rule(list_width(terminal_width), unicode_style=unicode_style, color=color, label=label)
+
+
 def screen_title(
     title: str,
     *,

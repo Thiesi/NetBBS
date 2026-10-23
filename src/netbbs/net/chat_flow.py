@@ -252,6 +252,7 @@ from netbbs.rendering import (
     clear_line,
     clear_screen,
     colored,
+    list_rule,
     menu_key,
     move_cursor,
     reflow,
@@ -2135,9 +2136,8 @@ async def _deliver_remote_scrollback_snapshot(
             fg_color=MUTED_COLOR,
         )
     )
-    rule_char = "─" if unicode_style else "-"
     divider_color = 238 if truecolor else RULE_COLOR
-    await deliver(colored(rule_char * min(terminal_width, 78), fg_color=divider_color))
+    await deliver(list_rule(terminal_width, unicode_style=unicode_style, color=divider_color))
 
 
 # -- command dispatch (design doc §13) ------------------------
@@ -6765,10 +6765,11 @@ async def _chat_loop(
                     fg_color=MUTED_COLOR,
                 )
             )
-            rule_char = "─" if unicode_style else "-"
+            # Under the history as wide as its lines run, short of the
+            # terminal's last column (`list_width`).
             divider_color = 238 if truecolor else RULE_COLOR
             await session.write_line(
-                colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
+                list_rule(session.terminal_width, unicode_style=unicode_style, color=divider_color)
             )
         if scrollback:
             # Issue #56: viewing this channel's scrollback advances
