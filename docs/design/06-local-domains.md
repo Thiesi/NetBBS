@@ -2412,11 +2412,17 @@ the status screen, as before.
 **Nodelist.** A network's nodelist (FTS-5000) arrives in one of two ways:
 
 - **By hand:** [N]odelist import on the FTN status screen, or
-  `ftn-import-nodelist`, from an unpacked file on the host.
+  `ftn-import-nodelist`, from a file on the host: the list itself, or a ZIP
+  holding it (the network's `<name>.<ddd>`, or the one list the ZIP holds).
 - **From the nodelist echo**, automatically. A file that arrives by TIC in the
   network's nodelist echo and passes the TIC checks is handled by its name:
   - `<name>.<ddd>`, or an archive of it, is a full list;
   - `<diff name>.<ddd>`, or an archive of it, is a diff.
+
+  An archive's name may end in the day number, in FTS-5000's archive letter
+  and the day's last two digits (`NODELIST.Z89`), or in `.ZIP`. The names
+  are compared case-insensitively, and a file of any other name is not the
+  nodelist's.
 
   An archive is recognised by content: ZIP now, and the other formats with
   stage C, until which they are held. It is opened in-process within the
@@ -2428,21 +2434,26 @@ What happens to each kind:
 
 - **A full list** has its CRC-16 checked against the first line, as FTS-5000
   specifies: computed from the second line to the end, before the end-of-file
-  byte. On a mismatch nothing is imported, the file is held, and the current
-  list stays in use. On a match the list replaces the stored entries, and its
-  raw text is kept, one per network.
+  byte, as if every line ended CR LF. A list from the echo whose first line
+  carries no check value fails the check. On a mismatch nothing is imported,
+  the file is held, and the current list stays in use. On a match the list
+  replaces the stored entries, and its raw text is kept, one per network.
 - **A diff** (FTS-5000's `A`, `C` and `D` commands) is applied to the kept
   raw text. Its first line must equal the kept list's first line, and the
   result's CRC-16 must match. Then the result becomes the kept list and is
   imported. If any of this fails, nothing changes: the diff is held, and the
   status says the network is waiting for a full list. That is the fall-back
-  (§16, "Issue #1154", Decision 5).
+  (§16, "Issue #1154", Decision 5). The next full list ends the wait. A diff
+  whose result is the kept list already (its full list came first) is
+  skipped, without a failure.
 - **A list imported by hand** is kept as raw text too, so later diffs apply
-  to it.
+  to it. Its CRC-16 is checked when its first line carries one, and a
+  mismatch is refused; a hand-made list without a check value is imported.
 
 The FTN status screen shows, per network, the list's day number, when it was
-imported and how (full, diff or by hand), its node count, and the last
-failure.
+imported and how (full, diff or by hand), its node count, its verified
+CRC-16, the nodelist echo and names, whether it is waiting for a full list,
+and the last failure.
 
 **Echo lists.** A hub's list of echoes, `.NA` for echomail or `.FA` for file
 echoes, is imported from a path on the host, from the FTN status screen. The

@@ -2897,15 +2897,55 @@ Netmail is personal mail to an address written as `Name (zone:net/node)`.
 | --- | --- |
 | **Who may send it** | Each network has a **Netmail level**, and only accounts at that level may send netmail. It starts at 255, SysOp only, because netmail leaves under this BBS's address. |
 | **Who receives it** | Every account, by username, a username it had before a rename, or its verified real name. Netmail for a name with no account here comes to you, and so does netmail for a real name two accounts share. |
-| **Direct delivery** | Import the network's nodelist (below). Netmail to a node whose nodelist entry gives a BinkP host then goes to it directly. |
+| **Direct delivery** | Keep the network's nodelist current (below). Netmail to a node whose nodelist entry gives a BinkP host then goes to it directly. |
 | **Via the hub** | The rest goes through the hub, and so does anything a direct call fails to deliver after three tries. |
 
-Import the nodelist either from **Node ▸ Echomail & netmail (FTN)** with
-<kbd>N</kbd> **Nodelist import**, or on the host:
+#### The nodelist
+
+Most networks send their nodelist every week in a file echo, such as nixNet's
+`NIX_LIST`, and some send a small daily diff in between. NetBBS can import
+both as they arrive:
+
+1. Under **Settings ▸ Echomail & netmail (FTN)**, open the network and fill in
+   the **Nodelist** fields:
+   - **Nodelist echo**: the echo's tag, such as `NIX_LIST`;
+   - **List name**: the list's file name without the day number, such as
+     `NIXLIST` for `NIXLIST.289`, or `NODELIST` on FidoNet;
+   - **Diff name**: the diffs' file name, such as `NODEDIFF`, if the network
+     sends diffs. Leave it empty if it doesn't.
+2. Ask the hub to send the echo: a FileFix request of `+NIX_LIST` to the
+   hub's FileFix robot. The echo needs no file area. If you map it to one as well,
+   the files are stored there too.
+
+What happens to each file:
+
+- **A full list**, plain or in a ZIP (such as `NIXLIST.Z89`), is imported once
+  its CRC-16 matches the check value in its first line.
+- **A diff** is applied to the last list, and the list it makes must pass the
+  same check.
+- **A file that fails** changes nothing: the list you have stays in use, and
+  the file goes to **Held** with the reason. After a failed diff, the network
+  waits for the next full list, and later diffs are not applied until it
+  arrives.
+
+> [!NOTE]
+> Other archive kinds (ARC, ARJ, LHA, RAR, 7-Zip) are held for now. Ask the
+> hub for ZIP.
+
+**Node ▸ Echomail & netmail (FTN)** shows, for each network, the list's day
+number, how many nodes it lists, when it was imported and how (full list,
+diff or by hand), whether its CRC-16 was verified, and the last failure.
+
+To import a list by hand, press <kbd>N</kbd> **Nodelist import** on that
+screen, or run on the host:
 
 ```sh
 python -m netbbs.admin ftn-import-nodelist fsxNet FSXNET.280
 ```
+
+Either way the file may be the list itself or a ZIP holding it. A list whose
+first line carries a check value that doesn't match is refused. A list
+imported by hand is kept like one from the echo, so later diffs apply to it.
 
 ### Held packets and status
 

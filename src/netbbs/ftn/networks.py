@@ -37,6 +37,7 @@ MAX_POLL_MINUTES = 24 * 60
 _AREA_TAG = re.compile(r"[\x21-\x60\x7b-\x7e]{1,60}")
 _DOMAIN = re.compile(r"[a-z0-9_-]{1,8}")
 _PRINTABLE = re.compile(r"[\x21-\x7e]*")
+_LIST_NAME = re.compile(r"[A-Z0-9_-]{1,8}")
 
 
 class FtnNetworkError(ValueError):
@@ -60,6 +61,11 @@ class FtnNetwork:
     default_charset: str = DEFAULT_CHARSET
     origin_text: str = ""
     netmail_min_level: int = SYSOP_LEVEL
+    # --- the nodelist echo (issue #1464) ---
+    nodelist_echo: str = ""  # the file echo's tag; empty: lists are imported by hand
+    nodelist_name: str = ""  # the full list's base name (NODELIST for NODELIST.289)
+    nodediff_name: str = ""  # its diffs' base name (NODEDIFF); empty: diffs are not applied
+    # --- end nodelist echo ---
     id: int | None = None
 
 
@@ -105,8 +111,22 @@ def validate_network(network: FtnNetwork) -> FtnNetwork:
         raise FtnNetworkError(f"Origin text must be at most {MAX_ORIGIN_TEXT} printable characters.")
     if not is_valid_level(network.netmail_min_level):
         raise FtnNetworkError("Netmail level must be a valid level.")
+    # --- the nodelist echo (issue #1464) ---
+    nodelist_echo = normalise_area_tag(network.nodelist_echo) if network.nodelist_echo.strip() else ""
+    nodelist_name = network.nodelist_name.strip().upper()
+    nodediff_name = network.nodediff_name.strip().upper()
+    for value, label in ((nodelist_name, "Nodelist name"), (nodediff_name, "Diff name")):
+        if value and not _LIST_NAME.fullmatch(value):
+            raise FtnNetworkError(f"{label} is the file name without its extension: 1-8 letters, digits, - or _ "
+                                  f"(e.g. NODELIST).")
+    if nodelist_echo and not nodelist_name:
+        raise FtnNetworkError("A nodelist echo needs the nodelist's name (e.g. NODELIST for NODELIST.289).")
+    if nodelist_name and nodelist_name == nodediff_name:
+        raise FtnNetworkError("The nodelist and its diffs need different names (e.g. NODELIST and NODEDIFF).")
+    # --- end nodelist echo ---
     return replace(network, name=name, domain=domain, our_address=our, uplink_address=uplink,
-                   uplink_host=host, origin_text=origin_text)
+                   uplink_host=host, origin_text=origin_text, nodelist_echo=nodelist_echo,
+                   nodelist_name=nodelist_name, nodediff_name=nodediff_name)
 
 
 def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
@@ -117,14 +137,16 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
         validated.uplink_host, validated.uplink_port, validated.session_password, validated.packet_password,
         validated.areafix_password, validated.poll_minutes, int(validated.answers_calls), int(validated.enabled),
         validated.default_charset, validated.origin_text, validated.netmail_min_level,
+        validated.nodelist_echo, validated.nodelist_name, validated.nodediff_name,
     )
     try:
         if validated.id is None:
             cursor = db.connection.execute(
                 "INSERT INTO ftn_networks (name, domain, our_address, uplink_address, uplink_host, uplink_port, "
                 "session_password, packet_password, areafix_password, poll_minutes, answers_calls, enabled, "
-                "default_charset, origin_text, netmail_min_level, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "default_charset, origin_text, netmail_min_level, nodelist_echo, nodelist_name, "
+                "nodediff_name, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (*values, utc_now_iso()),
             )
             validated = replace(validated, id=cursor.lastrowid)
@@ -133,7 +155,8 @@ def save_network(db: Database, network: FtnNetwork) -> FtnNetwork:
                 "UPDATE ftn_networks SET name = ?, domain = ?, our_address = ?, uplink_address = ?, "
                 "uplink_host = ?, uplink_port = ?, session_password = ?, packet_password = ?, "
                 "areafix_password = ?, poll_minutes = ?, answers_calls = ?, enabled = ?, default_charset = ?, "
-                "origin_text = ?, netmail_min_level = ? WHERE id = ?",
+                "origin_text = ?, netmail_min_level = ?, nodelist_echo = ?, nodelist_name = ?, "
+                "nodediff_name = ? WHERE id = ?",
                 (*values, validated.id),
             )
             if cursor.rowcount == 0:
@@ -179,6 +202,8 @@ def _network_from_row(row: sqlite3.Row) -> FtnNetwork:
         answers_calls=bool(row["answers_calls"]), enabled=bool(row["enabled"]),
         default_charset=row["default_charset"], origin_text=row["origin_text"],
         netmail_min_level=row["netmail_min_level"],
+        nodelist_echo=row["nodelist_echo"], nodelist_name=row["nodelist_name"],
+        nodediff_name=row["nodediff_name"],
     )
 
 
