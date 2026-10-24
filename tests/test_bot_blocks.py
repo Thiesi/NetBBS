@@ -29,7 +29,7 @@ from netbbs.link.protocol import (
 )
 from netbbs.net import chat_flow
 from netbbs.timeutil import utc_now_iso
-from tests.test_bot_runtime import FakeSession, eventually, next_line
+from tests.test_bot_runtime import CROSS_PROCESS_TIMEOUT, FakeSession, eventually, next_line
 from tests.test_chat_bots import sysop, alice, channel  # noqa: F401
 from tests.test_chat_flow_moderation import db, lane, hub, presence, mailbox, history  # noqa: F401
 
@@ -283,7 +283,7 @@ def test_block_replies_through_the_real_chat_loop_paged_when_tall(db, lane, hub,
         async def say(text, needle):
             session.input.put_nowait(text)
             try:
-                await eventually(lambda: needle in _plain(session.written), timeout=8)
+                await eventually(lambda: needle in _plain(session.written))
             except TimeoutError:
                 raise AssertionError(_plain(session.written)[-2000:])
 
@@ -321,7 +321,7 @@ def test_block_replies_through_the_real_chat_loop_paged_when_tall(db, lane, hub,
             assert "[BOT] Peer.bot · Node stats" in replayed and "row 12" in replayed
             assert "page 1 of" not in replayed
             session.input.put_nowait("/quit")
-            await asyncio.wait_for(task, 5)
+            await asyncio.wait_for(task, CROSS_PROCESS_TIMEOUT)
         finally:
             if task and not task.done():
                 task.cancel()

@@ -10,7 +10,6 @@ from netbbs.auth.users import create_user
 from netbbs.bots.link import BotLink
 from netbbs.bots.registry import BotError, allowed_channel, save_bot, stop_bots
 from netbbs.bots.runtime import BotRuntime
-from netbbs.bots.state import read_state
 from netbbs.chat.bots import bot_message_visible, mute_remote_bot, set_channel_bot_policy
 from netbbs.chat.hub import ParticipantId
 from netbbs.chat.scrollback import get_scrollback, record_message
@@ -21,7 +20,7 @@ from netbbs.link.realtime_direct import LiveDirectChat
 from netbbs.link.transport import LINK_REALTIME_PROTOCOL_TAG, LinkRealtimeServer
 from netbbs.net.chat_flow import _address_bot
 from netbbs.timeutil import utc_now_iso
-from tests.test_bot_runtime import eventually, next_line
+from tests.test_bot_runtime import bot_state, eventually, next_line
 from tests.test_link_realtime_channels import _Node, _establish_trust, _setup_linked_channel
 
 
@@ -101,14 +100,14 @@ def test_three_nodes_local_shorthand_remote_address_presence_mute_replay_and_sto
             assert await second.address(sc, address + "remind 1d remote-owned") is None
             await next_line(sq, "Saved reminder #1")
             await eventually(lambda: not second.bots.requests)
-            saved = read_state(first.db, "Baud")["reminders"][0]
+            saved = (await bot_state(first.lane, "Baud"))["reminders"][0]
             assert saved["user"] == f"link:{second.identity.fingerprint}:alice"
             assert await first.address(fc, "!cancel 1") is None
             await next_line(fq, "No reminder with that id")
-            assert len(read_state(first.db, "Baud")["reminders"]) == 1
+            assert len((await bot_state(first.lane, "Baud"))["reminders"]) == 1
             assert await second.address(sc, address + "cancel 1") is None
             await next_line(sq, "Cancelled reminder #1")
-            assert not read_state(first.db, "Baud")["reminders"]
+            assert not (await bot_state(first.lane, "Baud"))["reminders"]
 
             # Duplicated request ids cannot create duplicate reminders; bot
             # callers are refused even though their transport is authentic.
@@ -121,7 +120,7 @@ def test_three_nodes_local_shorthand_remote_address_presence_mute_replay_and_sto
             await direct.send(build_bot_frame("bot_request", {"channel_id": sc.channel_id, "bot": "Baud.bot",
                                                                "caller": "Other.bot", "text": "remind 1d forbidden"}))
             await asyncio.sleep(.1)
-            assert [r["text"] for r in read_state(first.db, "Baud")["reminders"]] == ["one-copy"]
+            assert [r["text"] for r in (await bot_state(first.lane, "Baud"))["reminders"]] == ["one-copy"]
 
             # Live input frames and later signed materialization never become commands.
             count = len(get_scrollback(first.db, fc))

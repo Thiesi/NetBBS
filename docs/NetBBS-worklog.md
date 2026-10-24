@@ -5635,6 +5635,27 @@ thereafter, with nothing about the failure pointing at the calendar. Anchor the
 pinned clock to the same real moment the rows were created, or inject the
 creation time too.
 
+A bound in the product can be the timing guess. The bot runtime gave a bot
+five seconds to answer its hello, and that time includes starting the
+interpreter. On a loaded machine a Python start can take far longer (18 s on
+average in the reproduction), so in full runs the bot tests timed out waiting
+for "running", and the log showed only "Bot process failed (TimeoutError)"
+(issue #1454). A bound that has to include a
+process start is generous (`READY_SECONDS`, 30 s), and so is a test's wait for
+it.
+
+On Windows, `os.replace` onto a file another thread has open fails ("Access
+is denied"), whatever share flags the reader used. Bot state is replaced that
+way in the database lane, so a test polling `read_state` from its own thread
+can make the bot's `state.set` fail, and the state it waits for never comes.
+Read a running bot's state through the lane (`bot_state` and
+`eventually_state` in `tests/test_bot_runtime.py`), as the runtime does.
+
+asyncio runs a timer up to one clock tick before its deadline (about 16 ms on
+Windows). Code that tells two deadlines apart by comparing `loop.time()` with
+one of them after a timeout can therefore name the wrong one; BinkP's
+handshake bound records that it shortened the wait instead.
+
 ### Use real boundaries where possible
 
 Use:

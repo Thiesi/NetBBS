@@ -42,6 +42,26 @@ async def eventually(predicate, timeout=CROSS_PROCESS_TIMEOUT):
             await asyncio.sleep(.02)
 
 
+async def bot_state(lane, storage_name):
+    """A bot's state, read through the database lane as the runtime reads it.
+
+    A running bot's `state.set` replaces state.json in the lane's thread. A
+    read from the test's own thread holds the file open meanwhile, and on
+    Windows the replace then fails ("Access is denied"): the bot's write is
+    refused and the state the test waits for never arrives (issue #1454).
+    Reads on the lane cannot overlap the bot's writes.
+    """
+    return await lane.run(read_state, storage_name)
+
+
+async def eventually_state(lane, storage_name, predicate, timeout=CROSS_PROCESS_TIMEOUT):
+    """The bot's state, once `predicate(state)` holds; read as `bot_state` does."""
+    async with asyncio.timeout(timeout):
+        while not predicate(state := await bot_state(lane, storage_name)):
+            await asyncio.sleep(.02)
+    return state
+
+
 async def next_line(queue, needle, timeout=CROSS_PROCESS_TIMEOUT):
     async with asyncio.timeout(timeout):
         while True:
@@ -235,14 +255,14 @@ def test_real_baud_help_persistent_reminder_restart_and_stop(db, lane, hub, syso
             proc = runtime.workers[bot.id].proc
             await send("Baud.bot: remind 1s restartproof")
             await next_line(queue, "Saved reminder")
-            assert read_state(db, bot.storage_name)["reminders"][0]["text"] == "restartproof"
+            assert (await bot_state(lane, bot.storage_name))["reminders"][0]["text"] == "restartproof"
             await runtime.close()
             assert proc.returncode is not None
             assert hub.bot_runtime is None
             runtime.start()
             await eventually(lambda: bot.id in runtime.running_ids)
             await next_line(queue, "reminder #1: restartproof")
-            await eventually(lambda: not read_state(db, bot.storage_name)["reminders"])
+            await eventually_state(lane, bot.storage_name, lambda state: not state["reminders"])
             stop_bots(db, actor=sysop)
             await eventually(lambda: not runtime.workers)
             assert not get_bot(db, bot.id).enabled
@@ -268,7 +288,7 @@ def test_request_text_reaches_bots_as_plain_text(db, lane, hub, sysop, alice, ch
             caller = {"id": "link:abc:bob", "name": "bob@Elsewhere"}
             await runtime.enqueue(bot, channel, caller, "remind 1h tab\there\x1b[2J\u202eend  keeps  spacing")
             await next_line(queue, "Saved reminder")
-            assert read_state(db, bot.storage_name)["reminders"][0]["text"] == "tab here[2Jend  keeps  spacing"
+            assert (await bot_state(lane, bot.storage_name))["reminders"][0]["text"] == "tab here[2Jend  keeps  spacing"
         finally:
             await runtime.close()
             hub.leave(channel.name, pid)
@@ -291,10 +311,10 @@ def test_external_bot_same_api_grants_and_separate_state(db, lane, hub, sysop, a
             message = record_message(db, channel, kind="message", author_label=alice.username, body="!help")
             assert await runtime.addressed(channel, alice, message, pid) is None
             await next_line(queue, "External reply: help")
-            await eventually(lambda: read_state(db, "Baud").get("refused"))
+            await eventually_state(lane, "Baud", lambda state: state.get("refused"))
             messages = get_scrollback(db, channel)
             assert [m.body for m in messages if m.author_kind == "bot"] == ["External reply: help"]
-            assert read_state(db, "Second") == {"secret": "other bot state"}
+            assert await bot_state(lane, "Second") == {"secret": "other bot state"}
         finally:
             await runtime.close()
     asyncio.run(run())
@@ -343,13 +363,13 @@ def test_node_lifecycle_starts_and_reaps_configured_bot(tmp_path, monkeypatch):
             await eventually(lambda: instances and bot.id in instances[0].running_ids)
             proc = instances[0].workers[bot.id].proc
             stop.set()
-            await asyncio.wait_for(task, 10)
+            await asyncio.wait_for(task, CROSS_PROCESS_TIMEOUT)
             assert proc.returncode is not None
             assert not instances[0].workers
             assert instances[0].hub.bot_runtime is None
         finally:
             stop.set()
-            await asyncio.wait_for(task, 10)
+            await asyncio.wait_for(task, CROSS_PROCESS_TIMEOUT)
     asyncio.run(run())
 
 
@@ -392,11 +412,31 @@ def test_real_chat_dispatch_roster_mute_and_no_replay_triggers(db, lane, hub, pr
             session.input.put_nowait("/unmute Baud.bot")
             await eventually(lambda: "was unmuted" in "".join(session.written))
             session.input.put_nowait("/quit")
-            await asyncio.wait_for(task, 3)
+            await asyncio.wait_for(task, CROSS_PROCESS_TIMEOUT)
         finally:
             if task and not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+            await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_a_bot_slow_to_start_is_waited_for_not_restarted(db, lane, hub, sysop, channel):
+    # Issue #1454: the wait for "ready" counts the interpreter's own start,
+    # which a loaded host stretches to several seconds. With a 5-second bound
+    # this bot was killed and restarted, ever later, and never ran.
+    slow = ("import json, sys, time; time.sleep(6); sys.stdin.readline(); "
+            "print(json.dumps({'type': 'ready', 'version': 1}), flush=True); [None for _ in sys.stdin]")
+    bot = install(db, sysop, channel, command=[sys.executable, "-u", "-c", slow])
+
+    async def run():
+        runtime = BotRuntime(lane, hub, poll_seconds=.03)
+        runtime.start()
+        try:
+            await eventually(lambda: bot.id in runtime.running_ids)
+            assert runtime_status(db)[bot.id][0] == "running"
+        finally:
             await runtime.close()
 
     asyncio.run(run())
