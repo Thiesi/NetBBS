@@ -8471,7 +8471,7 @@ def test_outbox_deletes_a_cancelled_item(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
 
     text = _normalized_visible(_written_text(session))
-    assert "Delete this work item for good? It is never sent." in text
+    assert "Delete this work item for good? The letter stays expired." in text
     assert "Deleted the link_mail_delivery to " in text
     assert list_work_items(db) == []
 
@@ -8484,9 +8484,9 @@ def test_outbox_cancelled_item_help_names_replay_and_delete(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
 
     text = _normalized_visible(_written_text(session))
-    assert "Retry from scratch" in text
-    assert "Forget it; it is never sent" in text
-    assert "Stop retrying it for good" not in text
+    assert "Retry from scratch; un-expires its letter" in text
+    assert "Forget it; its letter stays expired" in text
+    assert "Stop retrying; its letter expires" not in text
 
 
 def test_outbox_offers_no_items_for_pending_or_pushed_work(db, lane, sysop):

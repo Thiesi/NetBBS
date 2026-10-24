@@ -2074,16 +2074,12 @@ or blocked, which sends yours nothing. So:
 
 In the **Operations ▸ Outbox**, <kbd>C</kbd> **Cancel** on a delivery still
 retrying gives up on it at once: its letter expires, and its sender is told
-you stopped trying to send it. <kbd>R</kbd> **Replay now** on an expired
-delivery puts it back to pending, with its full retry schedule again. When the
-recipient is gone for good, <kbd>D</kbd> **Delete** it there instead: the work
+you stopped trying to send it. A delivery that gave up or was cancelled stays
+in the Outbox's list. <kbd>R</kbd> **Replay now** puts it back to pending,
+with its full retry schedule again, and its letter is pending again too. When
+the recipient is gone for good, <kbd>D</kbd> **Delete** it instead: the work
 item goes, the letter stays expired, and Link stops reporting it as needing
 attention.
-
-<kbd>C</kbd> **Cancel** stops a delivery that is still retrying. A cancelled
-delivery stays in the Outbox's list: <kbd>R</kbd> **Replay now** sends it
-again if you cancelled it by mistake, and <kbd>D</kbd> **Delete** forgets it,
-so it is never sent.
 
 #### Mail arriving here
 
