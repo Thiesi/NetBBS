@@ -28,6 +28,7 @@ several files or their own directory layout still go onto the host directly.
 - [War Dialer maintenance and recovery](#war-dialer-shared-world-sessions)
 - [Voidrunner saves and recovery](#voidrunner-careers-and-concurrent-sessions)
 - [Lunar Lander pilot records](#lunar-lander-pilot-records)
+- [Running a newer game release](#running-a-newer-game-release) than NetBBS bundles
 - [Verification and troubleshooting](#verification-and-troubleshooting)
 
 ## Bundled games at a glance
@@ -47,8 +48,10 @@ The four games are developed in their own repositories,
 release bundles one tagged release of each. Report game bugs there; the save,
 world, backup and resize behaviour below is NetBBS's and is reported here.
 
-Use the Gallery to register them from the installed package. Keep game and runtime
-versions together. Do not replace a career or world merely to bypass a compatibility
+Use the Gallery to register them from the installed package. To run a newer game
+release before NetBBS bundles it, see
+[Running a newer game release](#running-a-newer-game-release); never edit the
+installed copy. Do not replace a career or world merely to bypass a compatibility
 error. The detailed game strategy and screen walkthroughs formerly repeated here
 are available in the games' help and the developer design reference; this guide
 focuses on operating and recovering them.
@@ -458,6 +461,85 @@ so they never sit beside a database that did not issue their user IDs.
 > Records kept under a profile's own `DOOR_LL_DATA_DIR` are outside the node
 > backup. Back them up with SQLite's backup API, as the game's own
 > `OPERATIONS.md` describes.
+
+## Running a newer game release
+
+The bundled games release on their own schedule. A NetBBS release bundles
+whichever release of each game is current when NetBBS is released, so a game can
+have a newer release than the copy your NetBBS installed. You can run that newer
+release now, as an ordinary native door, and go back to the bundled copy once a
+NetBBS release catches up.
+
+> [!IMPORTANT]
+> **Check the game's release notes first.** Do this only when they say the
+> game's saved data is unchanged, or that it needs no newer NetBBS. NetBBS's
+> backups read the games' data: War Dialer's world schema, Lunar Lander's
+> records schema and Voidrunner's save layout. A release that changes any of
+> them can make backups refuse the data until a NetBBS release understands
+> it. If the notes say a newer NetBBS is needed, wait for it.
+
+### What changes compared to the bundled copy
+
+NetBBS recognises its bundled copy by the installed path. A copy you install
+anywhere else is a different door to NetBBS, so:
+
+- **Data stays put only if you say where.** Voidrunner is the exception: every
+  launch gets the node's save directory as `VOIDRUNNER_SAVE_DIR`. War Dialer
+  and Lunar Lander need their data path in the profile (below).
+- **Backups follow those paths.** War Dialer's world and Lunar Lander's records
+  are backed up when the profile names the node's own paths. Voidrunner saves
+  are backed up wherever the node keeps them.
+- **Guests are not separated.** A bundled game gives each guest call its own
+  throwaway save. Another copy is played under the shared guest account, so
+  every guest shares one career, world entry or set of records. Set the door's
+  minimum play level above your guest level while it runs.
+- **Resize and CPU come from the profile.** Turn on **Signal door on terminal
+  resize** for Voidrunner, War Dialer and Lunar Lander, which all handle
+  `SIGUSR1`; leave it off for Retro Trivia. Use the CPU limit the game's
+  release asks for (Lunar Lander: 900 seconds).
+- **Game events work as before**, once you switch the outbound hook on for the
+  new door (see [Letting it report game events](#letting-it-report-game-events)).
+
+### Install and register it
+
+**MANUAL — outside NetBBS:**
+
+```sh
+sudo install -d -m 755 -o netbbs -g netbbs /var/games/netbbs/<game>-<version>
+cd /var/games/netbbs/<game>-<version>
+# Download the release's script and SHA256SUMS, e.g. with `gh release download`
+sha256sum -c SHA256SUMS --ignore-missing   # on NetBSD: cksum -a sha256 -c SHA256SUMS
+```
+
+**Inside NetBBS:** create a native door under **Content ▸ Doors**. If the
+release ships a `netbbs.json`, import it with **[J] Import JSON** on the
+Compatibility screen and correct its paths. Otherwise set:
+
+- **Program:** NetBBS's own Python interpreter (the path the Gallery fills in).
+- **Arguments:** the full path to the downloaded script.
+- **Profile environment:** the data path, as an absolute path under the node
+  database's own `.doors` directory, so it is the same data the bundled copy
+  uses and node backups include it:
+
+| Game | Profile environment | Path |
+| --- | --- | --- |
+| Voidrunner | Nothing; don't set `VOIDRUNNER_SAVE_DIR` | NetBBS passes the node's save directory |
+| War Dialer | `WAR_DIALER_DB_PATH` | `<database>.doors/war-dialer.db` |
+| Lunar Lander | `DOOR_LL_DATA_DIR` | `<database>.doors/lunar_lander` |
+| Retro Trivia | Nothing | It keeps no data |
+
+Start the new door at the SysOp's play level, use **Test as SysOp**, then open
+it to callers. Remove the bundled entry, or raise its play level to SysOp, so
+callers see one copy.
+Never run two versions of War Dialer against the same world: older releases
+refuse a world a newer one upgraded.
+
+### Going back to the bundled copy
+
+When a NetBBS release bundles that version or a later one, re-register the
+game from the Gallery, then delete the hand-made door. The data is already in
+the node's own paths, so nothing moves. The bundled copy is never older than
+the data it finds there, because NetBBS bundles the newest release.
 
 ## What is supported, and what has been verified?
 

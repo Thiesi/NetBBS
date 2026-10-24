@@ -1545,6 +1545,10 @@ War Dialer, or Lunar Lander. Lunar Lander needs a terminal of at least 80x24;
 it pauses the flight on anything smaller until the caller enlarges it. Gallery entries fill a draft with the installed interpreter and
 sensible defaults; review and <kbd>S</kbd> **Save**.
 
+The games release on their own schedule. To run a newer release of one before
+NetBBS bundles it, follow the door guide's
+[Running a newer game release](NetBBS-door-guide.md#running-a-newer-game-release).
+
 ### Set up any other door
 
 Third-party native programs, DOS games through DOSBox-X, doors built only for
