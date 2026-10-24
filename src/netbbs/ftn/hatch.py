@@ -43,7 +43,7 @@ import logging
 import os
 import secrets
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from netbbs import __version__
@@ -400,7 +400,15 @@ def hatch_generated_file(
     password, BinkP's size limit, an 8.3 name no receiver takes for a
     control file, and room for two files in the queue. Returns the TIC's
     name; raises `HatchError` (or `FtnQueueFullError`) and changes nothing.
-    Commits."""
+    Commits.
+
+    Every active point and downlink carrying the file echo with a TIC
+    password set gets the edition too (issue #1512), as a hatched file
+    area entry goes to them: its own spool copy of the file and a TIC under
+    its own password, queued as a pair for that link alone, each deleted
+    once that link confirmed it. Every TIC's Seenby names the uplink and
+    all those links. A link whose queue has no room for both is skipped
+    with a node-log line; the uplink's copy goes all the same."""
     if not tag or " " in tag:
         raise HatchError("No file echo is set to hatch into.")
     if not network.tic_password:
@@ -418,14 +426,15 @@ def hatch_generated_file(
                                 "have gone")
     now = datetime.datetime.now(datetime.timezone.utc)
     us = network.our_address
+    links = _links_carrying(db, network, tag)  # issue #1512
     replaces = tuple(n for n in replaces if n != send_name and "*" not in n and "?" not in n
                      and replaces_pattern_problem(n) is None)
     tic = Tic(area=tag, file=send_name, crc=zlib.crc32(data) & 0xFFFFFFFF, size=len(data), desc=desc,
               replaces=replaces, origin=us, from_address=us, password=network.tic_password)
     try:
         tic_data = write_tic(tic, to=network.uplink_address, path=[(us, int(now.timestamp()))],
-                             seen_by=[us, network.uplink_address], date=int(now.timestamp()),
-                             created=f"NetBBS {__version__}")
+                             seen_by=[us, network.uplink_address, *(link.address for link in links)],
+                             date=int(now.timestamp()), created=f"NetBBS {__version__}")
     except FtnFormatError as exc:
         raise HatchError(f"{send_name} can't be hatched: {exc}.") from None
     # The file goes under a spool name of its own, so a second edition
@@ -436,6 +445,7 @@ def hatch_generated_file(
     except BaseException:
         file_path.unlink(missing_ok=True)
         raise
+    spooled: list[Path] = []
     try:
         common = dict(destination=network.uplink_address.four_d, route="uplink",
                       reference_kind=PUBLISH_REFERENCE_KIND, reference_id=reference_id, after_sent=KILL)
@@ -443,10 +453,53 @@ def hatch_generated_file(
                                   **common)
         queue_file_without_commit(db, network.id, send_name=tic_name, size_bytes=len(tic_data), path=tic_path,
                                   **common)
+        _queue_generated_for_links(db, network, tic, data, links, now, send_name=send_name,
+                                   reference_id=reference_id, spooled=spooled)
         db.connection.commit()
     except BaseException:
         db.connection.rollback()
-        file_path.unlink(missing_ok=True)
-        tic_path.unlink(missing_ok=True)
+        for path in (file_path, tic_path, *spooled):
+            path.unlink(missing_ok=True)
         raise
     return tic_name
+
+
+def _queue_generated_for_links(db: Database, network: FtnNetwork, tic: Tic, data: bytes, links: list,
+                               now: datetime.datetime, *, send_name: str, reference_id: str,
+                               spooled: list[Path]) -> list[str]:
+    """Queue a generated file for each link carrying its echo (issue #1512):
+    a spool copy of the file and a TIC under the link's own password, a
+    `publish` pair of its own. Returns the addresses it went to. Every file
+    written is added to `spooled`, for the caller to remove if its
+    transaction doesn't commit."""
+    from netbbs.ftn.ticfwd import _room
+
+    us = network.our_address
+    seen_by = [us, network.uplink_address, *(link.address for link in links)]
+    sent_to = []
+    for link in links:
+        if not _room(db, network.id, link.id):
+            _logger.warning("FTN %s: %s not sent to %s: its outbound files queue is full", network.name, send_name,
+                            link.label)
+            continue
+        try:
+            tic_data = write_tic(replace(tic, password=link.tic_password), to=link.address,
+                                 path=[(us, int(now.timestamp()))], seen_by=seen_by, date=int(now.timestamp()),
+                                 created=f"NetBBS {__version__}")
+        except FtnFormatError as exc:
+            _logger.warning("FTN %s: %s not sent to %s: %s", network.name, send_name, link.label, exc)
+            continue
+        file_path, _spool_name = _write_spool_tic(db, data, suffix=f"-{send_name}")
+        spooled.append(file_path)
+        tic_path, tic_name = _write_spool_tic(db, tic_data)
+        spooled.append(tic_path)
+        common = dict(destination=link.address.four_d, route="direct", reference_kind=PUBLISH_REFERENCE_KIND,
+                      reference_id=f"{reference_id}>{link.id}", after_sent=KILL, link_id=link.id)
+        queue_file_without_commit(db, network.id, send_name=send_name, size_bytes=len(data), path=file_path,
+                                  **common)
+        queue_file_without_commit(db, network.id, send_name=tic_name, size_bytes=len(tic_data), path=tic_path,
+                                  **common)
+        sent_to.append(link.address.four_d)
+    if sent_to:
+        _logger.info("FTN %s: %s also queued for %s", network.name, send_name, ", ".join(sent_to))
+    return sent_to

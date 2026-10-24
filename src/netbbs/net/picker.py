@@ -53,7 +53,7 @@ from netbbs.net.char_input import (
     page_step,
 )
 from netbbs.net.location import crumbs
-from netbbs.net.help_overlay import show_help
+from netbbs.net.help_overlay import menu_help_lines, show_help
 from netbbs.rendering.ansi import move_cursor, strip_ansi
 from netbbs.rendering.art_slots import ListSlotRow, SlotArt, list_slot_fits, render_list_slot_art
 from netbbs.rendering.charset import ASCII, ellipsis_for
@@ -319,10 +319,16 @@ async def pick_item(
     art_once: str = "",
     linked_of: Callable[[T], bool] | None = None,
     on_toggle: Callable[[T], Awaitable[None]] | None = None,
+    help_about: str | None = None,
 ) -> T | None:
     """
     Let the user browse/search/jump through `items` and pick one, or
     return `None` if they quit without selecting.
+
+    `help_about`, if given, is the screen's own help (issue #1514): what
+    the list shows and what picking a row does. Ctrl-H then shows it with
+    the caller's `live_nav` keys and a short block of the list's own keys,
+    on one screen, instead of the full navigation help.
 
     With `on_toggle`, numbers, Enter and Space toggle a highlighted row
     through the callback instead of closing the picker. Paging and Find
@@ -1482,6 +1488,7 @@ async def pick_item(
                 has_linked=linked_of is not None and any(linked_of(item) for item in items),
                 linked_marker_only=getattr(session, "output_charset", None) == ASCII or _slot_active(),
                 multiple=on_toggle is not None,
+                help_about=help_about,
             )
             page_items = await _render()
             continue
@@ -1874,6 +1881,7 @@ async def _show_picker_help(
     has_linked: bool = False,
     linked_marker_only: bool = False,
     multiple: bool = False,
+    help_about: str | None = None,
 ) -> None:
     """Ctrl-H's own content for this screen (dogfood feature request --
     the shared picker had no on-demand help at all, only the terse
@@ -1884,7 +1892,21 @@ async def _show_picker_help(
     though issue #171 gave this screen its own Up/Down highlight too --
     every command explained at once, in the order it appears in the nav
     row, with `[O]rder`/Ctrl-R included only when this caller actually
-    offers them (matching `_nav_entries`' own conditional inclusion)."""
+    offers them (matching `_nav_entries`' own conditional inclusion).
+
+    With `help_about` (issue #1514) the screen's own help comes instead:
+    `_screen_help_lines`, which fits one 80x24 screen."""
+    if help_about:
+        await show_help(
+            session, "Help",
+            _screen_help_lines(
+                help_about, on_sort=on_sort, has_refresh=has_refresh, has_create=has_create, live_nav=live_nav,
+                has_unpickable=has_unpickable, has_linked=has_linked, linked_marker_only=linked_marker_only,
+                multiple=multiple, header_color=header_color,
+            ),
+            header_color=header_color, unicode_style=unicode_style,
+        )
+        return
     lines = [
         colored("< > (or PgUp/PgDn, Left/Right)", fg_color=header_color, bold=True),
         "  Move one page back/forward through the list, on every list (issue #1158).",
@@ -1962,6 +1984,40 @@ async def _show_picker_help(
             "  Re-fetches the list from scratch and clears any active search.",
         ]
     await show_help(session, "Navigation help", lines, header_color=header_color, unicode_style=unicode_style)
+
+
+def _screen_help_lines(
+    about: str, *, on_sort: Callable | None, has_refresh: bool, has_create: bool, live_nav: Sequence[MenuEntry],
+    has_unpickable: bool, has_linked: bool, linked_marker_only: bool, multiple: bool,
+    header_color: int | tuple[int, int, int],
+) -> list[str]:
+    """A list's own help (issue #1514): `about`, then the caller's keys,
+    then the list's own in a few rows, then the keys that work everywhere
+    -- `help_overlay.menu_help_lines`' layout, so it reads like every other
+    screen's help and fits 80x24. Plain text throughout, so it wraps."""
+    notes = []
+    if has_unpickable:
+        notes.append("A row with - in place of a number can't be chosen; the words beside it say why.")
+    if has_linked:
+        # The colour can't be shown where the list draws only the marker
+        # (ASCII, or rows inside SysOp art): say what that session sees.
+        notes.append(f"A name ending in{LINKED_MARKER} is Linked: shared with other nodes over NetBBS Link."
+                     if linked_marker_only else
+                     "A name in the Linked colour is Linked: shared with other nodes over NetBBS Link.")
+    entries = list(live_nav)
+    if has_create:
+        entries.append(MenuEntry(label=menu_key("C", "reate"), brief="Make a new one"))
+    if on_sort is not None:
+        entries.append(MenuEntry(label=menu_key("O", "rder"), brief="Change how the list is sorted"))
+    entries.append(MenuEntry(
+        label="Up Down, a number",
+        brief=("Highlight a row, Enter or Space toggles it; or type its number" if multiple
+               else "Highlight a row and press Enter; or type its number"),
+    ))
+    entries.append(MenuEntry(label=menu_key("/", " Find"), brief="Show only names containing a text"))
+    if has_refresh:
+        entries.append(MenuEntry(label="Ctrl-R", brief="Read the list again; clears Find"))
+    return menu_help_lines(entries, about=" ".join([about, *notes]), paged=True, header_color=header_color)
 
 
 def _search_completer(candidates: Sequence[str]) -> Completer:
