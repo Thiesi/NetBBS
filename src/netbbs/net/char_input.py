@@ -1182,6 +1182,18 @@ def arm_enter_guard(source: object, *, tail_only: bool = False) -> None:
     setattr(source, _ENTER_GUARD_ATTR, (time.monotonic() + seconds, tail_only))
 
 
+def refresh_enter_guard(source: object) -> None:
+    """Restart a still-armed Enter guard's window from now; arm none that
+    isn't. For a door launch (review on #1548): the choice's deadline starts
+    when the picker returns, but the door's first read comes only after the
+    launch -- a service to start, a spawn, an rlogin handshake -- which can
+    take longer than the window. Nothing on screen takes input meanwhile, so
+    an Enter typed then still belongs to the choice."""
+    guard = getattr(source, _ENTER_GUARD_ATTR, None)
+    if guard is not None:
+        arm_enter_guard(source, tail_only=guard[1])
+
+
 def disarm_input_guards(source: object) -> None:
     """A key that is no character (a web arrow key) ends both guards, as
     any other key would."""

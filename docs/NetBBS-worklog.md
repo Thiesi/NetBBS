@@ -2621,7 +2621,10 @@ decoding. Without it, a byte a peek had pushed back sat through the whole door
 and surfaced at the prompt after it, and the Enter after a door-list choice
 was the door's first key. Door reads cannot peek, because the web's door mode
 has no timed read. So a guard that drops a CR leaves a short tail guard for
-the LF or NUL behind it. Zmodem reads `Session.read_byte` directly and must
+the LF or NUL behind it. A door launch can outlast the Enter guard's window
+(a service start, a spawn, an rlogin handshake), so `run_door` restarts a
+still-armed guard (`refresh_enter_guard`) just before the relay's first read,
+and never arms one that isn't. Zmodem reads `Session.read_byte` directly and must
 stay off this path.
 
 Current `main` already field-colors every ordinary `pick_item` row, so caller

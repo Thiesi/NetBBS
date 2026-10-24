@@ -32,7 +32,7 @@ from netbbs.doors.profiles import preflight, terminal_too_small
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.timeutil import resolve_display_preferences
 from netbbs.net.unicode_style_preference import unicode_style_enabled
-from netbbs.net.char_input import read_guarded_byte
+from netbbs.net.char_input import read_guarded_byte, refresh_enter_guard
 from netbbs.net.session import SessionClosedError, physical_terminal_width
 from netbbs.net.session_activity import records_activity
 from netbbs.net.shared_account import signed_in_without_credential
@@ -1099,6 +1099,9 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                 resize_task = asyncio.create_task(_forward_resize(
                     session, proc, info_path, info, published=(width, height),
                     pty_fd=endpoint.fd if mode == "pty" else None, signal_door=mode == "signal"))
+        # The door list's Enter guard (issue #1546) counts from the door's
+        # first read, not from the choice: the launch can outlast it.
+        refresh_enter_guard(session)
         try:
             relay = asyncio.create_task(_relay(terminal, endpoint, proc, stop_grace))
             try:
