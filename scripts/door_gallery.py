@@ -1218,6 +1218,17 @@ def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.P
                      "the combat fixture could not be built")
 
 
+def build_voidrunner_laden(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """The combat fixture with cargo aboard, and nothing else changed.
+
+    The website's combat still wants a fight with something at stake: a hold
+    with a lot in it, and the Dump option that only a laden ship is offered.
+    `outclassed` has both, but raises its opponent in the save; this stops
+    before that, so every value on the screen is one play left there.
+    """
+    build_voidrunner_combat(door_name, door, state, stock_hold=True)
+
+
 def build_voidrunner_played(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
     """A career with a fight behind it, for the screens that show a record.
 
@@ -1285,6 +1296,7 @@ FIXTURE_BUILDERS = {
     ("lunar_lander", "base"): build_lunar_lander_records,
     ("voidrunner", "outclassed"): build_voidrunner_outclassed,
     ("voidrunner", "combat"): build_voidrunner_combat,
+    ("voidrunner", "laden"): build_voidrunner_laden,
     ("voidrunner", "played"): build_voidrunner_played,
     ("voidrunner", "retiring"): build_voidrunner_retiring,
 }
