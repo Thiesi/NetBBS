@@ -7,6 +7,23 @@
     var HOLD = 900;  // ms after a scene's own final hold, before the next one
     var cache = {};
 
+    // Block glyphs are drawn as fills of the cell, not as text: a font's
+    // half block neither spans the 1ch cell nor the line height, so thin
+    // strips of background showed between the picture's pixels.
+    // Same rule as scripts/website_ansi_to_html.py.
+    var BLOCKS = {'▀': 'top', '▄': 'bottom', '█': 'full', '▌': 'left', '▐': 'right'};
+
+    function blockCss(fill, css){
+      var fg = /(?:^|;)color:(rgb\([^)]*\))/.exec(css);
+      var bg = /(?:^|;)background:(rgb\([^)]*\))/.exec(css);
+      fg = fg ? fg[1] : 'rgb(199,202,212)';
+      bg = bg ? bg[1] : 'transparent';
+      var paint = fill === 'full' ? fg
+        : 'linear-gradient(' + (fill === 'left' || fill === 'right' ? 'to right,' : '')
+          + (fill === 'top' || fill === 'left' ? fg + ' 50%,' + bg + ' 50%' : bg + ' 50%,' + fg + ' 50%') + ')';
+      return css.replace(/(?:^|;)background:rgb\([^)]*\)/, '') + ';background:' + paint;
+    }
+
     function scene(name){
       if (!cache[name]){
         var node = document.getElementById('scene-' + name);
@@ -57,8 +74,14 @@
           for (var k = 0; k < text.length; k++){
             var cell = row[run[1] + k];
             if (!cell) break;
-            cell.textContent = text[k];
-            cell.style.cssText = css;
+            var fill = BLOCKS[text[k]];
+            if (fill){
+              cell.textContent = ' ';
+              cell.style.cssText = blockCss(fill, css);
+            } else {
+              cell.textContent = text[k];
+              cell.style.cssText = css;
+            }
           }
         }
       }

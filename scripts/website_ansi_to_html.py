@@ -97,6 +97,29 @@ class Style:
         parts.append("width:1ch")
         return ";".join(parts)
 
+    def block_css(self, fill: str) -> str:
+        """A block glyph's cell, painted as a fill of the cell rather than as
+        text. A font's half block spans neither the 1ch cell nor the line
+        height, so thin strips of background showed between the pixels of
+        half-block pictures (Lunar Lander's scenery, the games' splashes).
+        `web/game-scenes.js` applies the same rule to replayed scenes."""
+        fg, bg = self.fg, self.bg
+        if self.reverse:
+            fg, bg = bg or DEFAULT_BG, fg or DEFAULT_FG
+        top = "rgb(%d,%d,%d)" % (fg or DEFAULT_FG)
+        under = "rgb(%d,%d,%d)" % bg if bg else "transparent"
+        if fill == "full":
+            paint = top
+        else:
+            direction = "to right," if fill in ("left", "right") else ""
+            first, second = (top, under) if fill in ("top", "left") else (under, top)
+            paint = f"linear-gradient({direction}{first} 50%,{second} 50%)"
+        return f"background:{paint};display:inline-block;width:1ch"
+
+
+#: Block glyphs drawn as cell fills (`Style.block_css`), with the part each fills.
+BLOCK_FILLS = {"▀": "top", "▄": "bottom", "█": "full", "▌": "left", "▐": "right"}
+
 
 BLANK = Style()
 
@@ -279,7 +302,8 @@ class Screen:
             while end and row[end - 1] == (" ", BLANK):
                 end -= 1
             lines.append("".join(
-                '<span style="%s">%s</span>' % (style.css(), html.escape(char))
+                '<span style="%s"> </span>' % style.block_css(BLOCK_FILLS[char]) if char in BLOCK_FILLS
+                else '<span style="%s">%s</span>' % (style.css(), html.escape(char))
                 for char, style in row[:end]
             ))
         while lines and not lines[-1]:
