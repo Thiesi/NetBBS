@@ -269,7 +269,7 @@ def _load_pending_items(
 
 async def _pick_pending_item(
     session: Session, lane: DatabaseLane, actor: User, loaded: tuple[list[_PendingItem], bool], *,
-    title: str, empty_message: str, node_wide: bool = False,
+    title: str, empty_message: str, what: str, node_wide: bool = False,
 ) -> _PendingItem | None:
     items, more = loaded
     return await pick_item(
@@ -291,8 +291,8 @@ async def _pick_pending_item(
         ),
         title=title, own=True,
         help_about=(
-            "Posts, edits and uploads waiting for approval, oldest first; callers see none of them "
-            "yet. Picking one shows it in full, with approve and reject."
+            f"{what} waiting for approval, oldest first; callers see none of them yet. Picking one "
+            "shows it in full, with approve and reject."
         ),
         empty_message=empty_message,
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -315,7 +315,7 @@ async def _pending_review_screen(
         loaded = await lane.run(_load_pending_items, actor)
         selected = await _pick_pending_item(
             session, lane, actor, loaded, title="Pending review", empty_message="Nothing awaits review.",
-            node_wide=True,
+            what="Posts, edits and uploads on every board and file area you moderate", node_wide=True,
         )
         if selected is None:
             return
@@ -345,6 +345,7 @@ async def _pending_posts_screen(
         loaded = await lane.run(lambda db: _load_pending_items(db, actor, boards=[board]))
         selected = await _pick_pending_item(
             session, lane, actor, loaded, title=f"Pending posts in {board.name!r}", empty_message="No pending posts.",
+            what="Posts and edits on this board",
         )
         if selected is None:
             return
@@ -531,6 +532,7 @@ async def _pending_files_screen(
         loaded = await lane.run(lambda db: _load_pending_items(db, actor, areas=[area]))
         selected = await _pick_pending_item(
             session, lane, actor, loaded, title=f"Pending files in {area.name!r}", empty_message="No pending files.",
+            what="Uploads to this file area",
         )
         if selected is None:
             return
