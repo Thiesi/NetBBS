@@ -465,13 +465,22 @@ class WebSession(Session):
                 if len(item) > 1:
                     self._pushed_back_item = _Click(item[1:])
                 item = str(item[0])
-            if isinstance(item, str) and char_input.word_guard_drops(self, item):
-                # The tail of a word typed after a one-key answer (issue #840).
-                continue
+            if isinstance(item, str):
+                if char_input.word_guard_drops(self, item):
+                    # The tail of a word typed after a one-key answer (issue
+                    # #840), or the Enter typed after a picker choice (#1546).
+                    continue
+            else:
+                # An arrow or another special key ends the guards, as any
+                # other key does.
+                char_input.disarm_input_guards(self)
             return item
 
     def arm_word_guard(self) -> None:
         char_input.arm_word_guard(self)
+
+    def arm_enter_guard(self, *, tail_only: bool = False) -> None:
+        char_input.arm_enter_guard(self, tail_only=tail_only)
 
     async def _read_char(self) -> str:
         """Plain characters only -- a recognized special key has no

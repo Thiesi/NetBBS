@@ -812,3 +812,56 @@ def test_a_door_stop_ends_although_a_descendant_holds_its_output_open(db, lane, 
         assert run_bounded(scenario(), timeout=30).reason == "timed_out"
     finally:
         end_child()
+
+
+# -- the door list's Enter, after a slow launch (issue #1546) ------------------
+
+
+class _GuardClock:
+    """The input guards' clock alone; asyncio and the runtime keep theirs."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.mark.parametrize("armed", [True, False])
+def test_the_enter_after_a_door_choice_is_dropped_after_a_slow_launch(
+        db, lane, player, tmp_path, monkeypatch, armed):
+    """The guard counts from the door's first read: a launch longer than its
+    window (a service to start, a handshake) must not let the Enter through.
+    A launch no picker armed a guard for gains none."""
+    from netbbs.doors import runtime
+    from netbbs.net import char_input
+
+    clock = _GuardClock()
+    monkeypatch.setattr(char_input, "time", clock)
+    real_preflight = runtime.preflight
+
+    def slow_preflight(*args, **kwargs):
+        clock.now += 5 * char_input.ENTER_GUARD_SECONDS
+        return real_preflight(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, "preflight", slow_preflight)
+    script = _write_script(
+        tmp_path, "first_line.py",
+        """
+        import sys
+        line = sys.stdin.buffer.readline()
+        sys.stdout.write("FIRST " + repr(line) + "\\n")
+        sys.stdout.flush()
+        """,
+    )
+    door = create_door(db, "First", sys.executable, args=(str(script),), creator=player)
+    session = FakeSession()
+    if armed:
+        char_input.arm_enter_guard(session)  # as the door list's "08" does
+    session.type_in("\r\ngo\n")
+
+    result = asyncio.run(_run(session, lane, door, player))
+
+    assert result.reason == "exited", result
+    expected = "FIRST b'go\\n'" if armed else "FIRST b'\\r\\n'"
+    assert expected in bytes(session.written).decode()

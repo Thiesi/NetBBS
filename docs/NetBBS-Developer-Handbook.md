@@ -243,6 +243,7 @@ Two kinds of registration deliberately get none of it:
 | `unicode_style` | The caller's own NetBBS glyph preference, so a door can match what they already chose. |
 | `transport` | `telnet`, `ssh`, `web`, `local`, or `unknown`. Key decoding and latency assumptions differ, particularly for the browser terminal. |
 | `timezone` | The node's display timezone as an IANA name, for in-game clocks. Node-wide: NetBBS has no per-caller timezone. |
+| `datetime_format` | The node's date and time display format, a Python `strftime` pattern such as the default `%d.%m.%Y %H:%M`, so a door can show dates the way the rest of the node does. It only ever uses `%Y %m %d %H %M %S %y %I %p %A %a %B %b %Z %z %%`, and NetBBS validates it, so it is safe to hand to `strftime`. It may contain `%Z` or `%z`, so format an aware time converted to `timezone`, not a naive one. Node-wide, like `timezone`. Added within `door_api` 5 in NetBBS 7.41.0: an older node omits it, so keep a fallback such as a profile setting of your own. |
 | `node_name` | The node's display name, which a SysOp may change at any time. |
 | `node_id` | A stable, opaque per-node identifier which survives a rename. Key a door's world on this, not on `node_name`. Not a credential. |
 | `session_limit_seconds` | The effective wall-clock cap for *this* launch — the tighter of the profile's limit and any lower bound the launch itself imposes — so a door can warn before it is cut off. Absent when nothing bounds the run. |
@@ -259,6 +260,10 @@ are, not what they may do.
 
 The version field is the contract discriminator. For supported versions, allow
 documented optional fields to be absent and ignore unknown additive fields.
+A field may also be added within a version, without a `door_api` bump, when
+a door that ignores it loses nothing: `datetime_format` arrived that way in
+`door_api` 5. Such a field is documented with the NetBBS release that first
+sends it, and is absent on older nodes.
 Require whichever identity or capability fields your own feature actually
 needs, and fail clearly if they are unavailable. The implementation currently
 publishes `unicode_style` as a boolean.
