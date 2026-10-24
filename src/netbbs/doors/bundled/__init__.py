@@ -52,6 +52,10 @@ class BundledDoor:
     #: by construction -- the signal's default action would otherwise end the
     #: caller's game (issue #645).
     follows_resize: bool = False
+    #: CPU seconds for a launch of this install's copy registered without a
+    #: profile, in place of the runtime's default. `None` keeps the default.
+    #: A profile's own `cpu_seconds` always wins.
+    cpu_seconds: int | None = None
 
 
 BUNDLED_DOORS: tuple[BundledDoor, ...] = (
@@ -85,6 +89,20 @@ BUNDLED_DOORS: tuple[BundledDoor, ...] = (
         ),
         resource="war_dialer.py",
         follows_resize=True,
+    ),
+    BundledDoor(
+        key="lunar_lander",
+        name="Lunar Lander",
+        description=(
+            "Real-time lunar landing: tilt and throttle a lander down onto a lit pad. A "
+            "training basin, fifteen ranked missions in three chapters and a daily challenge; "
+            "medals, ranks and per-mission leaderboards. Needs an 80x24 terminal."
+        ),
+        resource="lunar_lander.py",
+        follows_resize=True,
+        # Real-time flight at 60 frames a second spends CPU steadily; the game's
+        # own profile allows 900 s, and at 300 a long session ends early.
+        cpu_seconds=900,
     ),
 )
 

@@ -1,4 +1,4 @@
-"""The bundled doors are unmodified tagged releases (issues #1216, #1226, #1228).
+"""The bundled doors are unmodified tagged releases (issues #1216, #1226, #1228, #1542).
 
 Each game lives in its own repository with its own suite. NetBBS ships one
 tagged release of each, written by `scripts/vendor_door.py`, and must never
@@ -18,8 +18,8 @@ from tests.vendored_voidrunner import VOIDRUNNER_PATH, live_voidrunner, vr, worl
 
 BUNDLED = VOIDRUNNER_PATH.parent
 RECORD = BUNDLED / "VENDORED.json"
-VENDORED = {"retro_trivia.py": "Thiesi/RetroTrivia", "voidrunner.py": "Thiesi/Voidrunner",
-            "war_dialer.py": "Thiesi/WarDialer"}
+VENDORED = {"lunar_lander.py": "Thiesi/LunarLander", "retro_trivia.py": "Thiesi/RetroTrivia",
+            "voidrunner.py": "Thiesi/Voidrunner", "war_dialer.py": "Thiesi/WarDialer"}
 
 
 def test_every_vendored_door_has_a_record():
@@ -31,6 +31,8 @@ def test_the_bundled_door_is_the_release_its_record_names(filename):
     record = json.loads(RECORD.read_text(encoding="utf-8"))[filename]
     data = (BUNDLED / filename).read_bytes()
     assert record["repository"] == VENDORED[filename]
+    # A release candidate may be vendored on a branch for field testing;
+    # a stable tag replaces it before that branch merges.
     assert re.fullmatch(r"v\d+\.\d+\.\d+", record["tag"]) and re.fullmatch(r"[0-9a-f]{40}", record["commit"])
     assert hashlib.sha256(data).hexdigest() == record["sha256"], (
         f"src/netbbs/doors/bundled/{filename} differs from the vendored release; fix it in "

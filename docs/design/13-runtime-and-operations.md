@@ -61,6 +61,17 @@ namespace. Restore requires an explicit destination for every world and excludes
 active game sessions. The world ownership, limits and rollback contract is recorded
 in the War Dialer storage decision in ?16; manual activation is in the door guide.
 
+Lunar Lander coverage (issue #1542): a backup includes the node's own pilot
+records, `<db>.doors/lunar_lander/pilots.db`, as a checksummed snapshot taken
+with SQLite's backup API before the node database. The door has no
+maintenance lock and commits each landing in one short transaction, so the
+snapshot is one committed generation while callers play. Restore puts the
+records back beside the restored database with no destination to name, and
+refuses while a game holds their write lock. An archive without the component
+restores the absence: live records move into the rollback generation, since
+they name user IDs the restored database may never have issued. A profile
+that sets its own `DOOR_LL_DATA_DIR` keeps its records outside the backup.
+
 Voidrunner coverage (issue #310): ordinary CLI and SysOp node backups include the
 node's Voidrunner save directory (`<db>.doors/voidrunner/`, or the SysOp's
 `VOIDRUNNER_SAVE_DIR`), when present, under a checksummed `voidrunner/` component.

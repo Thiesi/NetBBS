@@ -386,6 +386,12 @@ same `VENDORED.json`. NetBBS imports nothing from Retro Trivia and keeps only
 the tests of how it launches and sizes the door. War Dialer's world paths,
 ownership, node backup and SysOp controls stay NetBBS's (§16, issue #200).
 
+**Lunar Lander is vendored the same way** from Thiesi/LunarLander (issue
+#1542). NetBBS owns where its pilot records live: a bundled launch sets
+`DOOR_LL_DATA_DIR` to `<db path>.doors/lunar_lander/`, because the door's own
+default is `data/` beside the script, inside the installed package. A guest
+call gets a copy (§4.6), and the backup carries the records (§13.4).
+
 NetBBS owns how it hosts Voidrunner:
 - **Launch.** It runs as a native door that reads `door_info.json`.
 - **Save directory.** NetBBS resolves it, as below.
@@ -398,8 +404,8 @@ The backup imports three names from the door: `_default_save_dir`, `PilotBusy`
 and `maintenance_session`. A release that renamed them would break NetBBS's
 backups rather than the game, so NetBBS's suite pins them.
 
-**Both bundled games require a terminal of at least 40 columns by 12 rows, and
-have exactly one layout above it (issue #495).** A launch on anything smaller is
+**Voidrunner and War Dialer require a terminal of at least 40 columns by 12
+rows, and have exactly one layout above it (issue #495).** A launch on anything smaller is
 refused, by name and with the size the terminal reported, before any save or
 world is opened. The doors used to carry a second, stripped presentation for
 terminals down to 20 columns, and that is what flattened them: art, gauges and
@@ -410,6 +416,12 @@ upward, and why a screen that will not fit 40 columns is redesigned rather than
 given a compact variant. Nothing in the host has ever supported below 40 either:
 the prose editor already clamps to 40, and the menu layout's only thresholds are
 72 and 120 for *wide* screens.
+
+**Lunar Lander is the stated exception: its floor is 80x24 (issue #1542).** A
+flight view with its instrument panel does not survive forty columns, so the
+door pauses the simulation below 80x24 and asks for a larger terminal rather
+than drawing a reduced view. The rule's substance holds: one layout, no narrow
+variant. Its gallery is drawn at 80x24 and 132x50.
 
 Door presentation is reviewed by looking at rendered screens. `scripts/
 door_gallery.py <door>` drives every screen in a subprocess at 80, 64 and 40

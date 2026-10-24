@@ -2611,6 +2611,22 @@ a habitual trailing Enter (``y`` plus Enter) without losing non-Enter input or
 letting the leftover line ending select the next prompt. Keep typed-name
 destructive confirmations separate and stronger.
 
+The input guards (the typed-word guard, #840, and the picker's Enter guard,
+#1546) are deadlines stored on the session, checked as each byte is read in
+`char_input._read_byte` and the web's `_read_item`. Nothing waits for them, so
+they never delay input. Door input reads through the same layer
+(`char_input.read_guarded_byte`, from `DoorTerminal.read_byte`): pushback
+first, then the guards, and nothing else, with no line editing, escapes or
+decoding. Without it, a byte a peek had pushed back sat through the whole door
+and surfaced at the prompt after it, and the Enter after a door-list choice
+was the door's first key. Door reads cannot peek, because the web's door mode
+has no timed read. So a guard that drops a CR leaves a short tail guard for
+the LF or NUL behind it. A door launch can outlast the Enter guard's window
+(a service start, a spawn, an rlogin handshake), so `run_door` restarts a
+still-armed guard (`refresh_enter_guard`) just before the relay's first read,
+and never arms one that isn't. Zmodem reads `Session.read_byte` directly and must
+stay off this path.
+
 Current `main` already field-colors every ordinary `pick_item` row, so caller
 and SysOp Who screens share selector/reference/name/metadata roles by
 construction. The generated default login banner already uses a truecolor

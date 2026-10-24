@@ -1352,6 +1352,7 @@ Availability depends on what your SysOp has registered. The bundled games:
 | **Retro Trivia** | Answer a short round of multiple-choice questions. |
 | **Voidrunner** | Build a persistent space-trading and exploration career. |
 | **War Dialer** | Develop a crew in a shared world of fictional BBS networks. |
+| **Lunar Lander** | Fly a lander down onto a lit pad, and chase the best landing on each mission. Needs a terminal of at least 80 by 24. |
 
 Each game opens with a short animated title screen. Any key skips it; once it
 has finished, it stays up until you press a key. Voidrunner and War Dialer
@@ -1488,8 +1489,8 @@ go back to the account's own the next time anyone signs in as the guest.
 - You can edit, withdraw or describe only what you wrote during this call;
   posts other guests wrote under the account can't be changed.
 - The bundled games play normally, but your progress lasts for the call only,
-  and your scores and callsign don't reach the Hall of Fame or the War Dialer
-  world.
+  and your scores and callsign don't reach the Hall of Fame, the War Dialer
+  world or Lunar Lander's best pilots.
 
 > [!TIP]
 > Register an account of your own to keep your settings.
