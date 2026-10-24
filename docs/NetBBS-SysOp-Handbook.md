@@ -2078,6 +2078,11 @@ recipient is gone for good, <kbd>D</kbd> **Delete** it there instead: the work
 item goes, the letter stays expired, and Link stops reporting it as needing
 attention.
 
+<kbd>C</kbd> **Cancel** stops a delivery that is still retrying. A cancelled
+delivery stays in the Outbox's list: <kbd>R</kbd> **Replay now** sends it
+again if you cancelled it by mistake, and <kbd>D</kbd> **Delete** forgets it,
+so it is never sent.
+
 #### Mail arriving here
 
 Mail arriving here is checked the way your own callers' mail is:
