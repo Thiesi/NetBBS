@@ -757,8 +757,110 @@ def test_every_expiry_reason_has_plain_words():
     from netbbs.link.mail import _BOUNCE_REASON_TEXT, _EXPIRED_TEXT
 
     codes = {value for name, value in vars(mail).items() if name.startswith("EXPIRED_") and isinstance(value, str)}
-    assert codes == set(_EXPIRED_TEXT) == {"own_policy", "no_answer"}
+    assert codes == set(_EXPIRED_TEXT) == {"own_policy", "no_answer", "sysop_cancelled"}
     assert not codes & set(_BOUNCE_REASON_TEXT)
+
+
+# -- a SysOp cancelling the delivery in the Outbox (issue #1535) ---------------
+
+
+def _sent_copy(db, sender):
+    from netbbs.mail import list_sent
+
+    return list_sent(db, sender)[0]
+
+
+def _cancel_delivery(db, message, sysop):
+    from netbbs.link.work_items import cancel_work_item, list_work_items
+
+    (item,) = list_work_items(db, kind=KIND_LINK_MAIL_DELIVERY)
+    assert item.reference_id == message.content_id
+    return cancel_work_item(db, item.id, cancelled_by=sysop)
+
+
+def test_cancelling_a_delivery_expires_its_letter_and_tells_the_sender(
+    db, alice, bob, node_identity, remote_node_identity
+):
+    message = _sent(db, alice, remote_node_identity, node_identity, subject="Lunch on Friday")
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+
+    _cancel_delivery(db, message, sysop)
+
+    copy = _sent_copy(db, alice)
+    assert (copy.link_delivery_status, copy.link_delivery_reason) == ("expired", "sysop_cancelled")
+    assert delivery_explanation(copy.link_delivery_status, copy.link_delivery_reason) == (
+        "Expired: the SysOp of this BBS stopped trying to send it. It was not delivered."
+    )
+    lines, _ids = pending_delivery_notices(db, alice)
+    assert lines == [
+        'Your mail "Lunch on Friday" to bob@Unnamed linked node was not delivered: '
+        "the SysOp of this BBS stopped trying to send it."
+    ]
+
+
+def test_replaying_a_cancelled_delivery_makes_its_letter_pending_again(
+    db, alice, node_identity, remote_node_identity
+):
+    from netbbs.link.work_items import replay_work_item
+
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    cancelled = _cancel_delivery(db, message, sysop)
+
+    replayed = replay_work_item(db, cancelled.id, replayed_by=sysop)
+
+    assert replayed.status == "pending"
+    copy = _sent_copy(db, alice)
+    assert (copy.link_delivery_status, copy.link_delivery_reason) == ("pending", None)
+    assert pending_delivery_notices(db, alice) == ([], [])
+
+
+def test_deleting_a_cancelled_delivery_leaves_its_letter_expired(db, alice, node_identity, remote_node_identity):
+    from netbbs.link.work_items import delete_work_item, list_work_items
+
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    cancelled = _cancel_delivery(db, message, sysop)
+
+    delete_work_item(db, cancelled.id, deleted_by=sysop)
+
+    assert list_work_items(db, kind=KIND_LINK_MAIL_DELIVERY) == []
+    copy = _sent_copy(db, alice)
+    assert (copy.link_delivery_status, copy.link_delivery_reason) == ("expired", "sysop_cancelled")
+
+
+def test_cancelling_never_overwrites_a_genuine_resolution(db, alice, node_identity, remote_node_identity):
+    """An accepted answer arrived while the item still looked unresolved:
+    the letter stays delivered, the same guard a dead-letter respects."""
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    ack = build_link_message_accepted(
+        signing_identity=remote_node_identity.signing_key,
+        recipient_node_fingerprint=remote_node_identity.fingerprint,
+        message_content_id=message.content_id,
+        created_at="2026-01-01T00:05:00Z",
+    )
+    apply_link_message_accepted(db, ack.to_dict())
+
+    _cancel_delivery(db, message, sysop)
+
+    assert _sent_copy(db, alice).link_delivery_status == "delivered"
+
+
+def test_cancelling_an_acknowledgement_leaves_the_letter_alone(db, alice, node_identity, remote_node_identity):
+    """Only a `link_mail_delivery` item has a letter of its own to expire."""
+    from netbbs.link.work_items import cancel_work_item, enqueue_work_item_without_commit
+
+    message = _sent(db, alice, remote_node_identity, node_identity)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    ack_item = enqueue_work_item_without_commit(
+        db, kind=KIND_LINK_MAIL_ACK, reference_id=message.content_id, target_fingerprint="fp",
+    )
+    db.connection.commit()
+
+    cancel_work_item(db, ack_item.id, cancelled_by=sysop)
+
+    assert _sent_copy(db, alice).link_delivery_status == "pending"
 
 
 def test_pending_delivery_notices_name_the_message_and_the_reason_until_acknowledged(

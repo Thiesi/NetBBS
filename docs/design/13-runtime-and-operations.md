@@ -398,9 +398,14 @@ two was a real risk in an earlier draft of this design — a work item is
 events exactly as today. The one integration point is one-directional: when
 a `link_mail_delivery` work item dead-letters or is cancelled (the payload
 could never even be successfully pushed, or a SysOp gave up on it
-manually), the caller — not `netbbs.link.work_items` itself, which stays
-completely kind-agnostic — sets `mail_messages.link_delivery_status =
-'expired'`, finally giving that reserved value a real producer. A
+manually), its letter's `mail_messages.link_delivery_status` becomes
+`'expired'`, finally giving that reserved value a real producer, and a
+replay puts it back to `'pending'`. The sync loop expires a dead-lettered
+letter, since only it knows why delivery failed; `cancel_work_item` and
+`replay_work_item` expire and un-expire in the same transaction as their
+own status change, so no Outbox screen can cancel a letter and leave its
+sender's Sent folder saying it is pending (issue #1535). A cancelled
+letter's reason says the SysOp stopped trying to send it. A
 successfully **pushed** work item changes nothing on `mail_messages`: it
 still waits for accepted/bounced exactly as it does today, except the sync
 loop stops wastefully re-pushing bytes that already arrived once — a real

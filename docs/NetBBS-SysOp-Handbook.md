@@ -2072,7 +2072,9 @@ or blocked, which sends yours nothing. So:
 - A relay keeps a letter well past those 14 days, so a recipient that is only
   slow to collect still answers in time.
 
-In the **Operations ▸ Outbox**, <kbd>R</kbd> **Replay now** on an expired
+In the **Operations ▸ Outbox**, <kbd>C</kbd> **Cancel** on a delivery still
+retrying gives up on it at once: its letter expires, and its sender is told
+you stopped trying to send it. <kbd>R</kbd> **Replay now** on an expired
 delivery puts it back to pending, with its full retry schedule again. When the
 recipient is gone for good, <kbd>D</kbd> **Delete** it there instead: the work
 item goes, the letter stays expired, and Link stops reporting it as needing

@@ -62,7 +62,7 @@ from netbbs.link.boards import LinkContext, link_board, queue_board_post_if_link
 from netbbs.link.channels import link_channel, queue_channel_message_if_linked
 from netbbs.link.file_transfer import apply_received_chunk, compute_transfer_id, get_transfer
 from netbbs.link.files import get_remote_file, link_file_area, list_remote_files, queue_file_descriptor_if_linked
-from netbbs.link.mail import compose_link_message, expire_link_message_delivery, unexpire_link_message_delivery
+from netbbs.link.mail import compose_link_message, expire_link_message_delivery
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import FileChunkRequest, LinkNode
 from netbbs.link.store import load_link_node
@@ -426,14 +426,9 @@ def test_link_mail_dead_lettered_delivery_recovers_via_replay_and_real_transport
         ).fetchone()
         assert expired_row["link_delivery_status"] == "expired"
 
-        # replay_work_item only resets the work item itself -- undoing
-        # the mail_messages 'expired' side effect back to 'pending' is
-        # the *caller's* job (see that function's own docstring), the
-        # same pairing netbbs.net.admin_flow's real Outbox replay
-        # handler performs (replay_work_item then unexpire_link_message_
-        # delivery, both against the same reference_id).
-        replayed = replay_work_item(dialer.db, work_item.id, replayed_by=alice)
-        unexpire_link_message_delivery(dialer.db, replayed.reference_id)
+        # replay_work_item undoes the mail_messages 'expired' side effect
+        # back to 'pending' itself, in the same transaction (issue #1535).
+        replay_work_item(dialer.db, work_item.id, replayed_by=alice)
         replayed = list_work_items(dialer.db, kind=KIND_LINK_MAIL_DELIVERY)[0]
         assert replayed.status == "pending"
         pending_row = dialer.db.connection.execute(
