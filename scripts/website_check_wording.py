@@ -35,6 +35,11 @@ PAGES = {
     "files.html": "https://www.netbbs.org/files.html",
     "doors.html": "https://www.netbbs.org/doors.html",
     "mrc.html": "https://www.netbbs.org/mrc.html",
+    "voidrunner.html": "https://www.netbbs.org/voidrunner.html",
+    "war-dialer.html": "https://www.netbbs.org/war-dialer.html",
+    "retro-trivia.html": "https://www.netbbs.org/retro-trivia.html",
+    "blacksite.html": "https://www.netbbs.org/blacksite.html",
+    "lunar-lander.html": "https://www.netbbs.org/lunar-lander.html",
 }
 # A scene player's data (`<script type="application/json">`) is terminal art, like a capture.
 PROTECTED = re.compile(r"<pre\b.*?</pre>|<style>.*?</style>|<script\b[^>]*>.*?</script>", re.S)
