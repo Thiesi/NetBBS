@@ -488,11 +488,11 @@ _VERIFIED_AGE_HELP = (
 
 
 _NAME_REQUIREMENT_HELP = (
-    "Gates posting/joining on identity: 'none' has no gate. 'verified' requires "
-    "attestation but shows nothing about it. 'verified_and_displayed' also shows the "
-    "caller's attested real name alongside their posts here. You verify a caller's "
-    "name from the main menu's [V]erify; staff can once you switch on Can verify "
-    "identity for them (Users)."
+    "Who may post, upload or join: 'verified' needs a verified real name but shows it "
+    "nowhere; 'verified_and_displayed' also shows that name with each post, file or "
+    "chat line, as it was when written. Reading a board or area is not gated. You verify a "
+    "caller's name from the main menu's [V]erify; staff can once you switch on Can "
+    "verify identity for them (Users)."
 )
 
 

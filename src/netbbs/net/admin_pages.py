@@ -34,6 +34,7 @@ from netbbs.rendering import (
     SUCCESS_COLOR,
     VALUE_COLOR,
     WARNING_COLOR,
+    MenuEntry,
     colored,
     menu_key,
     sanitize_text,
@@ -115,6 +116,14 @@ async def _close(lane: DatabaseLane, page: StaffPage, actor: User, outcome: str)
     return "The page is closed for everyone."
 
 
+#: A page's keys as its help describes them.
+_PAGE_HELP = {
+    "c": MenuEntry(label=menu_key("C", "hat"), detailed="Break into their session, as the Monitor does"),
+    "m": MenuEntry(label=menu_key("M", "ail reply"), detailed="Write to them, their reason quoted"),
+    "d": MenuEntry(label=menu_key("D", "one"), detailed="Close the page without contacting them"),
+}
+
+
 async def _page_detail(
     session: Session, lane: DatabaseLane, actor: User, page: StaffPage, node_controls: NodeControls | None,
 ) -> None:
@@ -157,10 +166,11 @@ async def _page_detail(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Page help",
             help_about=(
-                "Chat breaks into the caller's session while they are connected, as the Monitor does. "
-                "Mail reply writes to a member with their reason quoted. Done closes the page. Each "
-                "closes it for every SysOp and staff member."
+                "One caller's request for the SysOp: who, when, where they were and why, and whether "
+                "they are still online. A chat that opens, a sent reply or Done closes the page for every "
+                "SysOp and staff member."
             ),
+            help_entries=[_PAGE_HELP[key] for key, _label in actions if key in _PAGE_HELP],
         )
         message = None
         if choice == "b":
@@ -217,6 +227,10 @@ async def pages_screen(
             column_values_of=lambda row: [row[2], sanitize_text(row[0].place)],
             description_of=lambda row: sanitize_text(row[0].reason),
             title="Pages", own=True,
+            help_about=(
+                'Callers waiting for the SysOp, the longest-waiting first, with when they paged and where '
+                'they were. Pick one to chat, reply by mail or mark it done.'
+            ),
             empty_message="No page is waiting.",
             start_stable_id=start,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
