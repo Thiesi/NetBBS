@@ -262,7 +262,9 @@ def save_link(db: Database, link: FtnLink, *, commit: bool = True) -> FtnLink:
 
 def delete_link(db: Database, link_id: int, *, commit: bool = True) -> int:
     """Remove a link. What waits for it is dropped, each netmail's sender
-    told; returns how many messages and files were dropped."""
+    told; returns how many messages and files were dropped. Dropping them
+    commits on its own whatever `commit` says; `commit=False` leaves only
+    the link's own row to the caller's transaction."""
     from netbbs.ftn.outbound import drop_link_rows
 
     link = get_link(db, link_id)

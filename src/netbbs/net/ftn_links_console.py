@@ -139,10 +139,13 @@ async def ftn_links_screen(session: Session, lane: DatabaseLane, actor: User, ne
             return None
 
         def _persist(db: Database) -> int:
-            with db.connection:  # the delete and its entry together (issue #1515)
-                dropped = delete_link(db, link.id, commit=False)
+            # The entry is written first (issue #1515): dropping what waits
+            # for the link commits on its own, and must carry the entry
+            # with it; the link's row goes in the closing commit.
+            with db.connection:
                 record_action_without_commit(db, actor=actor, action="delete_ftn_link",
                                              detail=f"{network.name}: deleted {link.kind} {link.address.four_d}")
+                dropped = delete_link(db, link.id, commit=False)
             return dropped
 
         dropped = await lane.run(_persist)
