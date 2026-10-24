@@ -1152,10 +1152,69 @@ def arm_word_guard(source: object) -> None:
     setattr(source, _WORD_GUARD_ATTR, time.monotonic() + WORD_GUARD_SECONDS)
 
 
+# The Enter guard (issue #1546), the word guard's sibling for numbers: a
+# picker choice completes on its second digit, with no Enter, but callers
+# end the number with Enter out of habit. That Enter belongs to the choice.
+# Read by whatever comes next -- a door's first question, the next screen
+# -- it answers something nobody asked. So after a choice, the very next
+# input is dropped once if it is a line ending that arrives within this
+# window; anything else, or the window running out, disarms the guard and
+# is delivered unchanged. A habitual Enter comes 100-400 ms after the last
+# digit, a slow typist's within a second. An Enter meant for the next
+# screen comes after that screen has drawn and been read, which takes
+# longer. 50 ms (`_FOLLOWUP_BYTE_TIMEOUT`) only catches Enter sent in the
+# same packet as the digits.
+ENTER_GUARD_SECONDS = 1.0
+# The rest of a line ending whose CR has been taken: the LF of CR LF or the
+# NUL of CR NUL. A client sends them together; only a split packet
+# separates them, so this window is short.
+_LINE_END_TAIL_SECONDS = 0.25
+_ENTER_GUARD_ATTR = "_netbbs_enter_guard"
+
+
+def arm_enter_guard(source: object, *, tail_only: bool = False) -> None:
+    """Drop one line ending typed straight after a picker choice (see
+    `ENTER_GUARD_SECONDS`). `tail_only` is for a choice that already ended
+    with Enter: only the LF or NUL still to come of that same Enter is
+    dropped, not a second Enter. For any transport: it only stores a
+    deadline, and nothing ever waits for it."""
+    seconds = _LINE_END_TAIL_SECONDS if tail_only else ENTER_GUARD_SECONDS
+    setattr(source, _ENTER_GUARD_ATTR, (time.monotonic() + seconds, tail_only))
+
+
+def disarm_input_guards(source: object) -> None:
+    """A key that is no character (a web arrow key) ends both guards, as
+    any other key would."""
+    setattr(source, _WORD_GUARD_ATTR, None)
+    setattr(source, _ENTER_GUARD_ATTR, None)
+
+
+def _enter_guard_drops(source: object, char: str) -> bool:
+    guard = getattr(source, _ENTER_GUARD_ATTR, None)
+    if guard is None:
+        return False
+    until, tail_only = guard
+    # One shot: whatever arrives first decides, and the guard is spent.
+    setattr(source, _ENTER_GUARD_ATTR, None)
+    if time.monotonic() > until:
+        return False
+    if tail_only:
+        return char in ("\n", "\0")
+    if char == "\r":
+        # Its LF or NUL may still be on the way; it goes with it.
+        arm_enter_guard(source, tail_only=True)
+        return True
+    return char == "\n"
+
+
 def word_guard_drops(source: object, char: str) -> bool:
-    """Whether `char`, just read, is the tail of a guarded word -- dropped,
-    extending the guard -- or ends the guard and is delivered. Enter ends
-    the word and is dropped with it."""
+    """Whether `char`, just read, is input a guard drops: the tail of a
+    guarded word -- dropped, extending the guard -- or the Enter typed
+    after a picker choice (`arm_enter_guard`). Otherwise it ends the guard
+    and is delivered. Enter ends the word and is dropped with it, and so
+    is the LF or NUL behind its CR."""
+    if _enter_guard_drops(source, char):
+        return True
     until = getattr(source, _WORD_GUARD_ATTR, None)
     if until is None:
         return False
@@ -1165,6 +1224,8 @@ def word_guard_drops(source: object, char: str) -> bool:
         return False
     if char in ("\r", "\n"):
         setattr(source, _WORD_GUARD_ATTR, None)
+        if char == "\r":
+            arm_enter_guard(source, tail_only=True)
         return True
     if len(char) == 1 and (char.isalpha() or char in " -'" or ord(char) >= 0x80):
         setattr(source, _WORD_GUARD_ATTR, now + WORD_GUARD_SECONDS)
@@ -1179,18 +1240,38 @@ async def _read_byte(source: ByteSource) -> int | None:
         # "o" peeked by the Enter check behind the "n" (review on #871).
         pushed = _pop_pushed_back(source)
         byte = pushed if pushed is not None else await source.read_byte()
-        # Bytes of a non-ASCII letter (an umlaut) count as letters.
+        # Bytes of a non-ASCII letter (an umlaut) count as letters. A
+        # dropped CR leaves a short guard behind it for its LF or NUL, so
+        # nothing here needs to peek for them.
         if byte is None or not word_guard_drops(source, chr(byte)):
             return byte
-        if byte == _CR:
-            await _consume_optional_lf_or_nul(source)
+
+
+async def read_guarded_byte(source: ByteSource) -> int | None:
+    """The next raw byte, as a door reads it (issue #1546): a byte a peek
+    pushed back comes first, and the input guards apply -- the Enter typed
+    after a picker choice, the tail of a word typed after a one-key answer.
+    Nothing else: no line editing, no escape parsing, no decoding, and no
+    peeking, so it works on any transport's `read_byte`, the web's door
+    mode included. Zmodem keeps reading `Session.read_byte` directly."""
+    return await _read_byte(source)
 
 
 async def _read_byte_with_timeout(source: ByteSource, timeout: float) -> int | None:
     pushed = _pop_pushed_back(source)
     if pushed is not None:
         return pushed
-    return await source.read_byte_with_timeout(timeout)
+    # A peek honours the Enter guard too (issue #1546): a picker choice's
+    # Enter must not end the next screen's paced art or answer its
+    # bounded wait. The word guard stays with full reads, as it always has.
+    deadline = time.monotonic() + timeout
+    while True:
+        byte = await source.read_byte_with_timeout(timeout)
+        if byte is None or not _enter_guard_drops(source, chr(byte)):
+            return byte
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            return None
 
 
 async def read_line(
@@ -2027,8 +2108,9 @@ async def discard_buffered_enter(source: ByteSource) -> None:
     """
     peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
     if peek in (_CR, _LF):
-        # The Enter ends any word the answer was part of (issue #840).
-        setattr(source, _WORD_GUARD_ATTR, None)
+        # The Enter ends any word the answer was part of (issue #840), and
+        # it is the Enter a picker's guard was waiting for (issue #1546).
+        disarm_input_guards(source)
     if peek == _CR:
         await _consume_optional_lf_or_nul(source)
     elif peek is not None and peek != _LF:

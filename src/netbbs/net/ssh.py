@@ -447,6 +447,9 @@ class SSHSession(Session):
     def arm_word_guard(self) -> None:
         char_input.arm_word_guard(self)
 
+    def arm_enter_guard(self, *, tail_only: bool = False) -> None:
+        char_input.arm_enter_guard(self, tail_only=tail_only)
+
     async def close(self) -> None:
         self._process.exit(0)
 

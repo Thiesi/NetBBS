@@ -891,6 +891,12 @@ class Session(ABC):
         `netbbs.net.char_input.WORD_GUARD_SECONDS`). Interactive transports
         override it; the no-op default suits every other adapter."""
 
+    def arm_enter_guard(self, *, tail_only: bool = False) -> None:
+        """After a picker choice, drop one line ending typed straight after
+        it (issue #1546; see `netbbs.net.char_input.ENTER_GUARD_SECONDS`).
+        Interactive transports override it; the no-op default suits every
+        other adapter."""
+
     #: Whether this session has a live terminal that SysOp art can be
     #: paced for (issue #929, `netbbs.net.art_pacing`). Only the real
     #: transports set it; a test double or a session with no caller

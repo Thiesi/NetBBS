@@ -32,6 +32,7 @@ from netbbs.doors.profiles import preflight, terminal_too_small
 from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.timeutil import resolve_display_preferences
 from netbbs.net.unicode_style_preference import unicode_style_enabled
+from netbbs.net.char_input import read_guarded_byte
 from netbbs.net.session import SessionClosedError, physical_terminal_width
 from netbbs.net.session_activity import records_activity
 from netbbs.net.shared_account import signed_in_without_credential
@@ -511,11 +512,15 @@ class DoorTerminal:
         return door == ("cp437" if self.charset == CP437 else "utf-8")
 
     async def read_byte(self):
+        # Through the same input layer as every BBS prompt (issue #1546):
+        # a byte some peek pushed back reaches the door rather than the
+        # prompt after it, and the Enter typed after the door list's
+        # two-digit choice is not the door's first key. Still raw bytes.
         if self._input_passes_through():
-            return await self.session.read_byte()
+            return await read_guarded_byte(self.session)
         door = "cp437" if self.encoding == "cp437" else "utf-8"
         while not self.pending:
-            value = await self.session.read_byte()
+            value = await read_guarded_byte(self.session)
             if value is not None:
                 self.pending.extend(self.decoder.decode(bytes([value])).encode(door, errors="replace"))
         return self.pending.popleft()
