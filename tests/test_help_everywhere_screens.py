@@ -202,6 +202,17 @@ def test_help_taller_than_the_terminal_is_shown_a_page_at_a_time(unicode_style):
     assert session.leftover == []
 
 
+def test_plain_help_pages_count_rows_as_word_wrapping_draws_them():
+    from netbbs.net.help_overlay import show_help
+
+    # Nine 13-column words: 125 columns, but at 40 columns only two words fit
+    # a row, so each line takes five rows, not four.
+    line = " ".join(["abcdefghijklm"] * 9)
+    session = FakeSession([_DISMISS] * 10, width=40, height=24)
+    asyncio.run(show_help(session, "Wrapped help", [line] * 12))
+    assert all(rows <= 24 for rows in _rows_between_pauses(session))
+
+
 def test_esc_closes_a_paged_help_early():
     from netbbs.net.help_overlay import show_help
 

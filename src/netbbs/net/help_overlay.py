@@ -22,6 +22,7 @@ from __future__ import annotations
 from netbbs.rendering.menu import continue_prompt
 from netbbs.net.session import Session
 from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, visible_width, wrap_to_width
+from netbbs.rendering.reflow import wrap_terminal_text
 
 
 async def show_help(
@@ -57,10 +58,10 @@ async def show_help(
     height = getattr(session, "terminal_height", 24) or 24
     if not unicode_style:
         # Help taller than the terminal is shown a page at a time (issue
-        # #1514), so its top never scrolls away unread. A line the terminal
-        # soft-wraps counts as the rows it will take.
+        # #1514), so its top never scrolls away unread. A line counts as the
+        # rows `write_line` wraps it to, at word boundaries.
         term_width = max(1, getattr(session, "terminal_width", 80) or 80)
-        pages = _pages(lines, max(3, height - 2), lambda line: -(-max(1, visible_width(line)) // term_width))
+        pages = _pages(lines, max(3, height - 2), lambda line: wrap_terminal_text(line, term_width).count("\r\n") + 1)
         for number, page in enumerate(pages, 1):
             heading = title if len(pages) == 1 else f"{title} ({number}/{len(pages)})"
             await session.write_line(colored(heading, fg_color=header_color, bold=True))
