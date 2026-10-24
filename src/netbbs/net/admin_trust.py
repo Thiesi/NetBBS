@@ -207,11 +207,11 @@ def _audit_details_text(details: dict) -> str:
 
 
 _TRUST_MENU = (
-    MenuEntry(label=menu_key("S", "ubjects"), brief="Remote nodes and users, and their state"),
-    MenuEntry(label=menu_key("D", "omains"), brief="Groups of reporters that count as one"),
-    MenuEntry(label=menu_key("A", "nchors"), brief="Recorded anchor nodes (no effect yet)"),
-    MenuEntry(label=menu_key("R", "eporters"), brief="Whose signals and vouches count here"),
-    MenuEntry(label=menu_key("I", "dentity authorities"), brief="Whose verified ages and names count"),
+    MenuEntry(label=menu_key("S", "ubjects"), brief="Remote nodes, users, their state", detailed="Remote nodes and users, and their state"),
+    MenuEntry(label=menu_key("D", "omains"), brief="Reporter groups that count as one", detailed="Groups of reporters that count as one"),
+    MenuEntry(label=menu_key("A", "nchors"), brief="A recorded list; has no effect", detailed="Recorded anchor nodes (no effect yet)"),
+    MenuEntry(label=menu_key("R", "eporters"), brief="Whose signals and vouches count", detailed="Whose signals and vouches count here"),
+    MenuEntry(label=menu_key("I", "dentity authorities"), brief="Whose verified age or name counts", detailed="Whose verified ages and names count"),
     MenuEntry(label=menu_key("P", "ublished identity"), brief="Verified ages and names sent out"),
     MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for"),
     MenuEntry(label=menu_key("C", "onflict signals"), brief="Equivocation it reported"),
@@ -1092,8 +1092,8 @@ async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) ->
 
 _TRUST_DIMENSION_HELP = (
     MenuEntry(label=menu_key("I", "dentity integrity"), brief="Its keys, signatures, equivocation"),
-    MenuEntry(label=menu_key("R", "esource behavior"), brief="Floods, quotas, relay and storage use"),
-    MenuEntry(label=menu_key("C", "ontent conduct"), brief="Spam, harassment, moderation judgments"),
+    MenuEntry(label=menu_key("R", "esource behavior"), brief="Floods, quotas, relay, storage", detailed="Floods, quotas, relay and storage use"),
+    MenuEntry(label=menu_key("C", "ontent conduct"), brief="Spam, harassment, moderation", detailed="Spam, harassment, moderation judgments"),
     MenuEntry(label=menu_key("A", "ll three"), brief="The same state in all three"),
 )
 
@@ -1321,10 +1321,10 @@ async def _trust_list_choice(
 
 
 _TRUST_STATE_HELP = (
-    MenuEntry(label=menu_key("P", "robationary"), brief="Its new content held or sent for approval"),
-    MenuEntry(label=menu_key("E", "stablished"), brief="Accepted now, without waiting out probation"),
-    MenuEntry(label=menu_key("Q", "uarantined"), brief="New content refused, accepted content hidden"),
-    MenuEntry(label=menu_key("D", "enied"), brief="Blocked: as quarantine, recovery refused too"),
+    MenuEntry(label=menu_key("P", "robationary"), brief="New content held for approval", detailed="Its new content held or sent for approval"),
+    MenuEntry(label=menu_key("E", "stablished"), brief="Accepted now, no probation", detailed="Accepted now, without waiting out probation"),
+    MenuEntry(label=menu_key("Q", "uarantined"), brief="New refused, accepted hidden", detailed="New content refused, accepted content hidden"),
+    MenuEntry(label=menu_key("D", "enied"), brief="Quarantine, and no recovery", detailed="Blocked: as quarantine, recovery refused too"),
 )
 
 

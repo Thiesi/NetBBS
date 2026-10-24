@@ -2622,9 +2622,9 @@ async def _staff_permissions_screen(
 # says what each one lets the account do instead.
 _STAFF_PERMISSIONS_HELP = (
     MenuEntry(label=menu_key("A", "pprove accounts"), brief="Approve or decline pending signups"),
-    MenuEntry(label=menu_key("M", "anage accounts"), brief="Level to 254, disable, password, name, birthdate"),
-    MenuEntry(label=menu_key("G", "lobal moderation"), brief="Moderate every board, file area and channel"),
-    MenuEntry(label=menu_key("V", "erify identity"), brief="Record callers' verified age or real name"),
+    MenuEntry(label=menu_key("M", "anage accounts"), brief="Level, disable, password, name", detailed="Level to 254, disable, password, name, birthdate"),
+    MenuEntry(label=menu_key("G", "lobal moderation"), brief="Every board, file area, channel", detailed="Moderate every board, file area and channel"),
+    MenuEntry(label=menu_key("V", "erify identity"), brief="Record callers' age or real name", detailed="Record callers' verified age or real name"),
     MenuEntry(label=menu_key("C", "o-SysOp preset"), brief="All three permissions at once"),
     MenuEntry(label=menu_key("N", "one"), brief="Remove every staff permission"),
 )
