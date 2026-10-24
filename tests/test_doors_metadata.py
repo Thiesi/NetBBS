@@ -88,6 +88,31 @@ def test_the_node_timezone_is_published_as_an_iana_name(db, tmp_path, player):
     assert is_valid_timezone(info["timezone"])
 
 
+def test_the_node_display_format_is_published(db, tmp_path, player):
+    """Issue #1545: a door can show dates the way the node does."""
+    from netbbs.timeutil import set_display_format
+    set_display_format(db, "%Y-%m-%d %H:%M %Z")
+
+    info = _info(db, tmp_path)
+
+    assert info["datetime_format"] == "%Y-%m-%d %H:%M %Z"
+    assert info["door_api"] == 5, "an additive field within door_api 5, not a bump"
+
+
+def test_an_invalid_stored_display_format_falls_back_to_the_default(db, tmp_path, player):
+    """Like `timezone`: a bad stored value is never handed to a door."""
+    from netbbs.config import set_config
+    from netbbs.timeutil import (_DEFAULT_DISPLAY_FORMAT, _DEFAULT_DISPLAY_TIMEZONE,
+                                 DISPLAY_FORMAT_CONFIG_KEY, DISPLAY_TIMEZONE_CONFIG_KEY)
+    set_config(db, DISPLAY_FORMAT_CONFIG_KEY, "%Y %Q")
+    set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, "Not/AZone")
+
+    info = _info(db, tmp_path)
+
+    assert info["datetime_format"] == _DEFAULT_DISPLAY_FORMAT
+    assert info["timezone"] == _DEFAULT_DISPLAY_TIMEZONE
+
+
 def test_the_node_id_is_stable_opaque_and_survives_a_rename(db, tmp_path, player):
     first = _info(db, tmp_path)["node_id"]
     session = FakeSession()

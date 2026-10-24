@@ -125,6 +125,7 @@ def _write_door_info(db, workdir, session, player, war_dialer=False, session_lim
                      door_id=None, rehearsal=False, user_id=None):
     # `user_id` is a guest call's own door identity (issue #1075), never an
     # account's; otherwise the player's.
+    display_format, display_timezone = resolve_display_preferences(db)
     info = {"handle": player.username, "user_id": player.id if user_id is None else user_id,
             "terminal_width": physical_terminal_width(session), "terminal_height": session.terminal_height,
             "color_depth": (
@@ -138,7 +139,11 @@ def _write_door_info(db, workdir, session, player, war_dialer=False, session_lim
             "unicode_style": unicode_style_enabled(db, player),
             "transport": getattr(session, "transport_name", "unknown"),
             # Node-wide, not per-caller: NetBBS has one display timezone.
-            "timezone": resolve_display_preferences(db)[1],
+            "timezone": display_timezone,
+            # Issue #1545: the node's combined date/time strftime format,
+            # already validated, so a door can show dates the way the node
+            # does. Added within door_api 5: older nodes omit it.
+            "datetime_format": display_format,
             # `node_fingerprint` is deliberately absent: the node's own Link
             # identity is not in the database, so supplying it would mean
             # threading the identity (or its directory and passphrase) down
