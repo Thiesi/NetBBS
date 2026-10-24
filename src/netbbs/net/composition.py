@@ -27,13 +27,14 @@ from netbbs.net.char_input import (
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.draft_storage import delete_draft, load_draft, offer_draft_recovery, save_draft
 from netbbs.net.location import crumbs
-from netbbs.net.help_overlay import show_help
+from netbbs.net.help_overlay import menu_help_lines, show_help
 from netbbs.net.notices import announce, take_notices, write_notices
 from netbbs.net.resource_editor import editing_in_place, read_field_line, write_field_prompt
 from netbbs.net.session import Session, post_body_width, write_laid_out_row, write_prompt
 from netbbs.net.session_activity import records_activity
 from netbbs.digits import is_ascii_number
 from netbbs.quoting import is_attribution
+from netbbs.rendering.ansi import strip_ansi
 from netbbs.rendering.width import display_width
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.post_body import post_body_rows
@@ -688,34 +689,31 @@ async def _read_review_key(session: Session) -> tuple[EditorKey, bool]:
     return EditorKey(EditorKeyKind.CHAR, char=raw), True
 
 
-# Ctrl-H's own content for the arrow-selectable fields -- dogfood
-# feature request, this screen had no on-demand help at all until now.
-# Keyed the same as `field_order`'s own hotkeys, not a `FieldSpec` list,
-# since this screen has no draft of its own (see `review_composition`'s
-# own docstring for why it isn't an `edit_resource_draft` caller).
+# Ctrl-H's own content for the arrow-selectable fields, keyed the same as
+# `field_order`'s own hotkeys, not a `FieldSpec` list, since this screen has
+# no draft of its own (see `review_composition`'s docstring for why it isn't
+# an `edit_resource_draft` caller).
 _REVIEW_HELP: dict[str, tuple[str, str]] = {
     "t": ("To", "The recipient this will be sent to."),
-    "u": ("Subject", "A short one-line summary, shown wherever this ends up listed."),
+    "u": ("Subject", "One line, shown wherever this is listed."),
     "e": (
         "Body",
-        "The message text itself. Reopens whichever editor you're currently using (the "
-        "simple line-by-line editor, or the fullscreen editor if you've turned it on in "
-        "Your profile) with your draft intact.",
+        "Reopens your editor with the text intact: the line editor, or the fullscreen one "
+        "when Your profile turns it on.",
     ),
 }
 
 
 async def _show_review_help(
     session: Session, *, field_order: tuple[str, ...], selected: str | None,
+    entries: Sequence[MenuEntry] = (), commit_label: str = "",
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     unicode_style: bool = False,
 ) -> None:
-    """Same "narrow to the highlighted field if one is selected, else
-    list everything" shape `netbbs.net.resource_editor._show_field_help`
-    already establishes for `edit_resource_draft`'s own Ctrl-H.
-    `field_order` (the caller's own, already excluding "t" when there's
-    no recipient) decides what "everything" means here -- this function
-    has no independent opinion on which fields actually apply."""
+    """The highlighted field's help when one is selected, as
+    `netbbs.net.resource_editor._show_field_help` does; otherwise the
+    whole screen: what it is, then `entries` (the screen's own menu) with
+    Up/Down in front, which picks among `field_order`."""
     if selected is not None:
         label, help_text = _REVIEW_HELP[selected]
         await show_help(
@@ -723,13 +721,19 @@ async def _show_review_help(
             header_color=header_color, unicode_style=unicode_style,
         )
         return
-    lines: list[str] = []
-    for key in field_order:
-        label, help_text = _REVIEW_HELP[key]
-        lines.append(colored(label, fg_color=header_color, bold=True))
-        lines.append(f"  {help_text}")
-        lines.append("")
-    await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
+    fields = " or ".join(_REVIEW_HELP[key][0] for key in field_order)
+    about = (
+        f"Your draft, as it will go out. Nothing is sent or posted until you press {commit_label}. "
+        "Back throws the draft away, after asking."
+    )
+    keys = [
+        MenuEntry(label="Up/Down, Enter", brief=f"Highlight {fields} and change it"),
+        *entries,
+    ]
+    await show_help(
+        session, "Review help", menu_help_lines(keys, about=about, header_color=header_color),
+        header_color=header_color, unicode_style=unicode_style,
+    )
 
 
 async def review_composition(
@@ -838,13 +842,24 @@ async def review_composition(
     divider_color = 238 if truecolor else RULE_COLOR
     preview_rule = colored(rule_char * min(width, 78), fg_color=divider_color)
 
-    def _menu(paged: bool, packed: bool) -> list[str]:
+    def _options(paged: bool, *, for_help: bool = False) -> list[MenuEntry]:
+        """The screen's menu; `for_help` says what each field holds instead,
+        for the help screen."""
         options = [MenuEntry(label=menu_key(commit_key.upper(), commit_label), brief=commit_brief)]
         if recipient is not None:
-            options.append(MenuEntry(label=menu_key("T", "o"), brief="Change the recipient"))
+            options.append(MenuEntry(
+                label=menu_key("T", "o"),
+                brief="The recipient this will be sent to" if for_help else "Change the recipient",
+            ))
         options.extend([
-            MenuEntry(label=menu_key("U", "pdate subject"), brief="Change the subject"),
-            MenuEntry(label=menu_key("E", "dit body"), brief="Edit the body text"),
+            MenuEntry(
+                label=menu_key("U", "pdate subject"),
+                brief="One line, shown wherever this is listed" if for_help else "Change the subject",
+            ),
+            MenuEntry(
+                label=menu_key("E", "dit body"),
+                brief="Reopens your editor with the text intact" if for_help else "Edit the body text",
+            ),
         ])
         options.extend(MenuEntry(label=label, brief=brief) for _key, label, brief in extra_actions)
         if paged:
@@ -853,6 +868,10 @@ async def review_composition(
                 MenuEntry(label=menu_key(">", " Next"), brief="Show the next page of the body"),
             ])
         options.append(MenuEntry(label=menu_key("B", "ack"), brief="Leave without sending (asks first)"))
+        return options
+
+    def _menu(paged: bool, packed: bool) -> list[str]:
+        options = _options(paged)
         # A described menu takes the rows a long body needs: a body it does
         # not leave room for gets the packed bar instead, before any paging
         # (design doc §3.5's rule for a detail screen with a described menu).
@@ -999,7 +1018,8 @@ async def review_composition(
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_review_help(
                 session, field_order=field_order, selected=selected, header_color=header_color,
-                unicode_style=unicode_style,
+                unicode_style=unicode_style, entries=_options(paged, for_help=True),
+                commit_label=strip_ansi(menu_key(commit_key.upper(), commit_label)),
             )
             await draw()
             continue
@@ -1017,7 +1037,8 @@ async def review_composition(
                 # path `edit_resource_draft` itself handles.
                 await _show_review_help(
                 session, field_order=field_order, selected=selected, header_color=header_color,
-                unicode_style=unicode_style,
+                unicode_style=unicode_style, entries=_options(paged, for_help=True),
+                commit_label=strip_ansi(menu_key(commit_key.upper(), commit_label)),
             )
                 await draw()
                 continue

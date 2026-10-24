@@ -220,6 +220,14 @@ _MAX_PLAIN_POST_LINES = 200
 
 # The board list's table (issue #679): activity is fixed-width so it can be
 # scanned down the page; "about" is the flexible last column.
+# What the board list's columns say, for its help screen.
+_BOARD_LIST_HELP = (
+    "Each board says what is new for you: \"not visited yet\", \"caught up\", or how many "
+    "posts you have not opened. A name in [brackets] is a category holding more boards. "
+    "\"needs verification\" means the board asks for a verified name or age before you take part."
+)
+
+
 _BOARD_LIST_COLUMNS = [
     ListColumn("activity", len("not visited yet"), MUTED_COLOR),
     ListColumn("about", 30, MUTED_COLOR),
@@ -506,6 +514,7 @@ async def _browse_boards_in_category(
                 title=title,
                 own=True,
                 empty_message="No message boards are available to you yet.",
+                help_about=_BOARD_LIST_HELP,
                 on_sort=on_sort_flat,
                 sort_label=_sort_label,
                 redraw_in_place=redraw_in_place,
@@ -561,6 +570,7 @@ async def _browse_boards_in_category(
             title=title,
             own=True,
             empty_message="No message boards are available to you yet.",
+            help_about=_BOARD_LIST_HELP,
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
             collapsed=collapsed,
@@ -641,6 +651,26 @@ def _can_pin_post(db: Database, post: Post, user: User) -> bool:
         # A withdrawn post may be unpinned or un-kept, never pinned or kept.
         return False
     return has_permission(db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT)
+
+
+# What each key of the post reader does, for its help screen. One row each:
+# a moderator on a poll they started can see every one of them at once.
+_READ_POST_HELP = {
+    "r": "A reply on this board, for everyone to read",
+    "v": "Vote, or change your vote, until the poll closes",
+    "m": "A private letter to the author",
+    "g": "Download a file this post points at",
+    "h": "Earlier versions of this post, as they read then",
+    "w": "Replace your text with [withdrawn by author]",
+    "e": "Change the text; readers see the new version",
+    "t": "Remove the post for its readers; no undo",
+    "o": "Yes lists it at the top of the board",
+    "k": "Yes keeps it when the board's old posts expire",
+    "c": "End the voting now; no undo",
+    "d": "Show spoiler text decoded, on your screen only",
+    "n": "The next post on this board",
+    "p": "The post before this one",
+}
 
 
 def _toggle_post_flag(session: Session, db: Database, post: Post, user: User, *, pin: bool) -> None:
@@ -934,28 +964,25 @@ async def _read_list_key(session: Session) -> tuple[EditorKey, bool]:
 
 
 _LIST_HELP = [
-    "Up/Down      move the highlight",
-    "Enter, 01-99 read the highlighted post, or post number NN",
-    "             (or one digit and Enter)",
-    "< / >        older / newer posts (also PgUp/PgDn, Left/Right)",
-    "R            the newest page",
-    "P            write a new post (when you may post here)",
-    "A            draw a post in the ANSI art editor (boards with color)",
-    "N            a new poll: a question, answers, a closing date",
-    "D            resume or discard a saved draft",
-    "M            count every post on this board as read",
-    "F            follow this board, or stop: New scan lists it first",
-    "Ctrl-L       redraw the list",
-    "B or Esc     back to the list of boards (Esc first clears",
-    "             a highlighted row)",
+    "One row per post: subject, author and date. \"new\" is a post you have not",
+    "opened yet, \"pin\" one a moderator keeps at the top, \"held\" your own post",
+    "or edit waiting for a moderator; nobody else sees it until it is approved.",
     "",
-    "Pinned posts are listed first, marked \"pin\". A moderator puts",
-    "a post on top, and keeps it from expiring, while reading it.",
+    "Up/Down, Enter  read the highlighted post, or type its number (05)",
+    "< >             older / newer posts (PgUp/PgDn, Left/Right too)",
+    "R               back to the newest posts",
+    "P               write a post everyone who reads this board sees",
+    "A               draw a post in the ANSI art editor",
+    "N               start a poll: a question, its answers, a closing date",
+    "D               pick up or delete the draft you saved here",
+    "Q               approve or reject posts held for a moderator",
+    "M               count every post on this board as read",
+    "F               follow this board: New scan lists it first",
+    "Ctrl-L          draw the list again",
+    "B or Esc        back (Esc first clears a highlighted row)",
     "",
-    "Reading a post: Reply, Mail author (a private reply), Edit,",
-    "Withdraw, Take down, Next and Previous post live there,",
-    "and PgUp/PgDn page a long post. A post counts as read once you",
-    "open it; the list marks the ones you have not opened as new.",
+    "A key is offered only where it works. Open a post to reply, vote, mail",
+    "its author or download the files it points at.",
 ]
 
 
@@ -1507,10 +1534,8 @@ async def _board_screen(
                 preamble=byline,
                 message="\r\n".join(take_notices(session)) or None,
                 help_title="Reading a post",
-                help_about=(
-                    "One post at a time. Next and Previous step to the posts around it, "
-                    "across pages of the board."
-                ),
+                help_about="One post, with its files and poll. Next and Previous step through the board.",
+                help_entries=[MenuEntry(label=label, brief=_READ_POST_HELP.get(key, "")) for key, label in actions],
             )
             if key == "b":
                 return index
@@ -3177,6 +3202,10 @@ async def _show_history(
             description_of=lambda revision: labels[id(revision)],
             title=f"Versions of {sanitize_text(post.subject)}",
             empty_message="No versions to show.",
+            help_about=(
+                "Every version of this post, newest first, by when it was written: the original, "
+                "each edit (marked when a moderator made it), and a withdrawal. Only moderators see this list."
+            ),
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
             collapsed=collapsed,

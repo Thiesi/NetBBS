@@ -169,7 +169,7 @@ async def prompt_sort_change(
         if choice == HELP_KEY:
             await show_menu_help(
                 session, "Remember sort help", scope_help,
-                about="Where to keep the order you just picked. A narrower choice wins over a wider one.",
+                about="Where to keep the order you just picked; it changes only your lists. A narrower choice wins over a wider one.",
             )
             await session.write_line("")
             await session.write_line(f"Remember this as: {'  '.join(scope_nav)}")

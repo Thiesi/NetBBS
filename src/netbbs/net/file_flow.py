@@ -431,6 +431,7 @@ async def _browse_areas_in_category(
                 title=title,
                 own=True,
                 empty_message="No file areas are available to you yet.",
+                help_about=_AREA_LIST_HELP,
                 on_sort=on_sort_flat,
                 sort_label=_sort_label,
                 description_level=description_level,
@@ -487,6 +488,7 @@ async def _browse_areas_in_category(
             title=title,
             own=True,
             empty_message="No file areas are available to you yet.",
+            help_about=_AREA_LIST_HELP,
             description_level=description_level,
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
@@ -516,6 +518,13 @@ async def _browse_areas_in_category(
                 )
         else:
             await _show_area(session, lane, selected, user, link_context=link_context, transfers=transfers)
+
+
+# What the file area list shows, for its help screen.
+_AREA_LIST_HELP = (
+    "Pick a file area to see its files. A name in [brackets] is a category holding more areas. "
+    "\"needs verification\" means the area asks for a verified name or age before you take part."
+)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -1342,8 +1351,9 @@ async def _area_screen(
                 await show_menu_help(
                     session, "File area help", [*options, *hints],
                     about=(
-                        "The files in this area, newest first. Arrow keys move a highlight; "
-                        "Enter or a file's number downloads it."
+                        "The files in this area, any pinned on top, then oldest to newest: name, size, "
+                        "date, uploader, then the description. Enter or a file's number downloads it. "
+                        "In a moderated area an upload waits for approval before others see it."
                     ),
                     header_color=await lane.run(effective_header_color_256), unicode_style=unicode_style,
                 )
@@ -1829,6 +1839,11 @@ async def _remote_catalogue(
         title=f"Remote catalogue: {sanitize_text(area.name)}",
         own=True,
         empty_message="No remote catalogue entries.",
+        help_about=(
+            "Files other nodes offer in this Linked area. [LOCAL] is already in the area's list. "
+            "Picking a [REMOTE] one asks, then fetches it here for everyone in the area. "
+            "[IDENTITY CHANGED]: that node's key is not the one this node knew."
+        ),
         description_level=await lane.run(menu_description_level, user),
         redraw_in_place=redraw_in_place,
         unicode_style=unicode_style,
@@ -2893,7 +2908,7 @@ async def _transfer_link_screen(
                 session, "Browser transfer help", options,
                 about=(
                     "A link to open in a web browser, for a terminal that cannot send or receive "
-                    "files itself. Each link works once."
+                    "files itself. Each link works once, for a few minutes."
                 ),
                 header_color=header_color, unicode_style=unicode_style,
             )
