@@ -187,8 +187,8 @@ async def ftn_links_screen(session: Session, lane: DatabaseLane, actor: User, ne
             live_label=lambda: status or "Points and downlinks this BBS serves on this network",
             help_about=("This network's points and downlinks: kind, whether it calls in or is polled, status, "
                         "its areas, last call and what waits for it. Picking one edits it. Only a call that "
-                        "proves a link's session password gets its mail, and links call the answer port, so "
-                        "the network must answer calls."),
+                        "proves a link's session password gets its mail. Links that call in use the answer "
+                        "port, so for them the network must answer calls."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
