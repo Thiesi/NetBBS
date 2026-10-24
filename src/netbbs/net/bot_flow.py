@@ -128,6 +128,10 @@ async def bot_menu(session, lane, actor):
             columns=_BOT_COLUMNS,
             column_values_of=lambda b: [_state_cell(b, statuses), str(len(b.channels)), _error_cell(b, statuses)],
             description_of=description, title="Chat bots", own=True,
+            help_about=(
+                'Every bot: its state, channels and last error. A saved change reaches a bot within a '
+                'second; a budget preset applies from the next request.'
+            ),
             empty_message="No bots installed. Create an instance of Baud to get started.",
             refresh=refresh, on_create=create, live_keys={"s": stop_all, "m": model_settings, "a": budget_preset, "u": model_usage}, item_keys={"k": stop_one, "d": delete_one, "t": try_one},
             live_nav=(MenuEntry(label=menu_key("K", "ill selected"), brief="Stop this bot persistently"),
@@ -135,7 +139,7 @@ async def bot_menu(session, lane, actor):
                       MenuEntry(label=menu_key("T", "ry selected"), brief="Run it on a scratch node"),
                       MenuEntry(label=menu_key("S", "top all"), brief="Stop every bot persistently"),
                       MenuEntry(label=menu_key("M", "odel settings"), brief="Provider, privacy and budgets"),
-                      MenuEntry(label=menu_key("A", "pply budget preset"), brief="Frugal, Normal or Generous"),
+                      MenuEntry(label=menu_key("A", "pply budget preset"), brief="Limits now; prices, provider kept"),
                       MenuEntry(label=menu_key("U", "sage"), brief="Spending, callers and limits")),
             preamble="Bots read addressed messages only, unless you grant more. Changes apply within a second.",
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,

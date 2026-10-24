@@ -174,8 +174,11 @@ async def _area_menu(
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "File areas help", _AREA_MENU,
-                about="Add file areas and change or remove existing ones. GC storage frees disk space "
-                      "that deleted files still hold.",
+                about="File areas on this node, carried Linked areas included. List opens an area on its "
+                      "own screen: its fields change who may browse and upload, moderation and retention, "
+                      "in force once saved; its actions review pending uploads, recover expired files, "
+                      "reorder, Link or remove it. GC storage frees disk space that deleted files still "
+                      "hold.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_area_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -248,8 +251,9 @@ async def _gc_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="GC storage help",
             help_about=(
-                "Files on disk that no file entry refers to any more. Reclaiming deletes them to free the "
-                "space."
+                "A dry run: stored files on disk that no file entry refers to any more, such as the bytes "
+                "of deleted files, and the space they hold. Ones written in the last hour are skipped. "
+                "Reclaim now deletes the counted files for good; no file entry changes."
             ),
         )
         if choice == "b":
@@ -305,9 +309,9 @@ def _area_field_specs(
             prompt=_optional_int_field("min_read_level", "Minimum read level"),
             brief="Level required to browse it",
             help=(
-                "The permission level a caller needs to browse/download from this area. "
-                "'none' inherits the parent Community's own default read level if it has "
-                "one set, or falls back to no gate."
+                "The level a caller needs to see, browse and download from this area. 'none' uses its "
+                "Community's default read level, or no gate outside one. A Read only or Read and post "
+                "grant (Grant moderator) lets its holder past it."
             ),
             section="Access",
         ),
@@ -317,9 +321,9 @@ def _area_field_specs(
             prompt=_optional_int_field("min_write_level", "Minimum write level"),
             brief="Level required to upload",
             help=(
-                "The permission level a caller needs to upload here. 'none' inherits the "
-                "parent Community's own default write level if it has one set, or falls "
-                "back to no gate."
+                "The level a caller needs to upload here. 'none' uses its Community's default write "
+                "level, or no gate outside one. A Read and post grant (Grant moderator) lets its "
+                "holder past it."
             ),
             section="Access",
         ),
@@ -329,9 +333,9 @@ def _area_field_specs(
             prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
             help=(
-                "The minimum caller age required to browse or upload here, checked against "
-                "a caller's own birthdate (Your profile › Name & details) even if they've "
-                "chosen not to show it publicly. 'none' means no age gate."
+                "The minimum age to see, browse or upload here, checked against a caller's birthdate "
+                "even if they keep it private. Too young: the area is not listed for them. 'none' uses "
+                "its Community's default, or no gate outside one."
             ) + _VERIFIED_AGE_HELP,
             section="Access",
         ),
@@ -341,7 +345,7 @@ def _area_field_specs(
             render=lambda d: _name_requirement_label(d.get("name_requirement")),
             prompt=_name_requirement_field(),
             step=_name_requirement_step(),
-            help=_NAME_REQUIREMENT_HELP,
+            help=_NAME_REQUIREMENT_HELP + " 'none' uses its Community's rule.",
             brief="How uploaders must be identified",
             section="Access",
         ),
@@ -354,9 +358,9 @@ def _area_field_specs(
             ),
             brief="Parent community, if any",
             help=(
-                "The Community this file area belongs to, if any -- an area inside a "
-                "Community can inherit its default read/write/age/name-requirement settings "
-                "instead of each needing its own. 'none' keeps it outside every Community."
+                "The Community it is listed under in Topics. Its fields left at 'none' then take that "
+                "Community's defaults; moving it to another Community changes them at once. 'none': "
+                "outside every Community, still in the main file-area list."
             ),
             section="Organization",
         ),
@@ -371,8 +375,8 @@ def _area_field_specs(
             ),
             brief="Where it's grouped in listings",
             help=(
-                "Where this file area is grouped when browsing listings -- purely "
-                "organizational, has no effect on who can browse or upload."
+                "The folder it is listed in when callers browse file areas (Content > Categories). Has "
+                "no effect on who can browse or upload. 'none': listed at the top level."
             ),
             section="Organization",
         ),
@@ -389,7 +393,10 @@ def _area_field_specs(
             render=lambda d: "yes" if d.get("moderated") else "no",
             prompt=bool_field("moderated"), step=bool_step("moderated"),
             brief="New uploads need approval first",
-            help="New uploads need a moderator or SysOp to approve them before anyone else can download them.",
+            help=(
+                "New uploads wait under Pending files until a moderator or SysOp approves them. Turning "
+                "it off releases nothing: uploads already waiting still need approving."
+            ),
             section="Moderation",
         ),
         FieldSpec(
@@ -399,9 +406,11 @@ def _area_field_specs(
             prompt=_optional_int_field("max_file_age_days", "Max file age in days"),
             brief="Expire files after N days",
             help=(
-                "Files older than this expire: callers no longer see them, and they are deleted once "
-                "the node's grace period (Settings, Limits & retention) has passed too. 'unlimited' "
-                "keeps every file indefinitely."
+                "Files older than this expire, files already here included, the next time the area is "
+                "opened: callers no longer see them, and their bytes are deleted for good once the "
+                "node's grace period (Settings, Limits & retention) has passed too. Until then Expired "
+                "files can download one. Raising it later does not bring a file back. 'unlimited' keeps "
+                "every file."
             ),
             section="Moderation",
         ),
@@ -653,6 +662,12 @@ async def _list_areas_screen(
             columns=_AREA_COLUMNS,
             column_values_of=lambda a: _area_columns(a, effective[a.id], counts[a.id], a.area_id in to_review),
             title="File areas", own=True,
+            help_about=(
+                "Every file area in callers' order: the read and write level in force, inherited ones "
+                'included; moderated, pinned, or carried and not yet looked at (to review); files, +N '
+                'waiting for approval. Gates: 18+ an age, name a verified name, name+ one shown. Pick one '
+                'to open its screen.'
+            ),
             empty_message="No file areas yet.",
             start_stable_id=reopen_at,
             linked_of=lambda a, linked=linked_areas: a.id in linked,  # issue #1104
@@ -698,7 +713,11 @@ def _link_area_field_specs() -> list[FieldSpec]:
             render=lambda d: _optional_int_label(d.get("default_min_read_level")),
             prompt=_optional_int_field("default_min_read_level", "Recommended minimum read level"),
             brief="Sent to peers as a default",
-            help="Recommends a minimum read level to peers that don't set their own. 'none' sends no recommendation.",
+            help=(
+                "The read level a node that starts carrying this area gives its copy; its SysOp can "
+                "change it there. Signed into the area's Link record on Save, so it cannot be changed "
+                "afterwards. 'none': no recommendation, so their copy starts open to every level."
+            ),
         ),
         FieldSpec(
             key="default_min_write_level",
@@ -706,7 +725,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             render=lambda d: _optional_int_label(d.get("default_min_write_level")),
             prompt=_optional_int_field("default_min_write_level", "Recommended minimum write level"),
             brief="Sent to peers as a default",
-            help="Recommends a minimum write level to peers that don't set their own. 'none' sends no recommendation.",
+            help="The upload level a carrying node's copy starts with. Fixed on Save. 'none': open to every level.",
         ),
         FieldSpec(
             key="default_moderated",
@@ -715,7 +734,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             prompt=choice_field("default_moderated", _LINK_RECOMMENDATION_VALUES),
             step=choice_step("default_moderated", _LINK_RECOMMENDATION_VALUES),
             brief="Sent to peers as a default",
-            help="Recommends whether uploads should need approval, to peers that don't set their own.",
+            help="Whether a carrying node's copy starts moderated. Fixed on Save. No recommendation: unmoderated.",
         ),
         FieldSpec(
             key="default_max_file_age_days",
@@ -723,7 +742,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             render=lambda d: _optional_int_label(d.get("default_max_file_age_days"), none_word="no recommendation"),
             prompt=_optional_int_field("default_max_file_age_days", "Recommended max file age in days"),
             brief="Sent to peers as a default",
-            help="Recommends auto-purging files older than N days, to peers that don't set their own.",
+            help="The max file age a carrying node's copy starts with. Fixed on Save. No recommendation: keep every file.",
         ),
         FieldSpec(
             key="default_min_age",
@@ -731,7 +750,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             render=lambda d: _optional_int_label(d.get("default_min_age")),
             prompt=_min_age_field("default_min_age"),
             brief="Sent to peers as a default",
-            help="Recommends a minimum caller age to peers that don't set their own.",
+            help="The minimum age a carrying node's copy starts with. Fixed on Save. 'none': no age gate.",
         ),
         FieldSpec(
             key="default_name_requirement",
@@ -740,7 +759,7 @@ def _link_area_field_specs() -> list[FieldSpec]:
             prompt=_name_requirement_field("default_name_requirement"),
             step=_name_requirement_step("default_name_requirement"),
             brief="Sent to peers as a default",
-            help=_NAME_REQUIREMENT_HELP + " Recommended to peers that don't set their own.",
+            help="The name requirement a carrying node's copy starts with. Fixed on Save. " + _NAME_REQUIREMENT_HELP,
         ),
     ]
 
@@ -856,6 +875,10 @@ async def _expired_files_screen(
             stable_id_of=lambda f: f.id,
             description_of=lambda f: f"by {f.uploader_label}",
             title=f"Expired files in {area.name!r}", own=True,
+            help_about=(
+                "Files past this area's max file age, oldest first, which is the order they are purged "
+                'in. Pick one to see its purge date and download a copy before then.'
+            ),
             empty_message="No expired files.",
             redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
             unicode_style=await lane.run(unicode_style_enabled, actor),
@@ -931,8 +954,9 @@ async def _expired_file_screen(
                 session, "Expired file help",
                 [MenuEntry(label=menu_key("D", "ownload"), brief="Recover it before it is purged")]
                 if can_download else [],
-                about="A file that expired: callers can no longer reach it, and its bytes are deleted "
-                      "on the purge date. To put it back in the area, upload it again.",
+                about="A file past its area's max file age: callers can no longer reach it, and its "
+                      "bytes are deleted on the purge date. Download saves a copy to your computer; it "
+                      "does not restore the file. To put it back in the area, upload it again.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw()

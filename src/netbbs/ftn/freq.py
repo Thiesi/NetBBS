@@ -213,7 +213,7 @@ def is_area_offered(db: Database, area: FileArea) -> bool:
     return row is not None
 
 
-def set_area_offered(db: Database, area: FileArea, offered: bool) -> None:
+def set_area_offered(db: Database, area: FileArea, offered: bool, *, commit: bool = True) -> None:
     """Offer `area` to file requests, or stop; raises `FreqError` when it
     can't be offered."""
     if offered:
@@ -224,7 +224,8 @@ def set_area_offered(db: Database, area: FileArea, offered: bool) -> None:
                               (area.area_id, utc_now_iso()))
     else:
         db.connection.execute("DELETE FROM ftn_freq_areas WHERE area_id = ?", (area.area_id,))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def servable_areas(db: Database, network: FtnNetwork) -> list[FileArea]:
@@ -476,9 +477,12 @@ def request_target_problem(db: Database, network: FtnNetwork, node: FtnAddress) 
     return None
 
 
-def queue_request(db: Database, network: FtnNetwork, node: FtnAddress, lines: list[RequestLine]) -> FreqRecord:
+def queue_request(db: Database, network: FtnNetwork, node: FtnAddress, lines: list[RequestLine], *,
+                  audit=None) -> FreqRecord:
     """Write the `.REQ` and queue it, crash, for `node`; returns the record.
-    Raises `FreqError`, or `netbbs.ftn.queue.FtnQueueFullError`."""
+    Raises `FreqError`, or `netbbs.ftn.queue.FtnQueueFullError`. `audit`,
+    when given, is called with `(db, record)` before the commit, so its
+    entry is written with the request or not at all (issue #1515)."""
     from netbbs.ftn.outbound import CRASH, KILL, queue_file_without_commit, spool_dir
 
     problem = request_target_problem(db, network, node)
@@ -506,14 +510,17 @@ def queue_request(db: Database, network: FtnNetwork, node: FtnAddress, lines: li
             db, network.id, destination=node, route="uplink" if uplink else "direct", flavour=CRASH,
             send_name=send_name, size_bytes=len(content), reference_kind=_REQUEST_REFERENCE,
             reference_id=str(record_id), path=path, after_sent=KILL)
+        record = _record_from_row(
+            db.connection.execute("SELECT * FROM ftn_freq_requests WHERE id = ?", (record_id,)).fetchone())
+        if audit is not None:
+            audit(db, record)
         db.connection.commit()
     except BaseException:
         db.connection.rollback()
         path.unlink(missing_ok=True)
         raise
     _logger.info("FTN %s: file request to %s queued: %s", network.name, node.four_d, _shown_names(lines))
-    row = db.connection.execute("SELECT * FROM ftn_freq_requests WHERE id = ?", (record_id,)).fetchone()
-    return _record_from_row(row)
+    return record
 
 
 def _sweep_spool(db: Database, folder: Path) -> None:
