@@ -180,6 +180,55 @@ def test_show_menu_help_starts_on_a_fresh_line_and_waits_for_a_key():
     assert session.leftover == []
 
 
+def _rows_between_pauses(session) -> list[int]:
+    """How many terminal rows each help page took, prompt included."""
+    pages = re.split(r"\[Enter\][^\r\n]*", strip_ansi("".join(session.written)))[:-1]
+    # Each page's rows, from the end of the previous prompt line, plus its own prompt.
+    return [page.removeprefix("\r\n").count("\r\n") + 1 for page in pages]
+
+
+@pytest.mark.parametrize("unicode_style", [True, False])
+def test_help_taller_than_the_terminal_is_shown_a_page_at_a_time(unicode_style):
+    from netbbs.net.help_overlay import show_help
+
+    lines = [f"Line {n}" for n in range(1, 41)]
+    session = FakeSession([_DISMISS, _DISMISS], height=24)
+    asyncio.run(show_help(session, "Long help", lines, unicode_style=unicode_style))
+    text = session.text()
+    assert all(f"Line {n}" in text for n in range(1, 41))
+    assert "Long help (1/2)" in text and "Long help (2/2)" in text
+    assert "Next page, Esc closes" in text
+    assert all(rows <= 24 for rows in _rows_between_pauses(session))
+    assert session.leftover == []
+
+
+def test_esc_closes_a_paged_help_early():
+    from netbbs.net.help_overlay import show_help
+
+    session = FakeSession(["\x1b", "extra"], height=24)
+    asyncio.run(show_help(session, "Long help", [f"Line {n}" for n in range(1, 41)], unicode_style=True))
+    assert "Long help (2/2)" not in session.text()
+    assert session.leftover == ["extra"]
+
+
+def test_help_that_fits_is_not_paged():
+    from netbbs.net.help_overlay import show_help
+
+    session = FakeSession([_DISMISS], height=24)
+    asyncio.run(show_help(session, "Short help", [f"Line {n}" for n in range(1, 20)], unicode_style=True))
+    text = session.text()
+    assert "Short help" in text and "(1/" not in text and "Next page" not in text
+
+
+def test_a_page_break_keeps_a_heading_with_the_rows_under_it():
+    from netbbs.net.help_overlay import _pages
+
+    rows = [f"row {n}" for n in range(18)] + ["", "Keys", "  a  first", "  b  second"]
+    pages = _pages(rows, 20, lambda row: 1)
+    assert pages[0][-1] == "row 17"
+    assert pages[1][0] == "Keys"
+
+
 def _detail(session, **kwargs):
     kwargs.setdefault("title", "NetBBS / Status")
     kwargs.setdefault("sections", [Section("Facts", [Field("Fact", "value")])])
