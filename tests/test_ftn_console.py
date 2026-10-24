@@ -73,9 +73,9 @@ def test_settings_lists_ftn_networks(db, lane, sysop):
 
 
 def test_a_new_network_starts_as_fsxnet_and_needs_our_address(db, lane, sysop):
-    # s: Settings, e: FTN networks, c: create; save at once is refused (no
+    # s: Settings, e: FTN networks, c: create, 01: fsxNet; save at once is refused (no
     # address); 04: our address; s: save; then back out.
-    session = FakeSession(["s", "e", "c", "s", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
+    session = FakeSession(["s", "e", "c", "0", "1", "s", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     text = _visible(_written_text(session))
     assert "starts as fsxNet's main hub" in text
@@ -201,7 +201,7 @@ def test_the_cli_import_is_attributed_to_the_sysop_named_with_as(db, sysop, tmp_
 def test_network_save_audits_the_node_wide_listener_keys(db, lane, sysop):
     """Issue #1505: the entry names the answer port and the other node-wide
     listener keys the save writes, never a password."""
-    session = FakeSession(["s", "e", "c", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
+    session = FakeSession(["s", "e", "c", "0", "1", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop))
     (entry,) = [a for a in list_recent_actions(db, limit=10) if a.action == "set_ftn_network"]
     for key in ("ftn_listen_port=24554", "ftn_listen_host=", "ftn_tls_port=(none)", "ftn_tls_cert=(none)",
@@ -224,7 +224,7 @@ def test_network_save_writes_the_row_keys_and_entry_together_or_not_at_all(db, l
         raise RuntimeError("audit refused")
 
     monkeypatch.setattr(ftn_console, "record_action_without_commit", refuse)
-    session = FakeSession(["s", "e", "c", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
+    session = FakeSession(["s", "e", "c", "0", "1", "0", "4", "21:1/199", "s", "b", "b", "b", "b"])
     with pytest.raises(RuntimeError, match="audit refused"):
         asyncio.run(admin_menu(session, lane, sysop))
     assert list_networks(db) == []

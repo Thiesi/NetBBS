@@ -2923,9 +2923,12 @@ In this chapter: [Join a network](#join-a-network) ·
    gives you an address such as `21:1/199`, a hub, and one password for both
    BinkP and AreaFix.
 2. Under **Settings ▸ Echomail & netmail (FTN)**, press
-   <kbd>C</kbd> **Create**.
-   - A new network starts as fsxNet's main hub. Enter **Our address** and the
-     passwords, then set **Enabled**.
+   <kbd>C</kbd> **Create**, and pick the network to start from by its number
+   (see [Network templates](#network-templates) below).
+   - The template fills the new draft only; nothing is stored before
+     <kbd>S</kbd> **Save**, and every value stays editable.
+   - Enter **Our address** and the passwords, and whatever the template
+     left empty, then set **Enabled**.
    - **Answer calls** lets the hub, and other nodes, call this BBS on the
      **Answer port** (24554 by default), which must be reachable from the
      internet.
@@ -2939,6 +2942,29 @@ In this chapter: [Join a network](#join-a-network) ·
    enter `+FSX_GEN`, or `%LIST` to see what the hub carries. The hub's answer
    arrives in your Mail. To join many echoes at once, import the hub's echo
    list instead (see [Join echoes from the hub's list](#join-echoes-from-the-hubs-list)).
+
+#### Network templates
+
+<kbd>C</kbd> **Create** first asks which network the new one starts from.
+Each template fills only the network's public facts, taken from its own
+infopack; a value the infopack does not confirm is left empty.
+
+| Template | Fills | You still enter |
+| --- | --- | --- |
+| fsxNet | Name `fsxNet`, domain `fsxnet`, uplink `21:1/100` at `net1.fsxnet.nz` | Our address, the passwords; the nodelist echo and list name if you want lists imported |
+| nixNet | Name `nixNet`, domain `nixnet`, nodelist echo `NIX_LIST`, robots AreaFix and FileFix | Our address (zone 86), your regional hub's address and host, the passwords, and **List name** from the nixNet infopack |
+| FidoNet | Name `FidoNet`, domain `fidonet`, nodelist names `NODELIST` and `NODEDIFF` | Our address and the uplink your Net coordinator assigns, its host, the passwords, and **Nodelist echo** if your zone sends the list in one |
+| Blank | Nothing | Every value, from the network's infopack |
+
+- nixNet and FidoNet fill no uplink: nixNet assigns each node a regional
+  hub, and FidoNet's Net coordinators assign uplinks.
+- No template fills a password, the TLS pin, a certificate or key path,
+  **Our address**, or the answer host and ports.
+- None switches on **Enabled**, **Answer calls**, **Answer requests** (file
+  requests) or **Held mail, no password**, and none sets **Who may ask** to
+  anyone: it stays at secure links only.
+- A nodelist echo needs its list's name: nixNet's draft refuses to save until
+  you enter **List name**, or empty **Nodelist echo** to import lists by hand.
 
 #### How echomail behaves
 
@@ -3750,8 +3776,13 @@ In this chapter: [Join a QWK network](#join-a-qwk-network) ·
 3. In the account's QWK settings at the hub, turn **Include HEADERS.DAT** on.
    Ctrl-A codes may stay in; NetBBS strips them.
 4. In **Settings ▸ DOVE-Net and QWKnet**, press <kbd>C</kbd> **Create**. A new
-   network starts as DOVE-Net through Vertrauen. Check **Our QWK ID**, then
-   set **Password** to the account's password and **Enabled** to yes.
+   network starts as DOVE-Net through Vertrauen, the only template, so there
+   is nothing to pick. It fills the name `DOVE-Net`, **Hub QWK ID** `VERT`,
+   **Host** `vert.synchro.net` and **Transport** HTTPS; **Our QWK ID** starts
+   as your QWK BBS ID. Check **Our QWK ID**, then set **Password** to the
+   account's password and **Enabled** to yes. The template fills no password
+   and switches nothing on, **Serve nodes** included, and nothing is stored
+   before <kbd>S</kbd> **Save**.
 5. Press <kbd>S</kbd> **Save**, then map the conferences (below), and press
    <kbd>P</kbd> **Poll now**.
 

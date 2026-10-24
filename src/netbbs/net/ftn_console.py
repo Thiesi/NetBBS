@@ -8,8 +8,9 @@ Configuration and operation are kept apart, as MRC's are:
   default character set, Origin line, netmail level, the node-wide
   answer port, and the Transport section: the node-wide answer addresses,
   TLS for calls to the uplink (pinned or verified), and the node-wide TLS
-  answer port with its certificate files (issues #1467, #1468). A new network starts as fsxNet's main hub, the usual first
-  network for a new BBS; the SysOp fills in the address fsxNet gave them.
+  answer port with its certificate files (issues #1467, #1468). [C]reate first picks the
+  network to start from -- fsxNet, nixNet, FidoNet or Blank (`FTN_TEMPLATES`,
+  issue #1517) -- which fills only the new draft's public facts.
   **[L]inks** opens the highlighted network's points and downlinks
   (`netbbs.net.ftn_links_console`, issues #1478 and #1479), and
   **[P]ublishing** its pointlist and nodelist segment
@@ -133,6 +134,7 @@ from netbbs.net.ftn_robots_console import (
 )
 from netbbs.net.location import located
 from netbbs.net.menu_description_preference import menu_description_level
+from netbbs.net.network_templates import NetworkTemplate, apply_template, pick_template
 from netbbs.net.picker import pick_item as _pick_item
 from netbbs.net.resource_editor import (
     FieldSpec,
@@ -154,8 +156,36 @@ from netbbs.rendering.sanitize import sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
-# fsxNet's main hub, from its infopack: the starting point for a new network.
-FSXNET = {"name": "fsxNet", "domain": "fsxnet", "uplink_address": "21:1/100", "uplink_host": "net1.fsxnet.nz"}
+# --- network templates (issue #1517; §16, "Issue #1395", Decisions 10-12) ---
+# What [C]reate starts a new network from. Only the network's public facts,
+# from its own infopack; a value not confirmed there stays empty. An uplink
+# and host only where the network has one public entry hub (fsxNet's
+# 21:1/100). Never a password, pin, path, our address or listener value, and
+# no switch: `_TEMPLATE_KEYS` is all a template may fill.
+_TEMPLATE_KEYS = frozenset({"name", "domain", "uplink_address", "uplink_host", "areafix_robot",
+                            "filefix_robot", "nodelist_echo", "nodelist_name", "nodediff_name"})
+FSXNET = NetworkTemplate(
+    name="fsxNet", summary="Zone 21; its main hub 21:1/100 filled in",
+    fields={"name": "fsxNet", "domain": "fsxnet", "uplink_address": "21:1/100", "uplink_host": "net1.fsxnet.nz"},
+    preamble=("This network starts as fsxNet's main hub: fill in the address fsxNet gave you and the "
+              "passwords agreed with the hub."))
+NIXNET = NetworkTemplate(
+    name="nixNet", summary="Zone 86; nodelist echo NIX_LIST; a regional hub",
+    fields={"name": "nixNet", "domain": "nixnet", "nodelist_echo": "NIX_LIST", "areafix_robot": "AreaFix",
+            "filefix_robot": "FileFix"},
+    preamble=("nixNet is zone 86 and assigns each node a regional hub: fill in your address, the hub's "
+              "address and host, the passwords, and List name from the nixNet infopack."))
+FIDONET = NetworkTemplate(
+    name="FidoNet", summary="Nodelist NODELIST and NODEDIFF; uplink from your NC",
+    fields={"name": "FidoNet", "domain": "fidonet", "nodelist_name": "NODELIST", "nodediff_name": "NODEDIFF"},
+    preamble=("Your Net coordinator assigns your address and uplink: fill them in with the uplink's host "
+              "and the passwords, and Nodelist echo if your zone sends the list in one."))
+BLANK = NetworkTemplate(
+    name="Blank", summary="Nothing filled in: every value from the infopack",
+    preamble=("Nothing is filled in: enter the name, domain, your address and the uplink from the "
+              "network's infopack."))
+FTN_TEMPLATES = (FSXNET, NIXNET, FIDONET, BLANK)  # Blank always last
+# --- end network templates ---
 CHARSETS = [CP437.codec, "utf-8", "latin-1", "cp850", "cp866"]
 
 
@@ -172,7 +202,18 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
         return await lane.run(list_networks)
 
     async def _create() -> FtnNetwork | None:
-        return await edit_network(session, lane, actor, None, node_controls=node_controls)
+        template = await pick_template(  # issue #1517
+            session, lane, actor, FTN_TEMPLATES, title="New FTN network",
+            preamble="Which network to start from. It fills only the new draft; nothing is stored before Save.",
+            help_about=("Which network a new one starts from. fsxNet fills its name, domain and main hub "
+                        "21:1/100 with its host; nixNet its name, domain, nodelist echo NIX_LIST and robot "
+                        "names; FidoNet its name, domain and nodelist file names NODELIST and NODEDIFF; "
+                        "Blank nothing. Every value stays editable, and nothing is stored before Save. A "
+                        "template never fills a password, this BBS's address or the answer port, and "
+                        "switches nothing on: you enter those yourself."))
+        if template is None:
+            return None
+        return await edit_network(session, lane, actor, None, node_controls=node_controls, template=template)
 
     async def _delete(network: FtnNetwork) -> list[FtnNetwork] | None:
         nonlocal status
@@ -228,7 +269,7 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
                                       + ("on" if n.enabled else "off")
                                       + (", answers calls" if n.answers_calls else "")),
             title="FTN networks", own=True,
-            empty_message="No FTN networks. [C]reate one: it starts as fsxNet's hub.",
+            empty_message="No FTN networks. [C]reate one from fsxNet, nixNet, FidoNet or Blank.",
             refresh=_load, on_create=_create, item_keys={"d": _delete, "r": _robot_password, "l": _links,
                                                          "p": _publishing},
             live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network",
@@ -240,8 +281,9 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
                                 brief="Pointlist and nodelist segment")],  # issue #1480
             live_label=lambda: status or "FidoNet-style networks: echomail on boards, netmail in Mail",
             help_about=("The FTN networks this BBS is on: its address, the uplink, on or off, and whether it "
-                        "answers calls. Picking one edits all its settings in one draft; nothing is stored "
-                        "before Save, and the running node picks a change up within a minute."),
+                        "answers calls. Picking one edits it in one draft; [C]reate starts one from fsxNet, "
+                        "nixNet, FidoNet or Blank. Nothing is stored before Save, and the running node picks "
+                        "a change up within a minute."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -268,14 +310,14 @@ def _secret_field(key: str, label: str):
     return prompt
 
 
-def _network_draft(network: FtnNetwork | None, listen_port: int) -> dict:
+def _network_draft(network: FtnNetwork | None, listen_port: int, template: NetworkTemplate | None = None) -> dict:
     if network is None:
-        return {"name": FSXNET["name"], "domain": FSXNET["domain"], "our_address": "",
-                "uplink_address": FSXNET["uplink_address"], "uplink_host": FSXNET["uplink_host"],
-                "uplink_port": DEFAULT_PORT, "session_password": "", "packet_password": "", "areafix_password": "",
-                "poll_minutes": 60, "answers_calls": False, "enabled": False, "default_charset": CP437.codec,
-                "origin_text": "", "netmail_min_level": SYSOP_LEVEL, "listen_port": listen_port,
-                **robot_draft(None), **_nodelist_draft(None)}
+        draft = {"name": "", "domain": "", "our_address": "", "uplink_address": "", "uplink_host": "",
+                 "uplink_port": DEFAULT_PORT, "session_password": "", "packet_password": "", "areafix_password": "",
+                 "poll_minutes": 60, "answers_calls": False, "enabled": False, "default_charset": CP437.codec,
+                 "origin_text": "", "netmail_min_level": SYSOP_LEVEL, "listen_port": listen_port,
+                 **robot_draft(None), **_nodelist_draft(None)}
+        return apply_template(draft, template or FSXNET, _TEMPLATE_KEYS)  # issue #1517
     return {"name": network.name, "domain": network.domain, "our_address": network.our_address.four_d,
             "uplink_address": network.uplink_address.four_d, "uplink_host": network.uplink_host,
             "uplink_port": network.uplink_port, "session_password": network.session_password,
@@ -547,9 +589,11 @@ def _listen_port(db: Database) -> int:
 
 
 async def edit_network(session: Session, lane: DatabaseLane, actor: User, existing: FtnNetwork | None, *,
-                       node_controls=None) -> FtnNetwork | None:
-    """One network's settings in a draft; nothing is stored before [S]ave."""
-    draft = _network_draft(existing, await lane.run(_listen_port))
+                       node_controls=None, template: NetworkTemplate | None = None) -> FtnNetwork | None:
+    """One network's settings in a draft; nothing is stored before [S]ave.
+    A new network's draft starts from `template` (fsxNet by default)."""
+    template = template or FSXNET  # issue #1517
+    draft = _network_draft(existing, await lane.run(_listen_port), template)
     # --- file echoes (issue #1462) ---
     draft["tic_password"] = existing.tic_password if existing is not None else ""
     # --- end file echoes ---
@@ -727,8 +771,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
         session, lane, title=existing.name if existing is not None else "New FTN network",
         fields=fields, draft=draft, save=save, error_type=FtnNetworkError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
-        preamble=("A new network starts as fsxNet's main hub: fill in the address fsxNet gave you."
-                  if existing is None else None),
+        preamble=template.preamble if existing is None else None,  # issue #1517
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,

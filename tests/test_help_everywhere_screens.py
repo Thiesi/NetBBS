@@ -618,14 +618,21 @@ def boxed_chrome(monkeypatch):
     frame shows exactly how much of a terminal it takes."""
     import dataclasses
 
-    from netbbs.net import admin_ui, ftn_console, ftn_links_console, ftn_publish_console, qwknet_console
+    from netbbs.net import (
+        admin_ui,
+        ftn_console,
+        ftn_links_console,
+        ftn_publish_console,
+        network_templates,
+        qwknet_console,
+    )
 
     real = admin_ui._load_chrome
 
     async def boxed(lane, actor):
         return dataclasses.replace(await real(lane, actor), unicode_style=True)
 
-    for module in (ftn_console, ftn_links_console, ftn_publish_console, qwknet_console):
+    for module in (ftn_console, ftn_links_console, ftn_publish_console, qwknet_console, network_templates):
         monkeypatch.setattr(module, "_load_chrome", boxed)
 
 
@@ -673,6 +680,19 @@ def test_the_ftn_and_qwknet_lists_have_their_own_help_on_one_screen(db, lane, sy
         rows = _boxed(session)
         assert about in " ".join(rows), about
         assert _fits(rows), (about, len(rows))
+
+
+def test_the_ftn_template_pick_says_what_each_template_fills_on_one_screen(db, lane, sysop, boxed_chrome):
+    """Issue #1517: [C]reate's pick of fsxNet, nixNet, FidoNet or Blank."""
+    from netbbs.net import ftn_console
+
+    session = FakeSession(["c", HELP_KEY, _DISMISS, "b", "b"])
+    asyncio.run(ftn_console.ftn_networks_screen(session, lane, sysop))
+    rows = _boxed(session)
+    text = re.sub(r" {2,}", " ", " ".join(rows))
+    for name in ("fsxNet", "nixNet", "FidoNet", "Blank", "never fills a password"):
+        assert name in text, name
+    assert _fits(rows), len(rows)
 
 
 # -- account screens -------------------------------------------------------------
