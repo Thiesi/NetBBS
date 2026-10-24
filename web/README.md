@@ -373,6 +373,13 @@ all a page shows with scripts off.
 
 - **A scene needs `line-height:1.2`, not the stills' 1.55.** Its pictures are
   half blocks, and the taller rows split every pixel into stripes.
+- **Block glyphs are painted, never typed.** `website_ansi_to_html.py` and
+  `game-scenes.js` draw `▀ ▄ █ ▌ ▐` as a fill of the cell (a two-stop gradient
+  of the foreground and background), not as the font's glyph. No web font's
+  half block spans the 1ch cell and the full line, so the glyphs left thin
+  strips of background between the pixels of every half-block picture.
+  Captures converted before this rule were rewritten in place with the same
+  formula (only the block cells changed).
 - **Re-record after vendoring a new game release.** A cast is that release's
   bytes, so `VENDORED.json` and the casts change together.
 
