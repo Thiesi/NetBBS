@@ -72,7 +72,7 @@ from netbbs.ftn.tic import (
     replaces_pattern_problem,
     stored_name,
 )
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.search import reindex_file
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -572,9 +572,10 @@ def save_held_to_area(
                           (item.network_id if item is not None else None,
                            item.remote_address if item is not None else "held", entry.id))
     db.connection.execute("DELETE FROM ftn_held_inbound WHERE id = ?", (held_id,))
+    # The held item leaves with its audit entry, in one commit (issue #1515).
+    record_action_without_commit(db, actor=actor, action="save_ftn_held", object_type="file_area",
+                                 object_id=area.id, detail=f"saved held {name} ({len(content)} bytes) to {area.name}")
     db.connection.commit()
-    record_action(db, actor=actor, action="save_ftn_held", object_type="file_area", object_id=area.id,
-                  detail=f"saved held {name} ({len(content)} bytes) to {area.name}")
     return entry
 
 

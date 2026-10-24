@@ -102,7 +102,7 @@ from netbbs.ftn.queue import (
     list_held,
 )
 from netbbs.ftn.tosser import TossResult, release_held, retoss_bad_echo
-from netbbs.moderation.log import record_action, record_action_without_commit
+from netbbs.moderation.log import change_detail, record_action, record_action_without_commit
 from netbbs.net.admin_fields import _int_field, _optional_text_field
 from netbbs.net.admin_ui import (
     _BACK_ACTION,
@@ -224,8 +224,10 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
             return None
 
         def _persist(db: Database) -> None:
-            delete_network(db, network.id)
-            record_action(db, actor=actor, action="delete_ftn_network", detail=f"deleted FTN network {network.name!r}")
+            with db.connection:  # the delete and its entry together (issue #1515)
+                delete_network(db, network.id, commit=False)
+                record_action_without_commit(db, actor=actor, action="delete_ftn_network",
+                                             detail=f"deleted FTN network {network.name!r}")
 
         await lane.run(_persist)
         status = f"Deleted {network.name}."
@@ -588,6 +590,44 @@ def _listen_port(db: Database) -> int:
     return int(value) if value and value.isdigit() else DEFAULT_PORT
 
 
+# The network editor's passwords: its audit entry says only whether each changed.
+_NETWORK_SECRETS = ("session_password", "packet_password", "areafix_password", "filefix_password", "tic_password")
+_NODE_WIDE_KEYS = (PORT_CONFIG_KEY, HOST_CONFIG_KEY, TLS_PORT_CONFIG_KEY, TLS_CERT_CONFIG_KEY, TLS_KEY_CONFIG_KEY)
+
+
+def network_audit_values(db: Database, network: FtnNetwork | None) -> dict | None:
+    """Every value the network editor's save writes, as stored, by name: the
+    network's row, its file-request settings and the node-wide listener
+    keys (issue #1515). None for a network not stored yet."""
+    if network is None or network.id is None:
+        return None
+    from netbbs.ftn.freq import get_settings as get_freq_settings
+
+    freq = get_freq_settings(db, network.id)
+    return {
+        "name": network.name, "domain": network.domain, "our_address": str(network.our_address),
+        "enabled": network.enabled, "netmail_level": network.netmail_min_level,
+        "charset": network.default_charset, "origin": network.origin_text,
+        "uplink": str(network.uplink_address), "uplink_host": network.uplink_host,
+        "uplink_port": network.uplink_port, "tls": network.uplink_tls or TLS_OFF,
+        "tls_pin": network.uplink_tls_pin, "session_password": network.session_password,
+        "packet_password": network.packet_password, "areafix_password": network.areafix_password,
+        "poll_minutes": network.poll_minutes, "answers": network.answers_calls,
+        "areafix_robot": network.areafix_robot, "filefix_robot": network.filefix_robot,
+        "filefix_password": network.filefix_password, "nodelist_echo": network.nodelist_echo,
+        "nodelist_name": network.nodelist_name, "nodediff_name": network.nodediff_name,
+        "tic_password": network.tic_password, "bounce_unknown": network.bounce_unknown,
+        "attach_area_id": network.attach_area_id, "held_without_password": network.give_held_unproven,
+        "bundle": network.bundle_outgoing,
+        "freq_answer": freq.answer, "freq_secure_only": freq.secure_only,
+        "freq_session_files": freq.session_files, "freq_session_bytes": freq.session_bytes,
+        "freq_day_files": freq.day_files, "freq_day_bytes": freq.day_bytes,
+        "freq_about_path": freq.about_path, "freq_serve_nodelist": freq.serve_nodelist,
+        "freq_nodelist_path": freq.nodelist_path,
+        **{key: get_config(db, key) or "" for key in _NODE_WIDE_KEYS},
+    }
+
+
 async def edit_network(session: Session, lane: DatabaseLane, actor: User, existing: FtnNetwork | None, *,
                        node_controls=None, template: NetworkTemplate | None = None) -> FtnNetwork | None:
     """One network's settings in a draft; nothing is stored before [S]ave.
@@ -741,7 +781,10 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                 raise FtnNetworkError(problem)
             # --- end netmail extras ---
             # The row, the node-wide listener keys and the audit entry
-            # naming them commit together or not at all (issue #1505).
+            # naming them commit together or not at all (issue #1505); the
+            # entry names every value that changed, passwords only as
+            # changed or unchanged (issue #1515).
+            before = network_audit_values(db, get_network(db, existing.id) if existing is not None else None)
             try:
                 saved = save_network(db, candidate, commit=False)
                 # --- file requests (issue #1475) ---
@@ -752,11 +795,8 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                     set_config_without_commit(db, key, value)
                 record_action_without_commit(
                     db, actor=actor, action="set_ftn_network",
-                    detail=(f"{saved.name}: {saved.our_address} via {saved.uplink_address} "
-                            f"{saved.uplink_host}:{saved.uplink_port} tls={saved.uplink_tls or 'off'} "
-                            f"enabled={saved.enabled} "
-                            f"answers={saved.answers_calls} netmail_level={saved.netmail_min_level} "
-                            + " ".join(f"{key}={value or '(none)'}" for key, value in node_keys.items())),
+                    detail=change_detail(saved.name, before, network_audit_values(db, saved),
+                                         secrets=_NETWORK_SECRETS),
                 )
             except BaseException:
                 db.connection.rollback()
@@ -1003,9 +1043,10 @@ async def import_nodelist_file(lane: DatabaseLane, actor: User | None, network: 
     data = await asyncio.to_thread(read_list_file, path, network)
 
     def _persist(db: Database) -> ImportOutcome:
-        outcome = import_list(db, network.id, data, how=HOW_MANUAL, require_crc=False)
-        record_action(db, actor=actor, action="import_ftn_nodelist",
-                      detail=f"{network.name}: {outcome.nodes} nodes from {path.name}")
+        with db.connection:  # the list and its entry together (issue #1515)
+            outcome = import_list(db, network.id, data, how=HOW_MANUAL, require_crc=False, commit=False)
+            record_action_without_commit(db, actor=actor, action="import_ftn_nodelist",
+                                         detail=f"{network.name}: {outcome.nodes} nodes from {path.name}")
         return outcome
 
     return await lane.run(_persist)
@@ -1201,13 +1242,14 @@ async def _bad_echoes(session: Session, lane: DatabaseLane, actor: User, network
             return None
 
         def _persist(db: Database) -> None:
-            if kind == "echo":
-                delete_bad_echo(db, network.id, tag)
-            else:
-                for held_id in held_bad_file_echo_ids(db, network.id, tag):
-                    delete_held(db, held_id)
-            record_action(db, actor=actor, action="delete_ftn_bad_echo",
-                          detail=f"{network.name}: {count} {what} for {tag}")
+            with db.connection:  # what waited and the entry together (issue #1515)
+                if kind == "echo":
+                    delete_bad_echo(db, network.id, tag, commit=False)
+                else:
+                    for held_id in held_bad_file_echo_ids(db, network.id, tag):
+                        delete_held(db, held_id, commit=False)
+                record_action_without_commit(db, actor=actor, action="delete_ftn_bad_echo",
+                                             detail=f"{network.name}: {count} {what} for {tag}")
 
         await lane.run(_persist)
         status = f"Deleted what waited for {sanitize_text(tag)}."
@@ -1288,11 +1330,21 @@ async def _carry_bad_echo(lane: DatabaseLane, actor: User, network: FtnNetwork, 
     waited for it; the outcome for the status line."""
     from netbbs.ftn.exchange import rerun_bad_file_echo
 
+    def _map(db: Database) -> None:
+        # The mapping and its audit entry commit together (issue #1515);
+        # tossing again what waited comes after, on its own.
+        with db.connection:
+            if kind == "echo":
+                mapping = set_board_area(db, target, network.id, tag, commit=False)
+            else:
+                mapping = set_file_area_tic(db, target, network.id, tag, commit=False)
+            record_action_without_commit(
+                db, actor=actor, action="set_board_echo" if kind == "echo" else "set_file_area_echo",
+                detail=change_detail(target.name, None, {"network": network.name, "echo": mapping.tag,
+                                                         "from": "unknown echoes"}))
+
     try:
-        if kind == "echo":
-            await lane.run(set_board_area, target, network.id, tag)
-        else:
-            await lane.run(set_file_area_tic, target, network.id, tag)
+        await lane.run(_map)
     except FtnNetworkError as exc:
         return f"Not mapped: {exc}"
     fresh = await lane.run(get_network, network.id)
@@ -1304,9 +1356,6 @@ async def _carry_bad_echo(lane: DatabaseLane, actor: User, network: FtnNetwork, 
         result = await rerun_bad_file_echo(lane, fresh, tag)
         outcome = (f"{sanitize_text(target.name)} carries {sanitize_text(tag)}: {result.files} files stored, "
                    f"{result.file_duplicates} duplicates, {result.held} still held")
-    await lane.run(lambda db: record_action(
-        db, actor=actor, action="set_board_echo" if kind == "echo" else "set_file_area_echo",
-        detail=f"{network.name}: {target.name} carries unknown echo {tag}"))
     return outcome + "."
 
 
@@ -1344,21 +1393,41 @@ async def board_echo_action(session: Session, lane: DatabaseLane, actor: User, b
                                        initial=current.tag if current and current.network_id == network.id else "")).strip()
     except InputCancelled:
         return False
+    if not tag and current is None:
+        return False
+
+    def _persist(db: Database) -> str:
+        # The mapping and its audit entry commit together (issue #1515).
+        with db.connection:
+            before = _echo_audit_values(db, board_area(db, board))
+            if not tag:
+                clear_board_area(db, board, commit=False)
+                outcome = f"{board.name} is a local board again; its posts stay."
+            else:
+                mapping = set_board_area(db, board, network.id, tag, commit=False)
+                outcome = f"{board.name} carries {mapping.tag} on {network.name}."
+            record_action_without_commit(
+                db, actor=actor, action="set_board_echo",
+                detail=change_detail(board.name, before, _echo_audit_values(db, board_area(db, board))))
+        return outcome
+
     try:
-        if not tag:
-            if current is None:
-                return False
-            await lane.run(clear_board_area, board)
-            outcome = f"{board.name} is a local board again; its posts stay."
-        else:
-            mapping = await lane.run(set_board_area, board, network.id, tag)
-            outcome = f"{board.name} carries {mapping.tag} on {network.name}."
+        outcome = await lane.run(_persist)
     except FtnNetworkError as exc:
         _announce(session, str(exc), error=True)
         return False
-    await lane.run(lambda db: record_action(db, actor=actor, action="set_board_echo", detail=outcome))
     _announce(session, outcome)
     return True
+
+
+def _echo_audit_values(db: Database, mapping: AreaMapping | None, *, origin: bool = True) -> dict:
+    """What a board's or file area's echo mapping is, by name, for its
+    audit entry (issue #1515): the network, the tag, and a board's Origin."""
+    network = get_network(db, mapping.network_id) if mapping is not None else None
+    values = {"network": network.name if network is not None else "", "echo": mapping.tag if mapping else ""}
+    if origin:
+        values["origin"] = mapping.origin_text if mapping is not None else ""
+    return values
 
 
 # --- a file area's file echo (issue #1462) -------------------------------------
@@ -1395,19 +1464,30 @@ async def file_area_echo_action(session: Session, lane: DatabaseLane, actor: Use
                                        initial=current.tag if current and current.network_id == network.id else "")).strip()
     except InputCancelled:
         return False
+    if not tag and current is None:
+        return False
+
+    def _persist(db: Database) -> str:
+        # The mapping and its audit entry commit together (issue #1515).
+        with db.connection:
+            before = _echo_audit_values(db, file_area_tic(db, area), origin=False)
+            if not tag:
+                clear_file_area_tic(db, area, commit=False)
+                outcome = f"{area.name} is a local file area again; its files stay."
+            else:
+                mapping = set_file_area_tic(db, area, network.id, tag, commit=False)
+                outcome = f"{area.name} carries file echo {mapping.tag} on {network.name}."
+            record_action_without_commit(
+                db, actor=actor, action="set_file_area_echo",
+                detail=change_detail(area.name, before,
+                                     _echo_audit_values(db, file_area_tic(db, area), origin=False)))
+        return outcome
+
     try:
-        if not tag:
-            if current is None:
-                return False
-            await lane.run(clear_file_area_tic, area)
-            outcome = f"{area.name} is a local file area again; its files stay."
-        else:
-            mapping = await lane.run(set_file_area_tic, area, network.id, tag)
-            outcome = f"{area.name} carries file echo {mapping.tag} on {network.name}."
+        outcome = await lane.run(_persist)
     except FtnNetworkError as exc:
         _announce(session, str(exc), error=True)
         return False
-    await lane.run(lambda db: record_action(db, actor=actor, action="set_file_area_echo", detail=outcome))
     _announce(session, outcome)
     return True
 
@@ -1515,8 +1595,19 @@ async def board_origin_action(session: Session, lane: DatabaseLane, actor: User,
         text = await session.read_line(cancellable=True, initial=area.origin_text)
     except InputCancelled:
         return False
+    def _persist(db: Database) -> str:
+        # The text and its audit entry commit together, and an unchanged
+        # text writes neither (issue #1515).
+        with db.connection:
+            stored = set_board_origin(db, board, text, commit=False)
+            if stored != area.origin_text:
+                record_action_without_commit(
+                    db, actor=actor, action="set_board_origin",
+                    detail=change_detail(board.name, {"origin": area.origin_text}, {"origin": stored}))
+        return stored
+
     try:
-        stored = await lane.run(set_board_origin, board, text)
+        stored = await lane.run(_persist)
     except FtnNetworkError as exc:
         _announce(session, str(exc), error=True)
         return False
@@ -1526,6 +1617,5 @@ async def board_origin_action(session: Session, lane: DatabaseLane, actor: User,
         f"{board.name}'s echomail carries the Origin {stored!r} on {network.name}." if stored
         else f"{board.name}'s echomail carries {network.name}'s Origin again."
     )
-    await lane.run(lambda db: record_action(db, actor=actor, action="set_board_origin", detail=outcome))
     _announce(session, outcome)
     return True

@@ -58,7 +58,7 @@ from netbbs.ftn.networks import FtnNetwork, FtnNetworkError, get_network, normal
 from netbbs.ftn.binkp import DEFAULT_PORT
 from netbbs.ftn.nodelist import list_crc, list_lines, parse_header
 from netbbs.ftn.queue import FtnQueueFullError
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import get_node_timezone, utc_now_iso
 
@@ -301,9 +301,10 @@ def validate_settings(network: FtnNetwork, settings: PublishSettings) -> Publish
                    segment_echo=echoes[1], folder=folder, host=host)
 
 
-def save_settings(db: Database, network: FtnNetwork, settings: PublishSettings) -> PublishSettings:
+def save_settings(db: Database, network: FtnNetwork, settings: PublishSettings, *,
+                  commit: bool = True) -> PublishSettings:
     """Store the network's publishing settings (what was last published is
-    left as it is); returns them as stored. Commits."""
+    left as it is); returns them as stored. Commits unless `commit=False`."""
     s = validate_settings(network, replace(settings, network_id=network.id))
     db.connection.execute(
         "INSERT INTO ftn_publish_settings (network_id, pointlist_on, pointlist_name, pointlist_echo, segment_on, "
@@ -321,7 +322,8 @@ def save_settings(db: Database, network: FtnNetwork, settings: PublishSettings) 
          s.segment_echo, s.host.name, s.host.location, s.host.sysop, s.host.phone, s.host.speed, s.host.flags,
          s.folder, int(s.archive), s.schedule, s.weekday),
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return get_settings(db, network.id)
 
 
@@ -370,8 +372,8 @@ def point_line(entry: PointEntry) -> str:
     return data_line("", entry.number, clean_fields(entry.fields, defaults=point_defaults(entry.link)))
 
 
-def save_point_entry(db: Database, entry: PointEntry) -> PointEntry:
-    """Store a point's pointlist line once it makes a valid line. Commits."""
+def save_point_entry(db: Database, entry: PointEntry, *, commit: bool = True) -> PointEntry:
+    """Store a point's pointlist line once it makes a valid line. Commits unless `commit=False`."""
     point_line(entry)  # refuses what no list can carry
     f = entry.fields
     values = ("_".join(f.name.split()), "_".join(f.location.split()), "_".join(f.sysop.split()),
@@ -383,7 +385,8 @@ def save_point_entry(db: Database, entry: PointEntry) -> PointEntry:
         "speed = excluded.speed, flags = excluded.flags",
         (entry.link.id, int(entry.listed), *values),
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return replace(entry, fields=ListFields(*values))
 
 
@@ -414,8 +417,9 @@ def segment_line(node: SegmentNode) -> str:
     return data_line(node.keyword, node.node, clean_fields(node.fields))
 
 
-def save_segment_node(db: Database, network: FtnNetwork, node: SegmentNode) -> SegmentNode:
-    """Create (no `id`) or update one node line of the segment. Commits."""
+def save_segment_node(db: Database, network: FtnNetwork, node: SegmentNode, *, commit: bool = True) -> SegmentNode:
+    """Create (no `id`) or update one node line of the segment. Commits unless
+    `commit=False`."""
     if not 1 <= node.node <= MAX_NODE_NUMBER:
         raise PublishError(f"A node number is 1 to {MAX_NODE_NUMBER}; 0 is the Host line's.")
     fields = clean_fields(node.fields)
@@ -442,13 +446,15 @@ def save_segment_node(db: Database, network: FtnNetwork, node: SegmentNode) -> S
     except sqlite3.IntegrityError:
         db.connection.rollback()
         raise PublishError(f"Node {node.node} is already listed.") from None
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return replace(node, network_id=network.id, fields=fields, id=node_id)
 
 
-def delete_segment_node(db: Database, node_id: int) -> None:
+def delete_segment_node(db: Database, node_id: int, *, commit: bool = True) -> None:
     db.connection.execute("DELETE FROM ftn_segment_nodes WHERE id = ?", (node_id,))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def suggested_node(db: Database, network: FtnNetwork) -> SegmentNode:
@@ -661,11 +667,14 @@ def publish_now(db: Database, network_id: int, *, actor: User | None,
     problems = "; ".join(f"{LIST_LABELS[r.kind]}: {r.problem}" for r in results if r.problem)
     db.connection.execute("UPDATE ftn_publish_settings SET failure = ?, failed_at = ? WHERE network_id = ?",
                           (problems[:400], utc_now_iso() if problems else None, network_id))
+    # The outcome and the audit entries naming each edition commit together (issue #1515).
+    for result in results:
+        if result.written:
+            record_action_without_commit(db, actor=actor, action="publish_ftn_list",
+                                         detail=f"{network.name}: {result.summary}"[:500])
     db.connection.commit()
     for result in results:
         detail = f"{network.name}: {result.summary}"
-        if result.written:
-            record_action(db, actor=actor, action="publish_ftn_list", detail=detail[:500])
         level = logging.WARNING if result.problem else logging.INFO
         _logger.log(level, "FTN %s", detail)
     return results

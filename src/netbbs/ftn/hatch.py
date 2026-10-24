@@ -55,7 +55,7 @@ from netbbs.ftn.networks import FtnNetwork, get_network
 from netbbs.ftn.outbound import KILL, MAX_PENDING_FILES_PER_NETWORK, queue_file_without_commit, spool_dir
 from netbbs.ftn.queue import FtnQueueFullError
 from netbbs.ftn.tic import Tic, dos_name, name_problem, replaces_pattern_problem, write_tic
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import change_detail, record_action_without_commit
 from netbbs.storage.database import Database
 from netbbs.timeutil import parse_utc_iso, utc_now_iso
 
@@ -107,10 +107,15 @@ def auto_hatch_enabled(db: Database, area_id: int) -> bool:
 
 
 def set_auto_hatch(db: Database, area_id: int, enabled: bool, *, actor: User) -> None:
-    db.connection.execute("UPDATE file_areas SET ftn_auto_hatch = ? WHERE id = ?", (int(enabled), area_id))
-    db.connection.commit()
-    record_action(db, actor=actor, action="set_file_area_auto_hatch", object_type="file_area", object_id=area_id,
-                  detail=f"automatic hatching {'on' if enabled else 'off'}")
+    """Switch the area's automatic hatching; the setting and its audit
+    entry commit together or not at all (issue #1515)."""
+    row = db.connection.execute("SELECT name FROM file_areas WHERE id = ?", (area_id,)).fetchone()
+    with db.connection:
+        db.connection.execute("UPDATE file_areas SET ftn_auto_hatch = ? WHERE id = ?", (int(enabled), area_id))
+        record_action_without_commit(
+            db, actor=actor, action="set_file_area_auto_hatch", object_type="file_area", object_id=area_id,
+            detail=change_detail(row["name"] if row is not None else f"area {area_id}", None,
+                                 {"auto_hatch": "on" if enabled else "off"}))
 
 
 # --- checks ----------------------------------------------------------------------
@@ -295,6 +300,13 @@ def hatch_file(
         queue_file_without_commit(db, network.id, send_name=tic_name, size_bytes=len(data), path=tic_path,
                                   after_sent=KILL, **common)
         sent_to = _queue_for_links(db, network, entry, tic, links, now, reference, spooled)
+        how = "automatically" if automatic else ("again" if replaces else "")
+        detail = (f"hatched {entry.filename} into {tag} on {network.name}{' ' + how if how else ''} "
+                  f"(as {send_name}, CRC-32 {crc:08X}, {size} bytes)"
+                  + (f"; also to {', '.join(sent_to)}" if sent_to else ""))
+        # The hatch and its audit entry commit together (issue #1515).
+        record_action_without_commit(db, actor=actor, action="hatch_ftn_file", object_type="file_area",
+                                     object_id=entry.area_id, detail=detail)
         db.connection.commit()
     except BaseException:
         db.connection.rollback()
@@ -302,12 +314,6 @@ def hatch_file(
         for path in spooled:
             path.unlink(missing_ok=True)
         raise
-    how = "automatically" if automatic else ("again" if replaces else "")
-    detail = (f"hatched {entry.filename} into {tag} on {network.name}{' ' + how if how else ''} "
-              f"(as {send_name}, CRC-32 {crc:08X}, {size} bytes)"
-              + (f"; also to {', '.join(sent_to)}" if sent_to else ""))
-    record_action(db, actor=actor, action="hatch_ftn_file", object_type="file_area", object_id=entry.area_id,
-                  detail=detail)
     _logger.info("FTN %s: %s", network.name, detail)
     return Hatched(network.name, tag, entry.filename, send_name, tic_name, replaces)
 
