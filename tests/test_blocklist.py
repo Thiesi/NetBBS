@@ -195,3 +195,30 @@ def test_block_user_refuses_a_duplicate_even_behind_a_legacy_fingerprint_row(db,
         (bob.id, bob.fingerprint),
     ).fetchone()[0]
     assert rows == 1
+
+
+# -- the account's history ------------------------------------------------------
+
+
+def _history(db, user):
+    from netbbs.moderation.log import list_actions_for_target_user
+
+    return [(entry.action, entry.actor_user_id, entry.detail) for entry in list_actions_for_target_user(db, user.id)]
+
+
+def test_block_and_unblock_are_recorded_in_the_accounts_history(db, sysop, alice):
+    block_user(db, alice, blocked_by=sysop, reason="spam")
+    unblock_user(db, alice, actor=sysop)
+    assert sorted(_history(db, alice)) == [("block_user", sysop.id, "reason=spam"), ("unblock_user", sysop.id, None)]
+
+
+def test_unblocking_someone_not_blocked_records_nothing(db, sysop, alice):
+    unblock_user(db, alice, actor=sysop)
+    assert _history(db, alice) == []
+
+
+def test_a_refused_second_block_records_nothing_more(db, sysop, alice):
+    block_user(db, alice, blocked_by=sysop)
+    with pytest.raises(BlocklistError):
+        block_user(db, alice, blocked_by=sysop)
+    assert _history(db, alice) == [("block_user", sysop.id, None)]

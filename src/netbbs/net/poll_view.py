@@ -382,13 +382,17 @@ async def edit_poll_draft(
         FieldSpec(
             "closes_at", "Closes", lambda d: _closing_text(db, d["closes_at"]), _closes_prompt, step=_closes_step,
             brief="When voting ends", section="Settings", locked=closing_locked,
-            help=f"Voting ends this many days from now, {DEFAULT_POLL_DAYS} by default.",
+            help=(
+                f"Voting ends this many days from now, 1 to {MAX_POLL_DAYS}, {DEFAULT_POLL_DAYS} by default. "
+                "You or a moderator can close it sooner from the post."
+            ),
         ),
         FieldSpec(
             "results", "Results show", lambda d: _RESULTS_LABELS[d["results"]], _results_prompt, step=_results_step,
             brief="After voting, or only after it closes", section="Settings", locked=answers_locked,
             help="After voting: a caller sees the results once they have voted, or at once if they cannot "
-                 "vote. Only after the poll closes: nobody sees them before then.",
+                 "vote. Only after the poll closes: nobody sees them before then. Results are totals; "
+                 "nobody sees who voted for what.",
         ),
     ])
 
@@ -467,6 +471,10 @@ async def vote_on_poll(
             f"pick{index}", f"Answer {index + 1}",
             lambda d, index=index, option=option: f"{mark if d[f'pick{index}'] else blank} {option}",
             _toggle(index),
+            help=(
+                "Enter picks this answer and clears the other." if single
+                else "Enter ticks this answer, or unticks it."
+            ) + " Nothing is stored until [V]ote.",
         )
         for index, option in enumerate(poll.options)
     ]

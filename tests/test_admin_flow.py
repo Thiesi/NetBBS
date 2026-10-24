@@ -1190,8 +1190,9 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     session = FakeSession(["u", "u", "/", "alice", "CTRL+H", " ", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "moderator/sysop capability" in text.lower()
-    assert "designed to extend to remote nodes/traffic later" in text
+    # One row per key the screen offers, not every field's full help.
+    assert "Previews gains and losses, then applies" in text
+    assert "Blocklist: refused at login even if enabled" in text
 
 
 def test_user_detail_ctrl_h_narrows_to_the_highlighted_field(db, lane, sysop):
@@ -1201,7 +1202,8 @@ def test_user_detail_ctrl_h_narrows_to_the_highlighted_field(db, lane, sysop):
     text = _visible(_written_text(session))
     # Down lands on "l" (Level, the first of _USER_DETAIL_FIELD_ORDER) --
     # only its own help should show, not every field's.
-    assert "the account's permission level" in text.lower()
+    assert "decides which boards, file areas" in text.lower()
+    assert "previews gains and losses" not in text.lower()  # the whole screen's key list
     assert "moderator scope tiers" not in text.lower()  # that's "i" (Can verify identity)'s own help
 
 
@@ -2840,7 +2842,7 @@ def test_create_board_ctrl_h_shows_real_help_text_for_every_field(db, lane, syso
     text = _written_text(session)
     assert "No help is available" not in text
     assert "posts older than this expire" in text.lower()
-    assert "inherit its default read/write/age/name-requirement" in text
+    assert "take that Community's defaults" in text
 
 
 def test_create_board_can_be_cancelled_without_creating_anything(db, lane, sysop):
@@ -4235,7 +4237,7 @@ def test_create_door_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
-    assert "cpu/memory/process-count limits" in text.lower()
+    assert "cpu, memory and process" in text.lower()
 
 
 def test_create_door_can_be_cancelled_without_registering_anything(db, lane, sysop):
@@ -4288,7 +4290,7 @@ def test_create_channel_ctrl_h_shows_real_help_text_for_every_field(db, lane, sy
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
-    assert "never inherits from its community" in text.lower()
+    assert "see and join this channel. never taken from" in text.lower()
     assert "invite-only" in text.lower() or "invite from an existing member" in text.lower()
 
 
@@ -4419,7 +4421,7 @@ def test_create_community_ctrl_h_shows_real_help_text_for_every_field(db, lane, 
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
-    assert "delists this community from ordinary browsing" in text.lower()
+    assert "takes it off topics for everyone but sysops" in text.lower()
 
 
 def test_create_community_flow(db, lane, sysop):
@@ -5102,7 +5104,7 @@ def test_welcome_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(banner_path(db)), session.terminal_width - 4)
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 def test_welcome_banner_ctrl_h_keeps_every_piece_of_a_long_path_visible(tmp_path):
@@ -5137,7 +5139,7 @@ def test_banners_and_mastheads_hub_ctrl_h_shows_generic_help(db, lane, sysop):
     session = FakeSession(["s", "m", "\x08", "x", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "press Ctrl-H on that screen" in text
+    assert "on its screen says where it" in text
 
 
 def test_banners_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
@@ -5146,7 +5148,7 @@ def test_banners_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
     session = FakeSession(["s", "m", "s", "\x08", "x", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "press Ctrl-H on that screen" in text
+    assert "on its screen says where it" in text
 
 
 def test_mastheads_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
@@ -5155,7 +5157,7 @@ def test_mastheads_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
     session = FakeSession(["s", "m", "m", "\x08", "x", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "press Ctrl-H on that screen" in text
+    assert "on its screen says where it" in text
 
 
 # -- main-menu masthead (issue #161) ---------------------------------------
@@ -5645,7 +5647,7 @@ def test_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(main_menu_banner_path(db)), session.terminal_width - 4)
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 # -- door gallery (issue #172 follow-up) -------------------------------------
@@ -6257,7 +6259,7 @@ def test_logoff_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(logoff_banner_path(db)), session.terminal_width - 4)
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 # -- new-account banner (before signup) ----------------------------------
@@ -6578,7 +6580,7 @@ def test_board_list_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, syso
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(board_list_banner_path(db)), session.terminal_width - 4)
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 # -- file area masthead ----------------------------------------------------
@@ -6751,7 +6753,7 @@ def test_chat_channel_picker_masthead_ctrl_h_shows_where_to_place_the_file(db, l
     _assert_wrapped_token_visible(
         text, str(chat_channel_picker_banner_path(db)), session.terminal_width - 4
     )
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 def test_theme_colors_menu_shows_default_status_for_all_three_slots(db, lane, sysop):
@@ -10513,7 +10515,7 @@ def test_sysop_can_stop_sharing_with_a_recipient_and_is_told_what_that_does(db, 
     assert list_attestation_recipients(db) == []
     text = " ".join(_visible(_written_text(session)).split())
     assert "Attestation recipient removed and audited." in text
-    assert "What the node already holds stays with it until each attestation expires" in text
+    assert "a node running NetBBS then forgets everything it holds from this one" in text
 
 
 def test_declining_the_confirm_keeps_the_recipient(db, lane, sysop):

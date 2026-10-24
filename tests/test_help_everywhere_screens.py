@@ -356,7 +356,7 @@ def test_reading_a_post_has_help_and_back_still_leaves(db, alice):
     session = FakeSession(["0", "1", HELP_KEY, _DISMISS, "b", "b"])
     asyncio.run(_show_board(session, db, board, alice))
     text = session.squeezed()
-    assert "Reading a post" in text and "One post at a time." in text
+    assert "Reading a post" in text and "One post, with its files and poll." in text
     assert "[R]eply" in text.split("Reading a post")[1]
     assert session.leftover == []
 
@@ -441,7 +441,7 @@ def test_a_member_profile_has_help(db, alice):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_show_vcard(session, db, alice, alice))
     text = session.squeezed()
-    assert "Member profile help" in text and "What this member has chosen to share" in text
+    assert "Member profile help" in text and "What this member chose to share" in text
     assert session.leftover == []
 
 
@@ -497,7 +497,7 @@ def test_the_file_listing_has_help_and_is_drawn_again(db, lane, alice, editor, k
     session = FakeSession([key, _DISMISS, "b"], editor=editor)
     asyncio.run(_show_area(session, lane, area, alice))
     text = session.squeezed()
-    assert "File area help" in text and "Arrow keys move a highlight" in text
+    assert "File area help" in text and "any pinned on top, then oldest to newest" in text
     assert "[U]pload" in text.split("File area help")[1]
     assert "pkg1.tar.gz" in text.split("File area help")[1]
     assert session.leftover == []
@@ -543,7 +543,7 @@ def test_a_received_letter_has_help(db, lane, alice, bob):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_show_inbox_message(session, lane, bob, letter))
     text = session.squeezed()
-    assert "Reading a letter" in text and "A letter sent to you." in text
+    assert "Reading a letter" in text and "A letter to you: who sent it" in text
     assert "[F]orward" in text.split("Reading a letter")[1]
     assert session.leftover == []
 
@@ -557,7 +557,7 @@ def test_a_sent_letter_has_its_own_help(db, lane, alice, bob):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_show_sent_message(session, lane, alice, letter))
     text = session.squeezed()
-    assert "Reading a letter" in text and "A letter you sent." in text
+    assert "Reading a letter" in text and "A letter you sent, and how far it got" in text
     assert session.leftover == []
 
 
@@ -610,7 +610,7 @@ def test_a_managed_dns_registration_has_help(lane):
         presentation=presentation,
     ))
     text = session.squeezed()
-    assert "Registration help" in text and "[R]evoke Take the name out of DNS" in text
+    assert "Registration help" in text and "[R]evoke Out of DNS now, beyond its holder" in text
     assert text.count("harbor.netbbs.org") == 2
     assert session.leftover == []
 
@@ -644,9 +644,84 @@ def test_the_ftn_status_screen_has_help_and_h_is_still_held_items(db, lane, syso
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(ftn_status_screen(session, lane, sysop, _controls()))
     text = session.squeezed()
-    assert "Echomail & netmail help" in text and "What the echomail and netmail gateway last did" in text
-    assert "[H]eld items" in text.split("Echomail & netmail help")[1]
+    assert "Echomail & netmail help" in text and "Each network's last call and error" in text
+    assert "[H]eld items Release, save, export or delete what was held" in text.split("Echomail & netmail help")[1]
     assert session.leftover == []
+
+
+def _boxed(session) -> list[str]:
+    """The content rows of the boxed help screen a session was shown."""
+    rows = strip_ansi("".join(session.written)).split("\r\n")
+    top = max(i for i, row in enumerate(rows) if row.startswith("╭"))
+    bottom = next(i for i in range(top, len(rows)) if rows[i].startswith("╰"))
+    return rows[top + 1:bottom]
+
+
+def _fits(rows: list[str]) -> bool:
+    return len(rows) <= 20 and all(len(row) <= 78 for row in rows)
+
+
+@pytest.fixture
+def boxed_chrome(monkeypatch):
+    """Every FTN and QWKnet screen drawn in the boxed style, whose help
+    frame shows exactly how much of a terminal it takes."""
+    import dataclasses
+
+    from netbbs.net import admin_ui, ftn_console, ftn_links_console, ftn_publish_console, qwknet_console
+
+    real = admin_ui._load_chrome
+
+    async def boxed(lane, actor):
+        return dataclasses.replace(await real(lane, actor), unicode_style=True)
+
+    for module in (ftn_console, ftn_links_console, ftn_publish_console, qwknet_console):
+        monkeypatch.setattr(module, "_load_chrome", boxed)
+
+
+@pytest.mark.parametrize("screen", ["status", "publishing"])
+def test_the_ftn_detail_screens_explain_each_key_on_one_screen(db, lane, sysop, boxed_chrome, screen):
+    from netbbs.net import ftn_console, ftn_publish_console
+    from tests.test_ftn_console import _controls, _network
+
+    network = _network(db)
+    session = FakeSession([HELP_KEY, _DISMISS, "b"])
+    if screen == "status":
+        asyncio.run(ftn_console.ftn_status_screen(session, lane, sysop, _controls()))
+        expected = "Ask a node for files; they come to Held items"
+    else:
+        asyncio.run(ftn_publish_console.ftn_publish_screen(session, lane, sysop, network))
+        expected = "Each point's pointlist line, listed or not"
+    rows = _boxed(session)
+    assert expected in re.sub(r" {2,}", " ", " ".join(rows))
+    assert _fits(rows)
+
+
+def test_the_ftn_and_qwknet_lists_have_their_own_help_on_one_screen(db, lane, sysop, boxed_chrome):
+    from netbbs.boards.boards import create_board
+    from netbbs.ftn.address import FtnAddress
+    from netbbs.ftn.links import POINT, FtnLink, save_link
+    from netbbs.ftn.networks import set_board_area
+    from netbbs.net import ftn_console, ftn_links_console, qwknet_console
+    from netbbs.qwknet.networks import QwknetNetwork, save_network
+    from tests.test_ftn_console import _network
+
+    network = _network(db)
+    set_board_area(db, create_board(db, "general", creator=sysop), network.id, "FSX_GEN")
+    save_link(db, FtnLink(network_id=network.id, kind=POINT, address=FtnAddress(21, 1, 199, 1), session_password="x"))
+    save_network(db, QwknetNetwork(name="DOVE-Net", our_id="NETBBS", hub_id="VERT", host="vert.synchro.net"))
+    screens = {
+        "The FTN networks this BBS is on": lambda s: ftn_console.ftn_networks_screen(s, lane, sysop),
+        "This network's points and downlinks": lambda s: ftn_links_console.ftn_links_screen(s, lane, sysop, network),
+        "Every echo and file echo this BBS carries":
+            lambda s: ftn_links_console.offered_areas_screen(s, lane, sysop, network),
+        "The QWK networks this BBS is on": lambda s: qwknet_console.qwknet_networks_screen(s, lane, sysop),
+    }
+    for about, run in screens.items():
+        session = FakeSession([HELP_KEY, _DISMISS, "b"])
+        asyncio.run(run(session))
+        rows = _boxed(session)
+        assert about in " ".join(rows), about
+        assert _fits(rows), (about, len(rows))
 
 
 # -- account screens -------------------------------------------------------------
@@ -751,7 +826,7 @@ def test_the_monitor_has_help_and_repaints(lane, sysop, editor, key):
         session, lane, sysop, _controls(), disconnect=lambda entry: asyncio.sleep(0),
     ))
     text = session.squeezed()
-    assert "Monitor help" in text and "[S]noop Watch the selected caller's screen" in text
+    assert "Monitor help" in text and "[S]noop Watch their screen live" in text
     # Repainted in full after the help: the table's header row comes back.
     assert "USER" in text.split("Monitor help")[1]
     assert session.leftover == []

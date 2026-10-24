@@ -805,7 +805,8 @@ async def _previous_callers_screen(
                     session, "Recent callers help", help_entries,
                     about=(
                         "The most recent calls to this BBS, newest first, and the newest lines "
-                        "callers left on the oneliner wall."
+                        "callers left on the oneliner wall. A caller who hides their name in Profile "
+                        "shows as (name hidden)."
                     ),
                     header_color=effective_header_color(session, db),
                     unicode_style=unicode_style_enabled(db, user),
@@ -1172,6 +1173,10 @@ async def _sort_preferences_screen(
             description_of=lambda p: SORT_MODE_LABELS[p.sort_mode],
             title="Your sort preferences" if actor is None else f"{_possessive(user)} sort preferences",
             empty_message=none_saved,
+            help_about=(
+                "Each sort order you saved: the kind of list, where it applies, and the order. "
+                "Picking one asks before clearing it; that list then falls back to the next wider order."
+            ),
             redraw_in_place=await lane.run(redraw_in_place_enabled, viewer),
             unicode_style=await lane.run(unicode_style_enabled, viewer),
             collapsed=await lane.run(breadcrumb_collapsed_enabled, viewer),
@@ -1619,8 +1624,9 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User, *, act
             prompt=_unless_signed_in_without_credential("the bio", _bio_prompt),
             brief="Change your public bio text",
             help=(
-                "Free-form text shown on your public profile (Directory, Who's online, etc.) "
-                "when Visibility below is public. Supports multiple lines. Blank clears it."
+                "Free-form text, several lines if you like, shown on your Directory card when "
+                "Visibility below is public. To remove it, the line editor asks first whether to "
+                "clear it; in the fullscreen editor, erase the text and save."
             ),
             section="Identity",
         ),
@@ -1644,8 +1650,8 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User, *, act
             prompt=_unless_signed_in_without_credential("the signature", _signature_prompt),
             brief="Auto-appended to mail and posts you send",
             help=(
-                "Text automatically appended to every message you send from this account -- "
-                "mail, board posts, and channel posts alike. Blank means no signature."
+                "Text added to the end of every letter and board post you write from now on; "
+                "what you already wrote keeps the signature it had. Blank means no signature."
             ),
             section="Identity",
         ),
@@ -2725,6 +2731,11 @@ async def _verify_identity_menu(
         title="Verify a user's identity",
         own=True,
         empty_message="No users to verify." if may_self_verify else "No other users to verify.",
+        help_about=(
+            "Every account you may verify, with what this node has verified for it. Pick one to record "
+            "a birthdate or real name you checked, or to revoke one. Boards and areas that require a "
+            "verified name or age let them in from then on."
+        ),
         redraw_in_place=redraw_in_place_enabled(db, verifier),
         unicode_style=unicode_style_enabled(db, verifier),
         collapsed=breadcrumb_collapsed_enabled(db, verifier),

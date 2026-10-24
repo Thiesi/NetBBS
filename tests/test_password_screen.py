@@ -306,7 +306,7 @@ def test_user_detail_shows_the_password_line_and_help(db, lane, sysop, alice):
 
     text = _visible(_written_text(session))
     assert "Password" in text
-    assert "never shown or recovered" in text
+    assert "Set a new one, or remove it" in " ".join(text.split())
 
 
 def test_user_detail_arrow_nav_reaches_the_password_field(db, lane, sysop, alice):
