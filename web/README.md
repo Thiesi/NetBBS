@@ -19,6 +19,14 @@ web/
   netbbs-files.html      -> https://www.netbbs.org/files.html    subsystem each,
   netbbs-doors.html      -> https://www.netbbs.org/doors.html    linked from both
   netbbs-mrc.html        -> https://www.netbbs.org/mrc.html      main pages
+  netbbs-voidrunner.html -> https://www.netbbs.org/voidrunner.html
+  netbbs-war-dialer.html -> https://www.netbbs.org/war-dialer.html
+  netbbs-retro-trivia.html -> https://www.netbbs.org/retro-trivia.html
+  netbbs-blacksite.html  -> https://www.netbbs.org/blacksite.html
+  netbbs-lunar-lander.html -> https://www.netbbs.org/lunar-lander.html
+  game-scenes.js        -> https://www.netbbs.org/game-scenes.js
+  blacksite-hero.png     -> https://www.netbbs.org/blacksite-hero.png
+  lunar-lander-hero.jpg  -> https://www.netbbs.org/lunar-lander-hero.jpg
   favicon.ico            -> https://www.netbbs.org/favicon.ico   the icon: a
   favicon.svg            -> https://www.netbbs.org/favicon.svg   terminal with a
   apple-touch-icon.png   -> https://www.netbbs.org/apple-touch-icon.png  prompt
@@ -69,6 +77,11 @@ The site is deployed from `main`, never from a branch or a working tree, so
 what is live is what `main` says. Where it is hosted, how to reach that host,
 and the exact copy-and-install steps are operational details. They live in the
 maintainer's private operations notes, not in this public repository.
+
+The individual game pages also need `game-scenes.js` and the two hero images
+at the site root, under the exact names in the map above. Verify their hashes
+alongside the HTML. The `shots/` files are source captures embedded into HTML;
+they do not need to be served for the game pages to work.
 
 A deploy backs up each page it replaces, outside the web-served directory. The
 icon files go the same way as the pages, each to its own name at the site's
@@ -181,6 +194,40 @@ needs `shot-tall` (17–24 rows do; fewer do not). Recapturing changes those
 numbers — the Colors screen gained rows and needed the class, the directory
 screen lost them and no longer did — so read that report rather than assuming
 the classes still fit.
+
+## Individual game pages
+
+The three bundled games have dedicated pages with their gameplay galleries
+and scene players. Blacksite and Lunar Lander have development previews:
+describe planned play, label the status, and never manufacture a screenshot.
+Their images are copied without modification from
+`Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
+`Thiesi/LunarLander` (`assets/lunar-lander-social.jpg`). Both repositories are
+BSD-2-Clause licensed. The concept-art pages declare
+`<meta name="netbbs-capture-kind" content="concept-art">`; the page checker
+requires labelled artwork and no terminal captures for that declaration.
+
+Capture the real launch splashes through the games' own `play_splash` functions:
+
+```sh
+PYTHONPATH=src python scripts/website_capture_game_splash.py voidrunner web/shots/raw-voidrunner-splash.txt
+PYTHONPATH=src python scripts/website_capture_game_splash.py war_dialer web/shots/raw-war_dialer-splash.txt
+PYTHONPATH=src python scripts/website_capture_game_splash.py retro_trivia web/shots/raw-retro_trivia-splash.txt
+PYTHONPATH=src python scripts/website_capture_retro_trivia.py question web/shots/raw-retro_trivia-question.txt
+```
+
+Convert each with `website_ansi_to_html.py --width 80 --height 24` and embed
+the fragment in its page. The splash helper records the held final frame,
+before teardown clears it, using the same terminal-recorder approach as the
+scene helper. Retro Trivia's question capture launches the subprocess and
+chooses a five-question round: questions are random, so recapturing may show a
+different question. Keep its raw output with the converted fragment.
+
+Run the local page and wording checkers over **all** `web/netbbs-*.html` files
+when changing a game page; the live checkers include all five game URLs.
+`game-scenes.js` is the game pages' shared player; the older pages retain their
+inline players until separately changed, so game pages can be delivered on
+their own.
 
 ## Scenes: animated captures
 

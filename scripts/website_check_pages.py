@@ -37,6 +37,11 @@ PAGES = {
     "files.html": "https://www.netbbs.org/files.html",
     "doors.html": "https://www.netbbs.org/doors.html",
     "mrc.html": "https://www.netbbs.org/mrc.html",
+    "voidrunner.html": "https://www.netbbs.org/voidrunner.html",
+    "war-dialer.html": "https://www.netbbs.org/war-dialer.html",
+    "retro-trivia.html": "https://www.netbbs.org/retro-trivia.html",
+    "blacksite.html": "https://www.netbbs.org/blacksite.html",
+    "lunar-lander.html": "https://www.netbbs.org/lunar-lander.html",
 }
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr"}
@@ -99,7 +104,9 @@ def captures(text: str):
     invisible to the audit -- which would let every terminal check silently
     pass on nothing.
     """
-    for body_match in re.finditer(r'<pre class="term-body">(.*?)</pre>', text, re.S):
+    for body_match in re.finditer(
+            r'<pre\b(?=[^>]*\bclass="[^"]*\bterm-body\b[^"]*")[^>]*>(.*?)</pre>',
+            text, re.S):
         before = text[:body_match.start()]
         # The *enclosing* shot, not the `term-bar` div that sits between it
         # and the body: match on the class token, never on position.
@@ -149,7 +156,16 @@ def check(label: str, raw: bytes) -> bool:
 
     shots = list(captures(text))
     print(f"  terminal captures   : {len(shots)}")
-    if not shots:
+    concept_art = '<meta name="netbbs-capture-kind" content="concept-art">' in text
+    if concept_art:
+        # Unreleased-game pages deliberately have no simulated gameplay.
+        # An explicit declaration may replace captures only with labelled art.
+        labelled_art = bool(re.search(
+            r'<figure class="concept-art">.*?<img\b.*?<figcaption>[^<]*concept art[^<]*</figcaption>',
+            text, re.S))
+        print(f"  concept art page    : {'ok' if labelled_art and not shots else 'invalid'}")
+        ok &= labelled_art and not shots
+    elif not shots:
         print("      ! no captures found -- every terminal check below was skipped")
         ok = False
     for title, classes, body in shots:
@@ -192,7 +208,7 @@ def self_test() -> None:
         raise AssertionError("MOJIBAKE matches correctly-encoded text")
     sample = ('<div class="term shot shot-tall"><div class="term-bar">'
               '<span class="term-title">t</span></div>'
-              '<pre class="term-body">x</pre></div>')
+              '<pre class="term-body" tabindex="0" aria-label="screen">x</pre></div>')
     found = list(captures(sample))
     if [(t, sorted(c)) for t, c, _ in found] != [("t", ["shot", "shot-tall", "term"])]:
         raise AssertionError(f"capture discovery broke: {found}")
