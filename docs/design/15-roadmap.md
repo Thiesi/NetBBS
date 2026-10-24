@@ -448,7 +448,11 @@ Compatibility extension (issues #296/#297):
 - The launch metadata file (`door_info.json`) is itself versioned, by a
   `door_api` integer, and grows additively (issue #469): a reader treats any
   absent field as unknown, and a door may refuse a version it does not
-  understand rather than probing for fields. Removing a profile restores the
+  understand rather than probing for fields. A field may also be added
+  within a version when ignoring it costs a door nothing, as
+  `datetime_format` (the node's display format) was in `door_api` 5
+  (issue #1545): a bump would make every door that refuses an unknown
+  version stop launching. Removing a profile restores the
   stdio API but does not pin the metadata to an older version — the file is a
   property of the platform, not of the profile. It never carries a credential,
   an email address, a user level or a network address.
