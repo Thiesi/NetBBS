@@ -104,7 +104,7 @@ def offered_tags(db: Database, network_id: int, kind: str) -> set[str]:
     return {row["tag"].upper() for row in rows}
 
 
-def set_offered(db: Database, network_id: int, kind: str, tag: str, offered: bool) -> None:
+def set_offered(db: Database, network_id: int, kind: str, tag: str, offered: bool, *, commit: bool = True) -> None:
     """Offer an area to the network's links, or stop offering it. Links that
     have it keep it; only new requests are refused."""
     if kind not in (ECHO, FILE_ECHO):
@@ -118,7 +118,8 @@ def set_offered(db: Database, network_id: int, kind: str, tag: str, offered: boo
     else:
         db.connection.execute("DELETE FROM ftn_link_offers WHERE network_id = ? AND kind = ? AND tag = ?",
                               (network_id, kind, tag))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def carried_areas(db: Database, network_id: int, kind: str) -> list[tuple[str, str]]:

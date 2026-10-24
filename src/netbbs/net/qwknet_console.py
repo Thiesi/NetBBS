@@ -29,13 +29,14 @@ from netbbs.boards import Board
 from netbbs.boards.boards import list_boards
 from netbbs.config import get_qwk_bbs_id
 from netbbs.digits import is_ascii_number
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import change_detail, record_action_without_commit
 from netbbs.net.admin_fields import _int_field, _optional_text_field
 from netbbs.net.admin_ui import _announce, _announce_line, _load_chrome, edit_resource_draft, pick_item
 from netbbs.net.char_input import InputCancelled
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.location import located
 from netbbs.net.menu_description_preference import menu_description_level
+from netbbs.net.network_templates import NetworkTemplate, apply_template, pick_template
 from netbbs.net.picker import pick_item as _pick_item
 from netbbs.net.resource_editor import (
     FieldSpec,
@@ -67,6 +68,7 @@ from netbbs.qwknet.networks import (
     delete_network,
     delete_node,
     get_network,
+    get_node,
     list_networks,
     list_nodes,
     map_conference,
@@ -83,9 +85,18 @@ from netbbs.rendering.sanitize import sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
-# DOVE-Net through Vertrauen, the network most Synchronet systems are on:
-# the starting point for a new network. The SysOp fills in the password.
-DOVE_NET = {"name": "DOVE-Net", "hub_id": "VERT", "host": "vert.synchro.net", "transport": "https"}
+# --- network templates (issue #1517; §16, "Issue #1395", Decisions 10-12) ---
+# DOVE-Net through Vertrauen, the network most Synchronet systems are on, and
+# its one public entry hub. The only template, so [C]reate opens on it with no
+# pick. Never a password, and no switch: `_TEMPLATE_KEYS` is all it may fill.
+_TEMPLATE_KEYS = frozenset({"name", "hub_id", "host", "transport"})
+DOVE_NET = NetworkTemplate(
+    name="DOVE-Net", summary="Through Vertrauen (VERT), over HTTPS",
+    fields={"name": "DOVE-Net", "hub_id": "VERT", "host": "vert.synchro.net", "transport": "https"},
+    preamble=("A new network starts as DOVE-Net through Vertrauen: create an account there named after "
+              "your QWK ID first, then fill in its password."))
+QWKNET_TEMPLATES = (DOVE_NET,)
+# --- end network templates ---
 _TRANSPORT_LABELS = {"https": "HTTPS (qnet-http)", "http": "HTTP (qnet-http, password readable)",
                      "ftp": "FTP (passive, password readable)", "ftps": "FTPS (FTP over TLS)"}
 
@@ -129,7 +140,14 @@ async def qwknet_networks_screen(session: Session, lane: DatabaseLane, actor: Us
         return await lane.run(load)
 
     async def _create() -> QwknetNetwork | None:
-        return await edit_network(session, lane, actor, None, node_controls=node_controls)
+        # One template: no pick, the draft opens on DOVE-Net (issue #1517).
+        template = await pick_template(
+            session, lane, actor, QWKNET_TEMPLATES, title="New QWKnet network",
+            preamble="Which network to start from. It fills only the new draft; nothing is stored before Save.",
+            help_about="Which network a new one starts from. Nothing is stored before Save.")
+        if template is None:
+            return None
+        return await edit_network(session, lane, actor, None, node_controls=node_controls, template=template)
 
     async def _delete(network: QwknetNetwork):
         nonlocal status
@@ -140,9 +158,10 @@ async def qwknet_networks_screen(session: Session, lane: DatabaseLane, actor: Us
             return None
 
         def _persist(db: Database) -> None:
-            delete_network(db, network.id)
-            record_action(db, actor=actor, action="delete_qwknet_network",
-                          detail=f"deleted QWKnet network {network.name!r}")
+            with db.connection:  # the delete and its entry together (issue #1515)
+                delete_network(db, network.id, commit=False)
+                record_action_without_commit(db, actor=actor, action="delete_qwknet_network",
+                                             detail=f"deleted QWKnet network {network.name!r}")
 
         await lane.run(_persist)
         status = f"Deleted {network.name}."
@@ -223,11 +242,23 @@ def _secret_field(key: str, label: str, *, clears: bool = True):
     return prompt
 
 
-def _network_draft(network: QwknetNetwork | None, default_id: str) -> dict:
+def _network_draft(network: QwknetNetwork | None, default_id: str, template: NetworkTemplate | None = None) -> dict:
     if network is None:
-        return {"name": DOVE_NET["name"], "our_id": default_id, "hub_id": DOVE_NET["hub_id"],
-                "transport": DOVE_NET["transport"], "host": DOVE_NET["host"], "port": 0, "password": "",
-                "poll_minutes": 240, "tagline": "", "enabled": False, "serve_nodes": False}
+        draft = {"name": "", "our_id": default_id, "hub_id": "", "transport": "https", "host": "", "port": 0,
+                 "password": "", "poll_minutes": 240, "tagline": "", "enabled": False, "serve_nodes": False}
+        return apply_template(draft, template or DOVE_NET, _TEMPLATE_KEYS)  # issue #1517
+    return {"name": network.name, "our_id": network.our_id, "hub_id": network.hub_id,
+            "transport": network.transport, "host": network.host, "port": network.port,
+            "password": network.password, "poll_minutes": network.poll_minutes, "tagline": network.tagline,
+            "enabled": network.enabled, "serve_nodes": network.serve_nodes}
+
+
+def network_audit_values(network: QwknetNetwork | None) -> dict | None:
+    """Every value the network editor's save writes, as stored, by name, for
+    its audit entry (issue #1515); the password is compared, never shown.
+    None for a network not stored yet."""
+    if network is None or network.id is None:
+        return None
     return {"name": network.name, "our_id": network.our_id, "hub_id": network.hub_id,
             "transport": network.transport, "host": network.host, "port": network.port,
             "password": network.password, "poll_minutes": network.poll_minutes, "tagline": network.tagline,
@@ -235,9 +266,11 @@ def _network_draft(network: QwknetNetwork | None, default_id: str) -> dict:
 
 
 async def edit_network(session: Session, lane: DatabaseLane, actor: User, existing: QwknetNetwork | None, *,
-                       node_controls=None) -> QwknetNetwork | None:
-    """One network's settings in a draft; nothing is stored before [S]ave."""
-    draft = _network_draft(existing, await lane.run(get_qwk_bbs_id))
+                       node_controls=None, template: NetworkTemplate | None = None) -> QwknetNetwork | None:
+    """One network's settings in a draft; nothing is stored before [S]ave.
+    A new network's draft starts from `template` (DOVE-Net by default)."""
+    template = template or DOVE_NET  # issue #1517
+    draft = _network_draft(existing, await lane.run(get_qwk_bbs_id), template)
     transports = list(TRANSPORTS)
     fields = [
         FieldSpec(key="enabled", label="Enabled", render=lambda d: "yes" if d["enabled"] else "no",
@@ -303,11 +336,15 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
         )
 
         def _persist(db: Database) -> QwknetNetwork:
-            saved = save_network(db, candidate)
-            record_action(db, actor=actor, action="set_qwknet_network",
-                          detail=(f"{saved.name}: {saved.our_id} via {saved.hub_id or '(top hub)'} "
-                                  f"{saved.transport}://{saved.host}:{saved.effective_port} "
-                                  f"enabled={saved.enabled} serve_nodes={saved.serve_nodes}"))
+            # The network and its audit entry commit together; the entry
+            # names every value that changed, the password only as changed
+            # or unchanged (issue #1515).
+            with db.connection:
+                before = network_audit_values(get_network(db, existing.id) if existing is not None else None)
+                saved = save_network(db, candidate, commit=False)
+                record_action_without_commit(
+                    db, actor=actor, action="set_qwknet_network",
+                    detail=change_detail(saved.name, before, network_audit_values(saved), secrets=("password",)))
             return saved
 
         return await lane.run(_persist)
@@ -317,8 +354,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
         session, lane, title=existing.name if existing is not None else "New QWKnet network",
         fields=fields, draft=draft, save=save, error_type=QwknetError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
-        preamble=("A new network starts as DOVE-Net through Vertrauen: create an account there named after "
-                  "your QWK ID first, then fill in its password." if existing is None else None),
+        preamble=template.preamble if existing is None else None,  # issue #1517
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,
@@ -396,22 +432,34 @@ async def _map_board(session: Session, lane: DatabaseLane, actor: User, network:
         text = (await session.read_line(cancellable=True, initial=str(current) if current else "")).strip()
     except InputCancelled:
         return
+    if not text and current is None:
+        return
+    if text and not is_ascii_number(text):
+        _announce(session, "A conference number is digits only (e.g. 2001).", error=True)
+        return
+
+    def _persist(db: Database) -> str:
+        # The mapping and its audit entry commit together (issue #1515).
+        with db.connection:
+            if not text:
+                unmap_board(db, board, commit=False)
+                outcome = f"{board.name} is a local board again; its posts stay."
+                after = {"network": "", "conference": ""}
+            else:
+                mapping = map_conference(db, board, network.id, int(text), commit=False)
+                outcome = f"{board.name} carries conference {mapping.number} on {network.name}."
+                after = {"network": network.name, "conference": mapping.number}
+            before = ({"network": network.name, "conference": current} if current is not None
+                      else {"network": "", "conference": ""})
+            record_action_without_commit(db, actor=actor, action="set_board_qwknet",
+                                         detail=change_detail(board.name, before, after))
+        return outcome
+
     try:
-        if not text:
-            if current is None:
-                return
-            await lane.run(unmap_board, board)
-            outcome = f"{board.name} is a local board again; its posts stay."
-        elif not is_ascii_number(text):
-            _announce(session, "A conference number is digits only (e.g. 2001).", error=True)
-            return
-        else:
-            mapping = await lane.run(map_conference, board, network.id, int(text))
-            outcome = f"{board.name} carries conference {mapping.number} on {network.name}."
+        outcome = await lane.run(_persist)
     except QwknetError as exc:
         _announce(session, str(exc), error=True)
         return
-    await lane.run(lambda db: record_action(db, actor=actor, action="set_board_qwknet", detail=outcome))
     _announce(session, outcome)
 
 
@@ -446,9 +494,14 @@ async def qwknet_held_screen(session: Session, lane: DatabaseLane, actor: User, 
         what = "the packets" if group.conference is None else f"conference {group.conference}'s messages"
         if not await prompt_yes_no(session, f"Delete {what} ({group.count})?", default=False):
             return None
-        count = await lane.run(delete_held, network.id, group.conference)
-        await lane.run(lambda db: record_action(db, actor=actor, action="delete_qwknet_held",
-                                                detail=f"{network.name}: deleted {count} held ({what})"))
+        def _persist(db: Database) -> int:
+            with db.connection:  # the delete and its entry together (issue #1515)
+                count = delete_held(db, network.id, group.conference, commit=False)
+                record_action_without_commit(db, actor=actor, action="delete_qwknet_held",
+                                             detail=f"{network.name}: deleted {count} held ({what})")
+            return count
+
+        count = await lane.run(_persist)
         status = f"Deleted {count}."
         return await _load()
 
@@ -503,8 +556,10 @@ async def qwknet_nodes_screen(session: Session, lane: DatabaseLane, actor: User,
             return None
 
         def _persist(db: Database) -> None:
-            delete_node(db, node.id)
-            record_action(db, actor=actor, action="delete_qwknet_node", detail=f"{network.name}: {node.qwk_id}")
+            with db.connection:  # the delete and its entry together (issue #1515)
+                delete_node(db, node.id, commit=False)
+                record_action_without_commit(db, actor=actor, action="delete_qwknet_node",
+                                             detail=f"{network.name}: {node.qwk_id}")
 
         await lane.run(_persist)
         status = f"Deleted {node.qwk_id}."
@@ -638,11 +693,26 @@ async def edit_node(session: Session, lane: DatabaseLane, actor: User, network: 
         )
 
         def _persist(db: Database) -> QwknetNode:
-            saved = save_node(db, candidate, password_hash=password_hash, conferences=set(draft["conferences"]))
-            record_action(db, actor=actor, action="set_qwknet_node",
-                          detail=(f"{network.name}: {saved.qwk_id} enabled={saved.enabled} "
-                                  f"conferences={sorted(draft['conferences'])}"
-                                  + (" password changed" if password_hash else "")))
+            # The account and its audit entry commit together; the entry
+            # names every value that changed, the password only as changed
+            # or unchanged (issue #1515).
+            def values(node: QwknetNode | None) -> dict | None:
+                if node is None:
+                    return None
+                return {"qwk_id": node.qwk_id, "name": node.name, "enabled": node.enabled,
+                        "conferences": node_conferences(db, node.id), "packet_messages": node.packet_messages,
+                        "rep_kib": node.rep_kib, "password": ""}
+
+            with db.connection:
+                before = values(get_node(db, existing.id) if existing is not None else None)
+                saved = save_node(db, candidate, password_hash=password_hash, conferences=set(draft["conferences"]),
+                                  commit=False)
+                after = values(saved)
+                record_action_without_commit(
+                    db, actor=actor, action="set_qwknet_node",
+                    detail=change_detail(f"{network.name} {saved.qwk_id}", before,
+                                         {**after, "password": "new" if password_hash else ""},
+                                         secrets=("password",)))
             return saved
 
         return await lane.run(_persist)

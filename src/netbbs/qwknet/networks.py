@@ -134,7 +134,7 @@ _NETWORK_COLUMNS = ("name", "our_id", "hub_id", "transport", "host", "port", "pa
                     "tagline", "enabled", "serve_nodes")
 
 
-def save_network(db: Database, network: QwknetNetwork) -> QwknetNetwork:
+def save_network(db: Database, network: QwknetNetwork, *, commit: bool = True) -> QwknetNetwork:
     """Create (no `id`) or update a record; returns it as stored. Changing
     a network's own QWK ID changes how routes name this node from then on;
     nothing already sent changes."""
@@ -160,15 +160,17 @@ def save_network(db: Database, network: QwknetNetwork) -> QwknetNetwork:
     except sqlite3.IntegrityError:
         db.connection.rollback()
         raise QwknetError(f"A QWKnet network called {validated.name!r} already exists.") from None
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return get_network(db, validated.id) or validated
 
 
-def delete_network(db: Database, network_id: int) -> None:
+def delete_network(db: Database, network_id: int, *, commit: bool = True) -> None:
     """Remove a record. Its boards become local again and keep their posts;
     its node accounts, held messages and queue go with it."""
     db.connection.execute("DELETE FROM qwknet_networks WHERE id = ?", (network_id,))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def _network_from_row(row: sqlite3.Row) -> QwknetNetwork:
@@ -223,7 +225,8 @@ def _board_by_key(db: Database, board_key: str) -> Board | None:
         return None
 
 
-def map_conference(db: Database, board: Board, network_id: int, number: int) -> ConferenceMapping:
+def map_conference(db: Database, board: Board, network_id: int, number: int, *,
+                   commit: bool = True) -> ConferenceMapping:
     """Make `board` carry conference `number` of the network. Refuses a
     Linked or FTN board, a missing network, conference 0 (mail) or one out
     of QWK's range, and a conference another board already carries.
@@ -253,14 +256,16 @@ def map_conference(db: Database, board: Board, network_id: int, number: int) -> 
         "INSERT INTO qwknet_conferences (network_id, number, board_key, mapped_at) VALUES (?, ?, ?, ?)",
         (network_id, number, board.board_id, utc_now_iso()),
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return ConferenceMapping(network_id, number, board.board_id)
 
 
-def unmap_board(db: Database, board: Board) -> None:
+def unmap_board(db: Database, board: Board, *, commit: bool = True) -> None:
     """Make `board` local again; its posts stay."""
     db.connection.execute("DELETE FROM qwknet_conferences WHERE board_key = ?", (board.board_id,))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def board_conference(db: Database, board: Board) -> ConferenceMapping | None:
@@ -338,7 +343,7 @@ def validate_node(db: Database, node: QwknetNode) -> QwknetNode:
 
 
 def save_node(db: Database, node: QwknetNode, *, password_hash: str | None = None,
-              conferences: set[int] | None = None) -> QwknetNode:
+              conferences: set[int] | None = None, commit: bool = True) -> QwknetNode:
     """Create (no `id`; `password_hash` required) or update a node account.
     `password_hash` replaces the password when given. `conferences`, when
     given, replaces the set it carries; a new account with none carries
@@ -391,13 +396,15 @@ def save_node(db: Database, node: QwknetNode, *, password_hash: str | None = Non
     except BaseException:
         db.connection.rollback()
         raise
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return get_node(db, validated.id) or validated
 
 
-def delete_node(db: Database, node_id: int) -> None:
+def delete_node(db: Database, node_id: int, *, commit: bool = True) -> None:
     db.connection.execute("DELETE FROM qwknet_nodes WHERE id = ?", (node_id,))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def list_nodes(db: Database, network_id: int | None = None) -> list[QwknetNode]:

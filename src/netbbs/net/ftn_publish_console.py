@@ -64,7 +64,7 @@ from netbbs.ftn.publish import (
     segment_line,
     suggested_node,
 )
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import change_detail, record_action_without_commit
 from netbbs.net.admin_fields import _int_field, _optional_text_field
 from netbbs.net.admin_ui import (
     _BACK_ACTION,
@@ -224,6 +224,21 @@ def _settings_draft(settings: PublishSettings) -> dict:
             "weekday": settings.weekday}
 
 
+def _line_audit_values(fields: ListFields, prefix: str = "") -> dict:
+    return {f"{prefix}name": fields.name, f"{prefix}location": fields.location, f"{prefix}sysop": fields.sysop,
+            f"{prefix}phone": fields.phone, f"{prefix}speed": fields.speed, f"{prefix}flags": fields.flags}
+
+
+def settings_audit_values(settings: PublishSettings) -> dict:
+    """Every value the publishing settings' save writes, as stored, by name,
+    for its audit entry (issue #1515)."""
+    return {"pointlist": settings.pointlist_on, "pointlist_name": settings.pointlist_name,
+            "pointlist_echo": settings.pointlist_echo, "segment": settings.segment_on,
+            "segment_name": settings.segment_name, "segment_echo": settings.segment_echo,
+            **_line_audit_values(settings.host, "host_"), "folder": settings.folder, "zip": settings.archive,
+            "schedule": settings.schedule, "weekday": WEEKDAYS[settings.weekday]}
+
+
 def _settings_from_draft(base: PublishSettings, draft: dict) -> PublishSettings:
     return replace(
         base, pointlist_on=bool(draft["pointlist_on"]), pointlist_name=draft["pointlist_name"] or "",
@@ -336,10 +351,14 @@ async def edit_publish_settings(session: Session, lane: DatabaseLane, actor: Use
         candidate = _settings_from_draft(base, draft)
 
         def _persist(db: Database) -> PublishSettings:
-            saved = save_settings(db, network, candidate)
-            record_action(db, actor=actor, action="set_ftn_publishing",
-                          detail=(f"{network.name}: pointlist {'on' if saved.pointlist_on else 'off'}, segment "
-                                  f"{'on' if saved.segment_on else 'off'}, schedule {saved.schedule}"))
+            # The settings and their audit entry commit together; the entry
+            # names every value that changed (issue #1515).
+            with db.connection:
+                before = settings_audit_values(get_settings(db, network.id))
+                saved = save_settings(db, network, candidate, commit=False)
+                record_action_without_commit(
+                    db, actor=actor, action="set_ftn_publishing",
+                    detail=change_detail(network.name, before, settings_audit_values(saved)))
             return saved
 
         return await lane.run(_persist)
@@ -415,10 +434,16 @@ async def _edit_point(session: Session, lane: DatabaseLane, actor: User, network
             draft["speed"] or "", draft["flags"] or ""))
 
         def _persist(db: Database) -> PointEntry:
-            saved = save_point_entry(db, candidate)
-            record_action(db, actor=actor, action="set_ftn_pointlist_line",
-                          detail=f"{network.name}: point {entry.link.address.four_d} "
-                                 f"{'listed' if saved.listed else 'not listed'}")
+            # The line and its audit entry commit together; the entry names
+            # every value that changed (issue #1515).
+            with db.connection:
+                saved = save_point_entry(db, candidate, commit=False)
+                record_action_without_commit(
+                    db, actor=actor, action="set_ftn_pointlist_line",
+                    detail=change_detail(
+                        f"{network.name} point {entry.link.address.four_d}",
+                        {"listed": entry.listed, **_line_audit_values(entry.fields)},
+                        {"listed": saved.listed, **_line_audit_values(saved.fields)}))
             return saved
 
         return await lane.run(_persist)
@@ -470,9 +495,10 @@ async def _nodes_screen(session: Session, lane: DatabaseLane, actor: User, netwo
             return None
 
         def _persist(db: Database) -> None:
-            delete_segment_node(db, node.id)
-            record_action(db, actor=actor, action="delete_ftn_segment_node",
-                          detail=f"{network.name}: node {network.our_address.net}/{node.node}")
+            with db.connection:  # the line and its entry together (issue #1515)
+                delete_segment_node(db, node.id, commit=False)
+                record_action_without_commit(db, actor=actor, action="delete_ftn_segment_node",
+                                             detail=f"{network.name}: node {network.our_address.net}/{node.node}")
 
         await lane.run(_persist)
         status = f"Deleted node {node.node}."
@@ -517,9 +543,16 @@ async def _edit_node(session: Session, lane: DatabaseLane, actor: User, network:
             draft["speed"] or "", draft["flags"] or ""))
 
         def _persist(db: Database) -> SegmentNode:
-            saved = save_segment_node(db, network, candidate)
-            record_action(db, actor=actor, action="set_ftn_segment_node",
-                          detail=f"{network.name}: node {network.our_address.net}/{saved.node}")
+            # The line and its audit entry commit together; the entry names
+            # every value that changed (issue #1515).
+            values = lambda n: {"node": n.node, "keyword": n.keyword or "(plain)",  # noqa: E731
+                                **_line_audit_values(n.fields)}
+            with db.connection:
+                saved = save_segment_node(db, network, candidate, commit=False)
+                record_action_without_commit(
+                    db, actor=actor, action="set_ftn_segment_node",
+                    detail=change_detail(f"{network.name} node {network.our_address.net}/{saved.node}",
+                                         values(existing) if existing is not None else None, values(saved)))
             return saved
 
         return await lane.run(_persist)

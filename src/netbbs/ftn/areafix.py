@@ -219,7 +219,8 @@ def validate_new_password(password: str) -> str:
     return password
 
 
-def queue_password_change(db: Database, network: FtnNetwork, sysop: User, robot: str, new_password: str) -> str:
+def queue_password_change(db: Database, network: FtnNetwork, sysop: User, robot: str, new_password: str, *,
+                          commit: bool = True) -> str:
     """**Change robot password**: send `%PWD <new>` to the robot under its
     current password, and store the new one for that robot, in one
     transaction. Returns what else changed, for the SysOp, or "".
@@ -251,7 +252,8 @@ def queue_password_change(db: Database, network: FtnNetwork, sysop: User, robot:
     except BaseException:
         db.connection.rollback()
         raise
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     if keeps_old:
         return ("FileFix keeps the old password as its own. If your hub uses one password for both robots, "
                 "set FileFix's in the network editor once AreaFix confirms.")
