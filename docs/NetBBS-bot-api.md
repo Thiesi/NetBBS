@@ -68,7 +68,7 @@ are literal braces), and at most 400 characters with each `{name}` counted as
 a block row's length, since it opens Baud's command list. Any bot may honour
 them; Baud does (see below).
 
-The bot must answer within five seconds with exactly:
+The bot must answer within 30 seconds, counted from the hello, with exactly:
 
 ```json
 {"type":"ready","version":1}

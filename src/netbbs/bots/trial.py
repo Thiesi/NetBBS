@@ -249,8 +249,12 @@ class Trial:
             except TimeoutError:
                 return
 
-    async def wait_ready(self, limit: float = 10.0) -> None:
-        deadline = time.monotonic() + limit
+    async def wait_ready(self, limit: float | None = None) -> None:
+        """Until the bot runs or has failed to start. By default as long as
+        the runtime gives it to answer its hello, and a little more: the bot
+        is "restarting" by then if it never answered."""
+        from netbbs.bots.runtime import READY_SECONDS
+        deadline = time.monotonic() + (READY_SECONDS + 5 if limit is None else limit)
         while time.monotonic() < deadline:
             if self.bot.id in self.runtime.running_ids or (await self.status())[0] == "restarting":
                 return

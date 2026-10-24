@@ -27,6 +27,11 @@ from netbbs.timeutil import utc_now_iso
 MAX_LINE_BYTES = 32768
 MAX_PENDING = 32
 REQUEST_SECONDS = 60
+# The bot's answer to the hello. The time counts the interpreter's own start,
+# which a loaded host can stretch to many seconds (issue #1454): a bound of 5
+# treated a slow start as a broken bot and backed it off for up to a minute.
+# A bot that really hangs is still restarted once this runs out.
+READY_SECONDS = 30
 # Joins waiting for held-line delivery (issue #1375). A join is queued with
 # put_nowait from the chat paths, so a slow database never holds a caller's
 # input; a full queue drops the join and its lines wait for the next one.
@@ -454,7 +459,7 @@ class _Worker:
                                # this node by (`Baud.bot@<node>`).
                                "quotes": self.bot.quotes, "polls": self.bot.polls,
                                "linked_channels": list(self.bot.linked_channels), "node": node})
-            ready = await asyncio.wait_for(self._read(), 5)
+            ready = await asyncio.wait_for(self._read(), READY_SECONDS)
             if ready != {"type": "ready", "version": BOT_API_VERSION}:
                 raise BotError("Bot did not acknowledge BOT_API_VERSION 1.")
             self.ready = True

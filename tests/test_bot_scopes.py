@@ -9,7 +9,6 @@ import pytest
 
 from netbbs.bots.registry import BotError, save_bot, mute_bot, observation_targets, channel_readers
 from netbbs.bots.runtime import BotRuntime
-from netbbs.bots.state import read_state
 from netbbs.chat.bots import mute_remote_bot, set_channel_bot_policy
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ParticipantId
@@ -18,7 +17,7 @@ from netbbs.net import chat_flow
 from netbbs.timeutil import utc_now_iso
 from tests.test_bot_runtime import (  # noqa: F401
     db, lane, hub, presence, mailbox, history, sysop, alice, channel,
-    install, eventually, next_line, FakeSession, CROSS_PROCESS_TIMEOUT,
+    install, eventually, eventually_state, bot_state, next_line, FakeSession, CROSS_PROCESS_TIMEOUT,
 )
 
 
@@ -52,8 +51,8 @@ def test_real_external_bot_observes_only_granted_live_humans_and_stops_on_revoca
             human = record_message(db, channel, kind="message", author_label=alice.username, body="ordinary text")
             caller = {"id": alice.id, "name": alice.username}
             await runtime.observe(channel, human, caller=caller)
-            await eventually(lambda: len((read_state(db, "Baud") or {}).get("events", [])) == 1)
-            assert read_state(db, "Baud")["events"][0]["text"] == "ordinary text"
+            state = await eventually_state(lane, "Baud", lambda state: len((state or {}).get("events", [])) == 1)
+            assert state["events"][0]["text"] == "ordinary text"
             assert not runtime.workers[bot.id].pending
             await runtime.observe(channel, replace(human, author_kind="bot"), caller=caller)
             await runtime.observe(channel, replace(human, external_source="MRC"), caller=caller)
@@ -63,7 +62,7 @@ def test_real_external_bot_observes_only_granted_live_humans_and_stops_on_revoca
             install(db, sysop, channel, bot_id=bot.id, command=observer_command())
             await runtime.observe(channel, human, caller=caller)
             await asyncio.sleep(.1)
-            assert len(read_state(db, "Baud")["events"]) == 1
+            assert len((await bot_state(lane, "Baud"))["events"]) == 1
         finally:
             await runtime.close()
     asyncio.run(run())
@@ -90,14 +89,13 @@ def test_real_chat_heading_who_actions_join_leave_and_no_replay(db, lane, hub, p
             await eventually(lambda: "Joined" in "".join(session.written))
             for line in ("/who", "ordinary text", "/me waves"):
                 session.input.put_nowait(line)
-            await eventually(lambda: len((read_state(db, "Baud") or {}).get("events", [])) == 3)
+            await eventually_state(lane, "Baud", lambda state: len((state or {}).get("events", [])) == 3)
             written = "".join(session.written)
             assert written.count("Baud.bot reads this channel") >= 1  # the heading
             assert "reads this channel" in written.split("Who's in #lobby", 1)[1]  # its /who row
             session.input.put_nowait("/quit")
             await asyncio.wait_for(task, CROSS_PROCESS_TIMEOUT)
-            await eventually(lambda: len(read_state(db, "Baud")["events"]) == 4)
-            events = read_state(db, "Baud")["events"]
+            events = (await eventually_state(lane, "Baud", lambda state: len(state["events"]) == 4))["events"]
             assert [e["kind"] for e in events] == ["join", "message", "action", "leave"]
             assert "old history" not in str(events)
         finally:
@@ -163,8 +161,8 @@ def test_real_link_observation_disclosure_and_receiving_mutes_do_not_hide_reader
             await session.send(frame)
             await session.send(frame)  # normal live dedup applies before observation
             await session.send(build_presence_delta_frame(cc.channel_id, "join", "alice", "alice"))
-            await eventually(lambda: len((read_state(host.db, "Observer") or {}).get("events", [])) == 2)
-            events = read_state(host.db, "Observer")["events"]
+            events = (await eventually_state(host.lane, "Observer",
+                                             lambda state: len((state or {}).get("events", [])) == 2))["events"]
             assert [e["kind"] for e in events] == ["message", "join"]
             assert events[0]["caller"]["id"] == f"link:{caller.identity.fingerprint}:alice"
             assert not host.runtime.workers[bot.id].pending

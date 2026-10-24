@@ -22,6 +22,7 @@ from netbbs.messaging_preferences import set_accepts_direct_messages
 from netbbs.timeutil import utc_iso
 from tests.test_chat_bots import sysop, alice, channel  # noqa: F401
 from tests.test_chat_flow_moderation import FakeSession, db, lane, hub, presence, mailbox, history  # noqa: F401
+from tests.test_bot_runtime import CROSS_PROCESS_TIMEOUT, eventually_state
 
 WEEK = 7 * 24 * 3600
 
@@ -271,7 +272,7 @@ def test_real_chat_join_delivers_the_held_line(db, lane, hub, presence, mailbox,
                     while "held until you came" not in "".join(session.written):
                         await asyncio.sleep(.02)
                 session.input.put_nowait("/quit")
-                await asyncio.wait_for(task, 5)
+                await asyncio.wait_for(task, CROSS_PROCESS_TIMEOUT)
             finally:
                 if not task.done():
                     task.cancel()
@@ -434,7 +435,6 @@ HELLO_ECHO = (
 
 def test_hello_names_the_display_zone_and_a_zone_change_restarts(db, lane, hub, sysop, channel):
     import sys
-    from netbbs.bots.state import read_state
     from netbbs.timeutil import set_display_timezone
     set_display_timezone(db, "Europe/Berlin")
     bot = install(db, sysop, channel, command=[sys.executable, "-u", "-c", HELLO_ECHO])
@@ -443,12 +443,9 @@ def test_hello_names_the_display_zone_and_a_zone_change_restarts(db, lane, hub, 
         runtime = BotRuntime(lane, hub, poll_seconds=.03, restart_seconds=.03)
         runtime.start()
         try:
-            async with asyncio.timeout(30):
-                while read_state(db, bot.storage_name).get("tz") != "Europe/Berlin":
-                    await asyncio.sleep(.05)
-                set_display_timezone(db, "America/New_York")
-                while read_state(db, bot.storage_name).get("tz") != "America/New_York":
-                    await asyncio.sleep(.05)
+            await eventually_state(lane, bot.storage_name, lambda state: state.get("tz") == "Europe/Berlin")
+            set_display_timezone(db, "America/New_York")
+            await eventually_state(lane, bot.storage_name, lambda state: state.get("tz") == "America/New_York")
         finally:
             await runtime.close()
 
@@ -620,7 +617,6 @@ def test_baud_tell_commands_use_the_request_token():
 
 
 def test_real_baud_holds_a_reminder_until_its_owner_joins(db, lane, hub, sysop, alice, channel):
-    from netbbs.bots.state import read_state
     bot = install(db, sysop, channel)
 
     async def run():
@@ -634,8 +630,8 @@ def test_real_baud_holds_a_reminder_until_its_owner_joins(db, lane, hub, sysop, 
                     await asyncio.sleep(.02)
                 # Alice sets it and is gone when it falls due.
                 await runtime.enqueue(bot, channel, {"id": alice.id, "name": alice.username}, "remind 1s tea")
-                while not (read_state(db, bot.storage_name).get("reminders") or [{}])[0].get("held"):
-                    await asyncio.sleep(.05)
+                await eventually_state(lane, bot.storage_name,
+                                       lambda state: (state.get("reminders") or [{}])[0].get("held"))
                 assert len(held_rows(db)) == 1
                 hub.join(channel.name, ParticipantId(alice.username, 1))
                 runtime.joined(channel, alice.id)
@@ -643,8 +639,7 @@ def test_real_baud_holds_a_reminder_until_its_owner_joins(db, lane, hub, sysop, 
                     line = await queue.get()
                     if "held until you came back" in getattr(line, "body", ""):
                         break
-                while read_state(db, bot.storage_name)["reminders"]:
-                    await asyncio.sleep(.05)
+                await eventually_state(lane, bot.storage_name, lambda state: not state["reminders"])
         finally:
             await runtime.close()
 

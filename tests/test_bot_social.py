@@ -20,7 +20,9 @@ from netbbs.moderation import ChannelPermission
 from netbbs.moderation.roles import grant_permissions
 from netbbs.net import bot_flow
 from netbbs.net.admin_ui import _load_chrome
-from tests.test_bot_runtime import db, lane, hub, sysop, alice, channel, eventually, install, next_line  # noqa: F401
+from tests.test_bot_runtime import (  # noqa: F401
+    db, lane, hub, sysop, alice, channel, eventually, eventually_state, install, next_line,
+)
 from tests.test_bot_settings_ui import Screen
 
 
@@ -388,7 +390,6 @@ def test_message_events_carry_caller_facts_and_hello_carries_linked_channels(db,
 
 
 def test_linked_poll_remote_vote_by_address_and_pointer_from_the_callers_own_baud(tmp_path):
-    from netbbs.bots.state import read_state
     from netbbs.chat.scrollback import get_scrollback
     from netbbs.config import get_node_display_name
     from tests.test_bot_link import Node, connect
@@ -414,8 +415,8 @@ def test_linked_poll_remote_vote_by_address_and_pointer_from_the_callers_own_bau
             await next_line(fq, "No poll is open here. A poll opened on another BBS")
             address = f"Baud.bot@{origin.identity.fingerprint}: "
             assert await first.address(fc, address + "vote 2") is None
-            await eventually(lambda: read_state(origin.db, "Baud")["polls"][0]["v"])
-            assert list(read_state(origin.db, "Baud")["polls"][0]["v"].values()) == [1]
+            state = await eventually_state(origin.lane, "Baud", lambda state: state["polls"][0]["v"])
+            assert list(state["polls"][0]["v"].values()) == [1]
             # A Link caller is never a moderator at the bot's host.
             assert await first.address(fc, address + "poll close") is None
             await next_line(fq, "Only the person who opened poll #1")

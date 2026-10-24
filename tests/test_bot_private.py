@@ -22,7 +22,7 @@ from netbbs.link.events import CHAT_BOT_PRIVATE_CAPABILITY, LINK_CAPABILITIES, b
 from netbbs.link.protocol import LinkProtocolError, build_bot_frame
 from netbbs.net import chat_flow
 from netbbs.timeutil import utc_iso, utc_now_iso
-from tests.test_bot_runtime import FakeSession, eventually, next_line
+from tests.test_bot_runtime import CROSS_PROCESS_TIMEOUT, FakeSession, eventually, next_line
 from tests.test_chat_bots import sysop, alice, channel  # noqa: F401
 from tests.test_chat_flow_moderation import db, lane, hub, presence, mailbox, history  # noqa: F401
 
@@ -112,7 +112,7 @@ def test_private_requests_and_answers_through_the_real_chat_loop(db, lane, hub, 
         async def say(text, needle):
             session.input.put_nowait(text)
             try:
-                await eventually(lambda: needle in _plain(session), timeout=8)
+                await eventually(lambda: needle in _plain(session))
             except TimeoutError:
                 raise AssertionError(_plain(session)[-1500:])
 
@@ -168,7 +168,7 @@ def test_private_requests_and_answers_through_the_real_chat_loop(db, lane, hub, 
             # A name no bot has stays a person's name.
             await say("/msg Nobody.bot hi", "Nobody.bot")
             session.input.put_nowait("/quit")
-            await asyncio.wait_for(task, 5)
+            await asyncio.wait_for(task, CROSS_PROCESS_TIMEOUT)
         finally:
             if task and not task.done():
                 task.cancel()

@@ -187,6 +187,19 @@ def test_pinned_ui_min_height_requires_four_rows(lane, hub, presence, mailbox, c
 # -- the real, byte-fed session: live_buffer/lock genuinely exercised -----
 
 
+# A positive wait's bound. The wait returns the moment its condition holds,
+# so the bound matters only when something is stuck. Fixed sleeps standing in
+# for "the chat loop has got there by now" failed under a loaded full suite
+# (issue #1454).
+UNTIL_SECONDS = 30
+
+
+async def until(predicate) -> None:
+    async with asyncio.timeout(UNTIL_SECONDS):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
 class _LiveTypingSession(Session):
     """
     A `Session` backed by a live, externally-feedable byte queue --
@@ -235,7 +248,7 @@ class _LiveTypingSession(Session):
 
     async def wait_for_output(self, text: str, *, count: int = 1) -> None:
         """Wait until the chat loop has emitted an observable repaint."""
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(UNTIL_SECONDS):
             while self.output.count(text) < count:
                 self._output_changed.clear()
                 await self._output_changed.wait()
@@ -283,6 +296,13 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
     still-intact in-progress text.
     """
 
+    prompt = chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=True)
+    prompt_hel = f"{prompt}\x1b[Khel"
+    own_echo = (
+        colored("alice", fg_color=SELF_COLOR, bold=True) + colored(">", fg_color=MUTED_COLOR) + " "
+        + colored("hello", fg_color=CHAT_BODY_COLOR)
+    )
+
     async def scenario():
         alice_session = _LiveTypingSession()
         alice_task = asyncio.create_task(
@@ -290,10 +310,14 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
                 alice_session, lane, hub, presence, mailbox, InputHistory(), channel, alice
             )
         )
-        await asyncio.sleep(0.05)  # let alice join and reach her first read_line()
+        # alice has joined -- or bob's line would never reach her -- and
+        # drawn her input row.
+        await until(lambda: hub.participants_for_username(channel.name, "alice")
+                    and prompt in alice_session.output)
 
+        typed_from = len(alice_session.output)
         alice_session.feed("hel")  # mid-word, not yet submitted
-        await asyncio.sleep(0.05)  # let the per-keystroke loop consume it
+        await until(lambda: "hel" in alice_session.output[typed_from:])  # consumed and echoed
 
         # bob sends a complete message and quits -- broadcast to alice.
         bob_session = FakeSession(["hello there", "/quit"])
@@ -301,14 +325,16 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
             chat_flow._chat_loop(
                 bob_session, lane, hub, presence, mailbox, InputHistory(), channel, bob
             ),
-            timeout=2,
+            timeout=UNTIL_SECONDS,
         )
-        await asyncio.sleep(0.05)  # let alice's receive_loop process the broadcast
+        # alice's receive loop printed it and redrew her input row after it.
+        await until(lambda: "hello there" in alice_session.output
+                    and prompt_hel in alice_session.output.split("hello there", 1)[1])
 
         # alice resumes typing and submits.
         alice_session.feed("lo")
         alice_session.feed_enter()
-        await asyncio.sleep(0.05)
+        await until(lambda: own_echo in alice_session.output)
 
         alice_task.cancel()
         try:
@@ -324,7 +350,6 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
     assert "hello there" in text
     # The input row was redrawn showing alice's in-progress text intact
     # -- not silently dropped or corrupted by the interruption.
-    prompt_hel = f"{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=True)}\x1b[Khel"
     assert prompt_hel in text
     # The interruption's redraw happens strictly *after* alice's own
     # first three keystrokes were echoed, and *before* she resumes --
@@ -342,10 +367,7 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
     # name in SELF_COLOR, the muted `>` after it, then the body in its own
     # CHAT_BODY_COLOR span) specifically, not a bare "hello" substring,
     # which bob's own distinct "hello there" would also satisfy.
-    assert (
-        colored("alice", fg_color=SELF_COLOR, bold=True) + colored(">", fg_color=MUTED_COLOR) + " "
-        + colored("hello", fg_color=CHAT_BODY_COLOR)
-    ) in text
+    assert own_echo in text
 
 
 def test_tab_completion_candidate_list_does_not_land_on_the_status_row(
@@ -624,16 +646,18 @@ def test_shrink_below_minimum_mid_session_then_receive_broadcast_does_not_crash(
                 alice_session, lane, hub, presence, mailbox, InputHistory(), channel, alice
             )
         )
-        await asyncio.sleep(0.05)
+        # Joined -- or bob's line would never reach her -- and pinned at 24 rows.
+        await until(lambda: hub.participants_for_username(channel.name, "alice")
+                    and "\x1b[1;21r" in alice_session.output)
 
         alice_session.terminal_height = 2  # below _PINNED_UI_MIN_HEIGHT
 
         bob_session = FakeSession(["hi there", "/quit"])
         await asyncio.wait_for(
             chat_flow._chat_loop(bob_session, lane, hub, presence, mailbox, InputHistory(), channel, bob),
-            timeout=2,
+            timeout=UNTIL_SECONDS,
         )
-        await asyncio.sleep(0.05)  # let alice's receive_loop process the broadcast
+        await until(lambda: "hi there" in alice_session.output)  # alice's receive loop delivered it
 
         alice_session.feed("/quit")
         alice_session.feed_enter()

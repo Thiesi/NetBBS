@@ -353,14 +353,23 @@ class _Session:
 
     async def read_command(self) -> tuple[int, str]:
         timeout = self.timeout
+        handshake_bound = False
         if not self.established:
-            timeout = min(timeout, self._handshake_ends - asyncio.get_running_loop().time())
-            if timeout <= 0:
+            left = self._handshake_ends - asyncio.get_running_loop().time()
+            if left <= 0:
                 raise BinkpError(f"the handshake took over {HANDSHAKE_SECONDS:.0f} seconds")
+            handshake_bound = left < timeout
+            timeout = min(timeout, left)
         try:
             command, argument = await read_frame(self.reader, timeout)
-        except BinkpError:
-            if not self.established and asyncio.get_running_loop().time() >= self._handshake_ends:
+        except BinkpError as exc:
+            # A wait cut short by the handshake's deadline is that deadline,
+            # even when the loop's timer fires a clock tick before it
+            # (issue #1454: then "no data for 0 seconds" was reported).
+            if not self.established and (
+                asyncio.get_running_loop().time() >= self._handshake_ends
+                or (handshake_bound and isinstance(exc.__cause__, asyncio.TimeoutError))
+            ):
                 raise BinkpError(f"the handshake took over {HANDSHAKE_SECONDS:.0f} seconds") from None
             raise
         if command is None:

@@ -722,8 +722,19 @@ def test_an_open_realtime_session_records_contact_at_start_while_open_and_at_clo
             self.closed.set()
 
     async def scenario() -> None:
+        registry: LinkRealtimeSessionRegistry | None = None
+        while_open = asyncio.Event()
+
         async def _on_contact(fingerprint: str, at: str) -> None:
             calls.append((fingerprint, at))
+            if len(calls) == 3:
+                # Two interval records seen: no more of them from here on.
+                # Ending them on a timer instead raced the close -- on a
+                # loaded machine an interval falling due as close_all ran
+                # added one more row (issue #1454). This runs before the
+                # watcher waits again, so its next wait is this long one.
+                registry._contact_interval = 3600.0
+                while_open.set()
 
         registry = LinkRealtimeSessionRegistry(
             own_fingerprint="me", on_contact=_on_contact, contact_interval_seconds=0.05,
@@ -734,12 +745,9 @@ def test_an_open_realtime_session_records_contact_at_start_while_open_and_at_clo
         assert len(calls) == 1  # at the start, before any interval has passed
         # And while it stays open: waited for, not slept for, since a loaded
         # machine may run the interval late.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 5.0
-        while len(calls) < 3 and loop.time() < deadline:
-            await asyncio.sleep(0.01)
-        assert len(calls) >= 3
+        await asyncio.wait_for(while_open.wait(), 30)
         open_calls = len(calls)
+        assert open_calls == 3
         await registry.close_all(reason="test")
         assert len(calls) == open_calls + 1  # and once at close
         assert registry.get("peer-fp") is None

@@ -61,6 +61,28 @@ def test_a_handshake_that_never_finishes_is_cut_off(monkeypatch):
     assert isinstance(answered, BinkpError) and "handshake took over" in str(answered)
 
 
+def test_a_wait_cut_short_by_the_handshake_deadline_reports_that_deadline(monkeypatch):
+    # Issue #1454: the event loop runs a timer up to a clock tick early, so
+    # the read the handshake's deadline cut short could time out a moment
+    # before that deadline, and the session was reported idle "for 0
+    # seconds". Here the wait times out at once, as early as it can.
+    monkeypatch.setattr(binkp, "HANDSHAKE_SECONDS", 1.0)
+    real_read_frame = binkp.read_frame
+
+    async def early(reader, timeout=binkp.IDLE_TIMEOUT):
+        if timeout < 5:  # shortened to what is left of the handshake
+            raise BinkpError(f"no data from the remote for {timeout:.0f} seconds") from TimeoutError()
+        return await real_read_frame(reader, timeout)
+
+    monkeypatch.setattr(binkp, "read_frame", early)
+
+    async def silent(reader, writer):
+        await asyncio.sleep(2)
+
+    answered, _ = asyncio.run(_pair(_answer(), silent))
+    assert isinstance(answered, BinkpError) and "handshake took over" in str(answered)
+
+
 def test_a_session_has_a_deadline(monkeypatch):
     monkeypatch.setattr(binkp, "SESSION_SECONDS", 0.5)
 

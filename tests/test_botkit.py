@@ -13,7 +13,7 @@ from netbbs.bots import BOT_API_VERSION, botkit
 from netbbs.bots.baud import Baud
 from netbbs.bots.registry import save_bot
 from netbbs.bots.runtime import BotRuntime
-from netbbs.bots.state import read_state, state_root
+from netbbs.bots.state import state_root
 from netbbs.bots.tally import Tally
 from netbbs.bots.trial import STDERR_LIMIT, Trial, TrialSpec
 from netbbs.chat.bots import BotPrivateAnswer
@@ -22,7 +22,7 @@ from netbbs.chat.scrollback import get_scrollback, record_message
 from netbbs.net import bot_flow
 from netbbs.net.admin_ui import _load_chrome
 from tests.test_bot_runtime import (  # noqa: F401
-    db, lane, hub, sysop, alice, channel, eventually, install, next_line,
+    db, lane, hub, sysop, alice, channel, bot_state, eventually, install, next_line,
 )
 from tests.test_bot_settings_ui import Screen
 from tests.bounded import run_bounded
@@ -181,7 +181,7 @@ def test_real_tally_reads_the_channel_and_answers_karma(db, lane, hub, sysop, al
             line = record_message(db, channel, kind="message", author_label=alice.username, body="thanks bob++")
             await runtime.observe(channel, line, caller={"id": alice.id, "name": alice.username})
             await next_line(queue, "bob now has 1 karma.")
-            assert read_state(db, bot.storage_name) == {"karma": {"bob": ["bob", 1]}}
+            assert await bot_state(lane, bot.storage_name) == {"karma": {"bob": ["bob", 1]}}
             ask = record_message(db, channel, kind="message", author_label=alice.username, body="!karma bob")
             assert await runtime.addressed(channel, alice, ask, pid) is None
             await next_line(queue, "alice: bob has 1 karma (top: bob 1).")
@@ -281,8 +281,19 @@ def test_trial_rehearses_model_actions_and_keeps_a_bounded_stderr():
     run_bounded(run())
 
 
-def test_try_selected_and_the_editors_try_run_without_a_question(db, lane, sysop, channel):
+def test_try_selected_and_the_editors_try_run_without_a_question(db, lane, sysop, channel, monkeypatch):
     save_bot(db, actor=sysop, name="Baud", channels=[channel.name], defaults=[channel.name])
+    real_settle = Trial.settle
+
+    async def settle(self, **kwargs):
+        # Try shows what came within a short quiet spell, and a person
+        # presses Enter for anything later. This scripted SysOp types on at
+        # once, so it first waits for the answer it asked for: on a loaded
+        # suite the answer can come after the quiet spell (issue #1454).
+        await eventually(lambda: not any(worker.pending for worker in self.runtime.workers.values()))
+        await real_settle(self, **kwargs)
+
+    monkeypatch.setattr(Trial, "settle", settle)
     session = Screen(["t", "b"], lines=["01", "!help", "/quit"])
     run_bounded(bot_flow.bot_menu(session, lane, sysop))
     plain = session.plain

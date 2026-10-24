@@ -617,12 +617,16 @@ def test_real_war_dialer_launches_keep_two_node_worlds_separate(tmp_path, monkey
                         if task.done():
                             pytest.fail(f"Door exited early: {task.result()}")
                         await asyncio.sleep(0.01)
+                # Generous: the door is a fresh interpreter that builds its
+                # world first, which a loaded suite stretches past any tight
+                # bound (issue #1454). Each wait ends when its screen shows.
+                bound = 30
                 try:
-                    await asyncio.wait_for(wait_for(b"Press any key to continue..."), 8)
+                    await asyncio.wait_for(wait_for(b"Press any key to continue..."), bound)
                     session.type_in(" ")
-                    await asyncio.wait_for(wait_for_text(b"dial "), 8)
+                    await asyncio.wait_for(wait_for_text(b"dial "), bound)
                     session.type_in("q")
-                    assert (await asyncio.wait_for(task, 8)).exit_code == 0
+                    assert (await asyncio.wait_for(task, bound)).exit_code == 0
                 finally:
                     if not task.done():
                         task.cancel()
