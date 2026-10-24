@@ -2,6 +2,10 @@
 
     python scripts/door_gallery.py voidrunner --out build/gallery --open
     python scripts/door_gallery.py war_dialer --widths 80 64 40 --fresh
+    python scripts/door_gallery.py lunar_lander
+
+Lunar Lander needs 80x24 and pauses below it (issue #1542), so it is drawn at
+80x24 and 132x50 instead of the other doors' 80, 64 and 40 columns.
 
 Voidrunner is vendored from its own repository (issue #1216), and screen changes
 are reviewed there, with Thiesi/Voidrunner's `tools/door_gallery.py`. Its walks
@@ -130,6 +134,10 @@ WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 #        exactly two of them -- and a digit that lands on a transfer instead
 #        publishes a garrison preview under the service's caption.
 #
+#   `!`  press this key and photograph whatever is on the screen a moment
+#        later, without waiting for it to go quiet. Lunar Lander's flight is
+#        real time and redraws until the lander is down, so a key pressed in
+#        flight would otherwise never settle: `\r!p` launches and then pauses.
 #   `~`  the launch splash, as its last frame leaves it. Every other walk runs
 #        with `DOOR_SPLASH=0`, so a panel is the screen behind the splash
 #        and a launch costs no animation; this one turns the splash back on and
@@ -320,6 +328,17 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Your dossiers", b"O3?"),
         ("Your dossiers, a snapshot", b"O3?"),
         ("Help", b"?N%"),
+    ],
+    "lunar_lander": [
+        ("Mission briefing", b""),
+        ("Mission briefing, a ranked mission", b"4"),
+        ("Flight manual", b"?"),
+        ("Best pilots", b"2b"),
+        # Launched, then paused: the flight HUD under the pause card.
+        ("Flight paused", b"\r!p"),
+        # Training with the engine off falls to the surface inside the patience
+        # window, and the debrief is still once it is drawn.
+        ("Lander down", b"\r"),
     ],
 }
 
@@ -585,6 +604,14 @@ SHOWS: dict[str, dict[str, str]] = {
         "Your dossiers, a snapshot": "Last-known intelligence",
         "Help": "HOW TO PLAY",
     },
+    "lunar_lander": {
+        "Mission briefing": "FLIGHT DIRECTOR",
+        "Mission briefing, a ranked mission": "SELECTED: THE NEEDLE",
+        "Flight manual": "FLIGHT MANUAL",
+        "Best pilots": "BEST PILOTS",
+        "Flight paused": "FLIGHT PAUSED",
+        "Lander down": "SIGNAL LOST",
+    },
 }
 
 # The presets in which a door plays its launch splash: the rest turn motion off,
@@ -611,7 +638,21 @@ PRESETS: dict[str, dict[str, dict]] = {
                    "plain": {"unicode_style": False},
                    "mono": {"unicode_style": True, "display": {"monochrome": True}},
                    "fast": {"unicode_style": True, "display": {"fast": True}}},
+    # Lunar Lander takes everything from the drop file: the glyph style and the
+    # colour depth a caller's terminal publishes; it refuses a drop file with
+    # no `door_api`. `node_id` makes the caller a ranked pilot, so the
+    # best-pilots board has the fixture's records on it.
+    "lunar_lander": {preset: {"door_api": 5, "node_id": "gallery-node", **extra} for preset, extra in {
+        "auto": {"unicode_style": True},
+        "256": {"unicode_style": True, "color_depth": "256"},
+        "16": {"unicode_style": True, "color_depth": "16"},
+        "plain": {"unicode_style": False}}.items()},
 }
+
+# Each door's default terminal sizes. Lunar Lander's floor is 80x24 (issue
+# #1542), a stated exception to the 40x12 floor the other doors share.
+SIZES: dict[str, list[int]] = {"lunar_lander": [80, 132]}
+HEIGHTS = {80: 24, 64: 20, 40: 12, 132: 50}
 
 
 DROP_USER_ID = 1  # the caller every panel is drawn for; display rows are keyed by it
@@ -660,6 +701,7 @@ class Door:
         env.update(NETBBS_DOOR_INFO=str(drop_file(state, width, height, info_extra)),
                    VOIDRUNNER_SAVE_DIR=str(state / "saves"),
                    WAR_DIALER_DB_PATH=str(state / "war-dialer.db"),
+                   DOOR_LL_DATA_DIR=str(state),
                    DOOR_SPLASH="1" if splash else "0",
                    DOOR_SCENES="0",
                    PYTHONIOENCODING="utf-8")
@@ -723,6 +765,18 @@ class Door:
             f"{self.door.name} {'never stopped drawing' if answered else 'printed nothing'} "
             f"after {what} at {self.size}:\n"
             f"{bytes(self.err).decode('utf-8', 'replace')[-800:]}")
+
+    def press_unsettled(self, key: bytes, *, wait: float = 1.0) -> None:
+        """Press one key and give the door a moment, without waiting for quiet.
+
+        For a real-time screen that never goes quiet by itself (`!`)."""
+        time.sleep(QUIET)
+        if self.proc.poll() is not None:
+            raise SystemExit(f"{self.door.name} had already exited (code "
+                             f"{self.proc.poll()}) when {key!r} was pressed at {self.size}")
+        self.proc.stdin.write(key)
+        self.proc.stdin.flush()
+        time.sleep(wait)
 
     def press(self, key: bytes, *, expect: bool = True) -> None:
         """Press one key and wait for the screen it is supposed to open.
@@ -959,6 +1013,10 @@ def capture(door: pathlib.Path, state: pathlib.Path, keys: bytes, width: int, he
                     raise SystemExit(f"`%` photographs where a walk stops, so it has "
                                      f"to end one: {keys!r}")
                 pages = running.press_pages(key)
+                index += 2
+                continue
+            if suffix == b"!":
+                running.press_unsettled(key)
                 index += 2
                 continue
             if suffix == b"*":
@@ -1204,7 +1262,25 @@ def build_voidrunner_retiring(door_name: str, door: pathlib.Path, state: pathlib
         save.write_text(json.dumps(data), encoding="utf-8")
 
 
+def build_lunar_lander_records(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """Pilot records with a few landings, so the best-pilots board is not empty.
+
+    Written through the door's own `Records`, which creates and checks the
+    schema, then filled in directly: a landing is minutes of flying."""
+    game = load_door(door)
+    state.mkdir(parents=True, exist_ok=True)
+    records = game.Records(state / "pilots.db")
+    try:
+        for user, handle, score in ((1, "Thiesi", 1840), (2, "Eagle", 2105), (3, "Kestrel", 1622)):
+            records.db.execute("INSERT INTO pilots VALUES (?,?,?)", ("gallery-node", user, handle))
+            records.db.execute("INSERT INTO scores VALUES (?,?,?,?,?)",
+                               ("gallery-node", user, "tranquility", score, user))
+    finally:
+        records.close()
+
+
 FIXTURE_BUILDERS = {
+    ("lunar_lander", "base"): build_lunar_lander_records,
     ("voidrunner", "outclassed"): build_voidrunner_outclassed,
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "played"): build_voidrunner_played,
@@ -1458,16 +1534,17 @@ preset. Attach this page to any pull request that changes a screen.</p>
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("door", choices=sorted(WALKS))
-    parser.add_argument("--widths", type=int, nargs="+", default=[80, 64, 40],
-                        help="terminal widths to render (the supported floor is 40)")
+    parser.add_argument("--widths", type=int, nargs="+",
+                        help="terminal widths to render (default 80 64 40, the supported floor; "
+                             "80 132 for Lunar Lander, whose floor is 80x24)")
     parser.add_argument("--out", type=pathlib.Path, default=ROOT / "build" / "gallery")
     parser.add_argument("--fresh", action="store_true", help="rebuild the cached fixture first")
     parser.add_argument("--open", action="store_true", help="open the page when it is written")
     args = parser.parse_args()
 
-    heights = {80: 24, 64: 20, 40: 12}
+    widths = args.widths or SIZES.get(args.door, [80, 64, 40])
     out_dir = args.out.expanduser().resolve()
-    target = build(args.door, args.widths, heights, out_dir, args.fresh)
+    target = build(args.door, widths, HEIGHTS, out_dir, args.fresh)
     print(f"wrote {target}")
     if args.open:
         webbrowser.open(target.as_uri())

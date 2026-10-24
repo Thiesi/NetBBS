@@ -26,6 +26,7 @@ import urllib.request
 
 # The door's key in `netbbs.doors.bundled` -> its repository. The file is `<key>.py`.
 DOORS = {
+    "lunar_lander": "Thiesi/LunarLander",
     "retro_trivia": "Thiesi/RetroTrivia",
     "voidrunner": "Thiesi/Voidrunner",
     "war_dialer": "Thiesi/WarDialer",

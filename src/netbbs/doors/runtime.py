@@ -220,6 +220,49 @@ def war_dialer_path_problem(door, world_path: Path | None) -> str | None:
     return None
 
 
+#: The node's own Lunar Lander records directory, beside War Dialer's world
+#: (issue #1542). The door keeps one SQLite file there, `pilots.db`.
+LUNAR_LANDER_DIRNAME = "lunar_lander"
+LUNAR_LANDER_RECORDS = "pilots.db"
+
+
+def node_lunar_lander_dir(db_path: Path) -> Path:
+    """`<db path>.doors/lunar_lander/`: this node's pilot records, by construction.
+
+    Lunar Lander's own default is `data/` beside the script, which for the
+    bundled copy is inside the installed package: possibly read-only, and
+    replaced by every upgrade."""
+    node_path = Path(db_path).resolve()
+    return node_path.parent / (node_path.name + ".doors") / LUNAR_LANDER_DIRNAME
+
+
+def lunar_lander_records_dir(db, door) -> Path | None:
+    """Where a launch of `door` keeps Lunar Lander's records, or `None` when
+    `door` is not this install's own copy of Lunar Lander.
+
+    A profile's own `DOOR_LL_DATA_DIR` wins, as a profile's
+    `WAR_DIALER_DB_PATH` does; otherwise the node's own directory. A relative
+    override without an install directory would be relative to the temporary
+    node directory and lost at hang-up, so it is not honoured. `run_door`
+    hands the door this resolved path, never the profile's raw string."""
+    from netbbs.doors.bundled import launched_bundled_door
+
+    install_dir = door.profile.install_dir if door.profile else None
+    entry = launched_bundled_door(door.executable_path, tuple(door.args), install_dir)
+    if entry is None or entry.key != "lunar_lander":
+        return None
+    override = door.profile.environment.get("DOOR_LL_DATA_DIR") if door.profile else None
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute() and install_dir:
+            # The door resolves a relative path against its working
+            # directory, which a profile's install directory is.
+            path = Path(install_dir) / path
+        if path.is_absolute():
+            return path.resolve()
+    return node_lunar_lander_dir(db.path)
+
+
 #: Where a Voidrunner save lands, as resolved *by the node process*.
 #: Recorded so `netbbs.backup` does not have to guess (issue #555).
 VOIDRUNNER_SAVE_DIR_CONFIG_KEY = "voidrunner_save_dir"
@@ -416,11 +459,15 @@ def record_voidrunner_save_dir(db) -> Path:
 _GUEST_SCORES_COPIED = 10000
 
 
-def _prepare_guest_sandbox(call, world_path, voidrunner_dir):
+def _prepare_guest_sandbox(call, world_path, voidrunner_dir, lunar_lander_dir=None):
     """Where a guest call plays the bundled doors (issue #1075): its own
     Voidrunner directory and its own copy of War Dialer's world, inside the
     call's directory and gone when the call ends. Returns `(voidrunner_dir,
-    world_path)` for the door's environment.
+    world_path, lunar_lander_dir)` for the door's environment.
+
+    Lunar Lander (issue #1542) is treated as War Dialer's world is: a guest
+    call gets its own copy of the node's pilot records, so it sees the real
+    best pilots and its own landings never reach them.
 
     Made once, at the call's first launch, and played from for the rest of
     it, so a guest who leaves a game and comes back finds it where they left
@@ -469,10 +516,35 @@ def _prepare_guest_sandbox(call, world_path, voidrunner_dir):
             finally:
                 source.close()
             os.replace(partial, sandbox_world)
-    return sandbox_voidrunner, sandbox_world
+    sandbox_lunar = None
+    if lunar_lander_dir is not None:
+        sandbox_lunar = doors / LUNAR_LANDER_DIRNAME
+        sandbox_lunar.mkdir(exist_ok=True)
+        records = sandbox_lunar / LUNAR_LANDER_RECORDS
+        source_path = Path(lunar_lander_dir) / LUNAR_LANDER_RECORDS
+        if not records.exists() and source_path.is_file() and not source_path.is_symlink():
+            partial = sandbox_lunar / (LUNAR_LANDER_RECORDS + ".copying")
+            partial.unlink(missing_ok=True)
+            try:
+                # Read-only, so a missing or moved file is never created here.
+                source = sqlite3.connect(source_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+                try:
+                    target = sqlite3.connect(str(partial))
+                    try:
+                        source.backup(target)
+                    finally:
+                        target.close()
+                finally:
+                    source.close()
+                os.replace(partial, records)
+            except sqlite3.Error as exc:
+                # The guest still flies, against empty records of its own.
+                _logger.warning("Lunar Lander records at %s could not be copied for a guest: %s", source_path, exc)
+                partial.unlink(missing_ok=True)
+    return sandbox_voidrunner, sandbox_world, sandbox_lunar
 
 
-def _door_environment(info_path, war_dialer_path=None, voidrunner_dir=None):
+def _door_environment(info_path, war_dialer_path=None, voidrunner_dir=None, lunar_lander_dir=None):
     env = {"NETBBS_DOOR_INFO": str(info_path)}
     try:
         env["USERPROFILE" if os.name == "nt" else "HOME"] = str(Path.home())
@@ -485,6 +557,9 @@ def _door_environment(info_path, war_dialer_path=None, voidrunner_dir=None):
         env["VOIDRUNNER_SAVE_DIR"] = str(voidrunner_dir)
     if war_dialer_path is not None:
         env["WAR_DIALER_DB_PATH"] = str(war_dialer_path)
+    if lunar_lander_dir is not None:
+        # Lunar Lander reads only `DOOR_*` variables (issue #1542).
+        env["DOOR_LL_DATA_DIR"] = str(lunar_lander_dir)
     return env
 
 
@@ -957,6 +1032,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             # Small local lock operation; no await that could lose an acquired lease on cancellation.
             lease = NodeLease(root, identity, profile.max_sessions)
         voidrunner_dir = await lane.run(voidrunner_save_dir)
+        lunar_lander_dir = await lane.run(lunar_lander_records_dir, door)
         # Issue #1075: a session that signed in without a credential is one of
         # every anonymous caller sharing the guest account, and the bundled
         # doors key their saves on the account. Such a session plays them as
@@ -969,8 +1045,8 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
             guest_call = current_guest_call()
             if guest_call is None:
                 guest_call = own_guest_call = new_guest_call()
-            voidrunner_dir, world_path = await asyncio.to_thread(
-                _prepare_guest_sandbox, guest_call, world_path, voidrunner_dir)
+            voidrunner_dir, world_path, lunar_lander_dir = await asyncio.to_thread(
+                _prepare_guest_sandbox, guest_call, world_path, voidrunner_dir, lunar_lander_dir)
             # Nothing a guest's game does is published through the outbound
             # hook either: it answers as a rehearsal (issue #520) does.
             rehearsal = True
@@ -981,7 +1057,7 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
         info = json.loads(info_path.read_text(encoding="utf-8"))
         width = profile.width if profile and profile.width else physical_terminal_width(session)
         height = profile.height if profile and profile.height else session.terminal_height
-        env = _door_environment(info_path, world_path, voidrunner_dir)
+        env = _door_environment(info_path, world_path, voidrunner_dir, lunar_lander_dir)
         # Decided before the spawn, because the guard has to be in place before
         # there is a child to inherit it.
         vouched = (os.name == "posix" and bundled_follows_resize(door)
@@ -1029,6 +1105,12 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     # A profile's own save directory is the account's, not
                     # this guest call's (issue #1075).
                     env["VOIDRUNNER_SAVE_DIR"] = str(voidrunner_dir)
+                if lunar_lander_dir is not None:
+                    # The resolved directory, not the profile's raw string: the
+                    # door does not expand `~`, and a relative path would land
+                    # in the temporary node directory, gone at hang-up. For a
+                    # guest call, its own copy rather than the profile's.
+                    env["DOOR_LL_DATA_DIR"] = str(lunar_lander_dir)
                 if world_path is not None:
                     # Keep a profile's relative path anchored to the server cwd,
                     # never the temporary node directory or installation directory.

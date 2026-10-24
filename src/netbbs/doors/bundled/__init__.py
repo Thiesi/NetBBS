@@ -86,6 +86,17 @@ BUNDLED_DOORS: tuple[BundledDoor, ...] = (
         resource="war_dialer.py",
         follows_resize=True,
     ),
+    BundledDoor(
+        key="lunar_lander",
+        name="Lunar Lander",
+        description=(
+            "Real-time lunar landing: tilt and throttle a lander down onto a lit pad over "
+            "half-block terrain, through training, three missions and a daily challenge. "
+            "Keeps each pilot's best landing per mission. Needs an 80x24 terminal."
+        ),
+        resource="lunar_lander.py",
+        follows_resize=True,
+    ),
 )
 
 
