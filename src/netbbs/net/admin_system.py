@@ -122,6 +122,7 @@ from netbbs.net.policy_settings import (
 )
 from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
 from netbbs.mrc.settings import (
+    MAX_OPEN_ROOM_CAP,
     MrcSettings,
     MrcSettingsError,
     OpenRoomSettings,
@@ -229,6 +230,7 @@ from netbbs.net.admin_ui import (
 from netbbs.net.admin_fields import (
     _CLEAR_HINT,
     _EDIT_HINT,
+    _NAME_REQUIREMENT_HELP,
     _VERIFIED_AGE_HELP,
     _int_field,
     _min_age_field,
@@ -413,11 +415,10 @@ async def _system_menu(
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == HELP_KEY:
+            # No `about`: sixteen keys, one row each, already fill a 24-row
+            # help screen. The briefs carry what each key changes and when.
             await show_menu_help(
                 session, "Settings help", _system_menu_entries(stats),
-                about="The node's lasting configuration: how it looks, what callers may do, and how it "
-                      "joins other networks. Recent callers and the Wall change at once, without a screen of "
-                      "their own.",
                 header_color=stats["header_color"], unicode_style=stats["unicode_style"],
             )
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
@@ -549,17 +550,17 @@ def _system_menu_entries(stats: dict[str, Any]) -> list[MenuEntry]:
     option_list = [
         MenuEntry(label=menu_key("M", "astheads & banners"), brief="Banners and mastheads callers see"),
         MenuEntry(label=menu_key("C", "olors"), brief="Accent, header and clock colors"),
-        MenuEntry(label=menu_key("N", "ode name"), brief="Name and gradient shown everywhere"),
-        MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays"),
-        MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
-        MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
+        MenuEntry(label=menu_key("N", "ode name"), brief="Name and gradient; next login"),
+        MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable nodes; next start"),
+        MenuEntry(label=menu_key("U", "pdate"), brief="Check for and install releases"),
+        MenuEntry(label=menu_key("T", "imestamp format"), brief="Date format and node timezone"),
         MenuEntry(
             label=menu_key("L", "imits & retention"),
-            brief="Uploads, expiry, chat, mail level",
+            brief="Uploads, expiry, chat, levels",
         ),
         MenuEntry(
             label=menu_key("O", "perating limits"),
-            brief="Link, login throttle, shutdown",
+            brief="Link, logins, shutdown; next start",
         ),
         MenuEntry(
             label=menu_key("G", "uest access"),
@@ -605,7 +606,7 @@ def _system_menu_entries(stats: dict[str, Any]) -> list[MenuEntry]:
                 else "Neon; press for plain"
             ),
         ),
-        MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge channels to the MRC network"),
+        MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Hub link and caller-opened rooms"),
         MenuEntry(label=menu_key("E", "chomail & netmail (FTN)"), brief="FidoNet-style networks"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
         MenuEntry(label=menu_key("Q", "WK offline mail"), brief="Packet size and BBS ID"),
@@ -656,7 +657,7 @@ async def _draw_node_name_screen(
 
 
 _NODE_NAME_MENU = (
-    MenuEntry(label=menu_key("N", "ame"), brief="Rename the node"),
+    MenuEntry(label=menu_key("N", "ame"), brief="Rename the node; blank keeps it"),
     MenuEntry(label=menu_key("G", "radient"), brief="Recolor the node name"),
     MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
 )
@@ -695,10 +696,19 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
             ),
             sections=sections, actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_entries=[
+                MenuEntry(label=label, brief=brief) for key, label, brief in (
+                    ("a", menu_key("A", "ccept"), "Use them, from the next start"),
+                    ("d", menu_key("D", "ecline"), "Do not, from the next start"),
+                ) if key in {action_key for action_key, _label in actions}
+            ],
             help_title="Join NetBBS Link help",
             help_about=(
-                "Whether this node uses the project's reliable nodes as seeds and relays. The node's own "
-                "configuration file can override the answer."
+                "Whether this node dials the project's reliable nodes as seeds and, when it cannot be "
+                "reached from the internet, as relays. Accept and Decline save the answer at once. It "
+                "decides whether Link runs from the next start, unless the config file sets [link] "
+                "enabled, which wins (Configuration says which). Accepting needs a node name other than "
+                "the placeholder."
             ),
         )
         message = None
@@ -809,8 +819,10 @@ async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Node name help", _NODE_NAME_MENU,
-                about="The name shown in the corner of every screen and handed to doors, and the "
-                      "colors it is drawn in.",
+                about="The node's name, shown in the top corner of every screen and given to doors in "
+                      "their drop file (always plain there), and the gradient it is drawn in. Both save at "
+                      "once; callers see them from their next login, and sessions already on keep the old "
+                      "look until then.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_node_name_screen(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -1064,8 +1076,8 @@ async def _set_node_name_gradient_screen(
                 session, "Gradient help",
                 [MenuEntry(label=menu_key(f"0-{len(choices) - 1}", ""),
                            brief="Apply that gradient (0 is solid)")],
-                about="Each row shows the node name in one gradient. Pressing its number applies it "
-                      "straight away.",
+                about="Each row shows the node name in one gradient; 0 is solid, in the header color. "
+                      "Pressing a number applies that one at once. Callers see it from their next login.",
                 header_color=header_color, unicode_style=await lane.run(unicode_style_enabled, actor),
             )
             await _draw()
@@ -1536,27 +1548,29 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
                 effective_header_color_256(db), unicode_style_enabled(db, actor),
             ))
             help_entries = [MenuEntry(label=menu_key("R", "egister"),
-                                      brief="Ask for a netbbs.org name")]
+                                      brief="Ask for or reclaim a name")]
             if previous_name is not None and status is not ManagedDnsRegistrationStatus.REVOKED:
                 help_entries.append(MenuEntry(label=menu_key("C", "ancel change"),
-                                              brief="Keep the old name after all"))
+                                              brief="Drop the new name, keep current"))
             elif status in _MANAGED_DNS_ACTIVE_STATUSES and previous_name is None:
                 help_entries.append(MenuEntry(label=menu_key("G", "ive up name"),
-                                              brief="Release the name"))
+                                              brief="Release it; asks first"))
                 help_entries.append(MenuEntry(label=menu_key("N", "ew name"),
-                                              brief="Move to a different name"))
+                                              brief="Move to another name"))
             if status in _NODE_PAGE_STATUSES:
                 help_entries.append(MenuEntry(label=menu_key("W", "eb page"),
-                                              brief="Show, index or hide the web page"))
+                                              brief="Steps shown, indexed, off"))
                 help_entries.append(MenuEntry(label=menu_key("T", "agline"),
-                                              brief="One line about this board"))
+                                              brief="One line shown on the page"))
             if admin_token is not None:
                 help_entries.append(MenuEntry(label=menu_key("A", "dminister service"),
                                               brief="Every name the service holds"))
             await show_menu_help(
                 session, "Managed DNS help", help_entries,
-                about="A free name under netbbs.org that callers can use to reach this node, "
-                      "kept pointing at its current address.",
+                about="This node's free netbbs.org name: its state and what that means for you, how callers "
+                      "reach the board by it, and its public web page. Register, give up, new name and "
+                      "cancel ask the service at once; a web page or tagline change reaches the page with "
+                      "Reliable Link's next contact.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             status = await _draw_managed_dns_status(session, lane, actor)
@@ -1647,6 +1661,10 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
             name_of=lambda tz: tz,
             stable_id_of=lambda tz: zone_ids[tz],
             title="Timezone",
+            help_about=(
+                "Every IANA timezone. Picking one makes it the node's timezone at once: every date and time "
+                "callers see, and the node's calendar for scheduled backups and chat's day changes."
+            ),
             empty_message="No timezones available.",
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
@@ -1672,20 +1690,23 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
         FieldSpec(
             key="format", label="Format",
             render=lambda d: d["format"], prompt=_format_field,
+            brief="How dates and times look",
             help=(
-                "A Python strftime pattern controlling the *shape* of every displayed "
-                "timestamp node-wide, e.g. '%Y-%m-%d %H:%M' for '2026-08-22 14:05'. "
-                "Doesn't affect which instant is shown -- see Timezone for that."
+                "The shape of every date and time the node shows, for every caller, as a Python "
+                "strftime pattern: '%Y-%m-%d %H:%M' shows 2026-08-22 14:05. Saved when you press "
+                "Enter and used from the next screen drawn. It does not change the clock time shown; "
+                "Timezone does."
             ),
         ),
         FieldSpec(
             key="timezone", label="Timezone",
             render=lambda d: d["timezone"], prompt=_timezone_field,
+            brief="The node's clock",
             help=(
-                "Opens a searchable list of every IANA timezone (e.g. 'Europe/Berlin', "
-                "'America/New_York') controlling *which instant* every displayed timestamp "
-                "shows, node-wide. Getting this wrong leaves every timestamp reshaped but "
-                "still pointing at the wrong wall-clock time."
+                "The timezone every date and time is shown in, picked from a searchable list "
+                "(Europe/Berlin, America/New_York). Callers have no timezone of their own. It is also "
+                "the node's calendar: scheduled backups run, chat's day changes fall and away notices' "
+                "return dates end by it. Saved when you pick one."
             ),
         ),
     ]
@@ -1774,9 +1795,10 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             brief="Largest file a caller may upload", section="Files",
             help=(
                 "The largest single upload this node accepts, over Zmodem and the browser alike, in MiB "
-                f"(1-{MAX_UPLOAD_BYTES_LIMIT // _MIB}). A reverse proxy in front of the web listener has "
-                "its own request-body limit: set that at least 1 MiB higher than this (a browser upload "
-                "also carries form framing), or uploads near the cap fail at the proxy."
+                f"(1-{MAX_UPLOAD_BYTES_LIMIT // _MIB}). Files arriving by FTN file echo or attached to "
+                "netmail are held to it too, at most 64 MiB. A reverse proxy in front of the web listener "
+                "has its own request-body limit: set that at least 1 MiB higher than this (a browser "
+                "upload also carries form framing), or uploads near the cap fail at the proxy."
             ),
         ),
         FieldSpec(
@@ -1787,7 +1809,8 @@ async def _limits_settings_screen(session: Session, lane: DatabaseLane, actor: U
             help=(
                 "When a post or file passes its board's or area's maximum age it expires, and is deleted "
                 f"this many days later (0-{MAX_SETTING_DAYS}). Until then a SysOp can still recover an "
-                "expired file from its area's [E]xpired files screen."
+                "expired file from its area's [E]xpired files screen. The deletion date is worked out "
+                "each time the node clears expired items, so a change counts for items already expired."
             ),
         ),
         FieldSpec(
@@ -2146,11 +2169,18 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 _BACK_ACTION,
             ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, page=page,
+            help_entries=[
+                *(MenuEntry(label=menu_key(group[0], group[1:]), brief="Edit, save; next start")
+                  for group in POLICY_GROUPS),
+                MenuEntry(label=menu_key("A", "pply capacity preset"), brief="Small, Default or Hub, previewed"),
+                MenuEntry(label=menu_key("N", "ode configuration"), brief="Listeners and paths, read-only"),
+            ],
             help_title="Operating limits help",
             help_about=(
-                "Link limits, the login throttle and shutdown delays. Changes apply at the next start; a "
-                "value set in the config file or on the command line wins and is shown as such. A capacity "
-                "preset (Small, Default or Hub) sets the Link groups at once, after showing what it changes."
+                "Each group says how many of its settings are set here, set in config, or waiting for a "
+                "restart. A saved value applies at the next start; blank in a group returns a setting to "
+                "its default. A value the config file or command line sets wins and cannot be edited "
+                "here. A capacity preset sets the four Link groups at once, after a preview."
             ),
         )
         if choice == "b":
@@ -2213,8 +2243,9 @@ async def _node_configuration_screen(session: Session, lane: DatabaseLane, actor
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Node configuration help",
             help_about=(
-                "The listeners, Link addresses and paths the node read from its config file and command line "
-                "when it last started. Read-only: change them there and restart."
+                "The listeners, Link addresses, paths and managed-DNS service the node read when it last "
+                "started, each with where its value came from: the config file, the command line or the "
+                "default. Read-only: change them there and restart."
             ),
         )
         if choice == "b":
@@ -2344,6 +2375,15 @@ async def _policy_group_editor(
     )
 
 
+# The open-room gates are copied onto a room's channel when it is opened
+# (`netbbs.mrc.settings.materialize_open_room`), so they bind rooms opened
+# afterwards only.
+_OPEN_ROOM_GATE_HELP = (
+    " Copied onto each room when it opens, so a change affects only rooms opened afterwards; a room "
+    "already open keeps its own gates, which its channel screen edits."
+)
+
+
 _MRC_STATE_BADGES: dict[MrcState, tuple[str, str]] = {
     MrcState.CONNECTED: ("CONNECTED", "success"),
     MrcState.CONNECTING: ("CONNECTING", "neutral"),
@@ -2427,7 +2467,11 @@ async def _mrc_settings_screen(
             render=lambda d: "yes" if d["enabled"] else "no",
             prompt=bool_field("enabled"), step=bool_step("enabled"),
             brief="Switch the hub link on or off", section="Hub",
-            help="Off by default. Even when on, only channels you bridge individually reach the network.",
+            help=(
+                "Off by default. Saving with it on connects to the hub at once; off disconnects. Even "
+                "on, only channels you bridge on their own screens, and rooms callers open when that is "
+                "allowed below, reach the network."
+            ),
         ),
         FieldSpec(
             key="host", label="Hub host",
@@ -2439,6 +2483,7 @@ async def _mrc_settings_screen(
             key="port", label="Hub port",
             render=lambda d: str(d["port"]), prompt=_int_field("port", "Hub port"),
             brief="5001 with TLS, 5000 without", section="Hub",
+            help="The hub's port. Switching TLS moves a port of 5000 or 5001 to the other; a custom port stays.",
         ),
         FieldSpec(
             key="tls", label="TLS",
@@ -2456,6 +2501,10 @@ async def _mrc_settings_screen(
             key="info_sysop", label="SysOp",
             render=lambda d: d["info_sysop"] or "(none)", prompt=_optional_text_field("info_sysop"),
             brief="Shown to MRC users via /info", section="Identity",
+            help=(
+                "Your name as MRC users see it when they ask the hub for /info on this BBS, as are the "
+                "description and addresses below. Also the SysOp name sent with BBSMETA when that is on."
+            ),
         ),
         FieldSpec(
             key="info_description", label="Description",
@@ -2508,8 +2557,8 @@ async def _mrc_settings_screen(
             help=(
                 "Off by default. On: the chat channel picker gains a Multi Relay Chat section where a "
                 "caller can open any room on the network by name; it becomes a channel named mrc:<room> "
-                "here, with the gates below, and is retired once idle. Channels you bridge yourself are "
-                "unaffected either way."
+                "here, with the gates below, and is retired once idle. Off stops new rooms opening; rooms "
+                "opened earlier stay until they retire. Channels you bridge yourself are unaffected."
             ),
         ),
         FieldSpec(
@@ -2518,6 +2567,7 @@ async def _mrc_settings_screen(
             render=lambda d: _plain_level_label(levels, d["open_min_level"]),
             prompt=_int_field("open_min_level", "Minimum level"),
             brief="Level needed to open or enter one", section="Open rooms",
+            help="The lowest level that may open a new room and enter it." + _OPEN_ROOM_GATE_HELP,
         ),
         FieldSpec(
             key="open_min_age",
@@ -2525,7 +2575,7 @@ async def _mrc_settings_screen(
             render=lambda d: _min_age_label(d["open_min_age"], d["open_age_requirement"]),
             prompt=_min_age_field("open_min_age", "open_age_requirement"),
             brief="Age gate on rooms callers open", section="Open rooms",
-            help="The minimum age to open a room." + _VERIFIED_AGE_HELP,
+            help="The minimum age for a new room." + _OPEN_ROOM_GATE_HELP + _VERIFIED_AGE_HELP,
         ),
         FieldSpec(
             key="open_name_requirement",
@@ -2533,11 +2583,16 @@ async def _mrc_settings_screen(
             render=lambda d: d["open_name_requirement"] or "none",
             prompt=choice_field("open_name_requirement", [None, "verified", "verified_and_displayed"]),
             brief="Name gate on rooms callers open", section="Open rooms",
+            help=_NAME_REQUIREMENT_HELP + _OPEN_ROOM_GATE_HELP,
         ),
         FieldSpec(
             key="open_cap", label="Cap on open rooms",
             render=lambda d: str(d["open_cap"]), prompt=_int_field("open_cap", "Most rooms open at once"),
             brief="Opening refuses past this cap", section="Open rooms",
+            help=(
+                f"The most caller-opened rooms at once (1-{MAX_OPEN_ROOM_CAP}). At the cap, opening another "
+                "is refused until one retires. Checked only when a room opens: lowering it closes no room."
+            ),
         ),
         FieldSpec(
             key="open_retention_days", label="Retention (days)",
@@ -2546,13 +2601,19 @@ async def _mrc_settings_screen(
             brief="Idle open rooms retire after this", section="Open rooms",
             help=(
                 "A room callers opened is deleted, with its scrollback, once nobody has been in it for "
-                "this many days -- unless someone follows it or you adopt it from its channel screen."
+                "this many days -- unless someone follows it or you adopt it from its channel screen. "
+                "A change counts for every open room, those opened earlier too."
             ),
         ),
         FieldSpec(
             key="open_blocklist", label="Blocked rooms",
             render=lambda d: ", ".join(d["open_blocklist"]) if d["open_blocklist"] else "(none)",
             prompt=_blocklist_field, brief="Rooms callers may not open here", section="Open rooms",
+            help=(
+                "Rooms callers may not open or enter from this node. Checked on every way in, so a room "
+                "blocked after it was opened stops admitting callers at once; anyone already there stays, "
+                "and the room retires once idle. Channels you bridge yourself are not affected."
+            ),
         ),
     ]
 
@@ -2708,6 +2769,10 @@ async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) ->
                 name_of=lambda item: f"#{item[1]}",
                 stable_id_of=lambda item: item[0],
                 title="Unblock an MRC room",
+                help_about=(
+                    "The blocked rooms. Picking one takes it off the list; nothing is kept until you save "
+                    "the MRC settings."
+                ),
                 empty_message="No MRC rooms are blocked.",
             )
             if picked is not None:
@@ -2720,8 +2785,8 @@ async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) ->
                 help_entries.append(MenuEntry(label=menu_key("R", "emove"), brief="Pick a room to unblock"))
             await show_menu_help(
                 session, "Blocked rooms help", help_entries,
-                about="MRC rooms callers may not open from this node. Changes are kept only when you "
-                      "save the MRC settings.",
+                about="MRC rooms callers may not open or enter from this node. A change is kept only when "
+                      "you save the MRC settings, and then applies at once, to rooms already open too.",
             )
             continue
         await session.write(reject_unhandled_key(choice))
@@ -2879,11 +2944,18 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
         choice, page = await show_detail(
             session, title=title, actions=actions, page=page, message=message,
             sections=await _mrc_status_sections(lane, mrc_bridge, status, unicode_style=chrome.unicode_style),
+            help_entries=[
+                *([MenuEntry(label=menu_key("R", "econnect now"), brief="Drop the hub link, dial again")]
+                  if status.enabled else []),
+                MenuEntry(label=menu_key("S", "ettings"), brief="Open the MRC settings"),
+            ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="MRC status help",
             help_about=(
-                "What the inter-BBS chat bridge is doing right now: its connection to the hub and the "
-                "channels it carries."
+                "What the inter-BBS chat bridge is doing right now: its hub connection and traffic, the "
+                "network's size, the rooms callers opened, and each bridged channel with who is in its "
+                "MRC room. Reconnect now drops the hub link and dials again with the saved settings; "
+                "nothing else on this screen changes anything."
             ),
         )
         message = None
