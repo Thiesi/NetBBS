@@ -886,7 +886,7 @@ Delivery line when you open it:
 | **With relay** | The other node can't be reached directly, so your BBS left the letter at a relay for it to collect, and no answer has come back yet. If none comes within 14 days, it expires. |
 | **Delivered** | It is in the recipient's mailbox. |
 | **Bounced** | The other node sent it back, and the Delivery line says why, for example that there is no user by that name there, that their mailbox is full of unread mail, or that the node does not trust yours yet. |
-| **Expired** | No route to that node worked before delivery gave up, so it was not delivered. Mail left at a relay expires when no answer came back in 14 days; it may still have arrived, and if an answer turns up later, Sent shows it as delivered or bounced after all. |
+| **Expired** | No route to that node worked before delivery gave up, or this BBS's SysOp stopped trying to send it, so it was not delivered. Mail left at a relay expires when no answer came back in 14 days; it may still have arrived, and if an answer turns up later, Sent shows it as delivered or bounced after all. |
 | **Resent** | It bounced or expired, and you sent it again with **Send again**. The new copy is a letter of its own in Sent, with its own state. |
 
 #### Send a letter again

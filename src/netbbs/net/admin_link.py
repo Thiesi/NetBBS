@@ -94,7 +94,6 @@ from netbbs.link.trust import (
     node_probation,
     is_registered_subject,
 )
-from netbbs.link.mail import unexpire_link_message_delivery
 from netbbs.link.mail_refusals import (
     TRUST_REASONS,
     VIA_RELAY,
@@ -104,7 +103,6 @@ from netbbs.link.mail_refusals import (
 )
 from netbbs.mail import MAX_KEPT_PER_RECIPIENT, MAX_MAIL_PER_RECIPIENT, InboxSize, inbox_sizes
 from netbbs.link.work_items import (
-    KIND_LINK_MAIL_DELIVERY,
     WorkItem,
     cancel_work_item,
     delete_work_item,
@@ -1489,11 +1487,9 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
     of its own with `[R]eplay`/`[D]elete` (dead-lettered or cancelled) or
     `[C]ancel` (retrying) on its action bar (design doc §3.5: it used to
     print the item and then ask a yes/no that had to be answered to
-    leave). Replaying a dead-lettered
-    `link_mail_delivery` item also undoes its `mail_messages.
-    link_delivery_status = 'expired'` side effect back to `'pending'`
-    -- the one place that undo happens, symmetric with `netbbs.link.
-    sync`'s own dead-letter side effect.
+    leave). Replaying a `link_mail_delivery` item puts its letter back
+    to pending, and cancelling one expires it; `netbbs.link.work_items`
+    does both, in the same transaction (issue #1535).
     """
     chrome = await _load_chrome(lane, actor)
     message = None
@@ -1567,7 +1563,6 @@ async def _outbox_item_screen(
     if selected is None:
         return None
 
-    dead = selected.status == "dead_lettered"
     # Dead-lettered and cancelled items are both resolved without being
     # pushed: either can be replayed or deleted (`replay_work_item` and
     # `delete_work_item` accept both). Only a retrying one can be cancelled.
@@ -1597,17 +1592,15 @@ async def _outbox_item_screen(
             "One outgoing delivery that is retrying, gave up, or was cancelled, with its last error."
         ),
         help_entries=_help_entries(actions, {
-            "r": "Retry from scratch; un-expires its letter" if dead else "Retry from scratch",
-            "c": "Stop retrying it for good",
-            "d": "Forget it; its letter stays expired" if dead else "Forget it; it is never sent",
+            "r": "Retry from scratch; un-expires its letter",
+            "c": "Stop retrying; its letter expires",
+            "d": "Forget it; its letter stays expired",
         }),
     )
     if choice == "r" and resolved:
         def _replay(db: Database) -> WorkItem:
-            replayed = replay_work_item(db, selected.id, replayed_by=actor)
-            if replayed.kind == KIND_LINK_MAIL_DELIVERY:
-                unexpire_link_message_delivery(db, replayed.reference_id)
-            return replayed
+            # Replaying un-expires a delivery's letter itself (issue #1535).
+            return replay_work_item(db, selected.id, replayed_by=actor)
 
         replayed = await lane.run(_replay)
         return colored(f"Replayed -- status is now {replayed.status!r}.", fg_color=SUCCESS_COLOR)
@@ -1619,9 +1612,8 @@ async def _outbox_item_screen(
         return colored(f"Cancelled -- status is now {cancelled.status!r}.", fg_color=SUCCESS_COLOR)
     if choice == "d" and resolved:
         await session.write_line("")
-        consequence = "The letter stays expired." if dead else "It is never sent."
         if not await prompt_yes_no(
-            session, f"Delete this work item for good? {consequence}", default=False,
+            session, "Delete this work item for good? The letter stays expired.", default=False,
         ):
             return colored("Kept -- nothing was deleted.", fg_color=MUTED_COLOR)
         await lane.run(delete_work_item, selected.id, deleted_by=actor)

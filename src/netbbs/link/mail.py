@@ -596,15 +596,23 @@ def expire_link_message_delivery(db: Database, content_id: str, *, reason: str |
     must win, never be overwritten by a stale dead-letter outcome.
 
     `reason` is `EXPIRED_BY_OWN_POLICY` when this node's own trust policy
-    held the mail back to the end; `None` means no route worked. The
-    sender is told either way at their next main menu (issue #806)."""
+    held the mail back to the end, `EXPIRED_BY_SYSOP` when a SysOp
+    cancelled the delivery in the Outbox; `None` means no route worked.
+    The sender is told either way at their next main menu (issue #806)."""
+    expire_link_message_delivery_without_commit(db, content_id, reason=reason)
+    db.connection.commit()
+
+
+def expire_link_message_delivery_without_commit(db: Database, content_id: str, *, reason: str | None = None) -> None:
+    """`expire_link_message_delivery` inside the caller's own transaction:
+    `netbbs.link.work_items.cancel_work_item` expires the letter in the
+    same commit that cancels its delivery (issue #1535)."""
     db.connection.execute(
         "UPDATE mail_messages SET link_delivery_status = 'expired', link_delivery_reason = ?, "
         "link_delivery_notice_pending = 1 "
         "WHERE link_event_content_id = ? AND link_delivery_status = 'pending'",
         (reason, content_id),
     )
-    db.connection.commit()
 
 
 def record_relay_handoff(db: Database, content_id: str, *, now: str | None = None) -> None:
@@ -651,20 +659,18 @@ def expire_unanswered_relay_mail(db: Database, *, now: datetime.datetime | None 
     return cursor.rowcount
 
 
-def unexpire_link_message_delivery(db: Database, content_id: str) -> None:
-    """The other half of `expire_link_message_delivery`, called when a
-    SysOp replays a dead-lettered/cancelled `link_mail_delivery` work
-    item (`netbbs.link.work_items.replay_work_item`) -- undoes the
-    expiry so the next successful push can still lead to a genuine
-    accepted/bounced resolution, rather than the message staying
-    permanently `'expired'` even though delivery is being retried again."""
+def unexpire_link_message_delivery_without_commit(db: Database, content_id: str) -> None:
+    """The other half of `expire_link_message_delivery`: put an expired
+    letter back to pending when a SysOp replays its dead-lettered or
+    cancelled delivery, inside `replay_work_item`'s own transaction
+    (issue #1535), so the next push can still end in a genuine accepted
+    or bounced answer."""
     db.connection.execute(
         "UPDATE mail_messages SET link_delivery_status = 'pending', link_delivery_reason = NULL, "
         "link_delivery_notice_pending = 0, link_relay_handoff_at = NULL "
         "WHERE link_event_content_id = ? AND link_delivery_status = 'expired'",
         (content_id,),
     )
-    db.connection.commit()
 
 
 # -- what the sender is told (issue #806) -----------------------------------
@@ -712,8 +718,12 @@ EXPIRED_BY_OWN_POLICY = "own_policy"
 # Handed to a relay, and no answer came back in time (issue #874). Unlike every
 # other expiry, the letter may well have arrived.
 EXPIRED_NO_ANSWER = "no_answer"
+# A SysOp cancelled the delivery in the Outbox before it could be sent
+# (issue #1535).
+EXPIRED_BY_SYSOP = "sysop_cancelled"
 _EXPIRED_TEXT = {
     EXPIRED_BY_OWN_POLICY: "this BBS stopped exchanging mail with that BBS before it could be sent",
+    EXPIRED_BY_SYSOP: "the SysOp of this BBS stopped trying to send it",
     EXPIRED_NO_ANSWER: (
         f"no answer came back in the {RELAY_NO_ANSWER_TIMEOUT.days} days since it was left at a relay "
         "for that BBS, so it may not have arrived"

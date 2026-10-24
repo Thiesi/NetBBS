@@ -17,12 +17,15 @@ receipt. For Link mail specifically, that confirmation is a completely
 separate, pre-existing thing (`netbbs.link.mail.apply_link_message_
 accepted`/`apply_link_message_bounced`, driven by a genuine signed event
 coming back), unrelated to whether a push attempt succeeded. This
-module knows nothing about `mail_messages`/`link_mail_acknowledgements`
-at all -- kind-agnostic by design, storing only a `reference_id` pointer
-never a payload copy. The one integration point (a dead-lettered/
-cancelled `link_mail_delivery` item implying `mail_messages.
-link_delivery_status = 'expired'`) lives in the caller
-(`netbbs.link.sync`), not here.
+module stores only a `reference_id` pointer, never a payload copy, and
+its retry machinery is kind-agnostic. The one integration point is a
+`link_mail_delivery` item's letter: a dead-lettered or cancelled item
+implies `mail_messages.link_delivery_status = 'expired'`, and a replay
+undoes that. The sync loop (`netbbs.link.sync`) expires on a dead-letter,
+since only it knows the reason; the SysOp's own `cancel_work_item` and
+`replay_work_item` do it here, in the same transaction as the status
+change, so no Outbox screen can cancel a letter and leave its sender's
+Sent folder saying it is still pending (issue #1535).
 
 Plain, synchronous, `db`-first functions, matching every other
 `netbbs.link.*` module's calling convention -- dispatched via
@@ -270,7 +273,11 @@ def replay_work_item(db: Database, work_item_id: int, *, replayed_by: User) -> W
     Refuses on anything not already terminal -- replaying a `pending`/
     `retrying` item makes no sense (it's already going to be tried
     again on its own), and replaying an already-`pushed` one would
-    re-attempt a delivery that already succeeded."""
+    re-attempt a delivery that already succeeded.
+
+    A replayed `link_mail_delivery` item's letter goes back from `expired`
+    to `pending`, so the next push can still end in a genuine accepted or
+    bounced answer."""
     item = get_work_item(db, work_item_id)
     if item.status not in ("dead_lettered", "cancelled"):
         raise WorkItemError(
@@ -287,6 +294,11 @@ def replay_work_item(db: Database, work_item_id: int, *, replayed_by: User) -> W
         """,
         (now, now, work_item_id),
     )
+    if item.kind == KIND_LINK_MAIL_DELIVERY:
+        # Imported here: netbbs.link.mail imports this module.
+        from netbbs.link.mail import unexpire_link_message_delivery_without_commit
+
+        unexpire_link_message_delivery_without_commit(db, item.reference_id)
     record_action(
         db, actor=replayed_by, action="replay_link_work_item", object_type="link_work_item",
         object_id=work_item_id, detail=f"kind={item.kind} target={item.target_fingerprint}",
@@ -298,7 +310,11 @@ def cancel_work_item(db: Database, work_item_id: int, *, cancelled_by: User) -> 
     """Give up on a still-unresolved item deliberately, distinct from an
     automatic dead-letter -- e.g. a SysOp who knows a recipient is gone
     for good and doesn't want to wait out the remaining backoff/age
-    budget. Refuses on anything already terminal."""
+    budget. Refuses on anything already terminal.
+
+    A cancelled `link_mail_delivery` item's letter expires with reason
+    `EXPIRED_BY_SYSOP`, so its sender sees it was not delivered and is
+    told at their next main menu (issue #1535)."""
     item = get_work_item(db, work_item_id)
     if item.status not in _UNRESOLVED_STATUSES:
         raise WorkItemError(f"cannot cancel work item {work_item_id}: status is already {item.status!r}")
@@ -307,6 +323,11 @@ def cancel_work_item(db: Database, work_item_id: int, *, cancelled_by: User) -> 
         "UPDATE link_work_items SET status = 'cancelled', resolved_at = ? WHERE id = ?",
         (now, work_item_id),
     )
+    if item.kind == KIND_LINK_MAIL_DELIVERY:
+        # Imported here: netbbs.link.mail imports this module.
+        from netbbs.link.mail import EXPIRED_BY_SYSOP, expire_link_message_delivery_without_commit
+
+        expire_link_message_delivery_without_commit(db, item.reference_id, reason=EXPIRED_BY_SYSOP)
     record_action(
         db, actor=cancelled_by, action="cancel_link_work_item", object_type="link_work_item",
         object_id=work_item_id, detail=f"kind={item.kind} target={item.target_fingerprint}",
