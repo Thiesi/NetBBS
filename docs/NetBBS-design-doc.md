@@ -26,6 +26,9 @@ reading this design reference first.
 
 ## Current status
 
+- **Feature freeze since v7.40.0 (2026-10-24).** NetBBS is feature complete
+  for now; until NetBBS Link opens publicly (#1384), work is fixes, usability,
+  reliability, documentation and Link readiness (#131, #83).
 - Phases 1 and 2 are complete as working standalone BBS software.
 - The post-Phase-2 local additions—Communities, identity attestation,
   asynchronous personal mail, and self-update foundations—are substantially

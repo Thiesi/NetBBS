@@ -78,6 +78,13 @@ PR descriptions for the implementation narrative of the change being made.
 
 ## Development direction
 
+> [!IMPORTANT]
+> **Feature freeze since v7.40.0 (2026-10-24, #612 step 9).** NetBBS is
+> feature complete for now. Until NetBBS Link opens publicly (#1384), work is
+> bug fixes, usability, reliability, documentation, and the Link readiness work
+> (#131, #83). New features, settings, and protocol surface wait unless the
+> maintainer approves them on #612.
+
 NetBBS should leave proof-of-concept territory before the entire roadmap is
 finished. Do not treat protocol, background, and architectural work as a queue
 which must be exhausted before user-facing work resumes.
