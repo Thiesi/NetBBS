@@ -82,6 +82,17 @@ _STAGED_PACKET_SECONDS = DEFAULT_GRANT_TTL_SECONDS + TRANSFER_TIMEOUT_SECONDS
 _STAGED_PREFIX = "qwk-"
 
 
+# What each key of the offline mail screen does, for its help screen.
+_OFFLINE_HELP = {
+    "d": "A packet of your unread mail and new posts",
+    "u": "Your reply packet: its replies go out",
+    "m": "Count what your packets carried as read",
+    "c": "Pick the boards your packets carry",
+    "r": "What your last upload did, line by line",
+    "w": "A browser link instead of Zmodem",
+}
+
+
 def _supports_zmodem(session: Session) -> bool:
     return getattr(session, "supports_zmodem", True)
 
@@ -174,9 +185,10 @@ async def offline_mail(
                 message="\r\n".join(take_notices(session)) or None,
                 help_title="Offline mail help",
                 help_about=(
-                    "QWK packets of your mail and the boards you follow, to read and answer offline in a QWK "
-                    "reader, and the reply packets it makes."
+                    "What waits for your next QWK packet, and the file names a QWK reader expects. "
+                    "A packet holds your unread mail and the new posts on its boards."
                 ),
+                help_entries=[MenuEntry(label=label, brief=_OFFLINE_HELP.get(key, "")) for key, label in actions],
             )
             if choice == "b":
                 return
@@ -221,6 +233,12 @@ async def _web_transfer(
         ],
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style,
+        help_title="Browser transfer help",
+        help_about="Links to open in a web browser, for a terminal that cannot send or receive files itself.",
+        help_entries=[
+            MenuEntry(label=menu_key("D", "ownload link"), brief=_OFFLINE_HELP["d"]),
+            MenuEntry(label=menu_key("U", "pload link"), brief=_OFFLINE_HELP["u"]),
+        ],
     )
     if choice == "d":
         await _download(session, db, user, transfers, web=True)
@@ -445,6 +463,8 @@ async def _show_report(session: Session, db: Database, user: User) -> None:
         actions=[("b", menu_key("B", "ack"))],
         redraw_in_place=redraw_in_place_enabled(db, user),
         unicode_style=unicode_style,
+        help_title="Upload report help",
+        help_about="What your last reply packet in this call did, one line per reply.",
     )
 
 
@@ -495,6 +515,10 @@ async def _conferences(session: Session, db: Database, user: User) -> None:
         description_of=describe,
         title="QWK conferences",
         empty_message="There are no message boards you can read.",
+        help_about=(
+            "Every board you can read, its conference number in your packets, and whether you follow it. "
+            "Ticked [x] boards go in your packets; ticking never changes what you follow."
+        ),
         preamble=(
             "Tick the boards your packets carry. Followed boards start ticked; this changes your packets "
             "only, never what you follow. [S]ave keeps the ticks, [B]ack leaves without saving."

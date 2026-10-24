@@ -307,7 +307,7 @@ def test_reading_a_post_has_help_and_back_still_leaves(db, alice):
     session = FakeSession(["0", "1", HELP_KEY, _DISMISS, "b", "b"])
     asyncio.run(_show_board(session, db, board, alice))
     text = session.squeezed()
-    assert "Reading a post" in text and "One post at a time." in text
+    assert "Reading a post" in text and "One post, with its files and poll." in text
     assert "[R]eply" in text.split("Reading a post")[1]
     assert session.leftover == []
 
@@ -392,7 +392,7 @@ def test_a_member_profile_has_help(db, alice):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_show_vcard(session, db, alice, alice))
     text = session.squeezed()
-    assert "Member profile help" in text and "What this member has chosen to share" in text
+    assert "Member profile help" in text and "What this member chose to share" in text
     assert session.leftover == []
 
 
@@ -448,7 +448,7 @@ def test_the_file_listing_has_help_and_is_drawn_again(db, lane, alice, editor, k
     session = FakeSession([key, _DISMISS, "b"], editor=editor)
     asyncio.run(_show_area(session, lane, area, alice))
     text = session.squeezed()
-    assert "File area help" in text and "Arrow keys move a highlight" in text
+    assert "File area help" in text and "any pinned on top, then oldest to newest" in text
     assert "[U]pload" in text.split("File area help")[1]
     assert "pkg1.tar.gz" in text.split("File area help")[1]
     assert session.leftover == []
@@ -494,7 +494,7 @@ def test_a_received_letter_has_help(db, lane, alice, bob):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_show_inbox_message(session, lane, bob, letter))
     text = session.squeezed()
-    assert "Reading a letter" in text and "A letter sent to you." in text
+    assert "Reading a letter" in text and "A letter to you: who sent it" in text
     assert "[F]orward" in text.split("Reading a letter")[1]
     assert session.leftover == []
 
@@ -508,7 +508,7 @@ def test_a_sent_letter_has_its_own_help(db, lane, alice, bob):
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(_show_sent_message(session, lane, alice, letter))
     text = session.squeezed()
-    assert "Reading a letter" in text and "A letter you sent." in text
+    assert "Reading a letter" in text and "A letter you sent, and how far it got" in text
     assert session.leftover == []
 
 
@@ -777,7 +777,7 @@ def test_the_monitor_has_help_and_repaints(lane, sysop, editor, key):
         session, lane, sysop, _controls(), disconnect=lambda entry: asyncio.sleep(0),
     ))
     text = session.squeezed()
-    assert "Monitor help" in text and "[S]noop Watch the selected caller's screen" in text
+    assert "Monitor help" in text and "[S]noop Watch their screen live" in text
     # Repainted in full after the help: the table's header row comes back.
     assert "USER" in text.split("Monitor help")[1]
     assert session.leftover == []

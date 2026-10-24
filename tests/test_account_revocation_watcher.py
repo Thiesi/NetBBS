@@ -13,9 +13,9 @@ background task, one per authenticated session, that periodically
 re-checks the account and forcibly cancels the session from outside --
 covering every loop at once, present or future, and idle sessions too.
 These tests drive the real `run_authenticated_session` (the function
-that actually creates the watcher, not `_main_menu` in isolation) with
-`_REVOCATION_CHECK_INTERVAL_SECONDS` patched down to a test-friendly
-interval.
+that actually creates the watcher, not `_main_menu` in isolation).
+Revocation scenarios use a short poll interval; the active-session
+scenario wakes the watcher explicitly before logoff.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
 from netbbs.storage.database import Database
+from tests.bounded import run_bounded
 
 
 class FakeSession:
@@ -199,18 +200,43 @@ def test_watcher_cancels_the_session_even_if_the_notice_write_blocks_forever(db)
     # assertion above.
 
 
-def test_watcher_does_not_disconnect_a_still_active_session(db):
+def test_watcher_does_not_disconnect_a_still_active_session(db, monkeypatch):
     hub, presence, mailbox = ChatHub(), PresenceRegistry(), MessageMailbox()
     registry = ActiveSessionRegistry()
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    # Leading "n" answers the one-time post-login Unicode-style prompt.
-    session = FakeSession(["n", "l", "y"])  # logs off normally, on its own (confirmed)
+    reading, resume, checked = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class PausedSession(FakeSession):
+        async def read_key(self, echo: bool = True) -> str:
+            reading.set()
+            await resume.wait()
+            return await super().read_key(echo=echo)
+
+    apply_access_change = login_flow._apply_access_change
+
+    def account_checked(session, current, session_registry):
+        apply_access_change(session, current, session_registry)
+        checked.set()
+
+    monkeypatch.setattr(login_flow, "_apply_access_change", account_checked)
+    # The explicit recheck below must wake the watcher, rather than its timer.
+    monkeypatch.setattr(login_flow, "_REVOCATION_CHECK_INTERVAL_SECONDS", 60)
+    session = PausedSession()
 
     async def scenario():
         task = asyncio.create_task(_drive(db, hub, presence, mailbox, registry, alice, session))
-        await _wait_until_done(task)
+        await reading.wait()
+        # Let the real watcher check the active account before allowing logoff.
+        registry.request_account_recheck(alice.username)
+        await checked.wait()
+        assert not task.done()
+        assert presence.is_online(alice.username)
+        # Supply the normal confirmed-logoff script after the active check.
+        session._inputs.extend(["n", "l", "y"])
+        resume.set()
+        await task
 
-    asyncio.run(scenario())
+    run_bounded(scenario(), timeout=30)
     assert "no longer active" not in _written_text(session)
     assert "Goodbye!" in _written_text(session)
 
