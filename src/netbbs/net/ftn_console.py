@@ -231,12 +231,17 @@ async def ftn_networks_screen(session: Session, lane: DatabaseLane, actor: User,
             empty_message="No FTN networks. [C]reate one: it starts as fsxNet's hub.",
             refresh=_load, on_create=_create, item_keys={"d": _delete, "r": _robot_password, "l": _links,
                                                          "p": _publishing},
-            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network"),
-                      MenuEntry(label=menu_key("R", "obot password"), brief="Change robot password: send %PWD"),
+            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a network",
+                                detailed="Remove it: its boards turn local, its waiting mail is dropped"),
+                      MenuEntry(label=menu_key("R", "obot password"), brief="Change robot password: send %PWD",
+                                detailed="Change AreaFix's or FileFix's password at the hub and here"),
                       MenuEntry(label=menu_key("L", "inks"), brief="Points and downlinks on this network"),
                       MenuEntry(label=menu_key("P", "ublishing"),
                                 brief="Pointlist and nodelist segment")],  # issue #1480
             live_label=lambda: status or "FidoNet-style networks: echomail on boards, netmail in Mail",
+            help_about=("The FTN networks this BBS is on: its address, the uplink, on or off, and whether it "
+                        "answers calls. Picking one edits all its settings in one draft; nothing is stored "
+                        "before Save, and the running node picks a change up within a minute."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -297,16 +302,21 @@ def _nodelist_fields() -> list[FieldSpec]:
                      render=lambda d: d["nodelist_echo"] or "(none: import by hand)",
                      prompt=_optional_text_field("nodelist_echo"), section="Nodelist",
                      brief="The file echo the network's nodelist arrives in (NIX_LIST)",
-                     help="A list arriving there is imported once its CRC-16 checks. "
-                          "The echo needs no file area."),
+                     help="A list arriving there is imported once its CRC-16 checks, and netmail to listed "
+                          "BinkP nodes then goes direct. It needs List name. The echo needs no file area. "
+                          "Empty: lists are imported by hand."),
         FieldSpec(key="nodelist_name", label="List name",
                      render=lambda d: (f"{d['nodelist_name']}.nnn" if d["nodelist_name"] else "(not set)"),
                      prompt=_optional_text_field("nodelist_name"), section="Nodelist",
-                     brief="The list's file name without the day (NODELIST, NIXLIST)"),
+                     brief="The list's file name without the day (NODELIST, NIXLIST)",
+                     help="1-8 letters, digits, - or _: NIXLIST for NIXLIST.289 or its ZIP NIXLIST.Z89. "
+                          "Other files in the echo are not taken for the list."),
         FieldSpec(key="nodediff_name", label="Diff name",
                      render=lambda d: (f"{d['nodediff_name']}.nnn" if d["nodediff_name"] else "(none: full lists only)"),
                      prompt=_optional_text_field("nodediff_name"), section="Nodelist",
-                     brief="The daily diffs' file name, if the network sends them (NODEDIFF)"),
+                     brief="The daily diffs' file name, if the network sends them (NODEDIFF)",
+                     help="Each diff is applied to the last list and must pass its CRC-16. Empty: diffs are "
+                          "not applied, only full lists. It must differ from List name."),
     ]
 
 
@@ -346,7 +356,8 @@ def _transport_fields() -> list[FieldSpec]:
                      prompt=_optional_text_field("listen_host"), section="Transport",
                      brief="IP addresses to answer on, for all networks; empty for all",
                      help="One or more IP addresses separated by spaces, such as 192.0.2.7 2001:db8::7. "
-                          "Empty answers on every address, IPv6 and IPv4."),
+                          "Empty answers on every address, IPv6 and IPv4. It applies to every network, on both "
+                          "answer ports; the running node moves within a minute."),
         FieldSpec(key="uplink_tls", label="Call over TLS",
                      render=lambda d: _TLS_LABELS[d["uplink_tls"]],
                      prompt=choice_field("uplink_tls", TLS_CHOICES), step=choice_step("uplink_tls", TLS_CHOICES),
@@ -364,8 +375,9 @@ def _transport_fields() -> list[FieldSpec]:
                      render=lambda d: (f"{d['tls_port']} (every network)" if d["tls_port"] else "(off)"),
                      prompt=_optional_text_field("tls_port"), section="Transport",
                      brief=f"Also answer BinkP over TLS on this port (usually {DEFAULT_TLS_PORT}); empty for off",
-                     help="Needs a certificate and its key. Callers still prove themselves with their session "
-                          "password."),
+                     help="Needs a certificate and its key, and must differ from the answer port. It applies to "
+                          "every network that answers calls; the plain port goes on answering. Callers still "
+                          "prove themselves with their session password."),
         FieldSpec(key="tls_cert", label="Certificate file",
                      render=lambda d: d["tls_cert"] or "(not set)", prompt=_optional_text_field("tls_cert"),
                      section="Transport", brief="PEM file with the certificate (and chain) for the TLS port",
@@ -374,7 +386,10 @@ def _transport_fields() -> list[FieldSpec]:
         FieldSpec(key="tls_key", label="Key file",
                      render=lambda d: d["tls_key"] or "(in the certificate file)",
                      prompt=_optional_text_field("tls_key"), section="Transport",
-                     brief="PEM file with the certificate's private key, if separate"),
+                     brief="PEM file with the certificate's private key, if separate",
+                     help="Empty when the key is in the certificate file. If the files can't be loaded, the "
+                          "TLS port stays closed and the status screen shows a TLS error; the node tries them "
+                          "again every minute."),
     ]
 
 
@@ -466,7 +481,8 @@ def _netmail_fields() -> list[FieldSpec]:
                   prompt=_attach_area_prompt, section="Netmail",
                   brief="Where files sent with a netmail are stored",
                   help="A file that comes with a netmail is stored here and listed in the letter. Who may read "
-                       "this area may download it. With none, each one is held for you to look at."),
+                       "this area may download it, and its moderation applies. A Linked area is refused. "
+                       "With none, each one is held for you to look at."),
         FieldSpec(key="give_held_unproven", label="Held mail, no password",
                   render=lambda d: "give it" if d["give_held_unproven"] else "no: only to a proven caller",
                   prompt=bool_field("give_held_unproven"), step=bool_step("give_held_unproven"),
@@ -546,61 +562,92 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                      render=lambda d: "yes" if d["enabled"] else "no", prompt=bool_field("enabled"),
                      step=bool_step("enabled"), section="Network",
                      brief="Call the uplink and carry this network's mail",
-                     help="Off by default. Nothing is sent or polled while it is off."),
+                     help="Off by default. While it is off nothing is sent, polled or answered for it. "
+                          "It can't be on without the uplink's Host. The running node picks a change up "
+                          "within a minute."),
         FieldSpec(key="name", label="Name",
                      render=lambda d: d["name"], prompt=text_field("name", required=True), section="Network",
-                     brief="How the network is called here (fsxNet, FidoNet)"),
+                     brief="How the network is called here (fsxNet, FidoNet)",
+                     help="Up to 40 characters, and no other network here may have it."),
         FieldSpec(key="domain", label="Domain",
                      render=lambda d: d["domain"], prompt=text_field("domain", required=True), section="Network",
-                     brief="The network's 5D domain, up to 8 characters (fsxnet)"),
+                     brief="The network's 5D domain, up to 8 characters (fsxnet)",
+                     help="1-8 letters, digits, - or _, stored in lower case. It completes this BBS's and the "
+                          "uplink's addresses: 21:1/199@fsxnet."),
         FieldSpec(key="our_address", label="Our address",
                      render=lambda d: d["our_address"] or "(not set)", prompt=text_field("our_address"),
-                     section="Network", brief="zone:net/node[.point] the network gave this BBS"),
+                     section="Network", brief="zone:net/node[.point] the network gave this BBS",
+                     help="Everything this BBS sends on the network carries it, and must differ from the "
+                          "uplink's. A point address (21:1/199.3) makes this BBS a point: it then can't have "
+                          "points or downlinks, and publishes nothing."),
         FieldSpec(key="netmail_min_level",
                      label="Netmail level", render=lambda d: str(d["netmail_min_level"]),
                      prompt=_int_field("netmail_min_level", "Netmail level"), section="Network",
                      brief="Who may send netmail; 255 = SysOp only",
-                     help="Netmail leaves under this BBS's address, so it starts at SysOp only."),
+                     help="Callers below this level can't send netmail on this network. Netmail leaves under "
+                          "this BBS's address, so it starts at SysOp only."),
         FieldSpec(key="default_charset",
                      label="Charset", render=lambda d: d["default_charset"],
                      prompt=choice_field("default_charset", CHARSETS), step=choice_step("default_charset", CHARSETS),
-                     section="Network", brief="How to read a message that names no character set"),
+                     section="Network", brief="How to read a message that names no character set",
+                     help="Used for an arriving message without a CHRS line, from the next toss on. What this "
+                          "BBS sends is CP437 when it fits and UTF-8 otherwise, whatever this says."),
         FieldSpec(key="origin_text", label="Origin",
                      render=lambda d: d["origin_text"] or "(the BBS's name)", prompt=_optional_text_field("origin_text"),
-                     section="Network", brief="The line under every post sent out"),
+                     section="Network", brief="The line under every post sent out",
+                     help="' * Origin: ', this text and this BBS's address end every post sent out. Up to 60 "
+                          "characters, shortened if the line would pass 79. A board's own Origin wins over it."),
         FieldSpec(key="uplink_address", label="Uplink",
                      render=lambda d: d["uplink_address"], prompt=text_field("uplink_address", required=True),
-                     section="Uplink", brief="The hub's address (fsxNet: 21:1/100)"),
+                     section="Uplink", brief="The hub's address (fsxNet: 21:1/100)",
+                     help="This BBS's echomail and netmail go to it. A caller presenting this address must "
+                          "prove the session password."),
         FieldSpec(key="uplink_host", label="Host",
                      render=lambda d: d["uplink_host"] or "(not set)", prompt=text_field("uplink_host"),
-                     section="Uplink", brief="Where the hub answers BinkP"),
+                     section="Uplink", brief="Where the hub answers BinkP",
+                     help="A host name or IP address. A port written here wins over Port: host:24554, or "
+                          "[2001:db8::1]:24554 for IPv6."),
         FieldSpec(key="uplink_port", label="Port",
                      render=lambda d: str(d["uplink_port"]), prompt=_int_field("uplink_port", "Port"),
-                     section="Uplink", brief="Usually 24554"),
+                     section="Uplink", brief="Usually 24554",
+                     help="24554 is BinkP's usual port, 24553 its TLS port (see Call over TLS)."),
         FieldSpec(key="session_password",
                      label="Session password", render=secret("session_password"),
                      prompt=_secret_field("session_password", "Session password"), section="Uplink",
-                     brief="Proves this BBS to the hub (CRAM-MD5 when offered)"),
+                     brief="Proves this BBS to the hub (CRAM-MD5 when offered)",
+                     help="Agreed with the hub, and proves the hub to this BBS when it calls in. Without one "
+                          "every session is unsecure, and everything the hub sends is held for you."),
         FieldSpec(key="packet_password",
                      label="Packet password", render=secret("packet_password"),
                      prompt=_secret_field("packet_password", "Packet password"), section="Uplink",
-                     brief="Up to 8 characters, if the hub uses one"),
+                     brief="Up to 8 characters, if the hub uses one",
+                     help="Written into every packet sent to the hub, and checked, without case, on every "
+                          "packet from it: a packet with another one is held. Empty: nothing is checked."),
         FieldSpec(key="areafix_password",
                      label="AreaFix password", render=secret("areafix_password"),
                      prompt=_secret_field("areafix_password", "AreaFix password"), section="Uplink",
-                     brief="For linking echo areas"),
+                     brief="For linking echo areas",
+                     help="The subject of every AreaFix request this BBS sends, and of FileFix's while FileFix "
+                          "has no password of its own. Changing it here tells the hub nothing: [R]obot password "
+                          "on the networks list changes it at the hub too."),
         FieldSpec(key="poll_minutes", label="Poll every",
                      render=lambda d: f"{d['poll_minutes']} minutes", prompt=_int_field("poll_minutes", "Minutes"),
-                     section="Calls", brief="How often to call the hub; at least once a day"),
+                     section="Calls", brief="How often to call the hub; at least once a day",
+                     help="5 to 1440 minutes. When mail waits, the hub is also called within five minutes; a "
+                          "failed call is tried again after 1, 2, 4 ... minutes."),
         FieldSpec(key="answers_calls", label="Answer calls",
                      render=lambda d: "yes" if d["answers_calls"] else "no", prompt=bool_field("answers_calls"),
                      step=bool_step("answers_calls"), section="Calls",
                      brief="Let the hub (and other nodes) call this BBS",
-                     help="Needs the answer port open to the internet. Hubs deliver crash mail sooner."),
+                     help="Needs the answer port open to the internet; points and downlinks need it to call "
+                          "in. Hubs deliver crash mail sooner. A caller that proves no password may only "
+                          "deliver, and what it brings is held."),
         FieldSpec(key="listen_port",
                      label="Answer port", render=lambda d: f"{d['listen_port']} (every network)",
                      prompt=_int_field("listen_port", "Answer port"), section="Calls",
-                     brief="Where this BBS answers BinkP, for all networks"),
+                     brief="Where this BBS answers BinkP, for all networks",
+                     help="24554 by default. It is one port for every network that answers calls; the running "
+                          "node moves to a new one within a minute."),
     ]
     fields += robot_field_specs(_secret_field)  # issue #1463: the Robots section
     fields += _nodelist_fields()  # issue #1464: the Nodelist section, after Robots
@@ -611,8 +658,9 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                      label="TIC password", render=secret("tic_password"),
                      prompt=_secret_field("tic_password", "TIC password"), section="File echoes",
                      brief="The Pw line of the hub's TIC files",
-                     help="File echoes arrive with a TIC file carrying this password. With none set, every "
-                          "file echo is held for you to look at."))
+                     help="File echoes arrive with a TIC file carrying this password, and the files you "
+                          "hatch or publish carry it. With none set, every file echo is held for you to look "
+                          "at, and nothing can be hatched."))
     # --- end file echoes ---
     fields += _transport_fields()  # issues #1467, #1468: the Transport section, after File echoes
     fields += _netmail_fields()  # issues #1470 and #1472: the Netmail section, after File echoes
@@ -800,6 +848,18 @@ def _nodelist_rows(db: Database, network: FtnNetwork) -> list:
 # --- end nodelist status ---
 
 
+_STATUS_HELP = [
+    MenuEntry(label=menu_key("P", "oll now"), brief="Call the hub now, whatever the poll interval"),
+    MenuEntry(label=menu_key("A", "reaFix"), brief="Send the hub's AreaFix one line: +TAG, -TAG, %LIST"),
+    MenuEntry(label=menu_key("F", "ileFix"), brief="The same for file echoes"),
+    MenuEntry(label=menu_key("I", "mport echo list"), brief="Boards or file areas from a .NA or .FA file"),
+    MenuEntry(label=menu_key("N", "odelist import"), brief="Import a nodelist file from this machine"),
+    MenuEntry(label=menu_key("H", "eld items"), brief="Release, save, export or delete what was held"),
+    MenuEntry(label=menu_key("U", "nknown echoes"), brief="Carry or drop echoes no board or area carries"),
+    MenuEntry(label=menu_key("R", "equest files"), brief="Ask a node for files; they come to Held items"),
+]
+
+
 @located("Echomail & netmail (FTN)")
 async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, node_controls) -> None:
     """What the FTN gateway last did, and the work on it."""
@@ -820,9 +880,11 @@ async def ftn_status_screen(session: Session, lane: DatabaseLane, actor: User, n
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Echomail & netmail help",
             help_about=(
-                "What the echomail and netmail gateway last did, network by network. "
-                "Each action asks which network it is for."
+                "Each network's last call and error, what waits for it (on hold: kept until its node calls), "
+                "held items, unknown echoes, its nodelist, file requests and links. Calls answered is the "
+                "listener's ports and its last five calls. With more than one network, each key asks which."
             ),
+            help_entries=_STATUS_HELP,
         )
         message = None
         if choice == "b":
@@ -968,6 +1030,9 @@ async def _held_packets(session: Session, lane: DatabaseLane, actor: User, netwo
                   MenuEntry(label=menu_key("E", "xport"), brief="Write a file to this machine"),
                   MenuEntry(label=menu_key("D", "elete"), brief="Throw it away")],
         live_label=lambda: status or "Held: from an unknown caller, or what could not be stored",
+        help_about=("What a call brought that was not tossed or stored, for this network or a deleted one: its "
+                    "kind, size, when it came and why. A file or TIC waiting for its other half is paired when "
+                    "that arrives, or deleted after 7 days; everything else stays until you act on it."),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,
@@ -1116,9 +1181,13 @@ async def _bad_echoes(session: Session, lane: DatabaseLane, actor: User, network
         empty_message="No unknown echoes: everything that came is carried here.",
         refresh=_load, item_keys={"c": _create, "m": _map, "d": _delete},
         live_nav=[MenuEntry(label=menu_key("C", "reate"), brief="A new board or file area for it"),
-                  MenuEntry(label=menu_key("M", "ap"), brief="Carry it on an existing one"),
+                  MenuEntry(label=menu_key("M", "ap"), brief="Carry it on an existing one",
+                            detailed="Carry it on a local board or area that carries no echo"),
                   MenuEntry(label=menu_key("D", "elete"), brief="Drop what waits")],
         live_label=lambda: status or "Echoes the hub sends that no board or file area carries",
+        help_about=("Tags the hub sends that no board or file area here carries, with how many wait and when "
+                    "the first and last came. Create and Map toss what waited, through the board's moderation "
+                    "or the TIC checks. At most 1,000 messages wait per tag and 10,000 in all; the oldest go first."),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,

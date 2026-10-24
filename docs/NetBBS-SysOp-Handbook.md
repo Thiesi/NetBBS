@@ -2929,7 +2929,8 @@ In this chapter: [Join a network](#join-a-network) ·
    - **Answer calls** lets the hub, and other nodes, call this BBS on the
      **Answer port** (24554 by default), which must be reachable from the
      internet.
-   - Without it, the BBS only calls out, once every **Poll every** interval.
+   - Without it, the BBS only calls out: once every **Poll every** interval,
+     and within five minutes when mail waits for the hub.
 3. On each board that should carry an echo, use <kbd>E</kbd> **Echo (FTN)**
    on the board's screen and enter the echo's tag, such as `FSX_GEN`. Each
    echo goes to one board, and a Linked board can't carry one.

@@ -146,6 +146,8 @@ async def change_robot_password(session: Session, lane: DatabaseLane, actor: Use
         description_of=lambda r: ("sends %PWD to the echo robot" if r == AREAFIX else
                                   "sends %PWD to the file echo robot"),
         empty_message="No robots.",
+        help_about=("Pick the robot whose password changes, then type the new one twice. It goes to the hub's "
+                    "robot as %PWD under the current password, and is stored here at once."),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,
     )
@@ -265,6 +267,9 @@ async def edit_echolist_import(session: Session, lane: DatabaseLane, actor: User
             preamble="Select rows to check or uncheck them; [=] is mapped already. [B]ack returns to the draft.",
             live_label=lambda: f"{len(draft['checked'])} checked",
             on_toggle=toggle,
+            help_about=("Every echo in the list, with its description. [=] marks one this network carries "
+                        "already, which can't be checked. Checking changes only the draft: the import's Save "
+                        "creates, maps and requests the checked echoes."),
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
             accent_color=chrome.accent_color, header_color=chrome.header_color,
@@ -290,7 +295,10 @@ async def edit_echolist_import(session: Session, lane: DatabaseLane, actor: User
         FieldSpec(key="community_id", label="Community", render=lambda d: d.get("community_id_label") or "(none)",
                   prompt=_community_field(actor=actor, redraw_in_place=chrome.redraw_in_place,
                                           unicode_style=chrome.unicode_style, collapsed=chrome.collapsed),
-                  brief="Where the new boards or file areas go"),
+                  brief="Where the new boards or file areas go",
+                  help="The new boards or file areas take this Community's access rules. Each is named from "
+                       "its echo's description, cut to 40 characters, or from its tag when that name is "
+                       "taken."),
     ]
 
     def _preamble(draft: dict) -> str:

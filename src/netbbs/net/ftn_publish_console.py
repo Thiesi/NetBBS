@@ -145,6 +145,15 @@ def publishing_sections(db: Database, network: FtnNetwork) -> list[Section]:
     return sections
 
 
+_PUBLISH_HELP = [
+    MenuEntry(label=menu_key("P", "ublish now"),
+              brief="Write today's edition of each list that is on, and hatch it where a file echo is set"),
+    MenuEntry(label=menu_key("S", "ettings"), brief="Which lists are on, names, file echoes, Host line, schedule"),
+    MenuEntry(label=menu_key("E", "ntries for points"), brief="Each point's pointlist line, listed or not"),
+    MenuEntry(label=menu_key("N", "odes"), brief="The segment's node lines"),
+]
+
+
 @located("FTN publishing")
 async def ftn_publish_screen(session: Session, lane: DatabaseLane, actor: User, network: FtnNetwork) -> None:
     """The network's pointlist and segment; see the module docstring."""
@@ -161,8 +170,11 @@ async def ftn_publish_screen(session: Session, lane: DatabaseLane, actor: User, 
                      ("e", menu_key("E", "ntries for points")), ("n", menu_key("N", "odes")), _BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Publishing help",
-            help_about=("A pointlist of this BBS's points, and a nodelist segment for the net it coordinates, "
-                        "written to a file and hatched into a file echo if one is set."),
+            help_about=("A pointlist of this BBS's points, and a nodelist segment for the net it coordinates: "
+                        "each list's state, files, the file echo it is hatched into and its last edition, then "
+                        "the folder, the schedule and the last failure. Each edition is NAME.ddd, ddd the day "
+                        "of the year; earlier editions stay in the folder."),
+            help_entries=_PUBLISH_HELP,
         )
         message = None
         if choice == "b":
@@ -234,19 +246,26 @@ def _line_fields(section: str, prefix: str = "") -> list[FieldSpec]:
     return [
         FieldSpec(key=k("name"), label="System name", render=lambda d: d[k("name")] or "(not set)",
                   prompt=_optional_text_field(k("name")), section=section,
-                  brief="The system's name; spaces become underscores"),
+                  brief="The system's name; spaces become underscores",
+                  help="Plain ASCII, no commas, up to 60 characters; spaces become underscores. Every field "
+                       "of a line follows these rules."),
         FieldSpec(key=k("location"), label="Location", render=lambda d: d[k("location")] or "(not set)",
                   prompt=_optional_text_field(k("location")), section=section,
-                  brief="Town, and region where it helps (Wellington_NZ)"),
+                  brief="Town, and region where it helps (Wellington_NZ)",
+                  help="Up to 60 characters, spaces becoming underscores."),
         FieldSpec(key=k("sysop"), label="Sysop", render=lambda d: d[k("sysop")] or "(not set)",
                   prompt=_optional_text_field(k("sysop")), section=section,
-                  brief="Who runs it, up to 36 characters"),
+                  brief="Who runs it, up to 36 characters",
+                  help="The SysOp's name, up to 36 characters: Jane_Doe."),
         FieldSpec(key=k("phone"), label="Phone", render=lambda d: d[k("phone")] or "-Unpublished-",
                   prompt=_optional_text_field(k("phone")), section=section,
-                  brief="-Unpublished- for a system on the Internet only"),
+                  brief="-Unpublished- for a system on the Internet only",
+                  help="-Unpublished-, or digits in dashed groups, country code first: 1-800-555-0100. "
+                       "Empty is -Unpublished-."),
         FieldSpec(key=k("speed"), label="Speed", render=lambda d: d[k("speed")] or "300",
                   prompt=_optional_text_field(k("speed")), section=section,
-                  brief="300 for a system without a phone line"),
+                  brief="300 for a system without a phone line",
+                  help="A number, up to 6 digits. Empty is 300."),
         FieldSpec(key=k("flags"), label="Flags", render=lambda d: d[k("flags")] or "(none)",
                   prompt=_optional_text_field(k("flags")), section=section,
                   brief="Comma-separated: IBN,INA:bbs.example.org",
@@ -260,36 +279,52 @@ def settings_fields() -> list[FieldSpec]:
     return [
         FieldSpec(key="pointlist_on", label="Pointlist", render=_on("pointlist_on"),
                   prompt=bool_field("pointlist_on"), step=bool_step("pointlist_on"), section="Pointlist",
-                  brief="Publish this BBS's points (FTS-5002, Boss format)"),
+                  brief="Publish this BBS's points (FTS-5002, Boss format)",
+                  help="Off: no pointlist is written, by hand or by the schedule. On, an edition needs at least "
+                       "one listed point."),
         FieldSpec(key="pointlist_name", label="File name", render=lambda d: f"{d['pointlist_name'] or 'POINTS'}.ddd",
                   prompt=_optional_text_field("pointlist_name"), section="Pointlist",
-                  brief="Up to 8 letters and digits; ddd is the day of the year"),
+                  brief="Up to 8 letters and digits; ddd is the day of the year",
+                  help="1-8 letters, digits, - or _. ddd is the day of the year in this BBS's time zone. "
+                       "Empty is POINTS."),
         FieldSpec(key="pointlist_echo", label="Hatch into", render=lambda d: d["pointlist_echo"] or "(none)",
                   prompt=_optional_text_field("pointlist_echo"), section="Pointlist",
-                  brief="The file echo it goes out in, if any"),
+                  brief="The file echo it goes out in, if any",
+                  help="A file echo tag. Each edition is hatched into it with a TIC saying it replaces the "
+                       "last one; that needs the network's TIC password. Empty: the file is only written."),
         FieldSpec(key="segment_on", label="Nodelist segment", render=_on("segment_on"),
                   prompt=bool_field("segment_on"), step=bool_step("segment_on"), section="Nodelist segment",
-                  brief="Publish a segment for the net this BBS coordinates (FTS-5000)"),
+                  brief="Publish a segment for the net this BBS coordinates (FTS-5000)",
+                  help="Off: no segment is written. On, saving needs the Host line's fields filled in."),
         FieldSpec(key="segment_name", label="File name",
                   render=lambda d: f"{d['segment_name'] or 'NET<net>'}.ddd",
                   prompt=_optional_text_field("segment_name"), section="Nodelist segment",
-                  brief="Up to 8 letters and digits (NET549)"),
+                  brief="Up to 8 letters and digits (NET549)",
+                  help="1-8 letters, digits, - or _. Empty is NET and this BBS's net number."),
         FieldSpec(key="segment_echo", label="Hatch into", render=lambda d: d["segment_echo"] or "(none)",
                   prompt=_optional_text_field("segment_echo"), section="Nodelist segment",
-                  brief="The file echo it goes out in, if any"),
+                  brief="The file echo it goes out in, if any",
+                  help="As for the pointlist: hatched with a TIC replacing the last edition, which needs the "
+                       "TIC password. Empty: the file is only written."),
         *_line_fields("Host line", "host_"),
         FieldSpec(key="folder", label="Folder", render=lambda d: d["folder"] or "(the BBS's own)",
                   prompt=_optional_text_field("folder"), section="Output",
-                  brief="Where the files are written on this machine"),
+                  brief="Where the files are written on this machine",
+                  help="A full path, such as /bbs/publish. Empty: ftn-publish/<domain> in the BBS's file "
+                       "storage, shown on the Publishing screen. Earlier editions stay in it."),
         FieldSpec(key="archive", label="ZIP", render=_on("archive"), prompt=bool_field("archive"),
                   step=bool_step("archive"), section="Output",
-                  brief="Also write NAME.Zdd, and hatch that instead"),
+                  brief="Also write NAME.Zdd, and hatch that instead",
+                  help="dd is the day of the year's last two digits. The plain file is written either way."),
         FieldSpec(key="schedule", label="Schedule", render=lambda d: SCHEDULE_LABELS[d["schedule"]],
                   prompt=choice_field("schedule", schedules), step=choice_step("schedule", schedules),
-                  section="Output", brief="Publish by itself, daily or weekly"),
+                  section="Output", brief="Publish by itself, daily or weekly",
+                  help="An edition comes out on the first check of its day (this BBS's time zone), only while "
+                       "the network is on. One that fails is not tried again that day. Off: only Publish now."),
         FieldSpec(key="weekday", label="Weekday", render=lambda d: WEEKDAYS[d["weekday"]],
                   prompt=choice_field("weekday", weekdays), step=choice_step("weekday", weekdays),
-                  section="Output", brief="The day a weekly edition comes out"),
+                  section="Output", brief="The day a weekly edition comes out",
+                  help="Used only when Schedule is weekly. Friday by default, when FidoNet's own list comes out."),
     ]
 
 
@@ -353,6 +388,10 @@ async def _points_screen(session: Session, lane: DatabaseLane, actor: User, netw
             empty_message="No points: add them on the Links screen first.",
             refresh=_load, start_stable_id=start,
             live_label=lambda: "Each point's line in the pointlist; empty fields take the link's name",
+            help_about=("Each point from the Links screen with its pointlist line, or why it isn't listed. "
+                        "Picking one edits its line; the next edition carries it. Empty fields take the link's "
+                        "name (Point_n without one) and Unknown. A point disabled on the Links screen is always "
+                        "left out."),
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             collapsed=chrome.collapsed, accent_color=chrome.accent_color, header_color=chrome.header_color,
@@ -386,7 +425,9 @@ async def _edit_point(session: Session, lane: DatabaseLane, actor: User, network
 
     fields = [FieldSpec(key="listed", label="Listed", render=lambda d: "yes" if d["listed"] else "no",
                         prompt=bool_field("listed"), step=bool_step("listed"), section="Point",
-                        brief="Whether the pointlist carries this point"),
+                        brief="Whether the pointlist carries this point",
+                        help="No leaves it out of the next edition. A point disabled on the Links screen is left "
+                             "out whatever this says."),
               *_line_fields("Line")]
     chrome = await _load_chrome(lane, actor)
     saved = await edit_resource_draft(
@@ -449,6 +490,9 @@ async def _nodes_screen(session: Session, lane: DatabaseLane, actor: User, netwo
             refresh=_load, on_create=_create, item_keys={"d": _delete},
             live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a node's line")],
             live_label=lambda: status or "The node lines under the segment's Host line",
+            help_about=("The node lines under the segment's Host line, by node number, as the next edition "
+                        "writes them. Picking one edits it. Create starts from the first downlink in this net "
+                        "not listed yet, with its name and BinkP host filled in."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -483,10 +527,13 @@ async def _edit_node(session: Session, lane: DatabaseLane, actor: User, network:
     keywords = list(NODE_KEYWORDS)
     fields = [FieldSpec(key="node", label="Node", render=lambda d: f"{network.our_address.net}/{d['node']}",
                         prompt=_int_field("node", "Node number"), section="Node",
-                        brief="Its node number in this net, 1 to 32767"),
+                        brief="Its node number in this net, 1 to 32767",
+                        help="Each number is listed once; 0 is the Host line's."),
               FieldSpec(key="keyword", label="Listed as", render=lambda d: KEYWORD_LABELS[d["keyword"]],
                         prompt=choice_field("keyword", keywords), step=choice_step("keyword", keywords),
-                        section="Node", brief="A plain node, or Pvt, Hold or Down"),
+                        section="Node", brief="A plain node, or Pvt, Hold or Down",
+                        help="Pvt: a private node, its mail routed via the host. Hold: not taking calls for "
+                             "now. Down: not operating. The keyword starts the node's line."),
               *_line_fields("Line")]
     chrome = await _load_chrome(lane, actor)
     saved = await edit_resource_draft(
