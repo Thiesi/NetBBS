@@ -437,6 +437,7 @@ flight and nothing else.
 | **Override** | `DOOR_LL_DATA_DIR` in the door's profile environment |
 | **Terminal** | At least 80x24; the flight pauses below that until the caller enlarges it |
 | **Guests** | A guest call flies against its own copy, thrown away at hang-up |
+| **CPU** | 900 CPU seconds a launch when registered from the Gallery without a profile, instead of the usual 300: real-time flight spends CPU steadily. A profile's own `cpu_seconds` wins |
 
 NetBBS sets the location for a door registered from the Gallery. The door's own
 default, `data/` beside the script, would be inside the installed package, which

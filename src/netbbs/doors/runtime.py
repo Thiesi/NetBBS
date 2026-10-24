@@ -755,6 +755,18 @@ def bundled_follows_resize(door) -> bool:
     return bool(entry and entry.follows_resize)
 
 
+def door_cpu_seconds(door) -> int | None:
+    """The CPU ceiling for a launch of `door`: its profile's, else a bundled
+    door's own allowance when it launches this install's copy, else the
+    default. `None` means no ceiling (a profile's 0)."""
+    if door.profile:
+        return door.profile.cpu_seconds or None
+    from netbbs.doors.bundled import launched_bundled_door
+
+    entry = launched_bundled_door(door.executable_path, tuple(door.args), None)
+    return (entry.cpu_seconds if entry and entry.cpu_seconds else DOOR_CPU_LIMIT_SECONDS) or None
+
+
 def _republish_terminal_size(info_path, info, width, height):
     """Rewrite the door's metadata with the caller's current geometry.
 
@@ -1149,7 +1161,8 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                 # its first scheduler tick, and simply omitting the key would
                 # leave whatever soft limit this service inherited, which is not
                 # what the screen and the guide promise.
-                limits["RLIMIT_CPU"] = (profile.cpu_seconds if profile else DOOR_CPU_LIMIT_SECONDS) or None
+                # Without a profile, a bundled door may bring its own allowance.
+                limits["RLIMIT_CPU"] = (profile.cpu_seconds or None) if profile else door_cpu_seconds(door)
                 setup = {"pty": kind == "pty", "limits": limits}
                 argv = [sys.executable, "-I", str(Path(__file__).with_name("launcher.py")), json.dumps(setup), *argv]
             kwargs = {"start_new_session": True, "pass_fds": pass_fds} if os.name == "posix" else {}

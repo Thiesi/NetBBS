@@ -21,7 +21,9 @@ from netbbs.doors import create_door
 from netbbs.doors.bundled import BUNDLED_DOORS, launched_bundled_door, resolve_bundled_door_path
 from netbbs.doors.bundled import lunar_lander as ll
 from netbbs.doors.profiles import DoorProfile
-from netbbs.doors.runtime import lunar_lander_records_dir, node_lunar_lander_dir, run_door
+from netbbs.doors.runtime import (
+    DOOR_CPU_LIMIT_SECONDS, door_cpu_seconds, lunar_lander_records_dir, node_lunar_lander_dir, run_door,
+)
 from netbbs.guest import set_guest_user
 from netbbs.guest_call import guest_call
 from netbbs.storage.database import Database
@@ -75,6 +77,26 @@ def test_the_records_directory_is_the_nodes_own_unless_a_profile_names_one(db, p
     fork.write_bytes(_SCRIPT.read_bytes())
     other = create_door(db, "Fork", sys.executable, args=(str(fork),), creator=player)
     assert lunar_lander_records_dir(db, other) is None
+
+
+def test_a_bundled_launch_without_a_profile_gets_the_games_cpu_allowance(db, player, tmp_path):
+    bundled = create_door(db, "Lunar Lander", sys.executable, args=(str(_SCRIPT),), creator=player)
+    assert door_cpu_seconds(bundled) == 900
+    # A profile's own ceiling wins, and 0 is still "no ceiling".
+    profiled = create_door(db, "Profiled", sys.executable, args=(str(_SCRIPT),), creator=player,
+                           profile=DoorProfile(cpu_seconds=120))
+    assert door_cpu_seconds(profiled) == 120
+    unbounded = create_door(db, "Unbounded", sys.executable, args=(str(_SCRIPT),), creator=player,
+                            profile=DoorProfile(cpu_seconds=0))
+    assert door_cpu_seconds(unbounded) is None
+    # A fork, or a bundled door without an allowance of its own, keeps the default.
+    fork = tmp_path / "lunar_lander.py"
+    fork.write_bytes(_SCRIPT.read_bytes())
+    assert door_cpu_seconds(create_door(db, "Fork", sys.executable, args=(str(fork),), creator=player)) \
+        == DOOR_CPU_LIMIT_SECONDS
+    trivia = resolve_bundled_door_path(next(d for d in BUNDLED_DOORS if d.key == "retro_trivia"))
+    assert door_cpu_seconds(create_door(db, "Trivia", sys.executable, args=(str(trivia),), creator=player)) \
+        == DOOR_CPU_LIMIT_SECONDS
 
 
 def _fly_and_quit(session, lane, door, player, *, as_guest=False):
