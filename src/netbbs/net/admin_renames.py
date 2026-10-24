@@ -28,6 +28,7 @@ from netbbs.auth.renames import (
 from netbbs.auth.users import User, UserManagementError, deletion_retires_username, get_user_by_id
 from netbbs.net.admin_fields import _EDIT_HINT, _read_seeded_line
 from netbbs.net.admin_sessions import _request_live_access_recheck
+from netbbs.net.admin_trust import _help_entries
 from netbbs.net.admin_ui import (
     _BACK_ACTION,
     _announce_line,
@@ -129,6 +130,9 @@ async def rename_account_directly(
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         help_title="Rename help",
         help_about="What renaming this account does. [A]pply renames it; [B]ack keeps its name.",
+        help_entries=_help_entries([("a", menu_key("A", "pply"))], {
+            "a": "Rename it now; their live sessions end",
+        }),
     )
     if choice != "a":
         _announce_line(session, colored(f"{target.username!r} keeps its name.", fg_color=MUTED_COLOR))
@@ -191,11 +195,13 @@ async def _decide_request(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Name request help",
             help_about=(
-                "A caller's request for a new username, with the names the account had before. "
-                "[A]pprove asks once, then renames the account at once and ends its live sessions; "
-                "the name is checked again first. [R]efuse needs a reason, which the caller sees at "
-                "their next login. [B]ack leaves the request open."
+                "A caller's request for a new username, with the names the account had before. The name "
+                "is checked again when you approve. [B]ack leaves the request open."
             ),
+            help_entries=_help_entries([("a", menu_key("A", "pprove")), ("r", menu_key("R", "efuse"))], {
+                "a": "Asks once, renames, ends their sessions",
+                "r": "Needs a reason, shown at their next login",
+            }),
         )
         message = None
         if choice == "b":
@@ -261,6 +267,10 @@ async def username_requests_screen(
                 f"asks for {request.requested_username}, {request.requested_at[:10]}"
             ),
             title="Name requests", own=True,
+            help_about=(
+                "Callers asking for a new username, oldest first. Picking one shows the request and the "
+                "account's earlier names, with Approve and Refuse."
+            ),
             empty_message="No caller is asking for a new username.",
             start_stable_id=start,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,

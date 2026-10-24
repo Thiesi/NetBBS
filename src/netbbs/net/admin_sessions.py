@@ -330,6 +330,11 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
         description_of=lambda e: _session_description(e, display_format, display_timezone,
                                                       node_controls.presence),
         title="Active sessions", own=True,
+        help_about=(
+            "Everyone connected now and since when; a caller in a door shows which. Picking a session "
+            "opens its disconnect screen, with an optional message; nothing happens before "
+            "[D]isconnect and its confirmation."
+        ),
         empty_message="No active sessions.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=await lane.run(unicode_style_enabled, actor),

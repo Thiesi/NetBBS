@@ -533,12 +533,15 @@ async def _vouch_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Vouch help",
             help_about=(
-                "Whether this node vouches for the identity, and how its vouches leave the node. [I]ssue "
-                "asks for a reason, published with the vouch, then once more before signing; issuing again "
-                "replaces the reason. It counts only at nodes that name this one a trusted reporter allowed "
-                "to vouch, and changes nothing here. [W]ithdraw publishes a signed withdrawal. Vouches "
-                "renew themselves, and pause while you quarantine or block the identity."
+                "Whether this node vouches for the identity, and how its vouches leave the node. A vouch "
+                "counts only at nodes that name this one a trusted reporter allowed to vouch; it changes "
+                "nothing here. Vouches renew themselves, and pause while you quarantine or block the "
+                "identity."
             ),
+            help_entries=_help_entries(actions, {
+                "i": "Asks a public reason, then once more",
+                "w": "Publishes a signed withdrawal",
+            }),
         )
         if choice == "b":
             return
@@ -630,10 +633,10 @@ async def _published_vouches_screen(
             rows=rows, options=["w"] if intents else [],
             help_title="Vouches help",
             help_about=(
-                "Every identity this node vouches for, its status and published reason. Vouches are issued "
-                "on a subject's own screen. [W]ithdraw picks one and publishes a signed withdrawal, which "
-                "its subscribers apply at their next pull."
+                "Every identity this node vouches for, its status and published reason. Vouches are "
+                "issued on a subject's own screen."
             ),
+            help_briefs={"w": "Pick one; publishes a signed withdrawal"},
         )
         if choice == "b":
             return
@@ -691,6 +694,10 @@ async def _trust_subjects_screen(
         stable_id_of=_trust_subject_stable_id,
         description_of=lambda subject: subject.kind,
         title="Trust subjects", own=True,
+        help_about=(
+            "Every remote node and user this node has met or learned of. Picking one shows its trust "
+            "state in each dimension, the evidence and vouches behind it, and every action on it."
+        ),
         empty_message="No remote trust subjects have been registered.",
         # Dogfood report: without `refresh`, an empty list hit `pick_item`'s
         # silent early return (no held prompt at all) -- under
@@ -832,6 +839,16 @@ async def _trust_subject_screen(
                     "back; a probationary user's posts wait for approval. Quarantine refuses new content and "
                     "hides what was accepted; block also refuses key and recovery messages. Nothing is deleted."
                 ),
+                help_entries=_help_entries(actions, {
+                    "e": "Established in all three; asks a reason",
+                    "d": "Blocked in all three; asks a reason",
+                    "o": "Set one dimension's state, or all three",
+                    "c": "Back to what policy computes",
+                    "i": "Accept or reject its remote age or name",
+                    "r": "Clear evidence; revokes this node's signal",
+                    "v": "Vouch for it to other nodes, or withdraw",
+                    "h": "Every state change, and why",
+                }),
             )
             if choice == "b":
                 return
@@ -973,11 +990,13 @@ async def _issued_signals_screen(
             help_title="Signals help",
             help_about=(
                 "Signals this node signed about nodes it caught signing two different objects into one "
-                "place of a chain. Nothing here issues one. [T]urn off stops new signals and revokes the "
-                "published ones at the next sync pass; the quarantine they reported stays. [R]evoke "
-                "withdraws one signal and keeps its evidence. A signal counts at a subscriber only with a "
+                "place of a chain; nothing here issues one. A signal counts at a subscriber only with a "
                 "second, independent domain."
             ),
+            help_briefs={
+                "t": "Off revokes published ones; quarantine stays",
+                "r": "Withdraw one signal; its evidence stays",
+            },
         )
         if choice == "b":
             return
@@ -1266,10 +1285,18 @@ _TRUST_LIST_ACTIONS = {
 }
 
 
+def _help_entries(actions: Sequence[tuple[str, str]], briefs: dict[str, str]) -> list[MenuEntry]:
+    """A `show_detail` screen's keys for its help (issue #1514): each action
+    offered right now, with what it does from `briefs` (keyed like the
+    actions). `[B]ack` is left to the help's keys that work everywhere."""
+    return [MenuEntry(label=label, brief=briefs.get(key, "")) for key, label in actions if key != "b"]
+
+
 async def _trust_list_choice(
     session: Session, lane: DatabaseLane, actor: User, listing: _Listing, *,
     title: str, subtitle: str, rows: Sequence[Field | Note | Table], options: list[str],
     extra_actions: Sequence[tuple[str, str]] = (), help_title: str, help_about: str,
+    help_briefs: dict[str, str] | None = None,
 ) -> str:
     """One trust-policy listing, drawn in full -- title, the entries as a
     table, the action bar -- and the lowercase key the SysOp chose from it.
@@ -1288,6 +1315,7 @@ async def _trust_list_choice(
         sections=[Section(None, rows)], actions=actions, page=listing.page, message=listing.take_message(),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         help_title=help_title, help_about=help_about,
+        help_entries=_help_entries(actions, help_briefs) if help_briefs is not None else None,
     )
     return choice
 
@@ -1607,12 +1635,11 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
             rows=rows, options=["a"],
             help_title="Trust domains help",
             help_about=(
-                "Groups of reporters that may share an owner or interest, so several of them count as one. "
-                "Remote reports quarantine an identity only from two domains whose weights add up to 2.0; "
-                "a node leaves probation by vouches from reporters in two domains, a user from one. "
-                "[A]dd/update creates a domain or, with an existing ID, changes it; every state is "
-                "recomputed at once."
+                "Groups of reporters that may share an owner or interest, so several count as one. Remote "
+                "reports quarantine an identity only from two domains whose weights add up to 2.0; a node "
+                "leaves probation by vouches from reporters in two domains, a user from one."
             ),
+            help_briefs={"a": "Create or change one by ID; states recompute"},
         )
         if choice == "b":
             return
@@ -1769,11 +1796,11 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             rows=rows, options=["a", "r"] if anchors else ["a"],
             help_title="Trust anchors help",
             help_about=(
-                "A list of nodes you name as anchors, with a reason, kept and audited. This version of "
-                "NetBBS does not consult it: an anchor gets no reporter authority, its signals and vouches "
-                "count only if it is also a trusted reporter, and nothing is accepted or refused because "
-                "of it. [A]dd/update and [R]emove change only the list."
+                "A list of nodes you name as anchors, kept and audited. This version of NetBBS does not "
+                "consult it: an anchor gets no reporter authority, and nothing is accepted or refused "
+                "because of it."
             ),
+            help_briefs={"a": "Name a node an anchor, with a reason", "r": "Take a node off the list"},
         )
         if choice == "b":
             return
@@ -1900,12 +1927,15 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             rows=rows, options=["a", "r"] if reporters else ["a"],
             help_title="Trusted reporters help",
             help_about=(
-                "Nodes whose signed signals and vouches this node pulls and counts. Only once a reporter is "
-                "established here in identity integrity and resource behavior, and only within its Scopes: "
-                "a signal outside them is ignored. One domain never quarantines alone, short of an exception; "
-                "any counted report keeps the identity on probation. Vouches count only where May vouch is on. "
-                "[A]dd/update loads a reporter by choosing its node; held-back content is retried."
+                "Nodes whose signed signals and vouches this node pulls and counts, once established here "
+                "in identity integrity and resource behavior, and only within their Scopes. One domain "
+                "never quarantines alone, short of an exception; any counted report keeps the identity on "
+                "probation."
             ),
+            help_briefs={
+                "a": "Add one, or change one by choosing its node",
+                "r": "Stop counting its signals and vouches",
+            },
         )
         if choice == "b":
             return
@@ -2071,12 +2101,12 @@ async def _attestation_authorities_screen(
             rows=rows, options=["a", "r"] if authorities else ["a"],
             help_title="Identity authorities help",
             help_about=(
-                "Nodes whose signed verified age or real name of their callers this node accepts, for the "
-                "attributes listed. Accepted ones count as verified for that remote caller here. A node's "
-                "statements count only while its identity integrity is established here, and nothing "
-                "arrives until its SysOp names this node a recipient. With none listed, no remote "
-                "attestation is accepted. Separate from reporters: one role never grants the other."
+                "Nodes whose signed verified ages and real names of their callers count as verified here, "
+                "for the attributes listed, while their identity integrity is established here. Nothing "
+                "arrives until their SysOp names this node a recipient. With none, no remote attestation "
+                "is accepted."
             ),
+            help_briefs={"a": "Add one, or change its attributes", "r": "Stop accepting its attestations"},
         )
         if choice == "b":
             return
@@ -2211,10 +2241,13 @@ async def _attestation_recipients_screen(
             help_title="Attestation recipients help",
             help_about=(
                 "Nodes sent a sealed snapshot of every verified age and real name a caller here chose to "
-                "share over Link; only the recipient can open it. A change goes out at the next sync pass. "
-                "With none listed, nothing leaves. [R]emove sends that node a final, empty snapshot, which "
-                "makes a NetBBS node forget what it holds from this one."
+                "share over Link; only the recipient can open it. Changes go out at the next sync pass. "
+                "With none, nothing leaves."
             ),
+            help_briefs={
+                "a": "Name a node to receive them",
+                "r": "Sends it an empty snapshot: it forgets them",
+            },
         )
         if choice == "b":
             return
@@ -2487,12 +2520,16 @@ async def _published_identity_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Published identity help",
             help_about=(
-                "The verified ages and names of this node's callers that it signs for Link, and the "
-                "recipients that get them. Only callers who switched sharing on are listed; you can't "
-                "switch it on for them. [W]ithdraw switches one caller's sharing off and signs its "
-                "revocation; recipients drop it with the next snapshot. [R]ecipients names who receives "
-                "them. Show all adds ended ones."
+                "The verified ages and names of this node's callers that it signs for Link, and who "
+                "receives them. Only callers who switched sharing on are listed; you can't switch it on "
+                "for them."
             ),
+            help_entries=_help_entries(actions, {
+                "w": "Stop sharing one; recipients drop it",
+                "r": "The nodes that receive them",
+                "s": "List ended ones too",
+                "c": "Hide ended ones",
+            }),
         )
         if choice == "b":
             return
@@ -2766,10 +2803,13 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             help_title="Exceptions help",
             help_about=(
                 "Each row lets one trusted reporter quarantine on its own word in one category, without a "
-                "second domain. It counts only within that reporter's own Scopes, and a self-verifying "
-                "signal still needs its proof to check out here. [A]dd/update asks once more before saving; "
-                "[R]emove restores the two-domain rule. States are recomputed at once."
+                "second domain. It counts only within that reporter's Scopes, and a self-verifying signal "
+                "still needs its proof to check out here."
             ),
+            help_briefs={
+                "a": "Add one; asks once more before saving",
+                "r": "Restore the two-domain rule there",
+            },
         )
         if choice == "b":
             return
@@ -2984,10 +3024,10 @@ async def _retired_usernames_screen(session: Session, lane: DatabaseLane, actor:
             help_title="Held names help",
             help_about=(
                 "Names held for deleted and renamed accounts on a node that has run Link: nobody can "
-                "register or be renamed to one. [R]elease frees a name for anyone, who then takes over its "
-                "Link mail address, authorship and what other nodes recorded about it; mail to a renamed "
-                "account's old name stops reaching it. Asks once; it can't be undone."
+                "register or be renamed to one. Mail to a renamed account's old name reaches it while the "
+                "name is held."
             ),
+            help_entries=_help_entries(actions, {"r": "Free one: its next owner inherits it"}),
         )
         message = None
         if choice == "b":

@@ -26,6 +26,7 @@ from netbbs.link.moderators import (
     revoke_link_moderator,
 )
 from netbbs.link.node_profiles import identity_for_fingerprint, link_address_label
+from netbbs.net.admin_trust import _help_entries
 from netbbs.net.admin_ui import _BACK_ACTION, _detail_title, _load_chrome, pick_item
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.detail_view import show_detail
@@ -195,13 +196,15 @@ async def link_moderators_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Link moderators help",
             help_about=(
-                "Users of other nodes who moderate what this node originates on Link, and below, what this "
-                "node's own users may moderate elsewhere. A grant covers one linked board or channel, one "
-                "of this node's Link Communities, or everything it originates, and every node carrying it "
-                "accepts that user's moderation. [A]dd signs the new roster at Save; carriers learn it with "
-                "their next pass. [R]emove asks once; each carrier stops accepting it as the change arrives. "
-                "Your own node's moderators need no grant here."
+                "Users of other nodes who moderate what this node originates on Link, and below, what "
+                "this node's users may moderate elsewhere. A grant covers one linked board or channel, a "
+                "Link Community or everything this node originates, and every carrier accepts it. Your "
+                "own moderators need no grant here."
             ),
+            help_entries=_help_entries(actions, {
+                "a": "Grant one; carriers learn it next pass",
+                "r": "Asks once; carriers stop as it arrives",
+            }),
         )
         message = None
         if choice == "b":

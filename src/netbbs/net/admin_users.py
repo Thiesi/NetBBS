@@ -180,7 +180,7 @@ from netbbs.net.admin_fields import (
     _read_seeded_line,
     _resolve_redraw_preference,
 )
-from netbbs.net.admin_trust import _retired_usernames_screen
+from netbbs.net.admin_trust import _help_entries, _retired_usernames_screen
 from netbbs.net.admin_renames import rename_account_directly, username_requests_screen
 from netbbs.auth.renames import count_open_username_requests, open_username_request, username_history
 from netbbs.net.admin_sessions import _request_live_access_recheck, _revoke_live_sessions
@@ -497,6 +497,11 @@ async def _level_detail_screen(
                 column_values_of=_gate_columns,
                 description_of=_gate_description,
                 title=f"Level {level_label(level, names)}", own=True,
+                help_about=(
+                    "What this level opens, gate by gate: the type, the access, the level it opens at, where "
+                    "that level comes from, and other gates still in the way. [V]iew steps through four "
+                    "views; picking a board, area, channel or door opens its own screen to change its levels."
+                ),
                 empty_message=f"Nothing in this view of level {level}.",
                 refresh=_load,
                 live_keys={"v": _next_view},
@@ -601,6 +606,11 @@ async def _levels_screen(
                 f"{step.users} user{'s' if step.users != 1 else ''}; opens {ladder_summary(step)}"
             ),
             title="Level Admin SysOp Tool (LAST)", own=True,
+            help_about=(
+                "Each row is a level in use: how many accounts hold it and what it adds to the levels "
+                "below. Picking one shows everything it opens. A level's name is only a label; renaming "
+                "it changes nobody's access."
+            ),
             empty_message="No levels in use.",
             refresh=_load,
             live_keys={"g": _other_level, "a": _ladder_preset},
@@ -788,6 +798,12 @@ async def _promotion_rules_screen(session: Session, lane: DatabaseLane, actor: U
                 f"needs {row.rule.describe()}; {row.qualifying} ready; opens {row.opens}"
             ),
             title="Promotion rules", own=True,
+            help_about=(
+                "Each rule raises an account from its From level to its To level once it meets every "
+                "need, checked at each login, one step per login. Ready counts who it would raise at "
+                "their next login. Picking a rule edits it. Staff, SysOps and levels set by hand are "
+                "never raised."
+            ),
             empty_message="No promotion rules. [C]reate one: levels then change by hand only.",
             refresh=_load,
             on_create=_create,
@@ -2138,9 +2154,11 @@ async def _preview_level_change(
         help_about=(
             "What this account gains and loses by moving to the new level, counting its moderator "
             "grants. Still blocked lists what the new level opens but another gate, such as an age "
-            "check, keeps closed. [A]pply sets the level and turns promotion rules off for the "
-            "account; [B]ack leaves it as it was."
+            "check, keeps closed."
         ),
+        help_entries=_help_entries([("a", menu_key("A", "pply"))], {
+            "a": "Set the level; promotion rules stop for it",
+        }),
     )
     return choice == "a"
 
@@ -2752,12 +2770,15 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Registration help",
             help_about=(
-                "Who may sign up by themselves, over telnet and SSH alike. Open: new accounts can log in "
-                "at once. Approval required: they can't log in until approved on their account screen. "
-                "Closed: nobody can sign up; you create accounts under Users. A change applies to the next "
-                "signup; accounts already pending stay pending. [Q]uestion is asked of new callers only "
-                "while approval is required; blank removes it."
+                "Who may sign up by themselves, over telnet and SSH alike. A change applies to the next "
+                "signup; accounts already pending stay pending."
             ),
+            help_entries=_help_entries([("o", menu_key("O", "pen")), ("a", menu_key("A", "pproval required")), ("c", menu_key("C", "losed")), ("q", menu_key("Q", "uestion"))], {
+                "o": "New accounts can log in at once",
+                "a": "No login until approved on their account",
+                "c": "No signups; you create accounts here",
+                "q": "Asked only while approval is required",
+            }),
         )
         if choice == "b":
             return

@@ -83,6 +83,7 @@ from netbbs.timeutil import (
     format_for_display,
     resolve_display_preferences,
 )
+from netbbs.net.admin_trust import _help_entries
 from netbbs.net.admin_ui import (
     _announce,
     _announce_line,
@@ -289,6 +290,10 @@ async def _pick_pending_item(
             [item.where, item.kind, item.author, item.when] if node_wide else [item.kind, item.author, item.when]
         ),
         title=title, own=True,
+        help_about=(
+            "Posts, edits and uploads waiting for approval, oldest first; callers see none of them "
+            "yet. Picking one shows it in full, with approve and reject."
+        ),
         empty_message=empty_message,
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=await lane.run(unicode_style_enabled, actor),
@@ -468,11 +473,14 @@ async def _post_action_screen(
             help_title="Held post help",
             help_about=(
                 "A post or edit held for moderation, shown as readers will see it; for an edit, the "
-                "current text follows. [A]pprove publishes it, and sends it on to Link, FTN or QWKnet "
-                "if the board is carried there. [R]eject deletes it and tells the author, by mail with "
-                "their text, giving the reason you type. Pin keeps it at the top of the board; exempt "
-                "keeps it from expiring."
+                "current text follows."
             ),
+            help_entries=_help_entries(actions, {
+                "a": "Publish it; on to Link, FTN, QWKnet if carried",
+                "r": "Delete it; the author is mailed your reason",
+                "p": "Keep it at the top of the board, or not",
+                "x": "Never expire it, or let it expire again",
+            }),
         )
         if choice == "b":
             return
