@@ -260,8 +260,8 @@ when changing a game page; the live checkers include all five game URLs.
 `game-scenes.js` is the game pages' shared player; the older pages retain their
 own scripts for unrelated interactions.
 
-`doors.html` is the game overview: one real launch splash per bundled game,
-one labelled hero image per development project, a short description and a
+`doors.html` is the game overview: one real launch splash per playable game
+(including Lunar Lander's release candidate), Blacksite's labelled concept art, a short description and a
 link to each dedicated page. Keep gameplay galleries and scene players on the
 individual pages. The landing page keeps at most one still per game in its
 general screenshot gallery. Every public page links to the overview.
