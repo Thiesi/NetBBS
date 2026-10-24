@@ -225,33 +225,66 @@ the classes still fit.
 
 ## Individual game pages
 
-The three bundled games have dedicated pages with their gameplay galleries
-and scene players. Lunar Lander has a playable release-candidate page, with
-real captures from its published candidate and an explicit separate-download
-status; it is not yet bundled with the current NetBBS release. Blacksite has
-a development preview: describe planned play, label the status, and never
+The four bundled games have dedicated pages with their gameplay galleries;
+Voidrunner, War Dialer and Retro Trivia also have scene players. Lunar Lander
+is bundled since NetBBS 7.41.0, and its page shows captures of the release
+NetBBS bundles. Blacksite is
+in development and not yet released: its page separates what is built from
+what is still coming, labels the status, and shows only real captures. Never
 manufacture a screenshot.
 Their images are copied without modification from
 `Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
 `Thiesi/LunarLander` (`assets/lunar-lander-social.jpg`). Both repositories are
-BSD-2-Clause licensed. The Blacksite concept-art page declares
+BSD-2-Clause licensed. Both banners stay labelled as concept art. A page with
+no captures at all may declare
 `<meta name="netbbs-capture-kind" content="concept-art">`; the page checker
-requires labelled artwork and no terminal captures for that declaration.
+then requires labelled artwork and no terminal captures. No page declares it
+now.
 
-Lunar Lander's published screenshots come from the `v0.1.0-rc.3` asset,
-`lunar_lander.py`. `website_capture_lunar_lander.py` keeps every release it
+Blacksite's screenshots come from `Thiesi/Blacksite` at commit
+`d80dacdd58065f221d199b69df573fcf12f7d7cf` (package 0.0.20, slices S01-S24).
+The game is not vendored here. `website_capture_blacksite.py` refuses any
+other checkout HEAD, starts the game's own service in-process on a private
+loopback port, and runs the real door client (`python -m blacksite.door`) over
+stdio pipes, as a NetBBS native stdio door does. It plays one new Ghost through
+the Wake, the training drone, a Lattice run into the Vatline core, Clinic Row
+and Meridian Plaza, typing keys one at a time and waiting for the server to
+confirm each step: no teleports, grants or fixtures. Before each capture it
+presses Ctrl-L, the game's redraw key, and keeps the bytes from that full
+repaint onward, so each raw file is a complete frame as the door wrote it.
+
+```sh
+git clone https://github.com/Thiesi/Blacksite /path/to/Blacksite
+git -C /path/to/Blacksite checkout d80dacdd58065f221d199b69df573fcf12f7d7cf
+python scripts/website_capture_blacksite.py --source /path/to/Blacksite --out-dir web/shots
+python scripts/website_ansi_to_html.py web/shots/raw-blacksite-lattice.txt web/shots/shot-blacksite-lattice.html
+python scripts/website_ansi_to_html.py web/shots/raw-blacksite-city.txt web/shots/shot-blacksite-city.html
+python scripts/website_ansi_to_html.py web/shots/raw-blacksite-plaza.txt web/shots/shot-blacksite-plaza.html
+```
+
+Use the NetBBS venv's Python 3.12; the game has no runtime dependencies. The
+helper takes about three minutes. Combat and ICE use the game's randomness,
+so a recapture shows the same places with different numbers. The converter
+does not render SGR 2 (faint); remembered terrain shows in the game's own
+darker colours without the extra dimming a terminal adds. Blacksite's frames
+are box drawing, not half blocks, so they keep the stills' 1.55 line height.
+
+Lunar Lander's published screenshots come from the `v0.1.0` asset,
+`lunar_lander.py`, the release NetBBS 7.41.0 bundles. `website_capture_lunar_lander.py` keeps every release it
 can capture in `PINS`, a table of tags and each release's `lunar_lander.py`
 digest from its `SHA256SUMS`, and refuses a source that matches none of them.
 To capture a new release, add its tag and digest there. It draws through the
 game's own `Display.draw` and `Display.encode`, as its upstream capture tool
 does, on a fixed 2026-10-24 daily calendar. The flight capture advances the
-real model with controls for eight seconds. The published three make no pilot
-records. Download the script and `SHA256SUMS` from the release, then capture:
+real model with controls for eight seconds. Splash, briefing and flying make
+no pilot records. The site embeds splash and briefing; `flying` is kept as a
+capability, but the approach frame replaced it. Download the script and
+`SHA256SUMS` from the release, then capture:
 
 ```sh
-python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/rc.3/lunar_lander.py
-python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/rc.3/lunar_lander.py
-python scripts/website_capture_lunar_lander.py flying web/shots/raw-lunar_lander-flying.txt --source /path/to/rc.3/lunar_lander.py
+gh release download v0.1.0 -R Thiesi/LunarLander -p lunar_lander.py -p SHA256SUMS -D /path/to/v0.1.0
+python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
+python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
 ```
 
 From v0.1.0, the helper can also photograph a whole flight: `approach` (30 m
@@ -274,8 +307,9 @@ python scripts/website_capture_lunar_lander.py scores web/shots/raw-lunar_lander
 
 Convert at 80x24 with `website_ansi_to_html.py`. Lunar Lander's scenery uses
 half-block pixels, so the still captures also need `line-height:1.2`.
-Only Blacksite retains the concept-art page declaration. Lunar Lander's hero
-image remains source concept art; its page and overview use the real splash.
+Lunar Lander's hero image remains source concept art; its page and overview
+use the real splash. The landing page's Lunar Lander still is `touchdown`,
+with an inline `line-height:1.2`, since that page has no half-block class.
 
 Capture the real launch splashes through the games' own `play_splash` functions:
 
@@ -302,7 +336,8 @@ when changing a game page; the live checkers include all five game URLs.
 own scripts for unrelated interactions.
 
 `doors.html` is the game overview: one real launch splash per playable game
-(including Lunar Lander's release candidate), Blacksite's labelled concept art, a short description and a
+(Lunar Lander's included), Blacksite's labelled concept art
+(it has no launch splash yet; its real captures are on its own page), a short description and a
 link to each dedicated page. Keep gameplay galleries and scene players on the
 individual pages. The landing page keeps at most one still per game in its
 general screenshot gallery. Every public page links to the overview.
