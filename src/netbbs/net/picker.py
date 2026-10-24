@@ -1901,7 +1901,8 @@ async def _show_picker_help(
             session, "Help",
             _screen_help_lines(
                 help_about, on_sort=on_sort, has_refresh=has_refresh, has_create=has_create, live_nav=live_nav,
-                has_unpickable=has_unpickable, has_linked=has_linked, multiple=multiple, header_color=header_color,
+                has_unpickable=has_unpickable, has_linked=has_linked, linked_marker_only=linked_marker_only,
+                multiple=multiple, header_color=header_color,
             ),
             header_color=header_color, unicode_style=unicode_style,
         )
@@ -1987,7 +1988,8 @@ async def _show_picker_help(
 
 def _screen_help_lines(
     about: str, *, on_sort: Callable | None, has_refresh: bool, has_create: bool, live_nav: Sequence[MenuEntry],
-    has_unpickable: bool, has_linked: bool, multiple: bool, header_color: int | tuple[int, int, int],
+    has_unpickable: bool, has_linked: bool, linked_marker_only: bool, multiple: bool,
+    header_color: int | tuple[int, int, int],
 ) -> list[str]:
     """A list's own help (issue #1514): `about`, then the caller's keys,
     then the list's own in a few rows, then the keys that work everywhere
@@ -1997,7 +1999,11 @@ def _screen_help_lines(
     if has_unpickable:
         notes.append("A row with - in place of a number can't be chosen; the words beside it say why.")
     if has_linked:
-        notes.append(f"A name in the Linked colour, or ending in{LINKED_MARKER}, is shared over NetBBS Link.")
+        # The colour can't be shown where the list draws only the marker
+        # (ASCII, or rows inside SysOp art): say what that session sees.
+        notes.append(f"A name ending in{LINKED_MARKER} is Linked: shared with other nodes over NetBBS Link."
+                     if linked_marker_only else
+                     "A name in the Linked colour is Linked: shared with other nodes over NetBBS Link.")
     entries = list(live_nav)
     if has_create:
         entries.append(MenuEntry(label=menu_key("C", "reate"), brief="Make a new one"))

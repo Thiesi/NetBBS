@@ -254,6 +254,22 @@ def test_a_picker_with_help_about_shows_its_own_help_on_one_screen():
     assert all(len(row) <= 78 for row in rows)
 
 
+@pytest.mark.parametrize("marker_only", [True, False])
+def test_a_pickers_own_help_names_the_linked_mark_the_session_actually_sees(marker_only):
+    from netbbs.net.picker import _screen_help_lines
+    from netbbs.rendering.theme import LINKED_MARKER
+
+    text = " ".join(_plain(_screen_help_lines(
+        "Boards.", on_sort=None, has_refresh=False, has_create=False, live_nav=(), has_unpickable=False,
+        has_linked=True, linked_marker_only=marker_only, multiple=False, header_color=0,
+    )))
+    if marker_only:
+        assert f"A name ending in{LINKED_MARKER} is Linked" in text
+        assert "colour" not in text
+    else:
+        assert "A name in the Linked colour is Linked" in text
+
+
 def test_a_picker_without_help_about_keeps_its_navigation_help():
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     _pick(session)
