@@ -241,7 +241,10 @@ def lunar_lander_records_dir(db, door) -> Path | None:
     `door` is not this install's own copy of Lunar Lander.
 
     A profile's own `DOOR_LL_DATA_DIR` wins, as a profile's
-    `WAR_DIALER_DB_PATH` does; otherwise the node's own directory."""
+    `WAR_DIALER_DB_PATH` does; otherwise the node's own directory. A relative
+    override without an install directory would be relative to the temporary
+    node directory and lost at hang-up, so it is not honoured. `run_door`
+    hands the door this resolved path, never the profile's raw string."""
     from netbbs.doors.bundled import launched_bundled_door
 
     install_dir = door.profile.install_dir if door.profile else None
@@ -1102,8 +1105,12 @@ async def run_door(session, lane, door, player, *, wall_time_limit_seconds=None,
                     # A profile's own save directory is the account's, not
                     # this guest call's (issue #1075).
                     env["VOIDRUNNER_SAVE_DIR"] = str(voidrunner_dir)
-                    if lunar_lander_dir is not None:
-                        env["DOOR_LL_DATA_DIR"] = str(lunar_lander_dir)
+                if lunar_lander_dir is not None:
+                    # The resolved directory, not the profile's raw string: the
+                    # door does not expand `~`, and a relative path would land
+                    # in the temporary node directory, gone at hang-up. For a
+                    # guest call, its own copy rather than the profile's.
+                    env["DOOR_LL_DATA_DIR"] = str(lunar_lander_dir)
                 if world_path is not None:
                     # Keep a profile's relative path anchored to the server cwd,
                     # never the temporary node directory or installation directory.

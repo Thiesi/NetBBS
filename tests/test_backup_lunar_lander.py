@@ -241,3 +241,12 @@ def test_the_backup_screen_counts_records_as_door_data(db_path):
     assert not backup_module.door_data_left_behind(db_path)
     _land(db_path, 1, "Armstrong")
     assert backup_module.door_data_left_behind(db_path)
+
+
+def test_restore_over_damaged_live_records_moves_them_aside(tmp_path, db_path, identity_dir):
+    _land(db_path, 1, "Armstrong")
+    archive = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    _records(db_path).write_bytes(b"not a database at all" * 100)
+    rollback = restore_backup(source=archive, db_path=db_path, identity_dir=identity_dir)
+    assert _pilots(_records(db_path)) == ["Armstrong"]
+    assert (rollback / "lunar-lander" / "pilots.db").read_bytes().startswith(b"not a database")

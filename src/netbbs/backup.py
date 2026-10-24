@@ -2077,8 +2077,13 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
     live_records = node_lunar_lander_dir(db_path) / LUNAR_LANDER_RECORDS
     if live_records.is_file() and not live_records.is_symlink():
         # The door has no maintenance lock; its write lock is the only sign
-        # a game is still running against these records.
-        _require_not_in_use(live_records)
+        # a game is still running against these records. A file SQLite cannot
+        # read as a database is not one a game holds; the restore moves it
+        # into the rollback generation like any other live records.
+        try:
+            _require_not_in_use(live_records)
+        except sqlite3.DatabaseError:
+            pass
     _require_node_not_running(db_path)
     _refuse_if_restore_in_progress(db_path)
 

@@ -132,3 +132,19 @@ def test_a_guest_on_a_node_without_records_creates_none_of_the_nodes(db, lane):
     assert result.reason == "exited" and result.exit_code == 0, result.diagnostic
     assert sandbox_pilots == []  # the door made its records in the call's directory
     assert not node_lunar_lander_dir(db.path).exists()
+
+
+@pytest.mark.parametrize("override", ["~/ll-records", "relative-records"])
+def test_a_profile_override_reaches_the_door_resolved(db, lane, player, tmp_path, monkeypatch, override):
+    """The door expands nothing itself, so it is handed the resolved path: `~`
+    expanded, and a relative path without an install directory -- which would
+    land in the temporary node directory -- replaced by the node's own."""
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path / "home"))
+    door = create_door(db, "Lunar Lander", sys.executable, args=(str(_SCRIPT),), creator=player,
+                       profile=DoorProfile(environment={"DOOR_LL_DATA_DIR": override}))
+    expected = (tmp_path / "home" / "ll-records").resolve() if override.startswith("~") \
+        else node_lunar_lander_dir(db.path)
+    assert lunar_lander_records_dir(db, door) == expected
+    result, _ = _fly_and_quit(FakeSession(), lane, door, player)
+    assert result.reason == "exited" and result.exit_code == 0, result.diagnostic
+    assert (expected / "pilots.db").is_file()
