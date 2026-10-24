@@ -174,10 +174,29 @@ rather than by writing its tables.
 ```sh
 PYTHONPATH=src python scripts/website_capture_door_screen.py voidrunner \
   "Command Deck" web/shots/raw-voidrunner.txt --fixture played \
-  --expect "Command Deck"
+  --setup $'MDP12\rB' --expect "12/24"
+PYTHONPATH=src python scripts/website_capture_door_screen.py voidrunner \
+  "Commodity Market" web/shots/raw-voidrunner-market.txt --fixture played \
+  --setup $'MDP12\rB' --expect "12/24"
+PYTHONPATH=src python scripts/website_capture_door_screen.py voidrunner \
+  Combat web/shots/raw-voidrunner-combat.txt --fixture laden --expect "Dump"
 PYTHONPATH=src python scripts/website_capture_door_screen.py war_dialer \
   Switchboard web/shots/raw-war_dialer.txt --setup 'X{Bay}N*A'
+PYTHONPATH=src python scripts/website_capture_door_screen.py war_dialer \
+  "The scene" web/shots/raw-war_dialer-scene.txt --setup 'X{Bay}N*A'
 ```
+
+Each gameplay still is chosen to show the game doing something, not waiting
+for a first move. `$'MDP12\rB'` is bash for the keys M, D, P, 1, 2, Enter, B:
+the deck and the market are photographed after buying twelve units of the
+market's `[D]` good, machinery, which the cached `played` career's station
+sells cheap. A rebuilt fixture can dock somewhere else, so check that the
+caption still matches. The combat still uses `laden`: the `combat` fixture
+with a hold bought before the jump, so the fight has cargo at stake and
+offers Dump. Every value on it is one play left, unlike `outclassed`, which
+raises the opponent in the save. In PowerShell, write the Enter as
+``"MDP12`rB"``. War Dialer's scene is taken after the same Bay capture as the
+switchboard, so the two show the same ring.
 
 A walk that is given `--fixture` or `--setup` starts somewhere its own keys
 did not, so it can end somewhere else: `Command Deck --fixture combat`
@@ -195,8 +214,8 @@ screen is drawn at 80 columns except boards and files, which are captured at
 
 **A door capture comes from a played career.** A fresh one draws every gauge
 full or empty, which is the least informative state a gauge can be in. The
-Voidrunner shot names the `played` fixture for that reason, and its hull
-reads `36/60 Scuffed` rather than full.
+Voidrunner shot names the `played` fixture for that reason: its hull reads
+`53/60 Scuffed` rather than full, and its hold `12/24` rather than empty.
 
 `website_check_pages.py` reports each capture's rows × columns and whether it
 needs `shot-tall` (17–24 rows do; fewer do not). Recapturing changes those
@@ -219,19 +238,38 @@ BSD-2-Clause licensed. The Blacksite concept-art page declares
 `<meta name="netbbs-capture-kind" content="concept-art">`; the page checker
 requires labelled artwork and no terminal captures for that declaration.
 
-Lunar Lander's screenshots come from the published `v0.1.0-rc.3` asset,
-`lunar_lander.py`, SHA-256
-`75efa163b3cdadc5b8c56881460a1adea313e5e51f8c455589d623ed73aa3c78`.
-`website_capture_lunar_lander.py` verifies that digest, then uses the game's
-own `Display.draw` and `Display.encode`, as its upstream capture tool does.
-The flight capture advances the real model with controls for eight seconds;
-the briefing uses a fixed 2026-10-24 daily calendar. No pilot records are made.
-Download the script and `SHA256SUMS` from that release, then capture:
+Lunar Lander's published screenshots come from the `v0.1.0-rc.3` asset,
+`lunar_lander.py`. `website_capture_lunar_lander.py` keeps every release it
+can capture in `PINS`, a table of tags and each release's `lunar_lander.py`
+digest from its `SHA256SUMS`, and refuses a source that matches none of them.
+To capture a new release, add its tag and digest there. It draws through the
+game's own `Display.draw` and `Display.encode`, as its upstream capture tool
+does, on a fixed 2026-10-24 daily calendar. The flight capture advances the
+real model with controls for eight seconds. The published three make no pilot
+records. Download the script and `SHA256SUMS` from the release, then capture:
 
 ```sh
 python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/rc.3/lunar_lander.py
 python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/rc.3/lunar_lander.py
 python scripts/website_capture_lunar_lander.py flying web/shots/raw-lunar_lander-flying.txt --source /path/to/rc.3/lunar_lander.py
+```
+
+From v0.1.0, the helper can also photograph a whole flight: `approach` (30 m
+over the lit pad, engine burning), `touchdown` (the contact-light scene),
+`debrief` (a gold medal and a promotion) and `scores` (the best-pilots
+board). These play the release's own `Game`, the object its door loop drives,
+against a throwaway records database. The game gets only keys and elapsed
+time. A small autopilot in the helper chooses the keys, so the game's own
+physics, records and scoring decide every number. `scores` first flies the
+same mission for five **fixture pilots** (Kestrel, Okafor, Lindqvist, Moth and
+Sable), each with a differently tuned autopilot. They are made-up pilots, and
+a caption that shows the board must say so.
+
+```sh
+python scripts/website_capture_lunar_lander.py approach web/shots/raw-lunar_lander-approach.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
+python scripts/website_capture_lunar_lander.py touchdown web/shots/raw-lunar_lander-touchdown.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
+python scripts/website_capture_lunar_lander.py debrief web/shots/raw-lunar_lander-debrief.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
+python scripts/website_capture_lunar_lander.py scores web/shots/raw-lunar_lander-scores.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
 ```
 
 Convert at 80x24 with `website_ansi_to_html.py`. Lunar Lander's scenery uses
@@ -245,15 +283,18 @@ Capture the real launch splashes through the games' own `play_splash` functions:
 PYTHONPATH=src python scripts/website_capture_game_splash.py voidrunner web/shots/raw-voidrunner-splash.txt
 PYTHONPATH=src python scripts/website_capture_game_splash.py war_dialer web/shots/raw-war_dialer-splash.txt
 PYTHONPATH=src python scripts/website_capture_game_splash.py retro_trivia web/shots/raw-retro_trivia-splash.txt
-PYTHONPATH=src python scripts/website_capture_retro_trivia.py question web/shots/raw-retro_trivia-question.txt
+PYTHONPATH=src python scripts/website_capture_retro_trivia.py streak web/shots/raw-retro_trivia-streak.txt
 ```
 
 Convert each with `website_ansi_to_html.py --width 80 --height 24` and embed
 the fragment in its page. The splash helper records the held final frame,
 before teardown clears it, using the same terminal-recorder approach as the
-scene helper. Retro Trivia's question capture launches the subprocess and
-chooses a five-question round: questions are random, so recapturing may show a
-different question. Keep its raw output with the converted fragment.
+scene helper. Retro Trivia's `streak` capture launches the subprocess,
+chooses a five-question round and answers the first three questions right. It
+reads each question from the screen and looks the answer up in the game's own
+question table, then stops on the fourth question. Questions are random, so
+recapturing shows a different round. Keep its raw output with the converted
+fragment. `question` stops on the round's first question instead.
 
 Run the local page and wording checkers over **all** `web/netbbs-*.html` files
 when changing a game page; the live checkers include all five game URLs.
