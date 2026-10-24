@@ -472,9 +472,10 @@ dispatch, per-item try/except-log-and-continue tolerance, the fixed sleep
 **SysOp surface**: `list_work_items` (filterable by status/kind) plus
 `replay_work_item`/`cancel_work_item`/`delete_work_item` (all audit-logged
 via `record_action`, matching every other SysOp-triggered mutation in this
-codebase) — the Outbox screen under Operations, listing dead-lettered/
-retrying items with a picker to inspect one and replay, cancel or delete
-it. `replay_work_item` resets a `dead_lettered`/`cancelled` item to
+codebase) — the Outbox screen under Operations, listing retrying,
+dead-lettered and cancelled items with a picker to inspect one and cancel
+it (retrying) or replay or delete it (dead-lettered or cancelled, so a
+mistaken cancel can be undone; issue #1529). `replay_work_item` resets a `dead_lettered`/`cancelled` item to
 `pending` with `attempts = 0` and a fresh `created_at`, so a replay gets
 the whole retry schedule again rather than meeting the age cap on its first
 failure (issue #1245), and, for `link_mail_delivery`, is the one place the
