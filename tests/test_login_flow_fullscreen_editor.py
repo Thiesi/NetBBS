@@ -214,7 +214,7 @@ def test_profile_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
     assert "No help is available" not in text
-    assert "supports multiple lines" in text.lower()
+    assert "free-form text, several" in text.lower()
     assert "ssh-ed25519" in text
     assert "even when there's room to spare" in text
 

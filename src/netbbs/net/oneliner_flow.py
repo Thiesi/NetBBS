@@ -302,8 +302,9 @@ async def oneliner_wall_screen(
             await show_menu_help(
                 session, "Oneliners help", entries,
                 about=(
-                    "Short lines callers left for the callers after them, newest first. "
-                    "One line per call, and three a day."
+                    "Short lines callers left for the callers after them, newest first, each with the "
+                    "account name that wrote it, even one hidden from Recent callers. You may add one line "
+                    "per call and three a day; deleting one does not give it back."
                 ),
                 paged=True, header_color=header_color, unicode_style=unicode_style,
             )

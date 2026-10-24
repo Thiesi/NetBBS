@@ -36,6 +36,7 @@ from netbbs.net.char_input import InputCancelled
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.location import located
 from netbbs.net.menu_description_preference import menu_description_level
+from netbbs.net.network_templates import NetworkTemplate, apply_template, pick_template
 from netbbs.net.picker import pick_item as _pick_item
 from netbbs.net.resource_editor import (
     FieldSpec,
@@ -84,9 +85,18 @@ from netbbs.rendering.sanitize import sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
-# DOVE-Net through Vertrauen, the network most Synchronet systems are on:
-# the starting point for a new network. The SysOp fills in the password.
-DOVE_NET = {"name": "DOVE-Net", "hub_id": "VERT", "host": "vert.synchro.net", "transport": "https"}
+# --- network templates (issue #1517; §16, "Issue #1395", Decisions 10-12) ---
+# DOVE-Net through Vertrauen, the network most Synchronet systems are on, and
+# its one public entry hub. The only template, so [C]reate opens on it with no
+# pick. Never a password, and no switch: `_TEMPLATE_KEYS` is all it may fill.
+_TEMPLATE_KEYS = frozenset({"name", "hub_id", "host", "transport"})
+DOVE_NET = NetworkTemplate(
+    name="DOVE-Net", summary="Through Vertrauen (VERT), over HTTPS",
+    fields={"name": "DOVE-Net", "hub_id": "VERT", "host": "vert.synchro.net", "transport": "https"},
+    preamble=("A new network starts as DOVE-Net through Vertrauen: create an account there named after "
+              "your QWK ID first, then fill in its password."))
+QWKNET_TEMPLATES = (DOVE_NET,)
+# --- end network templates ---
 _TRANSPORT_LABELS = {"https": "HTTPS (qnet-http)", "http": "HTTP (qnet-http, password readable)",
                      "ftp": "FTP (passive, password readable)", "ftps": "FTPS (FTP over TLS)"}
 
@@ -130,7 +140,14 @@ async def qwknet_networks_screen(session: Session, lane: DatabaseLane, actor: Us
         return await lane.run(load)
 
     async def _create() -> QwknetNetwork | None:
-        return await edit_network(session, lane, actor, None, node_controls=node_controls)
+        # One template: no pick, the draft opens on DOVE-Net (issue #1517).
+        template = await pick_template(
+            session, lane, actor, QWKNET_TEMPLATES, title="New QWKnet network",
+            preamble="Which network to start from. It fills only the new draft; nothing is stored before Save.",
+            help_about="Which network a new one starts from. Nothing is stored before Save.")
+        if template is None:
+            return None
+        return await edit_network(session, lane, actor, None, node_controls=node_controls, template=template)
 
     async def _delete(network: QwknetNetwork):
         nonlocal status
@@ -225,11 +242,11 @@ def _secret_field(key: str, label: str, *, clears: bool = True):
     return prompt
 
 
-def _network_draft(network: QwknetNetwork | None, default_id: str) -> dict:
+def _network_draft(network: QwknetNetwork | None, default_id: str, template: NetworkTemplate | None = None) -> dict:
     if network is None:
-        return {"name": DOVE_NET["name"], "our_id": default_id, "hub_id": DOVE_NET["hub_id"],
-                "transport": DOVE_NET["transport"], "host": DOVE_NET["host"], "port": 0, "password": "",
-                "poll_minutes": 240, "tagline": "", "enabled": False, "serve_nodes": False}
+        draft = {"name": "", "our_id": default_id, "hub_id": "", "transport": "https", "host": "", "port": 0,
+                 "password": "", "poll_minutes": 240, "tagline": "", "enabled": False, "serve_nodes": False}
+        return apply_template(draft, template or DOVE_NET, _TEMPLATE_KEYS)  # issue #1517
     return {"name": network.name, "our_id": network.our_id, "hub_id": network.hub_id,
             "transport": network.transport, "host": network.host, "port": network.port,
             "password": network.password, "poll_minutes": network.poll_minutes, "tagline": network.tagline,
@@ -249,9 +266,11 @@ def network_audit_values(network: QwknetNetwork | None) -> dict | None:
 
 
 async def edit_network(session: Session, lane: DatabaseLane, actor: User, existing: QwknetNetwork | None, *,
-                       node_controls=None) -> QwknetNetwork | None:
-    """One network's settings in a draft; nothing is stored before [S]ave."""
-    draft = _network_draft(existing, await lane.run(get_qwk_bbs_id))
+                       node_controls=None, template: NetworkTemplate | None = None) -> QwknetNetwork | None:
+    """One network's settings in a draft; nothing is stored before [S]ave.
+    A new network's draft starts from `template` (DOVE-Net by default)."""
+    template = template or DOVE_NET  # issue #1517
+    draft = _network_draft(existing, await lane.run(get_qwk_bbs_id), template)
     transports = list(TRANSPORTS)
     fields = [
         FieldSpec(key="enabled", label="Enabled", render=lambda d: "yes" if d["enabled"] else "no",
@@ -335,8 +354,7 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
         session, lane, title=existing.name if existing is not None else "New QWKnet network",
         fields=fields, draft=draft, save=save, error_type=QwknetError,
         save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
-        preamble=("A new network starts as DOVE-Net through Vertrauen: create an account there named after "
-                  "your QWK ID first, then fill in its password." if existing is None else None),
+        preamble=template.preamble if existing is None else None,  # issue #1517
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, collapsed=chrome.collapsed,
         accent_color=chrome.accent_color, header_color=chrome.header_color,

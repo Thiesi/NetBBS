@@ -456,6 +456,11 @@ async def node_map_screen(
             column_values_of=lambda entry: row_cells(entry, now=now),
             title=title,
             empty_message="No other nodes are known here yet.",
+            help_about=(
+                "Other BBSes this one knows on the Link network. Known says how: \"direct\" it has talked "
+                "to it, \"via\" another BBS introduced it, \"unverified\" it has never heard from it. "
+                "\"stale\" means nothing was heard of it for over 30 days."
+            ),
             start_stable_id=reopen_at,
             redraw_in_place=state["redraw"],
             unicode_style=state["unicode"],
