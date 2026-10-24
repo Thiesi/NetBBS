@@ -90,12 +90,12 @@ def test_the_staff_console_has_help(db, lane, sysop):
         (["s", "n"], "Node name help", "corner of every screen", "Recolor the node name"),
         (["s", "p"], "Policy trust help", "safety deviation", "dentity authorities"),
         (["c"], "Content help", "approval", "rant moderator"),
-        (["c", "t"], "Communities help", "Community is a topic", "Browse and edit Communities"),
+        (["c", "t"], "Communities help", "Community gathers", "Browse and edit Communities"),
         (["c", "m"], "Message boards help", "message boards", "Browse and edit boards"),
         (["c", "f"], "File areas help", "GC storage", "Reclaim space from orphaned files"),
         (["c", "l"], "Chat channels help", "chat channels", "Browse and edit channels"),
-        (["c", "d"], "Doors help", "gallery", "Register a script from this node"),
-        (["c", "c", "m"], "Message board categories help", "two levels deep", "Edit, order and remove"),
+        (["c", "d"], "Doors help", "Gallery", "Register a script from this node"),
+        (["c", "c", "m"], "Message board categories help", "Folders that group", "Edit, order and remove"),
     ],
 )
 def test_each_console_menu_has_help(db, lane, sysop, keys, help_title, about_word, redraw_marker):
@@ -169,7 +169,7 @@ def test_the_door_outbound_screen_has_help(db, lane, sysop):
     session = FakeSession([H, " ", "t", "b"])
     asyncio.run(admin_doors._door_outbound_screen(session, lane, sysop, door))
     text = _visible(_written_text(session))
-    _assert_help_then_redraw(text, "Outbound help", "never read the BBS", "outbound")
+    _assert_help_then_redraw(text, "Outbound help", "Whether this door", "outbound")
     assert outbound_config(db, door.id) is not None
 
 

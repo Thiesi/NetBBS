@@ -149,8 +149,10 @@ async def welcome_letter_screen(session: Session, lane: DatabaseLane, actor: Use
                 session, "Welcome letter help", _ACTIONS,
                 about="Every new account finds this letter unread in its mailbox once it can sign in: "
                       "straight away when anyone may sign up, on approval when you approve accounts, "
-                      "and for accounts made here on the console. It comes from the account under "
-                      "From, so a reply reaches a person. Existing accounts never get it.",
+                      "and for accounts made here on the console. Existing accounts never get it. It "
+                      "comes from the account under From, which must be you or a staff member who may "
+                      "write mail, so a reply reaches a person. Changing the text, subject or sender "
+                      "affects only letters sent afterwards.",
                 header_color=chrome.header_color, unicode_style=chrome.unicode_style,
             )
         else:

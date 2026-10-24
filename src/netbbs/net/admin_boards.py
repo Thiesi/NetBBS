@@ -466,8 +466,10 @@ async def _community_menu(
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Communities help", _COMMUNITY_MENU,
-                about="A Community is a topic with its own boards, chat channels, file areas and games. "
-                      "Callers reach them under Topics on the main menu.",
+                about="A Community gathers boards, file areas, chat channels and doors around one topic; "
+                      "callers find it under Topics on the main menu. Its defaults (levels, age, name rule) "
+                      "apply to every resource inside that leaves its own field at 'none', from the next "
+                      "time a caller opens one. List opens a Community to edit, reorder or remove it.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_community_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -530,9 +532,9 @@ def _community_field_specs(
             prompt=bool_field("hidden"), step=bool_step("hidden"),
             brief="Hide from the communities list",
             help=(
-                "Delists this Community from ordinary browsing without deleting it. A SysOp "
-                "still sees it everywhere; boards/areas/channels inside keep working normally "
-                "for anyone who already knows to look for them."
+                "Takes it off Topics for everyone but SysOps. Its boards, areas and channels still "
+                "appear in the main lists and keep working; the help-desk bot leaves them out, and "
+                "FTN file requests cannot fetch its files."
             ),
         ),
         FieldSpec(
@@ -542,9 +544,9 @@ def _community_field_specs(
             prompt=_optional_int_field("default_min_read_level", "Default minimum read level"),
             brief="Default read level, inherited",
             help=(
-                "The read-level floor every board/area/channel in this Community inherits "
-                "unless it sets its own. 'none' means no inherited floor -- each resource's "
-                "own level (or lack of one) applies instead."
+                "The read level of every board and file area in this Community whose own Min read "
+                "level is 'none'. Chat channels keep their own level. 'none' here: those resources "
+                "are open to every level."
             ),
         ),
         FieldSpec(
@@ -554,8 +556,8 @@ def _community_field_specs(
             prompt=_optional_int_field("default_min_write_level", "Default minimum write level"),
             brief="Default write level, inherited",
             help=(
-                "The write-level floor every board/area/channel in this Community inherits "
-                "unless it sets its own. 'none' means no inherited floor."
+                "The level needed to post or upload in every board and file area in this Community "
+                "whose own Min write level is 'none'. 'none' here: anyone who can read may write."
             ),
         ),
         FieldSpec(
@@ -565,8 +567,8 @@ def _community_field_specs(
             prompt=_min_age_field("default_min_age", "default_age_requirement"),
             brief="Default min. age, inherited",
             help=(
-                "The minimum-age gate every board/area/channel in this Community inherits "
-                "unless it sets its own. 'none' means no inherited gate."
+                "The minimum age for every board, file area and channel in this Community whose own "
+                "Min age is 'none'. 'none' here: no age gate."
             ) + _VERIFIED_AGE_HELP,
         ),
         FieldSpec(
@@ -575,8 +577,8 @@ def _community_field_specs(
             render=lambda d: _name_requirement_label(d.get("default_name_requirement")),
             prompt=_name_requirement_field("default_name_requirement"),
             step=_name_requirement_step("default_name_requirement"),
-            help=_NAME_REQUIREMENT_HELP + " Message boards/file areas/chat channels in this "
-            "Community inherit this unless they set their own.",
+            help=_NAME_REQUIREMENT_HELP + " Applies to every board, file area and channel in this "
+            "Community whose own Name requirement is 'none'.",
             brief="Default name rule, inherited",
         ),
     ]
@@ -741,6 +743,11 @@ async def _list_communities_screen(
             columns=_COMMUNITY_COLUMNS,
             column_values_of=_community_columns,
             title="Communities", own=True,
+            help_about=(
+                'The Communities in the order callers see them under Topics, with their default read and '
+                'write levels, whether they are listed, and their default gates. Gates: 18+ an age, name '
+                'a verified name, name+ one shown. Pick one to edit, move or remove it.'
+            ),
             empty_message="No Communities yet.",
             start_stable_id=reopen_at,
             redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -1001,8 +1008,10 @@ async def _board_menu(
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Message boards help", _BOARD_MENU,
-                about="Add message boards and change or remove existing ones. Pick a board from the "
-                      "list to edit it.",
+                about="Message boards on this node, carried Linked boards included. List opens a board "
+                      "on its own screen: its fields change who may read and post, moderation and "
+                      "retention, saved with Save and in force at once; its actions review pending posts, "
+                      "reorder, Link or remove it. Ctrl-H there explains each field.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_board_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -1066,9 +1075,9 @@ def _board_field_specs(
             prompt=_optional_int_field("min_read_level", "Minimum read level"),
             brief="Level required to read it",
             help=(
-                "The permission level a caller needs to read this board. 'none' inherits "
-                "the parent Community's own default read level if it has one set, or falls "
-                "back to no gate."
+                "The level a caller needs to see and read this board. 'none' uses its Community's "
+                "default read level, or no gate outside one. A Read only or Read and post grant "
+                "(Grant moderator) lets its holder past it."
             ),
             section="Access",
         ),
@@ -1078,9 +1087,9 @@ def _board_field_specs(
             prompt=_optional_int_field("min_write_level", "Minimum write level"),
             brief="Level required to post",
             help=(
-                "The permission level a caller needs to post here. 'none' inherits the "
-                "parent Community's own default write level if it has one set, or falls "
-                "back to no gate."
+                "The level a caller needs to post here; below it the board is read only. 'none' "
+                "uses its Community's default write level, or no gate outside one. A Read and post "
+                "grant (Grant moderator) lets its holder past it."
             ),
             section="Access",
         ),
@@ -1090,9 +1099,9 @@ def _board_field_specs(
             prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
             help=(
-                "The minimum caller age required to read or post here, checked against a "
-                "caller's own birthdate (Your profile › Name & details) even if they've "
-                "chosen not to show it publicly. 'none' means no age gate."
+                "The minimum age to see, read or post here, checked against a caller's birthdate "
+                "even if they keep it private. Too young: the board is not listed for them. 'none' "
+                "uses its Community's default, or no gate outside one."
             ) + _VERIFIED_AGE_HELP,
             section="Access",
         ),
@@ -1103,9 +1112,9 @@ def _board_field_specs(
             prompt=_name_requirement_field(),
             step=_name_requirement_step(),
             help=_NAME_REQUIREMENT_HELP + (
-                " On a board carrying an FTN echo, 'verified_and_displayed' also sends that name to the "
-                "network as the poster's From, and refuses a post from anyone, you included, without one "
-                "that fits its 35 bytes."
+                " 'none' uses its Community's rule. On a board carrying an FTN echo, "
+                "'verified_and_displayed' also sends that name to the network as the poster's From, and "
+                "refuses a post from anyone, you included, without one that fits its 35 bytes."
             ),
             brief="How posters must be identified",
             section="Access",
@@ -1119,9 +1128,9 @@ def _board_field_specs(
             ),
             brief="Parent community, if any",
             help=(
-                "The Community this board belongs to, if any -- a board inside a Community "
-                "can inherit its default read/write/age/name-requirement settings instead of "
-                "each needing its own. 'none' keeps this board outside every Community."
+                "The Community it is listed under in Topics. Its fields left at 'none' then take that "
+                "Community's defaults; moving it to another Community changes them at once. 'none': "
+                "outside every Community, still in the main board list."
             ),
             section="Organization",
         ),
@@ -1136,8 +1145,8 @@ def _board_field_specs(
             ),
             brief="Where it's grouped in listings",
             help=(
-                "Where this board is grouped when browsing listings -- purely organizational, "
-                "has no effect on who can read or post."
+                "The folder it is listed in when callers browse boards (Content > Categories). Has no "
+                "effect on who can read or post. 'none': listed at the top level."
             ),
             section="Organization",
         ),
@@ -1154,7 +1163,11 @@ def _board_field_specs(
             render=lambda d: "yes" if d.get("moderated") else "no",
             prompt=bool_field("moderated"), step=bool_step("moderated"),
             brief="New posts need approval first",
-            help="New posts need a moderator or SysOp to approve them before anyone else can see them.",
+            help=(
+                "New posts wait under Pending posts until a moderator or SysOp approves them; only the "
+                "author sees one before then. Turning it off releases nothing: posts already waiting "
+                "still need approving."
+            ),
             section="Moderation",
         ),
         FieldSpec(
@@ -1180,9 +1193,10 @@ def _board_field_specs(
             prompt=_optional_int_field("max_post_age_days", "Max post age in days"),
             brief="Expire posts after N days",
             help=(
-                "Posts older than this expire: readers no longer see them, and they are deleted once "
-                "the node's grace period (Settings, Limits & retention) has passed too. 'unlimited' "
-                "keeps every post indefinitely."
+                "Posts older than this expire, posts already here included, the next time the board is "
+                "opened: readers no longer see them, and they are deleted for good once the node's grace "
+                "period (Settings, Limits & retention) has passed too. Raising it later does not bring "
+                "an expired post back. 'unlimited' keeps every post."
             ),
             section="Moderation",
         ),
@@ -1512,6 +1526,12 @@ async def _list_boards_screen(
             columns=_BOARD_COLUMNS,
             column_values_of=lambda b: _board_columns(b, effective[b.id], counts[b.id], b.board_id in to_review),
             title="Message boards", own=True,
+            help_about=(
+                "Every board in callers' order: the read and write level in force, inherited ones "
+                'included; moderated, pinned, or carried and not yet looked at (to review); posts, +N '
+                'waiting for approval. Gates: 18+ an age, name a verified name, name+ one shown. Pick one '
+                'to open its screen.'
+            ),
             empty_message="No message boards yet.",
             start_stable_id=reopen_at,
             linked_of=lambda b, linked=linked_boards: b.id in linked,  # issue #1104
@@ -1612,7 +1632,11 @@ def _link_board_field_specs(
             render=lambda d: _optional_int_label(d.get("default_min_read_level")),
             prompt=_optional_int_field("default_min_read_level", "Recommended minimum read level"),
             brief="Sent to peers as a default",
-            help="Recommends a minimum read level to peers that don't set their own. 'none' sends no recommendation.",
+            help=(
+                "The read level a node that starts carrying this board gives its copy; its SysOp can "
+                "change it there. Signed into the board's Link record on Save, so it cannot be changed "
+                "afterwards. 'none': no recommendation, so their copy starts open to every level."
+            ),
         ),
         FieldSpec(
             key="default_min_write_level",
@@ -1620,7 +1644,10 @@ def _link_board_field_specs(
             render=lambda d: _optional_int_label(d.get("default_min_write_level")),
             prompt=_optional_int_field("default_min_write_level", "Recommended minimum write level"),
             brief="Sent to peers as a default",
-            help="Recommends a minimum write level to peers that don't set their own. 'none' sends no recommendation.",
+            help=(
+                "The write level a carrying node's copy starts with; fixed on Save, like every field "
+                "here. 'none': no recommendation, open to every level."
+            ),
         ),
         FieldSpec(
             key="default_moderated",
@@ -1629,7 +1656,7 @@ def _link_board_field_specs(
             prompt=choice_field("default_moderated", _LINK_RECOMMENDATION_VALUES),
             step=choice_step("default_moderated", _LINK_RECOMMENDATION_VALUES),
             brief="Sent to peers as a default",
-            help="Recommends whether posts should need approval, to peers that don't set their own.",
+            help="Whether a carrying node's copy starts moderated. Fixed on Save. No recommendation: unmoderated.",
         ),
         FieldSpec(
             key="default_max_post_age_days",
@@ -1637,7 +1664,10 @@ def _link_board_field_specs(
             render=lambda d: _optional_int_label(d.get("default_max_post_age_days"), none_word="no recommendation"),
             prompt=_optional_int_field("default_max_post_age_days", "Recommended max post age in days"),
             brief="Sent to peers as a default",
-            help="Recommends auto-purging posts older than N days, to peers that don't set their own.",
+            help=(
+                "The max post age a carrying node's copy starts with. Fixed on Save. No recommendation: "
+                "their copy keeps every post."
+            ),
         ),
         FieldSpec(
             key="default_min_age",
@@ -1645,7 +1675,7 @@ def _link_board_field_specs(
             render=lambda d: _optional_int_label(d.get("default_min_age")),
             prompt=_min_age_field("default_min_age"),
             brief="Sent to peers as a default",
-            help="Recommends a minimum caller age to peers that don't set their own.",
+            help="The minimum age a carrying node's copy starts with. Fixed on Save. 'none': no age gate.",
         ),
         FieldSpec(
             key="default_name_requirement",
@@ -1654,7 +1684,7 @@ def _link_board_field_specs(
             prompt=_name_requirement_field("default_name_requirement"),
             step=_name_requirement_step("default_name_requirement"),
             brief="Sent to peers as a default",
-            help=_NAME_REQUIREMENT_HELP + " Recommended to peers that don't set their own.",
+            help="The name requirement a carrying node's copy starts with. Fixed on Save. " + _NAME_REQUIREMENT_HELP,
         ),
         FieldSpec(
             key="forked_from", label="Fork of",
@@ -2094,8 +2124,10 @@ async def _generic_category_screen(
             elif choice == HELP_KEY:
                 await show_menu_help(
                     session, f"{title} help", _GENERIC_CATEGORY_MENU,
-                    about="Categories group the items of one kind into folders callers browse, at most two "
-                          "levels deep. Pick one from the list to rename, move or remove it.",
+                    about="Folders that group this kind in the callers' lists, at most two levels deep; "
+                          "put an item in one with its own Category field. List opens a category to "
+                          "rename it, change its parent, move it up or down among its siblings, or "
+                          "remove it. Changes show in the callers' lists at once.",
                     header_color=header_color, unicode_style=unicode_style,
                 )
                 await _draw_generic_category_menu(session, title, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -2288,6 +2320,10 @@ async def _list_categories_screen(
             ),
             title=title, own=True,
             empty_message="No categories yet.",
+            help_about=(
+                "This kind's categories, each sub-category under its parent. Pick one to rename it, "
+                'change its parent, move it among its siblings or remove it.'
+            ),
             start_stable_id=reopen_at,
             redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
             unicode_style=await lane.run(unicode_style_enabled, actor),
@@ -2416,8 +2452,9 @@ async def _pick_moderator_scope(
     header_color = await lane.run(effective_header_color_256)
     scope_key = await _ask_moderator_scope_key(
         session, "Scope:", scope_options, _MODERATOR_SCOPE_HELP,
-        about="What the new grant covers: one board, file area or chat channel, all of one kind, "
-              "or everything at once. Any other key cancels.",
+        about="What the new grant covers. One board, area or channel is picked next; a blanket "
+              "scope (all of one kind, or everything) also covers ones created later, and can be "
+              "narrowed to one Community on the grant screen. Any other key cancels.",
         header_color=header_color, unicode_style=unicode_style,
     )
     if scope_key == "a":
@@ -2662,8 +2699,8 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             prompt=_scope_prompt,
             brief="One resource, or all of one kind",
             help=(
-                "A specific message board, file area, or chat channel -- or a blanket grant across "
-                "every board, every area, or every channel on this node."
+                "One message board, file area or chat channel; or a blanket grant over every board, "
+                "every area, every channel, or all three, including ones created later."
             ),
         ),
         FieldSpec(
@@ -2672,7 +2709,7 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             prompt=_community_prompt,
             brief="Narrow the grant to one Community",
             help=(
-                "For a blanket grant only: limit it to the boards/areas/channels of one Community "
+                "For a blanket grant only: limit it to what belongs to one Community, now or later, "
                 "instead of the whole node."
             ),
         ),
@@ -2689,7 +2726,8 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
                 "moderation: they let the holder past the minimum level of whatever the scope "
                 "covers -- one board or area, or every one under a blanket scope -- such as "
                 "posting on an announcements board with write level 255. Age and "
-                "verified-name requirements still apply."
+                "verified-name requirements still apply. A grant works at once; moderators, "
+                "unlike access holders, are listed under Operators."
             ),
         ),
     ]
@@ -2801,6 +2839,10 @@ async def _revoke_moderator_screen(session: Session, lane: DatabaseLane, actor: 
         session, grants,
         name_of=_grant_label, stable_id_of=lambda g: g.id, description_of=_grant_description,
         title=f"{target.username}'s moderator grants", empty_message="No grants.",
+        help_about=(
+            'Every grant this account holds and what it allows. Picking one asks, then revokes it; '
+            'the account loses that access or moderation at once.'
+        ),
         redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
         accent_color=accent_color, header_color=header_color,
     )
