@@ -1465,6 +1465,11 @@ _WORK_ITEM_STATUS_COLORS = {
     "cancelled": MUTED_COLOR,
 }
 
+# What the Outbox's item picker lists: everything a SysOp can act on.
+# `pending` goes out on its own next sync pass and `pushed` already went.
+_ACTIONABLE_STATUSES = ("retrying", "dead_lettered", "cancelled")
+_NOTHING_ACTIONABLE = "Nothing currently retrying, dead-lettered or cancelled."
+
 
 @located("Outbox")
 async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -1476,13 +1481,15 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
     module's own docstring for why not).
 
     The screen leads with a count per status, then `[I]tems` opens a
-    picker that only ever offers `retrying`/`dead_lettered` items --
-    `pending` will be attempted on its own within one sync pass,
-    `pushed`/`cancelled` are already resolved, so there's nothing a
-    SysOp would act on for either. One item's detail is a screen of its
-    own with `[R]eplay`/`[D]elete` or `[C]ancel` on its action bar (design doc
-    §3.5: it used to print the item and then ask a yes/no that had to
-    be answered to leave). Replaying a dead-lettered
+    picker that offers `retrying`, `dead_lettered` and `cancelled` items
+    -- `pending` will be attempted on its own within one sync pass and
+    `pushed` already succeeded, so there's nothing a SysOp would act on
+    for either. A cancelled item is listed so a SysOp who cancelled one
+    by mistake can replay it (issue #1529). One item's detail is a screen
+    of its own with `[R]eplay`/`[D]elete` (dead-lettered or cancelled) or
+    `[C]ancel` (retrying) on its action bar (design doc §3.5: it used to
+    print the item and then ask a yes/no that had to be answered to
+    leave). Replaying a dead-lettered
     `link_mail_delivery` item also undoes its `mail_messages.
     link_delivery_status = 'expired'` side effect back to `'pending'`
     -- the one place that undo happens, symmetric with `netbbs.link.
@@ -1495,7 +1502,7 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
         counts: dict[str, int] = {}
         for item in items:
             counts[item.status] = counts.get(item.status, 0) + 1
-        actionable = [item for item in items if item.status in ("retrying", "dead_lettered")]
+        actionable = [item for item in items if item.status in _ACTIONABLE_STATUSES]
         if items:
             rows: list[Field | Note] = [
                 Field(
@@ -1505,7 +1512,7 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
                 for status, count in sorted(counts.items())
             ]
             if not actionable:
-                rows.append(Note("Nothing currently retrying or dead-lettered."))
+                rows.append(Note(_NOTHING_ACTIONABLE))
         else:
             rows = [Note("No outbound work items recorded yet.")]
         actions = [_BACK_ACTION]
@@ -1523,9 +1530,10 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
             help_about=(
                 "Outgoing Link mail and delivery acknowledgements, counted by status. Pending ones go out "
                 "on the next sync pass; retrying ones wait between tries; after 10 failed tries or too "
-                "long, one is dead-lettered and its letter marked expired."
+                "long, one is dead-lettered and its letter marked expired. A cancelled one stays listed "
+                "until you replay or delete it."
             ),
-            help_entries=_help_entries(actions, {"i": "The retrying and dead-lettered ones"}),
+            help_entries=_help_entries(actions, {"i": "The retrying, dead-lettered and cancelled ones"}),
         )
         message = None
         if choice == "b":
@@ -1536,7 +1544,7 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
 async def _outbox_item_screen(
     session: Session, lane: DatabaseLane, actor: User, chrome: _Chrome, actionable: list[WorkItem]
 ) -> str | None:
-    """Pick one retrying/dead-lettered work item and act on it. Returns the
+    """Pick one retrying, dead-lettered or cancelled work item and act on it. Returns the
     styled result line for the Outbox screen to show, if anything was done."""
     target_labels = {
         item.target_fingerprint: (await lane.run(identity_for_fingerprint, item.target_fingerprint)).label
@@ -1548,8 +1556,8 @@ async def _outbox_item_screen(
         name_of=lambda item: f"{item.kind}{arrow}{target_labels[item.target_fingerprint]}",
         stable_id_of=lambda item: item.id,
         description_of=lambda item: f"{item.status}, {item.attempts} attempt(s)",
-        title="Retrying/dead-lettered work items",
-        empty_message="Nothing currently retrying or dead-lettered.",
+        title="Work items needing attention",
+        empty_message=_NOTHING_ACTIONABLE,
         redraw_in_place=chrome.redraw_in_place,
         unicode_style=chrome.unicode_style,
         collapsed=chrome.collapsed,
@@ -1560,6 +1568,10 @@ async def _outbox_item_screen(
         return None
 
     dead = selected.status == "dead_lettered"
+    # Dead-lettered and cancelled items are both resolved without being
+    # pushed: either can be replayed or deleted (`replay_work_item` and
+    # `delete_work_item` accept both). Only a retrying one can be cancelled.
+    resolved = selected.status in ("dead_lettered", "cancelled")
     rows: list[Field | Note] = [
         Field("Kind", selected.kind),
         Field("Target", target_labels[selected.target_fingerprint], bold=True),
@@ -1572,7 +1584,7 @@ async def _outbox_item_screen(
     if selected.last_error:
         rows.append(Field("Last error", selected.last_error, color=WARNING_COLOR))
     actions = (
-        [("r", menu_key("R", "eplay now")), ("d", menu_key("D", "elete"))] if dead
+        [("r", menu_key("R", "eplay now")), ("d", menu_key("D", "elete"))] if resolved
         else [("c", menu_key("C", "ancel (stop retrying)"))]
     )
     choice, _page = await show_detail(
@@ -1582,15 +1594,15 @@ async def _outbox_item_screen(
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         help_title="Work item help",
         help_about=(
-            "One outgoing delivery that is retrying or gave up, with its last error."
+            "One outgoing delivery that is retrying, gave up, or was cancelled, with its last error."
         ),
         help_entries=_help_entries(actions, {
-            "r": "Retry from scratch; un-expires its letter",
+            "r": "Retry from scratch; un-expires its letter" if dead else "Retry from scratch",
             "c": "Stop retrying it for good",
-            "d": "Forget it; its letter stays expired",
+            "d": "Forget it; its letter stays expired" if dead else "Forget it; it is never sent",
         }),
     )
-    if choice == "r":
+    if choice == "r" and resolved:
         def _replay(db: Database) -> WorkItem:
             replayed = replay_work_item(db, selected.id, replayed_by=actor)
             if replayed.kind == KIND_LINK_MAIL_DELIVERY:
@@ -1599,16 +1611,17 @@ async def _outbox_item_screen(
 
         replayed = await lane.run(_replay)
         return colored(f"Replayed -- status is now {replayed.status!r}.", fg_color=SUCCESS_COLOR)
-    if choice == "c":
+    if choice == "c" and not resolved:
         def _cancel(db: Database) -> WorkItem:
             return cancel_work_item(db, selected.id, cancelled_by=actor)
 
         cancelled = await lane.run(_cancel)
         return colored(f"Cancelled -- status is now {cancelled.status!r}.", fg_color=SUCCESS_COLOR)
-    if choice == "d" and dead:
+    if choice == "d" and resolved:
         await session.write_line("")
+        consequence = "The letter stays expired." if dead else "It is never sent."
         if not await prompt_yes_no(
-            session, "Delete this work item for good? The letter stays expired.", default=False,
+            session, f"Delete this work item for good? {consequence}", default=False,
         ):
             return colored("Kept -- nothing was deleted.", fg_color=MUTED_COLOR)
         await lane.run(delete_work_item, selected.id, deleted_by=actor)
