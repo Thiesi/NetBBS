@@ -63,6 +63,7 @@ async def show_detail(
     message: str | None = None,
     help_title: str | None = None,
     help_about: str | None = None,
+    help_entries: Sequence[object] | None = None,
 ) -> tuple[str, int]:
     """Show `sections` a page at a time and return `(hotkey, page)` once the
     SysOp presses one of `actions`' keys.
@@ -78,7 +79,9 @@ async def show_detail(
 
     `?`, F1 and Ctrl-H show this panel's keys (issue #1158): its `actions`,
     the page keys when it is paged, and `help_about` above them, a sentence
-    on what the panel is for, under `help_title`."""
+    on what the panel is for, under `help_title`. `help_entries`, if given,
+    are `MenuEntry` rows listed there instead of the bare `actions`, so each
+    key can say what it does."""
     width = max(1, session.terminal_width)
     keys = {key.lower() for key, _label in actions}
 
@@ -142,7 +145,8 @@ async def show_detail(
             step = page_step(key) if paged else None
             if (key.kind == EditorKeyKind.CTRL and key.char == "h") or char == HELP_KEY:
                 await show_menu_help(
-                    session, help_title or "Keys on this screen", actions,
+                    session, help_title or "Keys on this screen",
+                    help_entries if help_entries is not None else actions,
                     about=help_about, paged=paged, unicode_style=unicode_style,
                 )
                 break  # the outer loop redraws the page

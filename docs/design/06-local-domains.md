@@ -2613,7 +2613,14 @@ off by default; a node that is itself a point publishes nothing.
   below), under the same guards, written to the spool folder and deleted
   once sent; its TIC carries `Replaces` with the previous edition's file.
   The echo needs no file area. A refused hatch leaves the written file and
-  says why; one list that can't be built doesn't stop the other.
+  says why; one list that can't be built doesn't stop the other. Every
+  active point and downlink carrying the echo with a TIC password set gets
+  the edition too (issue #1512), as it gets a hatched file ("TIC
+  forwarding", under "Points and downlinks"): its own spool copy of the
+  file and a TIC under its own password, queued as a pair for it alone and
+  deleted once it confirmed them, and every TIC's Seenby names the uplink
+  and all those links. A link whose queue can't take both is skipped with
+  a node-log line.
 - **When.** **[P]ublish now** publishes every list that is on, with one
   yes/no when something is hatched. A schedule (off, daily, or weekly on a
   weekday, Friday by default) publishes on the first check of the mailer
