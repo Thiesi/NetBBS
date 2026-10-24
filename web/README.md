@@ -17,7 +17,7 @@ web/
   netbbs-overview.html   -> https://www.netbbs.org/overview.html
   netbbs-boards.html     -> https://www.netbbs.org/boards.html   tour pages: one
   netbbs-files.html      -> https://www.netbbs.org/files.html    subsystem each,
-  netbbs-doors.html      -> https://www.netbbs.org/doors.html    linked from both
+  netbbs-doors.html      -> https://www.netbbs.org/doors.html    game overview
   netbbs-mrc.html        -> https://www.netbbs.org/mrc.html      main pages
   netbbs-voidrunner.html -> https://www.netbbs.org/voidrunner.html
   netbbs-war-dialer.html -> https://www.netbbs.org/war-dialer.html
@@ -64,8 +64,17 @@ pages under `/nodes/`, because a browser asks for it there by itself.
 Before deployment, validate the repository copies:
 
 ```sh
-python scripts/website_check_pages.py --local web/netbbs-index.html web/netbbs-overview.html
-python scripts/website_check_wording.py web/netbbs-index.html web/netbbs-overview.html
+python scripts/website_check_pages.py --local web/netbbs-*.html
+python scripts/website_check_wording.py web/netbbs-*.html
+```
+
+The examples above use shell glob expansion. In PowerShell, pass the paths
+explicitly instead:
+
+```powershell
+$sitePages = (Get-ChildItem web/netbbs-*.html).FullName
+python scripts/website_check_pages.py --local $sitePages
+python scripts/website_check_wording.py $sitePages
 ```
 
 These local checks do not request outbound URLs. Check documentation links
@@ -249,13 +258,18 @@ different question. Keep its raw output with the converted fragment.
 Run the local page and wording checkers over **all** `web/netbbs-*.html` files
 when changing a game page; the live checkers include all five game URLs.
 `game-scenes.js` is the game pages' shared player; the older pages retain their
-inline players until separately changed, so game pages can be delivered on
-their own.
+own scripts for unrelated interactions.
+
+`doors.html` is the game overview: one real launch splash per playable game
+(including Lunar Lander's release candidate), Blacksite's labelled concept art, a short description and a
+link to each dedicated page. Keep gameplay galleries and scene players on the
+individual pages. The landing page keeps at most one still per game in its
+general screenshot gallery. Every public page links to the overview.
 
 ## Scenes: animated captures
 
-The bundled games play short full-screen scenes during play, and the doors page
-and the landing page replay them. A scene is recorded as a **cast**: every
+The bundled games play short full-screen scenes during play, and their individual
+game pages replay them. A scene is recorded as a **cast**: every
 frame's raw ANSI, with the wait the game asked for after it.
 `website_capture_door_scene.py` plays the scene through the game's own `play_*`
 function at 80x24 in truecolor. Only the terminal around it is replaced: stdout
