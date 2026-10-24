@@ -852,6 +852,10 @@ def _backup_door_sections(voidrunner_dir: Path, installs_on: bool) -> list[Secti
                 note="Close War Dialer sessions before backup; restore requires explicit world destinations.",
             ),
             Field(
+                "Lunar Lander", "the node's own pilot records",
+                note="Snapshotted consistently while callers play; restored beside the database.",
+            ),
+            Field(
                 "Door outbound receipts", "included automatically",
                 note="Restored beside the database with the archive's own generation.",
             ),

@@ -44,7 +44,7 @@ reading this design reference first.
   private messages, cross-node `/dm` direct chats (issue #1368), and
   one-/two-relay paths. Simultaneous background channel memberships are not
   implemented.
-- Phase 7 has native, DOSBox-X, VM (qemu) and remote door adapters, three bundled games,
+- Phase 7 has native, DOSBox-X, VM (qemu) and remote door adapters, four bundled games,
   companion services, and door API 4 with optional outbound board posting and
   chat lines. Compatibility is bounded to the documented host/game profiles.
 - Phase 6 has Link Communities (#1310). Delegated Link moderation is decided

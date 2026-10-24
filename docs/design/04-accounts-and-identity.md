@@ -580,7 +580,9 @@ Three consequences follow, and are intended rather than gaps:
   the call's directory: Voidrunner starts from a copy of the node's Hall of
   Fame records and War Dialer from a copy of the world (SQLite's backup API),
   so the guest sees the real standings and rivals, and nothing it does
-  reaches them. The door's outbound hook answers it as a rehearsal. The
+  reaches them. Lunar Lander (issue #1542) is handled as War Dialer is:
+  `DOOR_LL_DATA_DIR` names a directory in the call holding a backup-API
+  copy of the node's `pilots.db`. The door's outbound hook answers it as a rehearsal. The
   call's save stays for the rest of the call, so a guest can leave a game and
   come back. A SysOp's own doors keep receiving the guest account: what an
   external game stores is its own, a fresh identity every call would fill a

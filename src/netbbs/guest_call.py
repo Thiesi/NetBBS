@@ -14,7 +14,7 @@ caller leaves behind are files rather than preferences:
   instead (`drafts_directory` asks `current_guest_call`).
 - **Door saves.** The bundled doors key their saves on the drop file's
   `user_id`, so every guest shared one Voidrunner career and one War Dialer
-  crew, and Voidrunner's Hall of Fame showed whatever callsign the last guest
+  crew (and would have shared Lunar Lander's best landings), and Voidrunner's Hall of Fame showed whatever callsign the last guest
   typed. A guest call plays them under `door_user_id`, a number no account
   can have, with saves in this directory (`netbbs.doors.runtime.run_door`).
 

@@ -43,6 +43,15 @@ own, including replacing them with nothing when the archive predates
 this component: receipts from a newer generation beside an older
 database claim post IDs that database never had.
 
+Lunar Lander's pilot records (issue #1542) are one SQLite file in the node's
+own `<db>.doors/lunar_lander/`. When it exists, a checksummed snapshot taken
+with SQLite's backup API is captured before the database, for the same reason
+as the game components below, and restore puts it back beside the restored
+database with no destination to name. An archive without the component
+restores the absence: newer records beside an older database would credit
+landings to user IDs that database never issued, so the live directory moves
+into the rollback generation instead.
+
 When its save directory exists, Voidrunner adds a checksummed component
 containing careers, recovery copies, and scores. Capture it while game
 sessions are closed, before the node database snapshot, so its user IDs
@@ -139,6 +148,7 @@ _FILES_DIRNAME = "files"
 _IDENTITY_DIRNAME = "identity"
 _VOIDRUNNER_DIRNAME = "voidrunner"
 _WAR_DIALER_DIRNAME = "war-dialer"
+_LUNAR_LANDER_DIRNAME = "lunar-lander"
 _DOOR_INSTALLS_DIRNAME = "door-installs"
 _DOOR_OUTBOUND_DIRNAME = "door-outbound"
 _BOT_STATE_DIRNAME = "bot-state"
@@ -146,6 +156,10 @@ _BOT_STATE_MAX_INSTANCES = 64
 _BOT_STATE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,23}")
 _WAR_DIALER_MAX_WORLDS = 64
 _WAR_DIALER_MAX_BYTES = 512 * 1024 * 1024
+#: Pilot records are one row per pilot and one per landing kept, so this is
+#: an upper bound on a file that should stay a few hundred kilobytes.
+_LUNAR_LANDER_MAX_BYTES = 256 * 1024 * 1024
+_LUNAR_LANDER_APPLICATION_ID = 0x4C4C0001
 _VOIDRUNNER_MAX_FILES = 10_000
 _VOIDRUNNER_MAX_FILE_BYTES = 4 * 1024 * 1024
 _VOIDRUNNER_MAX_TOTAL_BYTES = 512 * 1024 * 1024
@@ -737,14 +751,18 @@ def _war_dialer_sources(db_path: Path) -> list[Path]:
 def door_data_left_behind(db_path: Path) -> bool:
     """Whether a backup of this node would capture door data even with no
     door registered: a Voidrunner save directory, a retained War Dialer
-    world, a `WAR_DIALER_DB_PATH` override, or door outbound receipts --
+    world, a `WAR_DIALER_DB_PATH` override, Lunar Lander records, or door
+    outbound receipts --
     the same places `create_backup` looks. The Backup screen says "no door
     data" only when this is False (issue #845)."""
+    from netbbs.doors.runtime import LUNAR_LANDER_RECORDS, node_lunar_lander_dir
+
     node = db_path.resolve()
     override = os.environ.get("WAR_DIALER_DB_PATH")
     return (
         voidrunner_save_directory(db_path)[0].is_dir()
         or (node.parent / (node.name + ".doors") / "war-dialer.db").exists()
+        or (node_lunar_lander_dir(db_path) / LUNAR_LANDER_RECORDS).exists()
         or bool(override and Path(override).expanduser().exists())
         or _door_outbound_root_for(db_path).is_dir()
     )
@@ -833,6 +851,87 @@ def _validate_war_dialer_component(source: Path, manifest: dict) -> None:
             raise BackupError("War Dialer schema does not match its manifest.")
     if {path.name for path in root.iterdir()} != expected:
         raise BackupError("War Dialer files do not match their coverage manifest.")
+
+
+def _lunar_lander_records(db_path: Path) -> Path | None:
+    """The node's own Lunar Lander records file, or `None` when it has none.
+
+    Refuses a symlinked directory or file rather than following it out of
+    the node's own tree, the way the other door components do."""
+    from netbbs.doors.runtime import LUNAR_LANDER_RECORDS, node_lunar_lander_dir
+
+    directory = node_lunar_lander_dir(db_path)
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise BackupError(f"Lunar Lander records directory is not a plain directory: {directory}")
+    records = directory / LUNAR_LANDER_RECORDS
+    if records.is_symlink():
+        raise BackupError(f"Lunar Lander records are a symbolic link, not a database: {records}")
+    return records if records.exists() else None
+
+
+def _inspect_lunar_lander(path: Path) -> int:
+    """Check `path` is Lunar Lander's own records database; return its schema.
+
+    Read-only, so inspecting never creates or changes a file."""
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > _LUNAR_LANDER_MAX_BYTES:
+        raise BackupError(f"Lunar Lander records are not a regular database within the 256 MiB limit: {path}")
+    try:
+        with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            identity = conn.execute("PRAGMA application_id").fetchone()[0]
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    except sqlite3.Error as exc:
+        raise BackupError(f"Lunar Lander records cannot be read: {path}: {exc}") from exc
+    if identity != _LUNAR_LANDER_APPLICATION_ID or version != 1 or tables != {"pilots", "scores"}:
+        raise BackupError(f"{path} is not a Lunar Lander records database this build knows "
+                          f"(application id {identity:#x}, schema {version}). Move it aside to back up the node.")
+    if integrity != "ok":
+        raise BackupError(f"Lunar Lander records failed SQLite integrity checking: {path}")
+    return version
+
+
+def _capture_lunar_lander(db_path: Path, destination: Path, checksums: dict) -> dict | None:
+    records = _lunar_lander_records(db_path)
+    if records is None:
+        return None
+    _inspect_lunar_lander(records)
+    output = destination / _LUNAR_LANDER_DIRNAME
+    output.mkdir()
+    snapshot = output / records.name
+    # The backup API, not a file copy: the door has no maintenance lock and
+    # may commit a landing while this runs. A snapshot is one generation.
+    try:
+        snapshot_database(records, snapshot)
+        with contextlib.closing(sqlite3.connect(snapshot)) as saved:
+            saved.execute("PRAGMA journal_mode=DELETE")
+    except sqlite3.Error as exc:
+        raise BackupError(f"Lunar Lander records could not be snapshotted: {records}: {exc}") from exc
+    version = _inspect_lunar_lander(snapshot)
+    checksums[f"{_LUNAR_LANDER_DIRNAME}/{records.name}"] = _sha256_of_file(snapshot)
+    return {"version": 1, "source_path": str(records), "schema_version": version}
+
+
+def _validate_lunar_lander_component(source: Path, manifest: dict) -> None:
+    from netbbs.doors.runtime import LUNAR_LANDER_RECORDS
+
+    metadata = manifest.get("lunar_lander")
+    root = source / _LUNAR_LANDER_DIRNAME
+    if metadata is None:
+        # A node database named `lunar-lander`, archived under its own name
+        # when there were no records to capture, is not this component.
+        legacy_database = _database_filename_from_manifest(manifest).casefold() == _LUNAR_LANDER_DIRNAME
+        if root.exists() and not (legacy_database and root.is_file()):
+            raise BackupError("Lunar Lander component has no coverage manifest.")
+        return
+    if (not isinstance(metadata, dict) or metadata.get("version") != 1
+            or not root.is_dir() or root.is_symlink()):
+        raise BackupError("Invalid Lunar Lander coverage manifest.")
+    _refuse_unlisted_entries(root, {LUNAR_LANDER_RECORDS}, "Lunar Lander files")
+    if f"{_LUNAR_LANDER_DIRNAME}/{LUNAR_LANDER_RECORDS}" not in manifest.get("checksums", {}):
+        raise BackupError("Lunar Lander snapshot has no checksum.")
+    if _inspect_lunar_lander(root / LUNAR_LANDER_RECORDS) != metadata.get("schema_version"):
+        raise BackupError("Lunar Lander schema does not match its manifest.")
 
 
 def _is_capturable_receipt_name(name: str, suffix: str) -> bool:
@@ -1256,6 +1355,11 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         game_source, game_source_provenance = voidrunner_save_directory(db_path)
     if destination.resolve().is_relative_to(game_source):
         raise BackupError("A backup destination cannot be inside the Voidrunner save directory.")
+    from netbbs.doors.runtime import node_lunar_lander_dir
+
+    if destination.resolve().is_relative_to(node_lunar_lander_dir(db_path)):
+        # A restore moves that whole directory, backups and all.
+        raise BackupError("A backup destination cannot be inside the Lunar Lander records directory.")
     destination.mkdir(parents=True)
 
     checksums = {}
@@ -1272,6 +1376,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
             # and this module's own validator ignore unknown keys.
             game_metadata["source_provenance"] = game_source_provenance
         war_metadata = _capture_war_dialer(db_path, destination, checksums)
+        lunar_metadata = _capture_lunar_lander(db_path, destination, checksums)
         # Before the database snapshot, like the game components above and for
         # a related reason: a receipt must never name a post the snapshot
         # beside it does not contain (issue #556).
@@ -1283,6 +1388,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         raise
     if ((game_metadata is not None and database_filename.casefold() == _VOIDRUNNER_DIRNAME)
             or (war_metadata is not None and database_filename.casefold() == _WAR_DIALER_DIRNAME)
+            or (lunar_metadata is not None and database_filename.casefold() == _LUNAR_LANDER_DIRNAME)
             or (door_metadata is not None and database_filename.casefold() == _DOOR_INSTALLS_DIRNAME)
             or (receipt_metadata is not None and database_filename.casefold() == _DOOR_OUTBOUND_DIRNAME)
             or (bot_metadata is not None and database_filename.casefold() == _BOT_STATE_DIRNAME)):
@@ -1343,6 +1449,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
             "provenance": game_source_provenance,
         },
         "war_dialer": war_metadata,
+        "lunar_lander": lunar_metadata,
         "door_installs": door_metadata,
         "door_outbound": receipt_metadata,
         "bot_state": bot_metadata,
@@ -1353,6 +1460,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path,
         # leaves no destination behind, or the next run cannot even retry at
         # the same path.
         _validate_war_dialer_component(destination, manifest)
+        _validate_lunar_lander_component(destination, manifest)
         _validate_door_outbound_component(destination, manifest)
         _validate_bot_state_component(destination, manifest)
         (destination / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2))
@@ -1441,6 +1549,7 @@ def _validate_backup_source(source: Path, *, allow_migrate: bool) -> dict:
     if not db_snapshot.exists():
         raise BackupError(f"backup is missing its database snapshot: {db_snapshot}")
     _validate_war_dialer_component(source, manifest)
+    _validate_lunar_lander_component(source, manifest)
     _validate_door_outbound_component(source, manifest)
     _validate_bot_state_component(source, manifest)
 
@@ -1661,6 +1770,15 @@ def _restore_switch_plan(
     plan.append((_BOT_STATE_DIRNAME, staged_bots if staged_bots.is_dir() else None,
                  _bot_state_root_for(db_path)))
 
+    # The same for Lunar Lander's records (issue #1542): they name user IDs,
+    # so an archive without them moves newer ones aside rather than leaving
+    # them beside a database that may never have issued those IDs.
+    from netbbs.doors.runtime import node_lunar_lander_dir
+
+    staged_lunar = staging_dir / _LUNAR_LANDER_DIRNAME
+    plan.append((_LUNAR_LANDER_DIRNAME, staged_lunar if staged_lunar.is_dir() else None,
+                 node_lunar_lander_dir(db_path)))
+
     # Planned whether or not this archive has the component (issue #556):
     # a point-in-time restore must restore the absence of receipts too, or a
     # later generation's receipts survive beside an older database and claim
@@ -1688,7 +1806,8 @@ def _restore_switch_plan(
 
     for entry in sorted(staging_dir.iterdir()):
         if entry.name in (*_RESERVED_BACKUP_ENTRIES, _VOIDRUNNER_DIRNAME, _WAR_DIALER_DIRNAME,
-                          _DOOR_OUTBOUND_DIRNAME, _BOT_STATE_DIRNAME, database_filename):
+                          _LUNAR_LANDER_DIRNAME, _DOOR_OUTBOUND_DIRNAME, _BOT_STATE_DIRNAME,
+                          database_filename):
             continue
         if entry.is_file():
             live_path = db_path.parent / entry.name
@@ -1795,6 +1914,9 @@ def _switch_one(name: str, staged_path: Path | None, live_path: Path, rollback_d
         moved = True
     try:
         if staged_path is not None:
+            if name == _LUNAR_LANDER_DIRNAME:
+                # `<db>.doors/` need not exist yet on a fresh target.
+                live_path.parent.mkdir(parents=True, exist_ok=True)
             staged_path.rename(live_path)
     except Exception:
         if moved:
@@ -1950,6 +2072,13 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path,
     war_targets = _war_dialer_restore_targets(source, manifest, war_dialer_to, war_protected)
     if db_path.exists():
         _require_not_in_use(db_path)
+    from netbbs.doors.runtime import LUNAR_LANDER_RECORDS, node_lunar_lander_dir
+
+    live_records = node_lunar_lander_dir(db_path) / LUNAR_LANDER_RECORDS
+    if live_records.is_file() and not live_records.is_symlink():
+        # The door has no maintenance lock; its write lock is the only sign
+        # a game is still running against these records.
+        _require_not_in_use(live_records)
     _require_node_not_running(db_path)
     _refuse_if_restore_in_progress(db_path)
 
@@ -2125,6 +2254,9 @@ def main(argv: list[str] | None = None) -> None:
         war = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("war_dialer")
         for world in war["worlds"] if war else []:
             print_wrapped(f"War Dialer world {world['key']}: included {world['source_path']}.")
+        lunar = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("lunar_lander")
+        if lunar is not None:
+            print_wrapped(f"Lunar Lander: included pilot records from {lunar['source_path']}.")
         receipts = json.loads((destination / _MANIFEST_FILENAME).read_text()).get("door_outbound")
         if receipts is not None:
             total = sum(len(door["receipts"]) for door in receipts["doors"])
@@ -2201,6 +2333,10 @@ def main(argv: list[str] | None = None) -> None:
         except BackupError as exc:
             raise SystemExit(terminal_wrapped(f"restore failed: {exc}", stream=sys.stderr)) from exc
         print_wrapped(f"Restored {args.source} into {args.db} / {args.identity_dir}")
+        if json.loads((args.source / _MANIFEST_FILENAME).read_text()).get("lunar_lander") is not None:
+            from netbbs.doors.runtime import node_lunar_lander_dir
+
+            print_wrapped(f"Lunar Lander pilot records restored to {node_lunar_lander_dir(args.db)}.")
         if args.war_dialer_to:
             print_wrapped("War Dialer restored. MANUAL: configure each restored door's world path before restarting; "
                           "the source service must remain stopped. The archived node owns these user IDs.")

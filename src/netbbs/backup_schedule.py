@@ -208,6 +208,7 @@ def validate_destination(
     if not os.access(path, os.W_OK | os.X_OK):
         raise BackupScheduleError(f"The node's account cannot write to {path}.")
     from netbbs.backup import _door_outbound_root_for, voidrunner_save_directory
+    from netbbs.doors.runtime import node_lunar_lander_dir
 
     resolved = path.resolve()
     # A backup copies these trees; a destination inside one would copy every
@@ -218,6 +219,7 @@ def validate_destination(
         (db_path.parent / f"{db_path.stem}_files", "the node's file storage"),
         (identity_dir, "the node's identity directory"),
         (voidrunner_save_directory(db_path)[0], "the Voidrunner save directory"),
+        (node_lunar_lander_dir(db_path), "the Lunar Lander records directory"),
         (_door_outbound_root_for(db_path), "the door outbound receipts"),
     ):
         if tree is not None and (resolved == tree.resolve() or resolved.is_relative_to(tree.resolve())):

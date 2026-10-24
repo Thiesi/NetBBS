@@ -20,7 +20,8 @@ your node carries and who it trusts.
 - Read and write posts, follow discussions, find new activity, and search.
 - Chat locally, across NetBBS Link, or through the optional MRC chat bridge.
 - Exchange persistent mail and files, using browser transfer links or Zmodem.
-- Play three bundled doors: **Retro Trivia**, **Voidrunner**, and **War Dialer**.
+- Play four bundled doors: **Retro Trivia**, **Voidrunner**, **War Dialer**, and
+  **Lunar Lander**.
   Add trusted native, DOSBox-X, VM-hosted foreign-platform, or remote doors
   using configurable profiles.
 - Manage accounts, access rules, moderation, backups, and node appearance

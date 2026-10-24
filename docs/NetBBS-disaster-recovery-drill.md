@@ -109,7 +109,8 @@ Start the isolated recovery node and check:
 - the same node fingerprint and expected SSH host key;
 - successful login through every transport you offer;
 - the recorded posts, revisions, uploaded bytes, and custom artwork;
-- the same Voidrunner pilot and score, and War Dialer crew/world history;
+- the same Voidrunner pilot and score, War Dialer crew/world history, and
+  Lunar Lander best pilots;
 - expected account permissions and moderator settings;
 - the effective game paths reported by setup/backup screens.
 
