@@ -331,11 +331,13 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
     ],
     "lunar_lander": [
         ("Mission briefing", b""),
-        ("Mission briefing, a ranked mission", b"4"),
+        # The Needle is the fourth mission of the second chapter, Highlands.
+        ("Mission briefing, a ranked mission", b"d4"),
         ("Flight manual", b"?"),
         ("Best pilots", b"2b"),
-        # Launched, then paused: the flight HUD under the pause card.
-        ("Flight paused", b"\r!p"),
+        # Launched, then paused: the flight HUD under the pause card. Any key
+        # ends the launch scene, so a space ends it before P pauses.
+        ("Flight paused", b"\r! !p"),
         # Training with the engine off falls to the surface inside the patience
         # window, and the debrief is still once it is drawn.
         ("Lander down", b"\r"),
@@ -606,7 +608,7 @@ SHOWS: dict[str, dict[str, str]] = {
     },
     "lunar_lander": {
         "Mission briefing": "FLIGHT DIRECTOR",
-        "Mission briefing, a ranked mission": "SELECTED: THE NEEDLE",
+        "Mission briefing, a ranked mission": "THE NEEDLE",
         "Flight manual": "FLIGHT MANUAL",
         "Best pilots": "BEST PILOTS",
         "Flight paused": "FLIGHT PAUSED",
