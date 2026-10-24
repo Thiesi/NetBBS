@@ -477,19 +477,21 @@ async def _update_settings_screen(
             if status.installable is not None:
                 help_entries.append(MenuEntry(
                     label=menu_key("I", f"nstall {status.installable.tag_name}"),
-                    brief="Download and install it",
+                    brief="Shows the plan before anything",
                 ))
             help_entries.extend([
                 MenuEntry(label=menu_key("R", "estart after install"),
-                          brief="Restart after installing or not"),
-                MenuEntry(label=menu_key("T", "oken"), brief="GitHub token for release checks"),
+                          brief="Steps auto, yes, no"),
+                MenuEntry(label=menu_key("T", "oken"), brief="GitHub token; kept masked"),
                 MenuEntry(label=menu_key("A", "uto-check off" if status.auto_enabled else "uto-check on"),
-                          brief="Daily automatic check on or off"),
+                          brief="At start and every 24 hours"),
             ])
             await show_menu_help(
                 session, "Self-update help", help_entries,
-                about="Check for a newer NetBBS release and install it. A check never installs "
-                      "anything by itself; a token only lifts GitHub's rate limit.",
+                about="The running version, the last release checks, and installing a newer release. A "
+                      "check, scheduled or manual, never installs anything. Install is offered only on the "
+                      "live node, once a check has found a newer release. A token only lifts GitHub's limit "
+                      "of 60 checks an hour per address.",
                 header_color=await lane.run(effective_header_color_256), unicode_style=status.unicode_style,
             )
             status = await _redraw()
@@ -574,6 +576,7 @@ async def _install_release_screen(
         session, title=title,
         sections=[Section(f"{current_version} -> {release.tag_name}", plan)],
         actions=[("i", menu_key("I", "nstall now")), _BACK_ACTION],
+        help_entries=[MenuEntry(label=menu_key("I", "nstall now"), brief="Asks once more, then runs it")],
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         help_title="Install help",
         help_about=(
@@ -634,7 +637,10 @@ async def _run_install(
         await _show_report(
             session, lane, actor, f"Install {release.tag_name}", sections=sections,
             help_title="Install help",
-            help_about="Why the install stopped, and at which step. The running version is unchanged.",
+            help_about=(
+                "Why the install stopped, and at which step. The node keeps running its current version. "
+                "If the reason says pip changed the environment, restart the service or roll back by hand."
+            ),
         )
 
     token = await lane.run(get_github_pat)
@@ -977,10 +983,19 @@ async def _backup_status_screen(
             ),
             sections=sections, actions=actions, page=page,
             redraw_in_place=chrome.redraw_in_place, unicode_style=unicode_style,
+            help_entries=[
+                *([MenuEntry(label=menu_key("C", "reate backup now"), brief="A complete backup; asks first")]
+                  if can_create else []),
+                *([MenuEntry(label=menu_key("D", "oor installations"), brief="Toggle; from the next backup")]
+                  if can_create and has_doors else []),
+                MenuEntry(label=menu_key("S", "chedule & destination"), brief="When, how many, and where"),
+            ],
             help_title="Backup help",
             help_about=(
-                "Complete local backups of this node: when the last one ran, the schedule, and where they "
-                "go. A backup can be made while the node runs."
+                "Complete local backups of this node: the last one, recent runs, the schedule and where "
+                "backups go, and what of the doors a backup holds. Create backup now asks first and runs "
+                "while the node stays up; it needs the live node. Door installations is a toggle for "
+                "every backup from the next one on. Restore is a shell command, with the node stopped."
             ),
         )
         if choice == "b":
@@ -1277,6 +1292,11 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
             stable_id_of=lambda entry: entry.id,
             description_of=lambda entry: sanitize_text(entry.message),
             title="Diagnostic log", own=True,
+            help_about=(
+                "Warnings and errors Link and the MRC bridge logged, newest first unless you change the order. "
+                "Pick one to read it in full. Old entries are dropped by the Diagnostics kept limits under "
+                "Settings, Operating limits. Nothing here changes anything."
+            ),
             empty_message="Nothing logged yet.",
             start_stable_id=reopen_at,
             on_sort=_flip_order,
@@ -1443,6 +1463,11 @@ async def _audit_log_screen(
                 name_segments_of=_row_name_segments,
                 title=title, own=True,
                 masthead=masthead,
+                help_about=(
+                    "Moderation and administrative actions, newest first unless you change the order: when, "
+                    "what and by whom. Pick one to see it in full, with its object, target and detail. "
+                    "Nothing here changes anything."
+                ),
                 empty_message="Nothing logged yet.",
                 start_stable_id=reopen_at,
                 on_sort=_flip_order,
@@ -1678,6 +1703,11 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
             description_of=lambda entry: entry.message,
             name_segments_of=_row_segments,
             title="Node log", own=True,
+            help_about=(
+                "The newest part of netbbs.log beside the database, warnings and errors first. Level widens "
+                "that to everything or narrows it to errors; Follow shows new lines as they come. Pick an "
+                "entry to read it in full. Read-only."
+            ),
             # One call serves every [L]evel, so this names no level; the
             # standing line below says which one is showing.
             empty_message=f"Nothing at this level in the newest part of {path.name}.",
@@ -1716,7 +1746,7 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
             actions=[_BACK_ACTION],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Log entry help",
-            help_about="One warning or error from the node's log file, in full.",
+            help_about="One entry from the node's log file, in full, with any lines that continued it.",
         )
 
 
@@ -1846,11 +1876,13 @@ async def _prune_drafts_screen(session: Session, lane: DatabaseLane, actor: User
                 subtitle="Abandoned post-edit and bio drafts past the retention window.",
             ),
             sections=[_prune_report_section(report)], actions=actions,
+            help_entries=[MenuEntry(label=menu_key("D", "elete stale drafts now"),
+                                    brief="Deletes them at once, no question")] if len(actions) > 1 else None,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Prune drafts help",
             help_about=(
-                "Unsaved post edits and bio drafts nobody has touched for longer than the retention window. "
-                "Deleting them cannot be undone."
+                "Draft files nobody has touched for 30 days: unsaved post edits and profile bios. Delete "
+                "removes them at once, with no question, and cannot be undone; drafts newer than that stay."
             ),
         )
         if choice == "b":
@@ -1928,11 +1960,17 @@ async def _search_indexes_screen(session: Session, lane: DatabaseLane, actor: Us
                 subtitle="What Find searches, compared with the content it indexes.",
             ),
             sections=[_search_index_section(report)], actions=actions,
+            help_entries=[
+                *([MenuEntry(label=menu_key("R", "ebuild"), brief="Replace every index from content")]
+                  if not report.is_clean else []),
+                MenuEntry(label=menu_key("C", "heck again"), brief="Compare once more"),
+            ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Search indexes help",
             help_about=(
-                "What Find searches, compared with the content it should cover. Rebuild an index that has "
-                "fallen behind."
+                "What Find searches, compared with the posts, files, chat and mail it should cover: counts "
+                "only, never the content. Rebuild replaces every index from the content itself, with no "
+                "question; it cannot lose anything. Check again compares once more."
             ),
         )
         if choice == "b":

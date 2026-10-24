@@ -62,7 +62,7 @@ def _assert_help_then_redraw(text: str, help_title: str, about_word: str, redraw
 
 def test_the_landing_page_has_help(db, lane, sysop):
     text = _console(FakeSession([H, " ", "b"]), lane, sysop)
-    _assert_help_then_redraw(text, "SysOp console help", "landing page", "SysOp operations console")
+    _assert_help_then_redraw(text, "SysOp console help", "what waits for you", "SysOp operations console")
     assert "Durable node configuration" in _after(text, "SysOp console help")
 
 
@@ -86,9 +86,9 @@ def test_the_staff_console_has_help(db, lane, sysop):
     [
         (["u"], "Users help", "user accounts", "romote/demote"),
         (["o"], "Operations help", "running node", "rune drafts"),
-        (["s"], "Settings help", "lasting configuration", "astheads & banners"),
+        (["s"], "Settings help", "next start", "astheads & banners"),
         (["s", "n"], "Node name help", "corner of every screen", "Recolor the node name"),
-        (["s", "p"], "Policy trust help", "safety deviation", "dentity authorities"),
+        (["s", "p"], "Policy trust help", "on probation", "dentity authorities"),
         (["c"], "Content help", "approval", "rant moderator"),
         (["c", "t"], "Communities help", "Community gathers", "Browse and edit Communities"),
         (["c", "m"], "Message boards help", "message boards", "Browse and edit boards"),
@@ -122,7 +122,7 @@ def test_the_node_management_screen_has_help(db, lane, sysop):
         return _visible(_written_text(session))
 
     text = asyncio.run(scenario())
-    _assert_help_then_redraw(text, "Node management help", "running node", "Schedule a node shutdown")
+    _assert_help_then_redraw(text, "Node management help", "lasts until you turn it off", "Schedule a node shutdown")
 
 
 def test_the_staff_permissions_screen_explains_each_permission(db, lane, sysop):
@@ -134,7 +134,7 @@ def test_the_staff_permissions_screen_explains_each_permission(db, lane, sysop):
     text = _visible(_written_text(session))
     _assert_help_then_redraw(text, "Staff permissions help", "asks first", "o-SysOp preset")
     help_text = text[text.rindex("Staff permissions help"):]
-    assert "Verify callers' age or real name" in help_text
+    assert "Record callers' verified age or real name" in help_text
     assert result.has_staff(StaffPermission.APPROVE_ACCOUNTS)
 
 
@@ -193,7 +193,7 @@ def test_the_gradient_screen_has_help(db, lane, sysop):
 def test_the_update_screen_has_help(db, lane, sysop):
     text = _console(FakeSession(["s", "u", H, " ", "b", "b", "b"]), lane, sysop)
     _assert_help_then_redraw(text, "Self-update help", "never installs", "Self-update")
-    assert "GitHub token for release checks" in text
+    assert "GitHub token; kept masked" in text
 
 
 def test_the_managed_dns_screen_has_help(db, lane, sysop):
@@ -217,7 +217,7 @@ def test_the_trust_dimension_choice_has_help(db, lane, sysop):
     session = FakeSession([H, " ", "r"])
     chosen = asyncio.run(admin_trust._pick_trust_dimension(session, allow_all=False))
     text = _visible(_written_text(session))
-    _assert_help_then_redraw(text, "Trust dimension help", "three areas", "Dimension:")
+    _assert_help_then_redraw(text, "Trust dimension help", "its own state", "Dimension:")
     assert chosen is TrustDimension.RESOURCE_BEHAVIOR
     # Without "all three" offered, its help doesn't mention it either.
     assert "The same state in all three" not in text
@@ -235,8 +235,8 @@ def test_the_trust_override_dimension_and_state_choices_have_help(db, lane, syso
         "o", "0", "1", H, " ", "r", "0", "2", H, " ", "d", "0", "3", "resource abuse reviewed", "s",
     )
     text = _console(session, lane, sysop)
-    _assert_help_then_redraw(text, "Trust dimension help", "three areas", "Dimension:")
-    _assert_help_then_redraw(text, "Trust state help", "override forces", "State:")
+    _assert_help_then_redraw(text, "Trust dimension help", "its own state", "Dimension:")
+    _assert_help_then_redraw(text, "Trust state help", "override holds", "State:")
     state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
     assert state.state == TrustState.BLOCKED
 
@@ -245,7 +245,24 @@ def test_the_remote_attestation_choice_has_help(db, lane, sysop):
     subject = TrustSubject.user("remote-home", "opaque-user")
     register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
     text = _console(_override_session("i", H, " ", "b"), lane, sysop)
-    _assert_help_then_redraw(text, "Remote attestation help", "whatever the signature says", "Remote attestation:")
+    _assert_help_then_redraw(text, "Remote attestation help", "decides that yourself", "Remote attestation:")
+
+
+def test_the_account_screen_help_is_one_row_per_key_and_fits_24_rows(db, lane, sysop):
+    """With no field highlighted, the account screen's help lists the keys
+    it offers on this account, one row each, and fits an 80x24 terminal:
+    it used to print every field's full help, two screens long."""
+    carol = create_user(db, "carol", password="hunter2pw", user_level=10)
+    session = FakeSession([H, " ", "b"])
+    asyncio.run(admin_users._user_detail_screen(session, lane, sysop, carol, None))
+    text = _visible(_written_text(session))
+    block = _after(text, "carol help").split("[Enter] Continue")[0]
+    assert "[L]evel" in block and "[R]estrict login" in block and "[D]elete" in block
+    # Offered only on a pending signup, and only with a verification on record.
+    assert "[A]pprove" not in block and "[V]erification" not in block
+    rows = [row for row in block.replace("\r\n", "\n").split("\n") if row.strip()]
+    assert len(rows) <= 20, rows
+    assert "carol" in _after(text, "[Enter] Continue"), "the account screen was not drawn again"
 
 
 def test_the_revoke_which_choice_has_help(db, lane, sysop):
@@ -323,7 +340,7 @@ def test_a_report_screen_has_its_own_help(db, lane, sysop):
 
 def test_a_trust_list_screen_has_its_own_help(db, lane, sysop):
     text = _console(FakeSession(["s", "p", "d", H, " ", "b", "b", "b", "b"]), lane, sysop)
-    _assert_help_then_redraw(text, "Trust domains help", "independent domains", "Trust domains")
+    _assert_help_then_redraw(text, "Trust domains help", "share an owner", "Trust domains")
 
 
 def test_a_detail_screen_has_its_own_help(db, lane, sysop):
@@ -335,5 +352,5 @@ def test_the_registration_screen_has_help_and_still_acts(db, lane, sysop):
     from netbbs.config import RegistrationMode, get_registration_mode
 
     text = _console(FakeSession(["u", "r", H, " ", "c", "b", "b", "b"]), lane, sysop)
-    _assert_help_then_redraw(text, "Registration help", "account on this node", "pproval required")
+    _assert_help_then_redraw(text, "Registration help", "sign up by themselves", "pproval required")
     assert get_registration_mode(db) is RegistrationMode.CLOSED

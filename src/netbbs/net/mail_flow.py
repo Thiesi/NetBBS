@@ -436,38 +436,46 @@ _IDENTITY_NOTE = (
     "Open the message for details."
 )
 
+# What each key of a letter does, for its help screen.
+_INBOX_LETTER_HELP = {
+    "r": "Write back to the sender, their letter quoted",
+    "a": "Write back to the sender and everyone it went to",
+    "f": "Send a copy of this letter on to someone else",
+    "g": "Download a file this letter points at",
+    "u": "Mark it unread again; the list shows it as new",
+    "k": "Yes moves it to Kept, which never drops letters",
+    "e": "Delete your copy; the sender keeps theirs",
+    "d": "Show spoiler text decoded, on your screen only",
+    "s": "Yes stops their mail and live messages to you",
+}
+_SENT_LETTER_HELP = {
+    "r": "Write to the same people again, as a new letter",
+    "s": "Send it again to those it did not reach",
+    "f": "Send a copy of this letter on to someone else",
+    "e": "Delete it from Sent; the recipient keeps theirs",
+}
+
 _LIST_HELP = [
-    "Up/Down      move the highlight",
-    "Enter, 01-99 read the highlighted message, or row number NN",
-    "             (or one digit and Enter)",
-    "< / >        previous page, next page (also PgUp/PgDn,",
-    "             Left/Right)",
-    "C            write a new message",
-    "D            resume or delete your unfinished letter",
-    "S            your sent mail; B there comes back to the Inbox",
-    "V            your kept mail; B there comes back to the Inbox",
-    "U            mark the highlighted message unread, or read",
-    "M, Space     mark the highlighted message, or unmark it",
-    "E            erase (delete) the marked messages, or the",
-    "             highlighted one",
-    "K            keep the marked (or highlighted) messages, or in",
-    "             Kept, move them back to the Inbox",
-    "P            purge: delete every read message in the Inbox",
-    "O            order: newest first, unread first (not in Sent),",
-    "             or by conversation",
-    "/            find: only mail with a word in its name or subject",
-    "Ctrl-L       redraw the list",
-    "B or Esc     back to the main menu (Esc first clears a",
-    "             highlighted row)",
+    "One row per letter, newest first: who it is from (or to), the subject and",
+    "the date. \"new\" is a letter you have not opened; * marks rows for Erase or",
+    "Keep. A full Inbox drops its oldest read letter for each new one.",
     "",
-    "\"new\" marks mail you have not opened. Opening a message marks",
-    "it read; [U]nread in the message or on the list takes that back.",
-    "* marks a message for Erase or Kept. Kept mail is never removed",
-    "to make room, but still counts toward the mailbox's size.",
-    "By conversation groups mail with one person under one subject,",
-    "Re: and Fwd: aside, newest conversation first.",
-    "Sent shows where mail to another BBS stands under Delivery.",
-    "Mail from System is a notice from this BBS; it has no Reply.",
+    "Up/Down, Enter  read the highlighted letter, or type its number (05)",
+    "< >             previous / next page (PgUp/PgDn, Left/Right too)",
+    "C / D           write a letter / pick up or delete your unfinished one",
+    "S / V           your Sent / Kept letters; B there returns to the Inbox",
+    "M or Space      mark or unmark the highlighted letter",
+    "E               delete the marked letters, or the highlighted one",
+    "K               move marked or highlighted letters to Kept, or back",
+    "U               mark the highlighted letter unread, or read again",
+    "P               delete every read letter in the Inbox; unread ones stay",
+    "O               order: newest first, unread first, or by conversation",
+    "/               only letters with a word in the name or subject",
+    "Ctrl-L          draw the list again",
+    "B or Esc        back (Esc first clears a highlighted row)",
+    "",
+    "Deleting removes only your copy. Kept letters are never dropped to make",
+    "room. Sent shows how far mail to another BBS got.",
 ]
 
 
@@ -1753,11 +1761,13 @@ async def _show_message(
     page: int,
     copies: list[MailMessage] | None = None,
     help_about: str | None = None,
+    action_help: dict[str, str] | None = None,
     decoded: bool = False,
 ) -> tuple[str, int]:
     """One message on `show_detail`: returns the action key and the page
     it was pressed on. `copies` are the Sent copies of a letter to several
-    people (issue #827). `help_about` is the sentence its help opens with.
+    people (issue #827). `help_about` is the sentence its help opens with,
+    `action_help` what each of `actions`' keys does.
     `decoded` shows the body ROT-13 decoded (issue #1473)."""
     unicode_style = await lane.run(unicode_style_enabled, user)
     title, preamble, body_rows = await _message_view(
@@ -1778,6 +1788,10 @@ async def _show_message(
         message="\r\n".join(take_notices(session)) or None,
         help_title="Reading a letter",
         help_about=help_about,
+        help_entries=(
+            [MenuEntry(label=label, brief=action_help.get(key, "")) for key, label in actions]
+            if action_help else None
+        ),
     )
 
 
@@ -1882,7 +1896,8 @@ async def _show_inbox_message(
         actions.append(("b", menu_key("B", "ack")))
         choice, page = await _show_message(
             session, lane, user, message, to_label=None, actions=actions, page=page,
-            help_about="A letter sent to you. Delete removes it from your mailbox; nothing reaches the sender.",
+            help_about="A letter to you: who sent it, when, and what it says. Opening it marked it read.",
+            action_help=_INBOX_LETTER_HELP,
             decoded=decoded,
         )
         if choice == "b":
@@ -2287,6 +2302,10 @@ async def blocked_senders_screen(
             stable_id_of=lambda row: row.block.id,
             description_of=lambda row: row.where,
             title="Blocked people",
+            help_about=(
+                "Everyone you block, and where they are. Their mail and live messages do not reach you, "
+                "and they are told you do not accept them. Mail already in your Inbox stays."
+            ),
             empty_message=(
                 "You block no one. Mail and live messages from anyone reach you." if actor is None
                 else f"{sanitize_text(user.username)} blocks no one."
@@ -2340,7 +2359,8 @@ async def _show_sent_message(
     while True:
         choice, page = await _show_message(
             session, lane, user, message, to_label=to_label, actions=actions, page=page,
-            help_about="A letter you sent. Delete removes your copy only; the recipient keeps theirs.",
+            help_about="A letter you sent, and how far it got when it went to another BBS.",
+            action_help=_SENT_LETTER_HELP,
         )
         if choice == "b":
             return
@@ -2395,9 +2415,10 @@ async def _show_sent_group(
         choice, page = await _show_message(
             session, lane, user, message, to_label=to_label, actions=actions, page=page, copies=copies,
             help_about=(
-                "A letter you sent to several people, shown once for all its copies. "
-                "Delete removes every copy from Sent; the recipients keep theirs."
+                "A letter you sent to several people, shown once for all its copies, "
+                "with how far each copy to another BBS got."
             ),
+            action_help={**_SENT_LETTER_HELP, "e": "Delete every copy in Sent; they keep theirs"},
         )
         if choice == "b":
             return

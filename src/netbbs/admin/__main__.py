@@ -244,6 +244,10 @@ async def _resolve_actor(session: Session, lane: DatabaseLane, as_username: str 
         name_of=lambda u: u.username,
         stable_id_of=lambda u: u.id,
         title="Attribute this session to which SysOp?",
+        help_about=(
+            "Every active SysOp account. What you do in this session is recorded in the audit log as the "
+            "one you pick; --as picks one on the command line instead."
+        ),
         empty_message="No SysOp accounts.",
         accent_color=await lane.run(effective_accent_color_256),
     )

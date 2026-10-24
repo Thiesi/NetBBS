@@ -190,8 +190,12 @@ async def qwknet_networks_screen(session: Session, lane: DatabaseLane, actor: Us
                       MenuEntry(label=menu_key("M", "ap conferences"), brief="Which board carries which conference"),
                       MenuEntry(label=menu_key("N", "odes"), brief="Systems this BBS serves as a hub"),
                       MenuEntry(label=menu_key("H", "eld"), brief="Messages no board carries yet"),
-                      MenuEntry(label=menu_key("D", "elete"), brief="Remove a network")],
+                      MenuEntry(label=menu_key("D", "elete"), brief="Remove a network",
+                                detailed="Remove it: boards turn local, its nodes and held go")],
             live_label=lambda: status or "QWK networks: conferences on boards, packets to and from a hub",
+            help_about=("The QWK networks this BBS is on: its QWK ID and hub, on or off, nodes it serves, posts "
+                        "waiting to go up and what the last call came to. Picking one edits it; nothing is "
+                        "stored before Save, and the mailer picks a change up within a minute."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -239,9 +243,12 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
         FieldSpec(key="enabled", label="Enabled", render=lambda d: "yes" if d["enabled"] else "no",
                   prompt=bool_field("enabled"), step=bool_step("enabled"), section="Network",
                   brief="Call the hub and carry this network's conferences",
-                  help="Off by default. Nothing is sent, fetched or served while it is off."),
+                  help="Off by default. Nothing is sent, fetched or served while it is off. On needs the hub's "
+                       "Host and Password, or Serve nodes for a network without a hub. The mailer picks a "
+                       "change up within a minute."),
         FieldSpec(key="name", label="Name", render=lambda d: d["name"], prompt=text_field("name", required=True),
-                  section="Network", brief="How the network is called here (DOVE-Net)"),
+                  section="Network", brief="How the network is called here (DOVE-Net)",
+                  help="Up to 40 characters, and no other QWK network here may have it."),
         FieldSpec(key="our_id", label="Our QWK ID", render=lambda d: d["our_id"] or "(not set)",
                   prompt=text_field("our_id", required=True), section="Network",
                   brief="This BBS's ID on the network: your account at the hub",
@@ -249,33 +256,42 @@ async def edit_network(session: Session, lane: DatabaseLane, actor: User, existi
                        "name of this BBS's account at the hub, and how routes name this BBS."),
         FieldSpec(key="tagline", label="Tagline", render=lambda d: d["tagline"] or "(the BBS's name)",
                   prompt=_optional_text_field("tagline"), section="Network",
-                  brief="The line under every post written here"),
+                  brief="The line under every post written here",
+                  help="Each post written here ends with a --- line and this, after ' ■ NetBBS ■ '. Empty: "
+                       "the BBS's name. Up to 70 characters. Posts passed on from elsewhere keep their own."),
         FieldSpec(key="hub_id", label="Hub QWK ID", render=lambda d: d["hub_id"] or "(none: this BBS is the hub)",
                   prompt=_optional_text_field("hub_id"), section="Hub",
-                  brief="The hub's QWK ID (Vertrauen: VERT); empty when this BBS is the top hub"),
+                  brief="The hub's QWK ID (Vertrauen: VERT); empty when this BBS is the top hub",
+                  help="It names the packets: VERT.QWK from the hub, VERT.REP to it. Empty: this BBS is the "
+                       "network's top hub, calls no one, and only serves nodes."),
         FieldSpec(key="host", label="Host", render=lambda d: d["host"] or "(not set)", prompt=text_field("host"),
-                  section="Hub", brief="Where the hub answers (vert.synchro.net)"),
+                  section="Hub", brief="Where the hub answers (vert.synchro.net)",
+                  help="A host name or address, without a path; the port goes under Port."),
         FieldSpec(key="transport", label="Transport", render=lambda d: _TRANSPORT_LABELS[d["transport"]],
                   prompt=choice_field("transport", transports), step=choice_step("transport", transports),
                   section="Hub", brief="How to reach the hub",
                   help="HTTPS is what Synchronet's qnet-http calls the hub's web server with, and keeps the "
-                       "password private. FTP is qnet-ftp's way, passive only; FTPS adds TLS to it."),
+                       "password private. FTP is qnet-ftp's way, passive only; FTPS adds TLS to it. HTTP and "
+                       "FTP send the password readable."),
         FieldSpec(key="port", label="Port",
                   render=lambda d: str(d["port"]) if d["port"] else f"{DEFAULT_PORTS[d['transport']]} (usual)",
                   prompt=_int_field("port", "Port (0 for the usual one)"), section="Hub",
-                  brief="0 uses the transport's usual port"),
+                  brief="0 uses the transport's usual port",
+                  help="0 follows the transport: 443 for HTTPS, 80 for HTTP, 21 for FTP and FTPS."),
         FieldSpec(key="password", label="Password", render=lambda d: "set" if d["password"] else "(not set)",
                   prompt=_secret_field("password", "Password"), section="Hub",
-                  brief="Of this BBS's account at the hub"),
+                  brief="Of this BBS's account at the hub",
+                  help="Up to 64 characters, stored here as typed so the mailer can log in."),
         FieldSpec(key="poll_minutes", label="Poll every", render=lambda d: f"{d['poll_minutes']} minutes",
                   prompt=_int_field("poll_minutes", "Minutes"), section="Hub",
                   brief="How often to call; DOVE-Net asks for about four times a day",
-                  help="Posts written here also go up within a quarter of an hour of being written."),
+                  help="15 to 1440 minutes. Posts written here also go up within a quarter of an hour; a "
+                       "failed call is tried again after 1, 2, 4 ... minutes."),
         FieldSpec(key="serve_nodes", label="Serve nodes", render=lambda d: "yes" if d["serve_nodes"] else "no",
                   prompt=bool_field("serve_nodes"), step=bool_step("serve_nodes"), section="Hub for other systems",
                   brief="Let node accounts call this BBS for this network's packets",
                   help="Nodes call this BBS's web listener at /qwk.ssjs, the way Synchronet's qnet-http does. "
-                       "Add them under [N]odes."),
+                       "Add them under [N]odes. Off: every node's login is refused."),
     ]
 
     async def save(draft: dict) -> QwknetNetwork:
@@ -355,6 +371,10 @@ async def qwknet_conferences_screen(session: Session, lane: DatabaseLane, actor:
             preamble=("Pick a board to give it a conference number (2001 for DOVE-Net's General, for example). "
                       "A board carries one conference of one network; an empty number makes it local again."),
             refresh=_load, start_stable_id=start,
+            help_about=("The boards that can carry one of this network's conferences: local boards, and those "
+                        "carrying one of its conferences already. Picking a board asks for its number; an "
+                        "empty line makes it local again and keeps its posts. Messages held for a conference "
+                        "before it was mapped need Re-toss under Held."),
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             collapsed=chrome.collapsed, accent_color=chrome.accent_color, header_color=chrome.header_color,
@@ -445,6 +465,10 @@ async def qwknet_held_screen(session: Session, lane: DatabaseLane, actor: User, 
         live_nav=[MenuEntry(label=menu_key("R", "e-toss"), brief="Toss again, once a board carries it"),
                   MenuEntry(label=menu_key("D", "elete"), brief="Drop these held messages")],
         live_label=lambda: status or "Held for 30 days, the newest 2,000 messages",
+        help_about=("Messages for conferences no board carries, per conference, with why they were held, and "
+                    "packets that could not be read. The newest 2,000 messages per network are kept, for 30 "
+                    "days. Re-toss posts a conference's messages once a board carries it; a packet that could "
+                    "not be read can only be deleted."),
         description_level=await lane.run(menu_description_level, actor),
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         collapsed=chrome.collapsed, accent_color=chrome.accent_color, header_color=chrome.header_color,
@@ -511,6 +535,10 @@ async def qwknet_nodes_screen(session: Session, lane: DatabaseLane, actor: User,
             preamble=preamble, refresh=_load, on_create=_create, item_keys={"d": _delete},
             live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a node account")],
             live_label=lambda: status or "Systems this BBS serves as a hub",
+            help_about=("The node accounts this BBS serves as a hub on this network: on or off, posts waiting "
+                        "for each and its last call. Picking one edits it. A node gets what was posted after "
+                        "its account was made, never its own posts back, and only while the network is on and "
+                        "serves nodes."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -556,31 +584,44 @@ async def edit_node(session: Session, lane: DatabaseLane, actor: User, network: 
                      "keeps them once saved.",
             live_label=lambda: f"{len(ticks)} ticked",
             on_toggle=toggle,
+            help_about=("The conferences mapped on this network. The node's packets carry only the ticked ones. "
+                        "Ticks change only the account's draft; its Save keeps them."),
         )
 
     fields = [
         FieldSpec(key="qwk_id", label="QWK ID", render=lambda d: d["qwk_id"] or "(not set)",
                   prompt=text_field("qwk_id", required=True), section="Node",
-                  brief="The node's QWK ID: its login here"),
+                  brief="The node's QWK ID: its login here",
+                  help="2-8 letters and digits, starting with a letter: the user name the node logs in with, "
+                       "and how routes name it. Not this BBS's own ID or the hub's."),
         FieldSpec(key="name", label="Name", render=lambda d: d["name"] or "(none)",
-                  prompt=_optional_text_field("name"), section="Node", brief="A note on whose system it is"),
+                  prompt=_optional_text_field("name"), section="Node", brief="A note on whose system it is",
+                  help="Up to 40 characters, shown only in the node list here."),
         FieldSpec(key="enabled", label="Enabled", render=lambda d: "yes" if d["enabled"] else "no",
                   prompt=bool_field("enabled"), step=bool_step("enabled"), section="Node",
-                  brief="Off: its logins are refused"),
+                  brief="Off: its logins are refused",
+                  help="Off refuses its logins; what waits for it keeps waiting. The network's Enabled and "
+                       "Serve nodes must be on too."),
         FieldSpec(key="password", label="Password",
                   render=lambda d: ("new one typed" if d["password"] else
                                     "(unchanged)" if existing is not None else "(not set)"),
                   prompt=_secret_field("password", "Password", clears=False), section="Node",
-                  brief="Its login password; only a hash is kept"),
+                  brief="Its login password; only a hash is kept",
+                  help="At least 6 characters, typed unseen. Only its hash is kept, so it can't be shown again; "
+                       "an empty line keeps the current one."),
         FieldSpec(key="conferences", label="Conferences",
                   render=lambda d: (", ".join(str(n) for n in sorted(d["conferences"])) or "(none)"),
-                  prompt=_pick_conferences, section="Packets", brief="The conferences its packets carry"),
+                  prompt=_pick_conferences, section="Packets", brief="The conferences its packets carry",
+                  help="A new account starts with every conference mapped on the network. Its packets carry "
+                       "only the ticked ones."),
         FieldSpec(key="packet_messages", label="Packet size", render=lambda d: f"up to {d['packet_messages']} messages",
                   prompt=_int_field("packet_messages", "Messages"), section="Packets",
-                  brief="The most messages one packet holds; the rest wait"),
+                  brief="The most messages one packet holds; the rest wait",
+                  help="50 to 10,000. What doesn't fit waits for its next fetch."),
         FieldSpec(key="rep_kib", label="Reply packet limit", render=lambda d: f"{d['rep_kib']} KiB",
                   prompt=_int_field("rep_kib", "KiB"), section="Packets",
-                  brief="The largest reply packet it may upload"),
+                  brief="The largest reply packet it may upload",
+                  help="64 to 32,768 KiB. A larger upload is refused, and the node is told the limit."),
     ]
 
     async def save(draft: dict) -> QwknetNode:

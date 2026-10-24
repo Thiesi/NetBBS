@@ -150,36 +150,50 @@ def freq_fields() -> list[FieldSpec]:
                   render=lambda d: "secure links only" if d["freq_secure_only"] else "anyone",
                   prompt=bool_field("freq_secure_only"), step=bool_step("freq_secure_only"), section=section,
                   brief="Secure links only (a session password), or any node",
-                  help="A secure link proves itself with its session password: your hub, today. Anyone can "
-                       "claim any address, so with anyone the limits are all that hold."),
+                  help="A secure link proves itself with its session password: your hub, and your points "
+                       "and downlinks. Anyone can claim any address, so with anyone the limits are all that "
+                       "hold."),
         FieldSpec(key="freq_session_files", label="Files per call",
                   render=lambda d: str(d["freq_session_files"]),
                   prompt=_int_field("freq_session_files", "Files per call"), section=section,
-                  brief=f"The most files one call gets ({SESSION_FILES_RANGE[0]}-{SESSION_FILES_RANGE[1]})"),
+                  brief=f"The most files one call gets ({SESSION_FILES_RANGE[0]}-{SESSION_FILES_RANGE[1]})",
+                  help="Counted over every request in one call. Files past it are not sent, and the log "
+                       "names them. All four limits hold at once, so the smallest wins: they are not checked "
+                       "against each other."),
         FieldSpec(key="freq_session_mib", label="MiB per call",
                   render=lambda d: f"{d['freq_session_mib']} MiB",
                   prompt=_int_field("freq_session_mib", "MiB per call"), section=section,
-                  brief=f"The most one call gets ({SESSION_MIB_RANGE[0]}-{SESSION_MIB_RANGE[1]} MiB)"),
+                  brief=f"The most one call gets ({SESSION_MIB_RANGE[0]}-{SESSION_MIB_RANGE[1]} MiB)",
+                  help="A file that would take the call past it is not sent; a smaller one after it still "
+                       "may be."),
         FieldSpec(key="freq_day_files", label="Files per node a day",
                   render=lambda d: str(d["freq_day_files"]),
                   prompt=_int_field("freq_day_files", "Files per node a day"), section=section,
-                  brief=f"The most files one node gets in a day ({DAY_FILES_RANGE[0]}-{DAY_FILES_RANGE[1]})"),
+                  brief=f"The most files one node gets in a day ({DAY_FILES_RANGE[0]}-{DAY_FILES_RANGE[1]})",
+                  help="Over the last 24 hours, per address the caller gives. Whatever the limits say, a "
+                       "network sends at most 1,000 files and 1 GiB a day by file request."),
         FieldSpec(key="freq_day_mib", label="MiB per node a day",
                   render=lambda d: f"{d['freq_day_mib']} MiB",
                   prompt=_int_field("freq_day_mib", "MiB per node a day"), section=section,
-                  brief=f"The most one node gets in a day ({DAY_MIB_RANGE[0]}-{DAY_MIB_RANGE[1]} MiB)"),
+                  brief=f"The most one node gets in a day ({DAY_MIB_RANGE[0]}-{DAY_MIB_RANGE[1]} MiB)",
+                  help="Over the last 24 hours, per address the caller gives."),
         FieldSpec(key="freq_about_path", label="ABOUT file",
                   render=lambda d: d["freq_about_path"] or "(none: ABOUT is not served)",
                   prompt=_optional_text_field("freq_about_path"), section=section,
-                  brief="The file a request for ABOUT gets, on this machine"),
+                  brief="The file a request for ABOUT gets, on this machine",
+                  help="A path on this machine. With Answer requests on, saving checks it is a file; a symbolic link "
+                       "is not served. Empty: ABOUT is answered as not found."),
         FieldSpec(key="freq_serve_nodelist", label="Serve NODELIST",
                   render=lambda d: "yes" if d["freq_serve_nodelist"] else "no",
                   prompt=bool_field("freq_serve_nodelist"), step=bool_step("freq_serve_nodelist"),
-                  section=section, brief="Answer a request for NODELIST"),
+                  section=section, brief="Answer a request for NODELIST",
+                  help="Off: NODELIST is answered as not found, even with a NODELIST file set."),
         FieldSpec(key="freq_nodelist_path", label="NODELIST file",
                   render=lambda d: d["freq_nodelist_path"] or "(the nodelist as imported here)",
                   prompt=_optional_text_field("freq_nodelist_path"), section=section,
-                  brief="The file NODELIST gets; empty for the network's nodelist as imported"),
+                  brief="The file NODELIST gets; empty for the network's nodelist as imported",
+                  help="A path on this machine, checked like the ABOUT file. Empty: the list last imported here, under "
+                       "its List name and day, if there is one."),
     ]
 
 

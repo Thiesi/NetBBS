@@ -1190,8 +1190,9 @@ def test_user_detail_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     session = FakeSession(["u", "u", "/", "alice", "CTRL+H", " ", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "moderator/sysop capability" in text.lower()
-    assert "designed to extend to remote nodes/traffic later" in text
+    # One row per key the screen offers, not every field's full help.
+    assert "Previews gains and losses, then applies" in text
+    assert "Blocklist: refused at login even if enabled" in text
 
 
 def test_user_detail_ctrl_h_narrows_to_the_highlighted_field(db, lane, sysop):
@@ -1201,7 +1202,8 @@ def test_user_detail_ctrl_h_narrows_to_the_highlighted_field(db, lane, sysop):
     text = _visible(_written_text(session))
     # Down lands on "l" (Level, the first of _USER_DETAIL_FIELD_ORDER) --
     # only its own help should show, not every field's.
-    assert "the account's permission level" in text.lower()
+    assert "decides which boards, file areas" in text.lower()
+    assert "previews gains and losses" not in text.lower()  # the whole screen's key list
     assert "moderator scope tiers" not in text.lower()  # that's "i" (Can verify identity)'s own help
 
 
@@ -10513,7 +10515,7 @@ def test_sysop_can_stop_sharing_with_a_recipient_and_is_told_what_that_does(db, 
     assert list_attestation_recipients(db) == []
     text = " ".join(_visible(_written_text(session)).split())
     assert "Attestation recipient removed and audited." in text
-    assert "What the node already holds stays with it until each attestation expires" in text
+    assert "a node running NetBBS then forgets everything it holds from this one" in text
 
 
 def test_declining_the_confirm_keeps_the_recipient(db, lane, sysop):

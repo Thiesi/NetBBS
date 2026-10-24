@@ -83,6 +83,7 @@ from netbbs.timeutil import (
     format_for_display,
     resolve_display_preferences,
 )
+from netbbs.net.admin_trust import _help_entries
 from netbbs.net.admin_ui import (
     _announce,
     _announce_line,
@@ -268,7 +269,7 @@ def _load_pending_items(
 
 async def _pick_pending_item(
     session: Session, lane: DatabaseLane, actor: User, loaded: tuple[list[_PendingItem], bool], *,
-    title: str, empty_message: str, node_wide: bool = False,
+    title: str, empty_message: str, what: str, node_wide: bool = False,
 ) -> _PendingItem | None:
     items, more = loaded
     return await pick_item(
@@ -289,6 +290,10 @@ async def _pick_pending_item(
             [item.where, item.kind, item.author, item.when] if node_wide else [item.kind, item.author, item.when]
         ),
         title=title, own=True,
+        help_about=(
+            f"{what} waiting for approval, oldest first; callers see none of them yet. Picking one "
+            "shows it in full, with approve and reject."
+        ),
         empty_message=empty_message,
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=await lane.run(unicode_style_enabled, actor),
@@ -310,7 +315,7 @@ async def _pending_review_screen(
         loaded = await lane.run(_load_pending_items, actor)
         selected = await _pick_pending_item(
             session, lane, actor, loaded, title="Pending review", empty_message="Nothing awaits review.",
-            node_wide=True,
+            what="Posts, edits and uploads on every board and file area you moderate", node_wide=True,
         )
         if selected is None:
             return
@@ -340,6 +345,7 @@ async def _pending_posts_screen(
         loaded = await lane.run(lambda db: _load_pending_items(db, actor, boards=[board]))
         selected = await _pick_pending_item(
             session, lane, actor, loaded, title=f"Pending posts in {board.name!r}", empty_message="No pending posts.",
+            what="Posts and edits on this board",
         )
         if selected is None:
             return
@@ -467,9 +473,15 @@ async def _post_action_screen(
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
             help_title="Held post help",
             help_about=(
-                "A post waiting for moderation. Read it in full, then approve it so readers see it, or "
-                "reject it."
+                "A post or edit held for moderation, shown as readers will see it; for an edit, the "
+                "current text follows."
             ),
+            help_entries=_help_entries(actions, {
+                "a": "Publish it; on to Link, FTN, QWKnet if carried",
+                "r": "Delete it; the author is mailed your reason",
+                "p": "Keep it at the top of the board, or not",
+                "x": "Never expire it, or let it expire again",
+            }),
         )
         if choice == "b":
             return
@@ -520,6 +532,7 @@ async def _pending_files_screen(
         loaded = await lane.run(lambda db: _load_pending_items(db, actor, areas=[area]))
         selected = await _pick_pending_item(
             session, lane, actor, loaded, title=f"Pending files in {area.name!r}", empty_message="No pending files.",
+            what="Uploads to this file area",
         )
         if selected is None:
             return
@@ -717,7 +730,8 @@ async def _file_action_screen(
             await show_menu_help(
                 session, "Pending file help", _file_action_entries(can_download=can_download, can_flag=can_flag),
                 about="An upload waiting for approval. Callers see it in the area only once it is "
-                      "approved; rejecting deletes it.",
+                      "approved, which also offers it to Link nodes if the area is Linked. Rejecting "
+                      "removes it from the area for good.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw()
