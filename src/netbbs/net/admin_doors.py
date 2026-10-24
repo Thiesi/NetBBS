@@ -213,8 +213,11 @@ async def _door_menu(session: Session, lane: DatabaseLane, actor: User, *, door_
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Doors help", _DOOR_MENU,
-                about="Doors are games and programs callers run from the BBS. Register one by hand, "
-                      "from NetBBS's own gallery, or from a script already on this node.",
+                about="Doors are games and programs callers run from Games on the main menu. Create "
+                      "registers any program by its path; Gallery registers a bundled game; From disk "
+                      "registers a script in this node's door directory, which Upload fills from your "
+                      "computer. List opens a door to edit it, set up its compatibility, its outbound "
+                      "posting or its companion service, or delete it.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_door_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -284,10 +287,9 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             prompt=text_field("executable_path", required=True),
             brief="Path to the program to launch",
             help=(
-                "The full filesystem path to the door's own executable. Runs as the same OS "
-                "user as NetBBS itself, with CPU/memory/process-count limits enforced "
-                "regardless of what the door does -- see the operator guide for the full "
-                "sandbox model."
+                "The full path to the program, from the next launch. It runs as the NetBBS OS user, "
+                "not in a security sandbox, under the CPU, memory and process limits set under "
+                "Compatibility; see docs/NetBBS-door-guide.md."
             ),
         ),
         FieldSpec(
@@ -296,7 +298,10 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             render=lambda d: d.get("args_line") or "(none)",
             prompt=text_field("args_line"),
             brief="Fixed command-line arguments",
-            help="Fixed arguments always passed to the door, space-separated on one line. Leave blank for none.",
+            help=(
+                "Fixed arguments passed on every launch, split like a shell line (quote one with "
+                "spaces) but never run through a shell. Blank: none."
+            ),
         ),
         FieldSpec(
             key="min_play_level", label="Min play level",
@@ -304,7 +309,11 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             render=lambda d: _plain_level_label(levels, d.get("min_play_level")),
             prompt=_int_field("min_play_level", "Minimum play level"),
             brief="Level required to launch it",
-            help="The permission level a caller needs to launch/play this door.",
+            help=(
+                "The level a caller needs to see and play this door; Games appears on a caller's main "
+                "menu once a door is open to them. Above 0, nothing the door posts or says in chat "
+                "reaches anyone, and bots cannot announce it."
+            ),
         ),
         FieldSpec(
             key="community_id", label="Community",
@@ -312,7 +321,10 @@ def _door_field_specs(*, actor: User, levels: LevelContext | None = None) -> lis
             render=lambda d: d.get("community_id_label") or "(none)",
             prompt=_community_field(actor=actor),
             brief="Where it's offered from",
-            help="The Community this door is offered from, if any. 'none' keeps it outside every Community.",
+            help=(
+                "The Community that lists it under Topics. 'none': outside every Community; it is in "
+                "Games either way."
+            ),
         ),
         FieldSpec(
             key="pinned", label="Pinned",
@@ -564,7 +576,9 @@ async def _resolve_door_name_collision(
                 [MenuEntry(label=menu_key("N", "ew instance under a different name"),
                            brief="Register it again, renamed"),
                  MenuEntry(label=menu_key("E", "dit the existing one"), brief="Open the door already registered")],
-                about="Every door needs a name of its own, and this one is taken. Back registers nothing.",
+                about="Every door needs a name of its own, and this one is taken. New instance "
+                      "registers a second door for the same program under a name you type; Edit "
+                      "opens the one already registered. Back registers nothing.",
                 header_color=await lane.run(effective_header_color_256),
                 unicode_style=await lane.run(unicode_style_enabled, actor),
             )
@@ -659,6 +673,10 @@ async def _door_gallery_screen(
             stable_id_of=lambda pair: pair[0],
             description_of=lambda pair: pair[1][0].description,
             title="Door gallery",
+            help_about=(
+                "NetBBS's bundled games. Picking one shows what it is and opens a door draft for it; "
+                'nothing is registered until you save.'
+            ),
             empty_message="No bundled doors found.",
             description_level=description_level,
             redraw_in_place=redraw_in_place,
@@ -757,6 +775,10 @@ async def _door_filesystem_screen(
             name_of=lambda pair: pair[1].name,
             stable_id_of=lambda pair: pair[0],
             title="Doors -- your own scripts",
+            help_about=(
+                "Files in this node's door directory, which Upload fills. Picking one opens a door draft "
+                "that runs it with this node's Python; nothing is registered until you save."
+            ),
             empty_message="No files found.",
             description_level=description_level,
             redraw_in_place=redraw_in_place,
@@ -799,6 +821,10 @@ async def _list_doors_screen(session: Session, lane: DatabaseLane, actor: User, 
         stable_id_of=lambda d: d.id,
         description_of=lambda d: d.description,
         title="Doors", own=True,
+        help_about=(
+            'Every registered door. Pick one to edit it, set up its compatibility or outbound '
+            'posting, run its companion service, or delete it.'
+        ),
         empty_message="No doors yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=await lane.run(unicode_style_enabled, actor),
@@ -864,6 +890,20 @@ def _door_channel_summary(db: Database, target) -> str:
     by = f" by {target.suspended_by}" if target.suspended_by else ""
     until = f" until {format_for_display(target.suspended_until, db)}" if target.suspended_until else ""
     return f"{name} (muted{by}{until})"
+
+
+#: The Outbound screen's keys as its help describes them, by their menu brief:
+#: longer than a menu row holds, so kept out of the entries the menu draws.
+_OUTBOUND_HELP = {
+    "Whether this door may post at all": "Off asks, then frees its name and allowlist",
+    "Take responsibility for its posts": "Re-own it after its enabler was deleted",
+    "Let it post to one more board": "A moderated board holds its posts",
+    "Posts per hour": "Posts an hour, 1-240, over all its boards",
+    "Let it chat in one more channel": "Linked ones ask first: lines can't be unsent",
+    "Chat lines per hour": "Chat lines an hour, 1-240, over all channels",
+    "Whether it may report game events": "For bots that have it as an event source",
+    "Events per hour": "Game events an hour, 1-240",
+}
 
 
 @located("Outbound")
@@ -1134,10 +1174,12 @@ async def _door_outbound_screen(session: Session, lane: DatabaseLane, actor: Use
                                else "That is not a whole number.")
         elif choice == HELP_KEY:
             await show_menu_help(
-                session, "Outbound help", options,
-                about="Whether this door may post to message boards and speak in chat channels, and "
-                      "where, and whether it may report game events for a bot to announce. It can only "
-                      "post where you allow it, never read the BBS or send mail.",
+                session, "Outbound help",
+                [MenuEntry(label=o.label, brief=o.brief, detailed=_OUTBOUND_HELP.get(o.brief)) for o in options],
+                about="Whether this door may post to boards and speak in channels, where, and whether "
+                      "it may report game events for a bot to announce; it never reads the BBS or "
+                      "sends mail. Switched on, it posts under a name of its own and you answer for it. "
+                      "Every change applies to its next post or line.",
                 header_color=header_color, unicode_style=unicode_style,
             )
         else:
@@ -1502,6 +1544,15 @@ async def _war_dialer_competition_flow(
                   "the world's own audit records the change.", error=True)
 
 
+#: The world screen's keys as its help describes them.
+_WAR_DIALER_WORLD_HELP = {
+    "m": "Close to new callers, or reopen; refused while anyone plays",
+    "n": "Settle ended seasons, start the next; receipts kept",
+    "c": "As Next season, and clear every receipt",
+    "r": "Read the world again",
+}
+
+
 async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: User, door: Door, *,
                                    backup_identity_dir: Path | None = None) -> None:
     """A War Dialer door's world: what `war_dialer_admin status` shows, the
@@ -1579,9 +1630,13 @@ async def _war_dialer_world_screen(session: Session, lane: DatabaseLane, actor: 
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="War Dialer world help",
             help_about=(
-                "The state of this War Dialer world. Maintenance closes it to new callers; a new season or a "
-                "competition reset needs maintenance on and asks for a reason."
+                "The world file this door plays, its season and players, and the latest SysOp operations. "
+                "Next season and Competition reset keep player identities, need maintenance on and a usable "
+                "backup destination, take a verified node backup first, ask for a reason and the world's "
+                "filename, and leave maintenance on."
             ),
+            help_entries=[MenuEntry(label=label, brief=_WAR_DIALER_WORLD_HELP[key])
+                          for key, label in actions if key in _WAR_DIALER_WORLD_HELP],
         )
 
         if choice == "b":

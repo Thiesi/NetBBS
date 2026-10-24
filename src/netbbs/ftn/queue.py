@@ -324,9 +324,10 @@ def held_tic(db: Database, held_id: int) -> bytes | None:
     return bytes(row["tic"]) if row is not None and row["tic"] is not None else None
 
 
-def delete_held(db: Database, held_id: int) -> None:
+def delete_held(db: Database, held_id: int, *, commit: bool = True) -> None:
     db.connection.execute("DELETE FROM ftn_held_inbound WHERE id = ?", (held_id,))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 @dataclass(frozen=True)
@@ -483,12 +484,13 @@ def take_bad_echo(db: Database, message_id: int) -> tuple[str, bytes] | None:
     return row["remote_address"], bytes(row["packet"])
 
 
-def delete_bad_echo(db: Database, network_id: int, tag: str) -> int:
+def delete_bad_echo(db: Database, network_id: int, tag: str, *, commit: bool = True) -> int:
     """Drop a tag's held messages; returns how many."""
     cursor = db.connection.execute(
         "DELETE FROM ftn_bad_echoes WHERE network_id = ? AND tag = ?", (network_id, tag.upper())
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return cursor.rowcount
 
 

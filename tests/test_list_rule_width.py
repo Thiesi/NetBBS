@@ -169,6 +169,46 @@ def test_the_file_lists_rules_line_up_with_its_rows(tmp_path, width, unicode_sty
     assert rules[0].index(" ", 1) == rows[1].index("f1.txt") - 1
 
 
+@pytest.mark.parametrize("unicode_style", [True, False])
+@pytest.mark.parametrize("width", [50, 59])
+def test_a_narrow_file_lists_rows_fit_the_terminal(tmp_path, width, unicode_style):
+    """Below the table width the files are prose rows (issue #1452): no row
+    is wider than `list_width`, where the columns were 54 wide at 50 and
+    wrapped. The labelled Pinned rule stands where the column heading was,
+    and the rules are as wide as the rows may be, as a narrow board's are."""
+    path = tmp_path / "files.db"
+    db = Database(path)
+    mod = create_user(db, "mod", password="hunter2", user_level=10)
+    set_unicode_style_enabled(db, mod, unicode_style)
+    area = create_file_area(db, "downloads", creator=mod)
+    grant_permissions(
+        db, mod, object_type="file_area", object_id=area.id, permissions=BoardPermission.EDIT, granted_by=mod
+    )
+    names = ["f0.txt", "copperplate-minuscules-and-majuscules-week1.png", "f2.txt"]
+    files = [upload_file(db, area, mod, name, f"payload {i}".encode()) for i, name in enumerate(names)]
+    set_file_pinned(db, files[0], True, changed_by=mod)
+    lane = DatabaseLane(path)
+    try:
+        session = FileSession(["b"], width=width)
+        asyncio.run(_show_area(session, lane, area, mod))
+    finally:
+        lane.close()
+        db.close()
+
+    lines = _lines("".join(session.written))
+    assert not any("Filename" in line and "Uploader" in line for line in lines)
+    rows = [line for line in lines if re.search(r"\[0\d\] ", line)]
+    rules = _list_rules(lines)
+    assert len(rows) == 3
+    # The labelled Pinned rule and the one under the pins.
+    assert len(rules) == 2 and "Pinned" in rules[0]
+    assert {display_width(line) for line in rules} == {list_width(width)}
+    assert all(display_width(line) <= list_width(width) for line in rows)
+    # The filename keeps its end; the size follows it.
+    assert "week1.png -- " in rows[1]
+    assert rows[0].startswith(" [01] pin f0.txt -- ") and rows[0].endswith(", mod")
+
+
 @pytest.mark.parametrize("width", [80, 132, 40, 1])
 def test_list_rule_is_list_width_wide(width):
     assert list_width(width) == max(1, width - 1)
