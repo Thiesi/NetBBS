@@ -2832,7 +2832,7 @@ def test_create_board_ctrl_h_shows_real_help_text_for_every_field(db, lane, syso
     text = _written_text(session)
     assert "No help is available" not in text
     assert "posts older than this expire" in text.lower()
-    assert "inherit its default read/write/age/name-requirement" in text
+    assert "take that Community's defaults" in text
 
 
 def test_create_board_can_be_cancelled_without_creating_anything(db, lane, sysop):
@@ -4227,7 +4227,7 @@ def test_create_door_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
-    assert "cpu/memory/process-count limits" in text.lower()
+    assert "cpu, memory and process" in text.lower()
 
 
 def test_create_door_can_be_cancelled_without_registering_anything(db, lane, sysop):
@@ -4280,7 +4280,7 @@ def test_create_channel_ctrl_h_shows_real_help_text_for_every_field(db, lane, sy
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
-    assert "never inherits from its community" in text.lower()
+    assert "see and join this channel. never taken from" in text.lower()
     assert "invite-only" in text.lower() or "invite from an existing member" in text.lower()
 
 
@@ -4411,7 +4411,7 @@ def test_create_community_ctrl_h_shows_real_help_text_for_every_field(db, lane, 
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
-    assert "delists this community from ordinary browsing" in text.lower()
+    assert "takes it off topics for everyone but sysops" in text.lower()
 
 
 def test_create_community_flow(db, lane, sysop):
@@ -5094,7 +5094,7 @@ def test_welcome_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(banner_path(db)), session.terminal_width - 4)
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 def test_welcome_banner_ctrl_h_keeps_every_piece_of_a_long_path_visible(tmp_path):
@@ -5129,7 +5129,7 @@ def test_banners_and_mastheads_hub_ctrl_h_shows_generic_help(db, lane, sysop):
     session = FakeSession(["s", "m", "\x08", "x", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "press Ctrl-H on that screen" in text
+    assert "on its screen says where it" in text
 
 
 def test_banners_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
@@ -5138,7 +5138,7 @@ def test_banners_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
     session = FakeSession(["s", "m", "s", "\x08", "x", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "press Ctrl-H on that screen" in text
+    assert "on its screen says where it" in text
 
 
 def test_mastheads_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
@@ -5147,7 +5147,7 @@ def test_mastheads_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
     session = FakeSession(["s", "m", "m", "\x08", "x", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
-    assert "press Ctrl-H on that screen" in text
+    assert "on its screen says where it" in text
 
 
 # -- main-menu masthead (issue #161) ---------------------------------------
@@ -5637,7 +5637,7 @@ def test_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(main_menu_banner_path(db)), session.terminal_width - 4)
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 # -- door gallery (issue #172 follow-up) -------------------------------------
@@ -6249,7 +6249,7 @@ def test_logoff_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(logoff_banner_path(db)), session.terminal_width - 4)
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 # -- new-account banner (before signup) ----------------------------------
@@ -6570,7 +6570,7 @@ def test_board_list_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, syso
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(board_list_banner_path(db)), session.terminal_width - 4)
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 # -- file area masthead ----------------------------------------------------
@@ -6743,7 +6743,7 @@ def test_chat_channel_picker_masthead_ctrl_h_shows_where_to_place_the_file(db, l
     _assert_wrapped_token_visible(
         text, str(chat_channel_picker_banner_path(db)), session.terminal_width - 4
     )
-    assert "gallery" in text.lower()
+    assert "preview a sample" in text.lower()
 
 
 def test_theme_colors_menu_shows_default_status_for_all_three_slots(db, lane, sysop):
@@ -8420,6 +8420,83 @@ def test_outbox_cancels_a_retrying_item(db, lane, sysop):
     assert "[C]ancel (stop retrying) [B]ack" in text
     assert "Cancelled -- status is now 'cancelled'." in text
     assert [entry.status for entry in list_work_items(db)] == ["cancelled"]
+
+
+def _cancelled_work_item(db, sysop):
+    from netbbs.link.work_items import KIND_LINK_MAIL_DELIVERY, cancel_work_item, enqueue_work_item_without_commit, record_failure
+
+    item = enqueue_work_item_without_commit(db, kind=KIND_LINK_MAIL_DELIVERY, reference_id="msg1", target_fingerprint="fp1")
+    record_failure(db, item, error="connection refused")
+    return cancel_work_item(db, item.id, cancelled_by=sysop)
+
+
+def test_outbox_replays_a_cancelled_item(db, lane, sysop):
+    # Issue #1529: a SysOp who cancelled an item by mistake gets it back
+    # from the console. The outcome shows on the Outbox's next redraw and
+    # the replay is audited like any other.
+    from netbbs.link.work_items import list_work_items
+    from netbbs.moderation.log import list_actions_for_object
+
+    item = _cancelled_work_item(db, sysop)
+    session = FakeSession(["o", "o", "i", "0", "1", "r", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Cancelled: 1" in text
+    assert "[I]tems needing attention" in text
+    assert "cancelled, 1 attempt(s)" in text  # the picker row
+    assert "[R]eplay now [D]elete [B]ack" in text
+    assert "[C]ancel (stop retrying)" not in text
+    assert "Replayed -- status is now 'pending'." in text
+    assert "Press any key" not in text
+    assert [entry.status for entry in list_work_items(db)] == ["pending"]
+    assert [e.action for e in list_actions_for_object(db, "link_work_item", item.id)][-1] == "replay_link_work_item"
+
+
+def test_outbox_deletes_a_cancelled_item(db, lane, sysop):
+    from netbbs.link.work_items import list_work_items
+
+    _cancelled_work_item(db, sysop)
+    session = FakeSession(["o", "o", "i", "0", "1", "d", "y", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Delete this work item for good? It is never sent." in text
+    assert "Deleted the link_mail_delivery to " in text
+    assert list_work_items(db) == []
+
+
+def test_outbox_cancelled_item_help_names_replay_and_delete(db, lane, sysop):
+    from netbbs.net.char_input import HELP_KEY
+
+    _cancelled_work_item(db, sysop)
+    session = FakeSession(["o", "o", "i", "0", "1", HELP_KEY, " ", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Retry from scratch" in text
+    assert "Forget it; it is never sent" in text
+    assert "Stop retrying it for good" not in text
+
+
+def test_outbox_offers_no_items_for_pending_or_pushed_work(db, lane, sysop):
+    # Pending goes out on its own next sync pass and pushed already went:
+    # neither is listed, so neither can be replayed from the console.
+    from netbbs.link.work_items import KIND_LINK_MAIL_ACK, KIND_LINK_MAIL_DELIVERY, enqueue_work_item_without_commit, record_success
+
+    enqueue_work_item_without_commit(db, kind=KIND_LINK_MAIL_DELIVERY, reference_id="msg1", target_fingerprint="fp1")
+    pushed = enqueue_work_item_without_commit(db, kind=KIND_LINK_MAIL_ACK, reference_id="ack1", target_fingerprint="fp1")
+    record_success(db, pushed)
+
+    session = FakeSession(["o", "o", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Pending: 1" in text
+    assert "Pushed: 1" in text
+    assert "Nothing currently retrying, dead-lettered or cancelled." in text
+    assert "[I]tems needing attention" not in text
+    assert "[R]eplay now" not in text
 
 
 # -- Link status (issue #60, narrow scope) -----------------------------------

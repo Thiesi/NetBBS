@@ -38,7 +38,7 @@ from netbbs.ftn.freq import (
 )
 from netbbs.ftn.networks import FtnNetwork, get_network
 from netbbs.ftn.queue import FtnQueueFullError
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.net.admin_fields import _int_field, _optional_text_field
 from netbbs.net.admin_ui import _announce, _announce_line, _load_chrome, edit_resource_draft
 from netbbs.net.menu_description_preference import menu_description_level
@@ -80,13 +80,14 @@ async def request_files(session: Session, lane: DatabaseLane, actor: User, netwo
             current = get_network(db, network.id)
             if current is None:
                 raise FreqError("That network no longer exists.")
+            def _audit(db: Database, record) -> None:  # with the request, in one commit (issue #1515)
+                record_action_without_commit(db, actor=actor, action="ftn_file_request",
+                                             detail=f"{current.name}: requested {record.names} from {record.node}")
+
             try:
-                record = queue_request(db, current, node, lines)
+                return queue_request(db, current, node, lines, audit=_audit)
             except FtnQueueFullError as exc:
                 raise FreqError(str(exc)) from None
-            record_action(db, actor=actor, action="ftn_file_request",
-                          detail=f"{current.name}: requested {record.names} from {record.node}")
-            return record
 
         return await lane.run(_persist)
 
@@ -237,10 +238,11 @@ async def toggle_area_offer(session: Session, lane: DatabaseLane, actor: User, a
     offered = await lane.run(is_area_offered, area)
 
     def _persist(db: Database) -> str:
-        set_area_offered(db, area, not offered)
         outcome = (f"{area.name} is no longer offered to file requests." if offered else
                    f"{area.name} is offered to file requests, on every network that answers them.")
-        record_action(db, actor=actor, action="set_file_area_freq", detail=outcome)
+        with db.connection:  # the offer and its entry together (issue #1515)
+            set_area_offered(db, area, not offered, commit=False)
+            record_action_without_commit(db, actor=actor, action="set_file_area_freq", detail=outcome)
         return outcome
 
     try:

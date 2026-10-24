@@ -65,7 +65,7 @@ def test_outbox_item_picker_sits_under_the_outbox(db, lane, sysop):
         item = record_failure(db, item, error="unreachable")
     lines = _walk(lane, sysop, ["o", "o", "i", "b", "b", "b", "b"], link_context=_link_context())
     assert "NetBBS › SysOp › Operations › Outbox" in lines
-    assert "NetBBS › SysOp › Operations › Outbox › Retrying/dead-lettered work items" in lines
+    assert "NetBBS › SysOp › Operations › Outbox › Work items needing attention" in lines
 
 
 def test_a_console_shortcut_shows_the_way_it_was_taken(db, lane, sysop):

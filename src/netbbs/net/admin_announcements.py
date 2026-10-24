@@ -109,6 +109,11 @@ async def announcements_screen(session: Session, lane: DatabaseLane, actor: User
             column_values_of=lambda a: [a.recurrence.describe(), next_text.get(a.id, "")],
             description_of=lambda a: f"{a.recurrence.describe()}, saved by {a.saved_by_name or 'a deleted account'}",
             title=f"Announcements in #{sanitize_text(channel.name)}", own=True,
+            help_about=(
+                "This channel's scheduled announcements: the text, its rule and when it is next said. "
+                'Pick one to edit it. A once announcement already said stays, marked done, until you '
+                'delete it.'
+            ),
             empty_message="No announcements here. Create one to say something in this channel on a schedule.",
             refresh=refresh, on_create=create, item_keys={"d": delete_one},
             live_nav=(MenuEntry(label=menu_key("D", "elete selected"), brief="Remove this announcement"),),
@@ -216,7 +221,8 @@ async def announcement_editor(
                       help="The day a once announcement is said, as year-month-day, at most a year ahead."),
             FieldSpec("weekdays", "Weekdays (weekly)",
                       only("weekly", lambda d: ", ".join(WEEKDAY_SHORT[x] for x in d["weekdays"]) or "(none)"),
-                      pick_weekdays, brief="One or more days", section=when),
+                      pick_weekdays, brief="One or more days", section=when,
+                      help="The days a weekly announcement is said, toggled in a list; at least one."),
             FieldSpec("month_week", "Week of month (monthly)",
                       only("monthly", lambda d: MONTH_WEEK_NAMES[d["month_week"]]),
                       choice_field("month_week", list(MONTH_WEEKS)), step=choice_step("month_week", list(MONTH_WEEKS)),
@@ -224,7 +230,8 @@ async def announcement_editor(
                       help="Which of the month's weekdays: first, second, third or fourth, which every month has."),
             FieldSpec("weekday", "Weekday (monthly)", only("monthly", lambda d: WEEKDAY_NAMES[d["weekday"]]),
                       choice_field("weekday", list(range(7))), step=choice_step("weekday", list(range(7))),
-                      brief="The day of the week", section=when),
+                      brief="The day of the week", section=when,
+                      help="Which weekday a monthly announcement falls on, with Week of month."),
             FieldSpec("time", "Time", lambda d: d["time"], text_field("time"),
                       brief="24-hour, node's timezone", section=when,
                       help="HH:MM on a 24-hour clock, in the node's display timezone (Settings, Timestamp "

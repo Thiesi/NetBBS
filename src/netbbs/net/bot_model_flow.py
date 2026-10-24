@@ -92,7 +92,9 @@ async def model_editor(session, lane, actor, chrome):
         follow_mode(before, values)
 
     fields = [
-        switch("enabled", "Off by default. Each bot also needs its own conversation grant.", "Provider"),
+        switch("enabled", "Off by default. Each bot also needs its own Grant model conversation. Switching it "
+               "on, or changing the provider, mode, prior lines or logging while on, asks you to confirm "
+               "what callers will be told.", "Provider"),
         FieldSpec("mode", FIELD_LABELS["mode"], lambda d: MODE_LABELS.get(d["mode"], d["mode"]), mode_field,
                   step=mode_step,
                   help="Help desk (the default) answers from excerpts of the caller handbook and this node's facts: "
@@ -107,18 +109,29 @@ async def model_editor(session, lane, actor, chrome):
                   step=choice_step("token_parameter", ["max_completion_tokens", "max_tokens"]),
                   help="Defaults to max_tokens for Ollama. Select max_completion_tokens for current OpenAI models that require it.", section="Provider"),
         text("persona", "Baud's host-owned persona, 1-2,000 characters. No ordinary channel history is included. Help desk adds its own rules and the grounding after it.", "Privacy and access"),
-        number("context_lines", "0-20; only this caller's addressed inputs and replies in this channel. Memory only; 30-minute idle expiry and reset.", "Privacy and access"),
+        number("context_lines", "0-20; only this caller's addressed inputs and replies in this channel. Memory only; "
+               "30-minute idle expiry and reset. 0 sends no earlier lines. A budget preset sets this too.",
+               "Privacy and access"),
         switch("log_prompts", "Off by default. When on, stores each submitted input with the bounded usage ledger. Callers are told. Does not log unrelated chat or provider responses.", "Privacy and access"),
-        number("min_level", "0-255. For Link callers, this is the level asserted by their authenticated home node; it grants no other local privilege.", "Privacy and access"),
+        number("min_level", "0-255; callers below it get no model reply. For Link callers, this is the level "
+               "asserted by their authenticated home node; it grants no other local privilege.", "Privacy and access"),
         switch("allow_guests", "Off by default. Guests share their node's guest account quota and context; they are not separate authenticated people.", "Privacy and access"),
-        number("day_tokens", "1-1,000,000,000 tokens; UTC day. Includes reservations for interrupted/unmetered requests. "
+        number("day_tokens", "1-1,000,000,000 tokens; UTC day, for every bot together. A request that would pass it "
+                             "is refused and the caller told so, until the next UTC day. Includes reservations for "
+                             "interrupted/unmetered requests. "
                              f"In help desk, each request also reserves up to about {GROUNDING_BYTES:,} for the "
-                             "handbook excerpts and node facts.", "Limits"),
-        number("month_tokens", "1-10,000,000,000 tokens; UTC month. Reported usage replaces the reserved estimate.", "Limits"),
-        number("user_daily", "1-1,000, across all bot instances and channels on this node.", "Limits"),
-        number("cooldown", "0-3,600; across all bot instances and channels.", "Limits"),
-        number("channel_per_minute", "1-60; additional to each bot's normal output limit.", "Limits"),
-        number("reply_chars", "80-500. Model replies remain public and use ordinary wrapped chat output.", "Limits"),
+                             "handbook excerpts and node facts. Every Limits field is also set by Apply budget "
+                             "preset on the Chat bots list.", "Limits"),
+        number("month_tokens", "1-10,000,000,000 tokens; UTC month, refused past it like the daily budget. Reported "
+                               "usage replaces the reserved estimate.", "Limits"),
+        number("user_daily", "1-1,000 requests per caller per UTC day, across all bot instances and channels on this "
+                             "node.", "Limits"),
+        number("cooldown", "0-3,600 seconds a caller waits between requests, across all bot instances and channels. "
+                           "0: no wait.", "Limits"),
+        number("channel_per_minute", "1-60 model requests per channel per minute; additional to each bot's normal "
+                                     "output limit.", "Limits"),
+        number("reply_chars", "80-500. A longer model reply is cut to this. Replies remain public and use ordinary "
+                              "wrapped chat output.", "Limits"),
         number("output_tokens", "32-4,096. Passed to the provider and included in each advance reservation.", "Limits"),
         text("input_price", "Your chosen currency; up to 6 decimal places. Zero for local/free use. NetBBS does not look up prices.", "Optional cost accounting"),
         text("output_price", "Use the same currency as input prices and budgets. Provider invoices may include other charges.", "Optional cost accounting"),

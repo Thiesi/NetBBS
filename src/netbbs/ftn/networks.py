@@ -269,7 +269,7 @@ def save_network(db: Database, network: FtnNetwork, *, commit: bool = True) -> F
     return validated
 
 
-def delete_network(db: Database, network_id: int) -> None:
+def delete_network(db: Database, network_id: int, *, commit: bool = True) -> None:
     """Remove a record. Its boards and file areas become local again and
     keep their posts and files;
     its queue, dupe history and held packets go with it."""
@@ -281,7 +281,8 @@ def delete_network(db: Database, network_id: int) -> None:
         "UPDATE file_areas SET ftn_network_id = NULL, ftn_file_echo = NULL WHERE ftn_network_id = ?", (network_id,)
     )
     db.connection.execute("DELETE FROM ftn_networks WHERE id = ?", (network_id,))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def list_networks(db: Database) -> list[FtnNetwork]:
@@ -383,7 +384,7 @@ def normalise_area_tag(tag: str) -> str:
     return tag
 
 
-def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> AreaMapping:
+def set_board_area(db: Database, board: Board, network_id: int, tag: str, *, commit: bool = True) -> AreaMapping:
     """Make `board` carry echo area `tag` of the network. Refuses a Linked
     board, a missing network, and a tag another board already carries.
     Moving to another network drops the board's Origin (issue #1474): it
@@ -412,18 +413,20 @@ def set_board_area(db: Database, board: Board, network_id: int, tag: str) -> Are
         "ftn_network_id = ?, ftn_area_tag = ? WHERE id = ?",
         (network_id, network_id, tag, board.id),
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return AreaMapping(network_id, tag)
 
 
-def clear_board_area(db: Database, board: Board) -> None:
+def clear_board_area(db: Database, board: Board, *, commit: bool = True) -> None:
     """Make `board` local again. Its posts stay; its Origin override goes,
     as a local board has no Origin line."""
     db.connection.execute(
         "UPDATE boards SET ftn_network_id = NULL, ftn_area_tag = NULL, ftn_origin_text = '' WHERE id = ?",
         (board.id,),
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def board_area(db: Database, board: Board) -> AreaMapping | None:
@@ -435,7 +438,7 @@ def board_area(db: Database, board: Board) -> AreaMapping | None:
     return AreaMapping(row["ftn_network_id"], row["ftn_area_tag"], row["ftn_origin_text"])
 
 
-def set_board_origin(db: Database, board: Board, text: str) -> str:
+def set_board_origin(db: Database, board: Board, text: str, *, commit: bool = True) -> str:
     """Give `board`'s echomail its own Origin text (issue #1474, §16 "Issue
     #1154", Decision 10), or with an empty `text` go back to the network's.
     Runs of whitespace become one space. The text is bounded by the
@@ -458,7 +461,8 @@ def set_board_origin(db: Database, board: Board, text: str) -> str:
             f"address {network.our_address}, stays within 79."
         )
     db.connection.execute("UPDATE boards SET ftn_origin_text = ? WHERE id = ?", (text, board.id))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return text
 
 
@@ -491,7 +495,8 @@ def _network_id(network: FtnNetwork | int) -> int:
     return network if isinstance(network, int) else network.id
 
 
-def set_file_area_tic(db: Database, area: FileArea, network: FtnNetwork | int, tag: str) -> AreaMapping:
+def set_file_area_tic(db: Database, area: FileArea, network: FtnNetwork | int, tag: str, *,
+                      commit: bool = True) -> AreaMapping:
     """Make file `area` carry file echo `tag` of the network (a record or
     its id), the way `set_board_area` maps a board. An area is local,
     Linked or FTN, never two: a Linked area is refused, and so are a
@@ -514,18 +519,20 @@ def set_file_area_tic(db: Database, area: FileArea, network: FtnNetwork | int, t
     db.connection.execute(
         "UPDATE file_areas SET ftn_network_id = ?, ftn_file_echo = ? WHERE id = ?", (network_id, tag, area.id)
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return AreaMapping(network_id, tag)
 
 
-def clear_file_area_tic(db: Database, area: FileArea) -> None:
+def clear_file_area_tic(db: Database, area: FileArea, *, commit: bool = True) -> None:
     """Make file `area` local again. Its files stay, and files that came by
     TIC keep saying so, so a later `Replaces` in the same area still
     matches them if the echo is mapped back."""
     db.connection.execute(
         "UPDATE file_areas SET ftn_network_id = NULL, ftn_file_echo = NULL WHERE id = ?", (area.id,)
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
 
 
 def file_area_tic(db: Database, area: FileArea) -> AreaMapping | None:

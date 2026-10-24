@@ -49,6 +49,7 @@ from netbbs.ftn.links import (
     FtnLinkError,
     count_link_waiting,
     delete_link,
+    get_link,
     link_areas,
     list_links,
     next_point_number,
@@ -57,7 +58,7 @@ from netbbs.ftn.links import (
     set_link_area_without_commit,
 )
 from netbbs.ftn.networks import BUNDLE_MODES, BUNDLE_OFF, BUNDLE_ZIP, FtnNetwork, get_network
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import change_detail, record_action_without_commit
 from netbbs.net.admin_fields import _int_field, _optional_text_field
 from netbbs.net.admin_ui import _announce_line, _load_chrome, edit_resource_draft
 from netbbs.net.char_input import InputCancelled
@@ -138,9 +139,13 @@ async def ftn_links_screen(session: Session, lane: DatabaseLane, actor: User, ne
             return None
 
         def _persist(db: Database) -> int:
-            dropped = delete_link(db, link.id)
-            record_action(db, actor=actor, action="delete_ftn_link",
-                          detail=f"{network.name}: deleted {link.kind} {link.address.four_d}")
+            # The entry is written first (issue #1515): dropping what waits
+            # for the link commits on its own, and must carry the entry
+            # with it; the link's row goes in the closing commit.
+            with db.connection:
+                record_action_without_commit(db, actor=actor, action="delete_ftn_link",
+                                             detail=f"{network.name}: deleted {link.kind} {link.address.four_d}")
+                dropped = delete_link(db, link.id, commit=False)
             return dropped
 
         dropped = await lane.run(_persist)
@@ -227,6 +232,22 @@ def _link_draft(network: FtnNetwork, link: FtnLink | None, next_point: int) -> d
             # --- robot and TIC passwords (issue #1479) ---
             "areafix_password": link.areafix_password, "filefix_password": link.filefix_password,
             "tic_password": link.tic_password}
+
+
+# A link's passwords: its audit entry says only whether each changed.
+_LINK_SECRETS = ("session_password", "packet_password", "areafix_password", "filefix_password", "tic_password")
+
+
+def link_audit_values(link: FtnLink | None) -> dict | None:
+    """Every value the link editor's save writes, as stored, by name, for
+    its audit entry (issue #1515). None for a link not stored yet."""
+    if link is None or link.id is None:
+        return None
+    return {"kind": link.kind, "address": link.address.four_d, "name": link.name, "status": link.status,
+            "session_password": link.session_password, "packet_password": link.packet_password,
+            "areafix_password": link.areafix_password, "filefix_password": link.filefix_password,
+            "tic_password": link.tic_password, "calls": link.flavour, "host": link.host, "port": link.port,
+            "bundle": link.bundle}
 
 
 def _link_from_draft(network: FtnNetwork, draft: dict, existing: FtnLink | None) -> FtnLink:
@@ -333,10 +354,16 @@ async def edit_link(session: Session, lane: DatabaseLane, actor: User, network: 
         candidate = _link_from_draft(fresh, draft, existing)
 
         def _persist(db: Database) -> FtnLink:
-            saved = save_link(db, candidate)
-            record_action(db, actor=actor, action="set_ftn_link",
-                          detail=(f"{fresh.name}: {saved.kind} {saved.address.four_d} calls={saved.flavour} "
-                                  f"status={saved.status}"))
+            # The link and its audit entry commit together; the entry names
+            # every value that changed, passwords only as changed or
+            # unchanged (issue #1515).
+            with db.connection:
+                before = link_audit_values(get_link(db, existing.id) if existing is not None else None)
+                saved = save_link(db, candidate, commit=False)
+                record_action_without_commit(
+                    db, actor=actor, action="set_ftn_link",
+                    detail=change_detail(f"{fresh.name} {saved.address.four_d}", before, link_audit_values(saved),
+                                         secrets=_LINK_SECRETS))
             return saved
 
         return await lane.run(_persist)
@@ -427,10 +454,11 @@ async def link_areas_screen(session: Session, lane: DatabaseLane, actor: User, n
             return await _load()
 
         def _persist(db: Database) -> None:
-            set_link_area_without_commit(db, link.id, chosen.kind, chosen.tag, "rw")
-            db.connection.commit()
-            record_action(db, actor=actor, action="set_ftn_link_area",
-                          detail=f"{network.name}: {link.address.four_d} carries {chosen.kind_label} {chosen.tag}")
+            with db.connection:  # the area and its entry together (issue #1515)
+                set_link_area_without_commit(db, link.id, chosen.kind, chosen.tag, "rw")
+                record_action_without_commit(
+                    db, actor=actor, action="set_ftn_link_area",
+                    detail=f"{network.name}: {link.address.four_d} carries {chosen.kind_label} {chosen.tag}")
 
         await lane.run(_persist)
         status = f"{link.address.four_d} carries {chosen.tag} now, read-write."
@@ -440,10 +468,11 @@ async def link_areas_screen(session: Session, lane: DatabaseLane, actor: User, n
         nonlocal status
 
         def _persist(db: Database) -> None:
-            remove_link_area_without_commit(db, link.id, row.kind, row.tag)
-            db.connection.commit()
-            record_action(db, actor=actor, action="remove_ftn_link_area",
-                          detail=f"{network.name}: {link.address.four_d} no longer carries {row.kind_label} {row.tag}")
+            with db.connection:  # the area and its entry together (issue #1515)
+                remove_link_area_without_commit(db, link.id, row.kind, row.tag)
+                record_action_without_commit(
+                    db, actor=actor, action="remove_ftn_link_area",
+                    detail=f"{network.name}: {link.address.four_d} no longer carries {row.kind_label} {row.tag}")
 
         await lane.run(_persist)
         status = f"{link.address.four_d} no longer carries {row.tag}."
@@ -480,11 +509,12 @@ async def link_areas_screen(session: Session, lane: DatabaseLane, actor: User, n
         mode = "read" if picked.mode == "rw" else "rw"
 
         def _toggle(db: Database, row: AreaRow = picked, mode: str = mode) -> None:
-            set_link_area_without_commit(db, link.id, row.kind, row.tag, mode)
-            db.connection.commit()
-            record_action(db, actor=actor, action="set_ftn_link_area",
-                          detail=f"{network.name}: {link.address.four_d} carries {row.kind_label} {row.tag} "
-                                 f"{'read-only' if mode == 'read' else 'read-write'}")
+            with db.connection:  # the mode and its entry together (issue #1515)
+                set_link_area_without_commit(db, link.id, row.kind, row.tag, mode)
+                record_action_without_commit(
+                    db, actor=actor, action="set_ftn_link_area",
+                    detail=f"{network.name}: {link.address.four_d} carries {row.kind_label} {row.tag} "
+                           f"{'read-only' if mode == 'read' else 'read-write'}")
 
         await lane.run(_toggle)
         status = f"{picked.tag} is {'read-only' if mode == 'read' else 'read-write'} for {link.address.four_d}."
@@ -529,10 +559,12 @@ async def offered_areas_screen(session: Session, lane: DatabaseLane, actor: User
         offered = not picked.offered
 
         def _persist(db: Database, row: AreaRow = picked, offered: bool = offered) -> None:
-            set_offered(db, network.id, row.kind, row.tag, offered)
-            record_action(db, actor=actor, action="set_ftn_link_offer",
-                          detail=f"{network.name}: {row.kind_label} {row.tag} "
-                                 f"{'offered to links' if offered else 'no longer offered'}")
+            with db.connection:  # the offer and its entry together (issue #1515)
+                set_offered(db, network.id, row.kind, row.tag, offered, commit=False)
+                record_action_without_commit(
+                    db, actor=actor, action="set_ftn_link_offer",
+                    detail=f"{network.name}: {row.kind_label} {row.tag} "
+                           f"{'offered to links' if offered else 'no longer offered'}")
 
         await lane.run(_persist)
         status = (f"{picked.tag} is offered to links: their AreaFix or FileFix can link it." if offered
