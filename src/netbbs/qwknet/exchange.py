@@ -501,11 +501,12 @@ def list_held(db: Database, network_id: int) -> list[HeldGroup]:
     return [HeldGroup(network_id, row["conference"], row["n"], row["reason"] or "", row["newest"]) for row in rows]
 
 
-def delete_held(db: Database, network_id: int, conference: int | None) -> int:
+def delete_held(db: Database, network_id: int, conference: int | None, *, commit: bool = True) -> int:
     cursor = db.connection.execute(
         "DELETE FROM qwknet_held WHERE network_id = ? AND conference IS ?", (network_id, conference)
     )
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return cursor.rowcount
 
 
