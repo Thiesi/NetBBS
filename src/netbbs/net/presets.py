@@ -41,7 +41,7 @@ from netbbs.moderation.log import record_action_without_commit
 from netbbs.net.location import entered
 from netbbs.net.notices import announce
 from netbbs.net.session import Session
-from netbbs.rendering import MUTED_COLOR, VALUE_COLOR, WARNING_COLOR, colored, menu_key, sanitize_text
+from netbbs.rendering import MUTED_COLOR, VALUE_COLOR, WARNING_COLOR, MenuEntry, colored, menu_key, sanitize_text
 from netbbs.rendering.detail import Field, Note, Section, Styled
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -175,6 +175,8 @@ async def run_preset(session: Session, lane: DatabaseLane, actor: User, preset: 
                     stable_id_of=lambda t: tiers.index(t),
                     description_of=lambda t: t.description,
                     title=preset.title, own=True, empty_message="No presets.",
+                    help_about="The tiers of this preset. Picking one shows what it would change; nothing is "
+                               "written until you apply it there.",
                     preamble=preset.pick_preamble,
                     description_level=await lane.run(menu_description_level, actor),
                     redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -203,6 +205,8 @@ async def _preview(session, lane, actor, preset, tier, chrome, show_detail, deta
                 sections=preview_sections(plan, tier, unicode_style=chrome.unicode_style),
                 actions=actions, page=page,
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+                help_entries=[MenuEntry(label=menu_key("A", "pply"), brief="Write every change listed, now")]
+                if plan.changes else None,
                 help_title=f"{preset.title} help",
                 help_about=preset.help_about,
             )
@@ -291,11 +295,13 @@ MODEL_BUDGETS = Preset(
         PresetTier("generous", "Generous", "1,000,000 tokens a day, 100 requests per caller, long replies"),
     ),
     plan=_model_plan, write=_model_write,
-    pick_preamble="Sets the model conversation's token budgets, rate limits and reply length. Prices, "
-                  "money budgets and every provider and privacy setting stay as they are.",
-    help_about="Sets the model conversation's eight bounded limits at once: token budgets, requests per "
-               "caller, cooldown, channel rate, output tokens, reply length and prior exchange lines. Each "
-               "stays editable under Model settings.",
+    pick_preamble="Sets the model conversation's token budgets, rate limits, reply length and prior "
+                  "exchange lines. Prices, money budgets, the provider and every other privacy setting "
+                  "stay as they are.",
+    help_about="Each value this tier would change, as before -> after; values already set that way are "
+               "left out: token budgets, requests per caller, cooldown, channel rate, output tokens, reply length "
+               "and prior exchange lines. Apply writes them all, used from the next request, with one audit "
+               "entry; Back writes nothing. Prices, money budgets and the provider stay as they are.",
 )
 
 
@@ -418,8 +424,9 @@ LINK_CAPACITY = Preset(
     plan=_capacity_plan, write=_capacity_write,
     pick_preamble="Sets the Link carry caps, peering, Link limits and real-time relay at once. The login "
                   "throttle, shutdown delays, seeds and sync interval stay as they are.",
-    help_about="Sets how much Link content and traffic this node takes on. Applies at the next start; a value "
-               "the config file or command line sets wins and is left alone.",
+    help_about="Each Link value this tier would change, as before -> after; one the config file or command "
+               "line sets is listed under Not changed and left alone. Apply writes them all, with one audit "
+               "entry, for the next start; Back writes nothing. Every value stays editable under its group.",
 )
 
 
@@ -524,8 +531,10 @@ LEVELS_LADDER = Preset(
     title="Levels ladder",
     tiers=(PresetTier("standard", "Levels ladder", "New at 0, Member at 10 after a day and 2 logins"),),
     plan=_ladder_plan, write=_ladder_write,
-    help_about="Names level 0 New and level 10 Member, raises accounts from 0 to 10 after 24 hours and 2 "
-               "logins, and opens mail and oneliners at 10. Other names and rules stay as they are.",
+    help_about="Names level 0 New and level 10 Member, raises accounts from 0 to 10 at their first login "
+               "after 24 hours and 2 logins, and opens mail and oneliners at 10. The preview lists each "
+               "change as before -> after; Apply writes them at once, Back writes nothing. Other names and "
+               "rules stay as they are.",
 )
 
 

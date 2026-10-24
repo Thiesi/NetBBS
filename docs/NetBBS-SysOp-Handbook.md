@@ -2845,6 +2845,16 @@ prompt, prompt logging, guest access, or whether model conversation is on.
    retention, and blocklist. Adopt a room to retain it, or retire it
    deliberately.
 
+> [!NOTE]
+> The open-room gates (minimum level, minimum age and name requirement) are
+> copied onto a room when a caller opens it. Changing them affects only rooms
+> opened afterwards; edit an open room's gates on its own channel screen. The
+> cap is checked only when a room opens, so lowering it closes nothing.
+> Retention and the blocklist apply to every open room as soon as you save:
+> a newly blocked room stops admitting callers, though anyone already in it
+> stays. Switching **Open rooms** off stops new rooms opening; rooms opened
+> earlier stay until they retire.
+
 ### What MRC sees
 
 - IP-address reporting and extra caller metadata are separate opt-in
@@ -3916,9 +3926,9 @@ and applied without a restart:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| Upload cap | 100 MiB | Largest single upload, over Zmodem and the browser. Keep a reverse proxy's body limit at least 1 MiB higher. |
-| Grace before deletion | 7 days | How long an expired post or file waits before it is deleted. An expired file can be recovered from its area until then. |
-| Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. |
+| Upload cap | 100 MiB | Largest single upload, over Zmodem and the browser. Files arriving by FTN file echo or netmail attachment are held to it too, at most 64 MiB. Keep a reverse proxy's body limit at least 1 MiB higher. |
+| Grace before deletion | 7 days | How long an expired post or file waits before it is deleted. An expired file can be recovered from its area until then. A change counts for items already expired. |
+| Invitation expiry | 7 days | When an unaccepted channel invitation lapses. Clear the field for invitations that never expire. A change applies to invitations sent afterwards. |
 | Chat scrollback | 100 messages | Lines each channel keeps, carried Link channels included. Lowering it trims a channel the next time someone speaks there. |
 | Node map level | 0 | The lowest level that may open **Directory ▸ Node map**. A guest is an ordinary account: set this above the guest account's level to keep the map from guests. |
 | Mail level | 0 | The lowest level that may open **E-mail**: read, write and reply, here and to other BBSes. Below it the main menu offers no E-mail. Mail sent to an account below it still arrives and waits until you raise the account's level. |
@@ -4716,8 +4726,9 @@ The steps run in order, and a failure stops the rest and says why:
 1. Download the release's wheel from GitHub and check it against the SHA-256
    digest the release publishes. A wheel without a published digest is not
    installed.
-2. Back up this node to `netbbs_backups/` beside the database, the same as
-   <kbd>C</kbd> **Create backup now** under **Operations ▸ Full backups**.
+2. Back up this node to the backup destination (`netbbs_backups/` beside the
+   database unless you set another), the same as <kbd>C</kbd>
+   **Create backup now** under **Operations ▸ Full backups**.
 3. `pip install` the wheel into the environment NetBBS runs from, with the same
    extras. pip also fetches any newer dependency the release needs. A failed
    pip run shows its last lines of output. The install is refused for:
