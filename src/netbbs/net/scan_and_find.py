@@ -463,6 +463,7 @@ async def _new_scan_screen(
             description_of=_where,
             title="Replies to you",
             empty_message="No replies to you are waiting.",
+            help_about="Replies to your posts you have not read yet, with their board. Picking one opens it there.",
             redraw_in_place=redraw_in_place_enabled(db, user),
             unicode_style=unicode_style_enabled(db, user),
             collapsed=breadcrumb_collapsed_enabled(db, user),
@@ -495,6 +496,11 @@ async def _new_scan_screen(
             title="New scan",
             own=True,
             empty_message="Nothing accessible yet.",
+            help_about=(
+                "Every board, chat channel and file area open to you, the ones you follow first (marked *), "
+                "each with what is new since you last looked. Enter opens a row at its first new item; "
+                "Back brings you here on the next row with something new."
+            ),
             item_keys={"m": _mark_read, "f": _toggle_follow},
             live_keys={"v": _toggle_followed_only, "r": _read_replies, "e": _read_mail},
             masthead=_replies_summary,
@@ -791,6 +797,11 @@ async def _find_screen(
             description_of=lambda item: item.description,
             title=f"Search results for {query!r}",
             empty_message=empty_message,
+            help_about=(
+                "What matched every word you typed, on this node only: [MAIL] your own letters, [POST] "
+                "board posts, [FILE] files, [CHAT] chat lines still kept. At most "
+                f"{_SEARCH_RESULT_LIMIT} of each. Picking one opens it where it is."
+            ),
             redraw_in_place=redraw_in_place_enabled(db, user),
             unicode_style=unicode_style_enabled(db, user),
             collapsed=breadcrumb_collapsed_enabled(db, user),

@@ -1510,7 +1510,8 @@ async def _how_this_board_works(session: Session, db: Database, user: User) -> N
         + (" Clicking a [letter] works too." if web else ""),
         "Lists number their rows: type the number (03, or 3 and Enter), or move with the arrow keys and press Enter.",
         "[B]ack goes one level up. [N]ew scan shows what is new since your last visit, one place after another.",
-        f"{help_key_label(session)} or ? shows help on every screen.",
+        f"{help_key_label(session)} or ? shows help on every screen. Menu descriptions in Your profile "
+        "put a line about each item under it.",
         "",
         _contact_line(sysops, caller_mail_refusal(session, db, user)),
         "",
@@ -1748,6 +1749,10 @@ async def _enter_communities(
             title="Communities",
             own=True,
             empty_message="No Communities exist yet.",
+            help_about=(
+                "Communities gather boards, chat channels, file areas and games on one topic. "
+                "Pick one to see what it holds."
+            ),
             start_stable_id=last_id,
             redraw_in_place=redraw_in_place_enabled(db, user),
             unicode_style=unicode_style_enabled(db, user),
