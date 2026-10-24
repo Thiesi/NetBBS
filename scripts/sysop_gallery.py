@@ -99,7 +99,6 @@ WALKS: dict[str, tuple[list[str], str]] = {
     "settings > file area masthead": (["s", "m", "m", "f"], "File area masthead"),
     "settings > chat channel masthead": (["s", "m", "m", "c"], "Chat channel picker masthead"),
     "trust > domains": (["s", "p", "d"], "Trust domains"),
-    "trust > anchors": (["s", "p", "a"], "Trust anchors"),
     "trust > reporters": (["s", "p", "r"], "Trusted reporters"),
     "trust > identity authorities": (["s", "p", "i"], "Identity authorities"),
     "trust > published identity": (["s", "p", "p"], "Published identity"),

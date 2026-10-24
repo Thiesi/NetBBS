@@ -1165,7 +1165,7 @@ identity it waited for becomes known, or after an hour, or when trust changes
 
 - the SysOp overrides or clears an override for that node, which also starts a
   sync pass at once;
-- a trust anchor, domain, reporter or sole-authority exception is changed in the
+- a trust domain, reporter or sole-authority exception is changed in the
   trust console, which releases everything set aside and starts a pass;
 - the node, or a user of it, graduates or recovers on its own, found by the
   re-evaluation every pass runs (§12);

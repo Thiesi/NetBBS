@@ -14,7 +14,6 @@ from netbbs.link.trust import (
     clear_local_observation,
     clear_trust_override,
     configure_sole_authority,
-    configure_trust_anchor,
     configure_trust_domain,
     configure_trusted_reporter,
     get_effective_trust_state,
@@ -31,7 +30,6 @@ from netbbs.link.trust import (
     record_vouch,
     recompute_all_trust_states,
     register_subject,
-    remove_trust_anchor,
     remove_sole_authority,
     remove_trusted_reporter,
     revoke_trust_signal,
@@ -150,23 +148,28 @@ def test_node_and_user_subjects_are_independent_and_start_probationary(db):
             assert get_effective_trust_state(db, subject, dimension).state == TrustState.PROBATIONARY
 
 
-def test_anchor_role_does_not_grant_reporter_authority(db):
-    configure_trust_anchor(
-        db, "anchor-only", reason="Privately verified identity", now_iso=stamp(NOW)
-    )
-    assert db.connection.execute(
-        "SELECT COUNT(*) FROM link_trust_anchors WHERE fingerprint = 'anchor-only'"
-    ).fetchone()[0] == 1
-    assert db.connection.execute(
-        "SELECT COUNT(*) FROM link_trust_reporters WHERE fingerprint = 'anchor-only'"
-    ).fetchone()[0] == 0
+def test_trust_anchors_are_gone_but_old_rows_still_open(db):
+    """Issue #1528: the anchor API is removed. The table stays so a database
+    that has anchors in it still opens, and its old audit rows stay in the
+    configuration history."""
+    import netbbs.link.trust as trust
 
-    remove_trust_anchor(db, "anchor-only", now_iso=stamp(NOW + timedelta(minutes=1)))
-    actions = db.connection.execute(
-        """SELECT action FROM link_trust_config_audit
-           WHERE object_kind = 'anchor' AND object_id = 'anchor-only' ORDER BY audit_id"""
-    ).fetchall()
-    assert [row[0] for row in actions] == ["created", "removed"]
+    for name in ("configure_trust_anchor", "remove_trust_anchor", "list_trust_anchors", "TrustAnchorConfig"):
+        assert not hasattr(trust, name)
+    db.connection.execute(
+        "INSERT INTO link_trust_anchors (fingerprint, reason, created_at) VALUES ('old-anchor', 'kept', ?)",
+        (stamp(NOW),),
+    )
+    db.connection.execute(
+        """INSERT INTO link_trust_config_audit
+           (object_kind, object_id, action, details_json, created_at)
+           VALUES ('anchor', 'old-anchor', 'created', '{"reason": "kept"}', ?)""",
+        (stamp(NOW),),
+    )
+    assert [row.kind for row in trust.list_trust_config_audit(db)] == ["anchor:old-anchor"]
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_trust_reporters WHERE fingerprint = 'old-anchor'"
+    ).fetchone()[0] == 0
 
 
 def test_node_graduation_requires_three_dates_and_two_vouch_domains(db):

@@ -2279,8 +2279,6 @@ history before applying an override.
   identities from one trust domain do not become independent votes.
 - A reporter's signals count only within its scopes, and only once it is
   established here.
-- **Anchors** is a recorded, audited list only: this version of NetBBS
-  accepts or refuses nothing because a node is an anchor.
 - Quarantine restricts exchange; it does not erase previously accepted
   content.
 - A sole-authority exception deliberately weakens the usual multi-source

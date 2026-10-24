@@ -835,50 +835,33 @@ def test_sysop_menu_can_reject_remote_attestation_for_one_user(db, lane, sysop):
     assert "Remote attestation override applied and audited." in _written_text(session)
 
 
-def test_trust_anchor_editor_picks_a_stored_peer_and_remove_uses_a_picker(db, lane, sysop):
-    """Issue #282: the node is a picker over stored peers (typed input
-    still available as the first entry), and removal picks from the
-    anchors that exist instead of re-typing a reference."""
-    from netbbs.link.node_identity import bootstrap_node_identity
-    from netbbs.link.protocol import LinkNode
-    from netbbs.link.store import save_peer
-    from netbbs.link.trust import list_trust_anchors
+def test_policy_trust_no_longer_offers_anchors(db, lane, sysop):
+    """Issue #1528: trust anchors were configured and listed but never read
+    by any trust decision, so the screen and its key are gone. [A] on
+    Policy trust is now an unhandled key, and nothing writes the table."""
+    from netbbs.net.admin_trust import _TRUST_MENU
 
-    peer = LinkNode(identity=bootstrap_node_identity("anchor-peer"))
-    save_peer(db, peer.handle_hello(peer.build_hello(
-        addresses=None, outgoing_only=True, created_at="2026-09-04T09:00:00+00:00",
-        friendly_name="Anchor Peer",
-    )))
-
-    # [A]dd -> Node (01) -> the stored peer is entry 02 (01 is "type it") -> Reason (02) -> [S]ave.
-    session = FakeSession(["s", "p", "a", "a", "0", "1", "0", "2", "0", "2", "runs the seed", "s", "b", "b", "b", "b"])
+    assert all("nchors" not in entry.label for entry in _TRUST_MENU)
+    session = FakeSession(["s", "p", "a", "b", "b", "b"])
     _run(session, lane, sysop)
-    anchors = list_trust_anchors(db)
-    assert [a.fingerprint for a in anchors] == [peer.identity.fingerprint]
     text = _visible(_written_text(session))
-    assert "Anchor Peer" in text and "Trust anchor changed and audited." in text
-
-    # [R]emove -> picker (the only anchor) -> confirm.
-    session = FakeSession(["s", "p", "a", "r", "0", "1", "y", "b", "b", "b", "b"])
-    _run(session, lane, sysop)
-    assert list_trust_anchors(db) == []
-    assert "Trust anchor removed and audited." in _written_text(session)
+    assert "Trust anchors" not in text
+    assert "Anchors" not in text
+    assert db.connection.execute("SELECT COUNT(*) FROM link_trust_anchors").fetchone()[0] == 0
 
 
 def test_trust_editors_back_leaves_policy_untouched(db, lane, sysop):
-    from netbbs.link.trust import list_sole_authorities, list_trust_anchors, list_trust_domains, list_trusted_reporters
+    from netbbs.link.trust import list_sole_authorities, list_trust_domains, list_trusted_reporters
 
     session = FakeSession([
         "s", "p",
         "d", "a", "i", "half-typed", "b", "y", "b",  # domain editor, then discard
-        "a", "a", "b", "b",  # anchor editor untouched -> silent back
         "r", "a", "b", "b",
         "e", "a", "b", "b",
         "b", "b", "b",
     ])
     _run(session, lane, sysop)
     assert list_trust_domains(db) == []
-    assert list_trust_anchors(db) == []
     assert list_trusted_reporters(db) == []
     assert list_sole_authorities(db) == []
     assert "saved and audited" not in _written_text(session)
@@ -904,15 +887,16 @@ def test_trust_override_rejected_save_keeps_the_draft(db, lane, sysop):
     assert state.explanation["override_reason"] == "resource abuse reviewed"
 
 
-def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(db, lane, sysop):
+def test_node_picker_selection_still_warns_about_a_reused_familiar_name(db, lane, sysop):
     """Codex review on #290: picking a stored peer from the node picker
     must go through the same changed-identity confirmation a typed
-    name does, and declining it keeps the draft without a node."""
+    name does, and declining it keeps the draft without a node. Moved
+    from the trust anchor screen to identity authorities, which share the
+    node picker, when anchors were removed (issue #1528)."""
     from netbbs.link.events import build_endpoint_descriptor
     from netbbs.link.node_identity import bootstrap_node_identity
     from netbbs.link.protocol import PeerRecord
     from netbbs.link.store import save_peer
-    from netbbs.link.trust import list_trust_anchors
 
     original = bootstrap_node_identity("original-familiar-node")
     replacement = bootstrap_node_identity("replacement-familiar-node")
@@ -940,13 +924,13 @@ def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(
     save_profile(replacement, friendly_name="Familiar Node", created_at="2026-09-04T08:02:00+00:00")
 
     # [A]dd -> Node (01) -> pick the replacement (most recently contacted, entry 02) -> warning -> "n".
-    session = FakeSession(["s", "p", "a", "a", "0", "1", "0", "2", "n", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "p", "i", "a", "0", "1", "0", "2", "n", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "different cryptographic identity" in text
     assert "No trust policy change made." in text
     assert re.search(r"Node: +\(not chosen\)", _visible(text))
-    assert list_trust_anchors(db) == []
+    assert list_attestation_authorities(db) == []
 
 
 def test_attestation_authority_update_keeps_its_existing_scope(db, lane, sysop):
@@ -978,17 +962,23 @@ def test_trust_domain_update_keeps_the_stored_weight(db, lane, sysop):
     assert [(d.domain_id, d.display_name, d.weight) for d in domains] == [("friends", "Close friends", 0.25)]
 
 
-def test_trust_anchor_removal_picker_shows_the_technical_identity(db, lane, sysop):
-    from netbbs.link.trust import configure_trust_anchor, list_trust_anchors
+def test_trusted_reporter_removal_picker_shows_the_technical_identity(db, lane, sysop):
+    """Moved from the trust anchor screen when anchors were removed (issue
+    #1528): the removal picker and its confirmation both show the
+    technical identity, not only the familiar name."""
+    from netbbs.link.trust import configure_trust_domain, configure_trusted_reporter, list_trusted_reporters
 
     fingerprint = "abcdefghijklmnopqrstuvwxyz234567"
-    configure_trust_anchor(db, fingerprint, reason="runs the seed", actor_user_id=sysop.id)
-    # [R]emove -> the only anchor -> confirm.
-    session = FakeSession(["s", "p", "a", "r", "0", "1", "y", "b", "b", "b", "b"])
+    configure_trust_domain(db, "friends", display_name="Friends", weight=1.0, actor_user_id=sysop.id)
+    configure_trusted_reporter(
+        db, fingerprint, domain_id="friends", scopes=[("identity_integrity", "signed_equivocation")], actor_user_id=sysop.id,
+    )
+    # [R]emove -> the only reporter -> confirm.
+    session = FakeSession(["s", "p", "r", "r", "0", "1", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert text.count(fingerprint) >= 2  # in the picker row and in the confirmation
-    assert list_trust_anchors(db) == []
+    assert list_trusted_reporters(db) == []
 
 
 # -- create user ----------------------------------------------------------
