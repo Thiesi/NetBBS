@@ -576,6 +576,7 @@ async def _install_release_screen(
         session, title=title,
         sections=[Section(f"{current_version} -> {release.tag_name}", plan)],
         actions=[("i", menu_key("I", "nstall now")), _BACK_ACTION],
+        help_entries=[MenuEntry(label=menu_key("I", "nstall now"), brief="Asks once more, then runs it")],
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         help_title="Install help",
         help_about=(
@@ -982,6 +983,13 @@ async def _backup_status_screen(
             ),
             sections=sections, actions=actions, page=page,
             redraw_in_place=chrome.redraw_in_place, unicode_style=unicode_style,
+            help_entries=[
+                *([MenuEntry(label=menu_key("C", "reate backup now"), brief="A complete backup; asks first")]
+                  if can_create else []),
+                *([MenuEntry(label=menu_key("D", "oor installations"), brief="Toggle; from the next backup")]
+                  if can_create and has_doors else []),
+                MenuEntry(label=menu_key("S", "chedule & destination"), brief="When, how many, and where"),
+            ],
             help_title="Backup help",
             help_about=(
                 "Complete local backups of this node: the last one, recent runs, the schedule and where "
@@ -1284,6 +1292,11 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
             stable_id_of=lambda entry: entry.id,
             description_of=lambda entry: sanitize_text(entry.message),
             title="Diagnostic log", own=True,
+            help_about=(
+                "Warnings and errors Link and the MRC bridge logged, newest first unless you change the order. "
+                "Pick one to read it in full. Old entries are dropped by the Diagnostics kept limits under "
+                "Settings, Operating limits. Nothing here changes anything."
+            ),
             empty_message="Nothing logged yet.",
             start_stable_id=reopen_at,
             on_sort=_flip_order,
@@ -1450,6 +1463,11 @@ async def _audit_log_screen(
                 name_segments_of=_row_name_segments,
                 title=title, own=True,
                 masthead=masthead,
+                help_about=(
+                    "Moderation and administrative actions, newest first unless you change the order: when, "
+                    "what and by whom. Pick one to see it in full, with its object, target and detail. "
+                    "Nothing here changes anything."
+                ),
                 empty_message="Nothing logged yet.",
                 start_stable_id=reopen_at,
                 on_sort=_flip_order,
@@ -1685,6 +1703,11 @@ async def _node_log_screen(session: Session, lane: DatabaseLane, actor: User) ->
             description_of=lambda entry: entry.message,
             name_segments_of=_row_segments,
             title="Node log", own=True,
+            help_about=(
+                "The newest part of netbbs.log beside the database, warnings and errors first. Level widens "
+                "that to everything or narrows it to errors; Follow shows new lines as they come. Pick an "
+                "entry to read it in full. Read-only."
+            ),
             # One call serves every [L]evel, so this names no level; the
             # standing line below says which one is showing.
             empty_message=f"Nothing at this level in the newest part of {path.name}.",
@@ -1853,6 +1876,8 @@ async def _prune_drafts_screen(session: Session, lane: DatabaseLane, actor: User
                 subtitle="Abandoned post-edit and bio drafts past the retention window.",
             ),
             sections=[_prune_report_section(report)], actions=actions,
+            help_entries=[MenuEntry(label=menu_key("D", "elete stale drafts now"),
+                                    brief="Deletes them at once, no question")] if len(actions) > 1 else None,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Prune drafts help",
             help_about=(
@@ -1935,6 +1960,11 @@ async def _search_indexes_screen(session: Session, lane: DatabaseLane, actor: Us
                 subtitle="What Find searches, compared with the content it indexes.",
             ),
             sections=[_search_index_section(report)], actions=actions,
+            help_entries=[
+                *([MenuEntry(label=menu_key("R", "ebuild"), brief="Replace every index from content")]
+                  if not report.is_clean else []),
+                MenuEntry(label=menu_key("C", "heck again"), brief="Compare once more"),
+            ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Search indexes help",
             help_about=(

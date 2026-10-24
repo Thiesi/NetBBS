@@ -696,6 +696,12 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
             ),
             sections=sections, actions=actions, page=page, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+            help_entries=[
+                MenuEntry(label=label, brief=brief) for key, label, brief in (
+                    ("a", menu_key("A", "ccept"), "Use them, from the next start"),
+                    ("d", menu_key("D", "ecline"), "Do not, from the next start"),
+                ) if key in {action_key for action_key, _label in actions}
+            ],
             help_title="Join NetBBS Link help",
             help_about=(
                 "Whether this node dials the project's reliable nodes as seeds and, when it cannot be "
@@ -1655,6 +1661,10 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
             name_of=lambda tz: tz,
             stable_id_of=lambda tz: zone_ids[tz],
             title="Timezone",
+            help_about=(
+                "Every IANA timezone. Picking one makes it the node's timezone at once: every date and time "
+                "callers see, and the node's calendar for scheduled backups and chat's day changes."
+            ),
             empty_message="No timezones available.",
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
@@ -2159,6 +2169,12 @@ async def _policy_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 _BACK_ACTION,
             ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style, page=page,
+            help_entries=[
+                *(MenuEntry(label=menu_key(group[0], group[1:]), brief="Edit, save; next start")
+                  for group in POLICY_GROUPS),
+                MenuEntry(label=menu_key("A", "pply capacity preset"), brief="Small, Default or Hub, previewed"),
+                MenuEntry(label=menu_key("N", "ode configuration"), brief="Listeners and paths, read-only"),
+            ],
             help_title="Operating limits help",
             help_about=(
                 "Each group says how many of its settings are set here, set in config, or waiting for a "
@@ -2753,6 +2769,10 @@ async def _blocklist_field(session: Session, lane: DatabaseLane, draft: dict) ->
                 name_of=lambda item: f"#{item[1]}",
                 stable_id_of=lambda item: item[0],
                 title="Unblock an MRC room",
+                help_about=(
+                    "The blocked rooms. Picking one takes it off the list; nothing is kept until you save "
+                    "the MRC settings."
+                ),
                 empty_message="No MRC rooms are blocked.",
             )
             if picked is not None:
@@ -2924,6 +2944,11 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
         choice, page = await show_detail(
             session, title=title, actions=actions, page=page, message=message,
             sections=await _mrc_status_sections(lane, mrc_bridge, status, unicode_style=chrome.unicode_style),
+            help_entries=[
+                *([MenuEntry(label=menu_key("R", "econnect now"), brief="Drop the hub link, dial again")]
+                  if status.enabled else []),
+                MenuEntry(label=menu_key("S", "ettings"), brief="Open the MRC settings"),
+            ],
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="MRC status help",
             help_about=(

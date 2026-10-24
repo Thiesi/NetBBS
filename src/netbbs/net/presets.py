@@ -41,7 +41,7 @@ from netbbs.moderation.log import record_action_without_commit
 from netbbs.net.location import entered
 from netbbs.net.notices import announce
 from netbbs.net.session import Session
-from netbbs.rendering import MUTED_COLOR, VALUE_COLOR, WARNING_COLOR, colored, menu_key, sanitize_text
+from netbbs.rendering import MUTED_COLOR, VALUE_COLOR, WARNING_COLOR, MenuEntry, colored, menu_key, sanitize_text
 from netbbs.rendering.detail import Field, Note, Section, Styled
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -175,6 +175,8 @@ async def run_preset(session: Session, lane: DatabaseLane, actor: User, preset: 
                     stable_id_of=lambda t: tiers.index(t),
                     description_of=lambda t: t.description,
                     title=preset.title, own=True, empty_message="No presets.",
+                    help_about="The tiers of this preset. Picking one shows what it would change; nothing is "
+                               "written until you apply it there.",
                     preamble=preset.pick_preamble,
                     description_level=await lane.run(menu_description_level, actor),
                     redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -203,6 +205,8 @@ async def _preview(session, lane, actor, preset, tier, chrome, show_detail, deta
                 sections=preview_sections(plan, tier, unicode_style=chrome.unicode_style),
                 actions=actions, page=page,
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
+                help_entries=[MenuEntry(label=menu_key("A", "pply"), brief="Write every change listed, now")]
+                if plan.changes else None,
                 help_title=f"{preset.title} help",
                 help_about=preset.help_about,
             )

@@ -943,6 +943,11 @@ async def administer_service(session: Session, lane: DatabaseLane, actor: User) 
             columns=_ADMIN_COLUMNS,
             column_values_of=columns_of,
             title="Managed DNS service administration", own=True,
+            help_about=(
+                "Every name the managed-DNS service holds, with its state, last contact and the node holding "
+                "it, as the service reports it now. Pick one to see it in full and revoke it. Ctrl-R asks the "
+                "service again."
+            ),
             empty_message="The service holds no registrations.",
             refresh=reload,
             **presentation,
