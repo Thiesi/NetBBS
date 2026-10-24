@@ -138,6 +138,41 @@ def test_column_widths_geometry_on_narrow_terminals():
     assert total <= 70
 
 
+@pytest.mark.parametrize("width", [60, 61, 62, 63, 64])
+def test_column_widths_near_the_table_minimum_fit_the_row(width):
+    """Near the table's minimum the uploader column gives way before the
+    filename, so the row stays inside `list_width` (issue #1452): at 60
+    columns with a full uploader column it was wider than the terminal."""
+    idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(width, uploader_need=28)
+    assert name_w >= 12 and uploader_w >= len("Uploader")
+    assert idx_w + 1 + name_w + 1 + size_w + 1 + date_w + 1 + uploader_w == width - 1
+
+
+@pytest.mark.parametrize("width", [59, 50, 40, 20])
+def test_column_widths_below_the_table_minimum_are_prose(width):
+    assert _file_column_widths(width) is None
+
+
+@pytest.mark.parametrize("width", [50, 30, 12])
+def test_the_narrow_highlighted_row_is_a_reverse_video_bar(tmp_path, monkeypatch, width):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, count=3, monkeypatch=monkeypatch)
+    session = FakeInteractiveSession(editor_keys=[EditorKey(EditorKeyKind.DOWN)], width=width)
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+
+    bars = [line for line in session.output.split(chr(10)) if ">[01]" in line]
+    assert bars, "the highlighted row was never drawn"
+    assert bars[-1].startswith("\x1b[7m"), bars[-1]
+    rows = [line for line in session.visible_output.split(chr(10)) if re.search(r"\[0\d\]", line)]
+    assert rows and all(visible_width(line) <= width - 1 for line in rows)
+
+    lane.close()
+    db.close()
+
+
 # -- Columnar Header & Directory Layout --
 
 

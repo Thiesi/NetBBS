@@ -167,6 +167,7 @@ from netbbs.rendering import (
     cut_to_width,
     empty_state,
     horizontal_rule,
+    list_rule,
     list_width,
     menu_grid,
     menu_key,
@@ -536,8 +537,21 @@ def _format_size(size_bytes: int) -> str:
     return file_size_text(size_bytes)
 
 
-def _file_column_widths(terminal_width: int, *, uploader_need: int | None = None) -> tuple[int, int, int, int, int]:
-    """Returns (idx_w, name_w, size_w, date_w, uploader_w) for columnar file listing.
+# Below this width a file is a prose row ("[01] name -- size, uploader")
+# instead of columns (design doc §3.6, issue #1452), the width the board and
+# mail lists switch at.
+_TABLE_MIN_WIDTH = 60
+_FILENAME_MIN_WIDTH = 12
+# A prose row shows the uploader only when it has this many columns left.
+_PROSE_UPLOADER_MIN_WIDTH = 6
+
+
+def _file_column_widths(
+    terminal_width: int, *, uploader_need: int | None = None
+) -> tuple[int, int, int, int, int] | None:
+    """Returns (idx_w, name_w, size_w, date_w, uploader_w) for columnar file
+    listing, or `None` when no readable table fits and the rows should be
+    prose instead (`_file_prose_row`).
 
     `uploader_need` is the widest uploader on the page. The uploader column
     takes only that much, up to its usual width, and the filename gets the
@@ -545,7 +559,10 @@ def _file_column_widths(terminal_width: int, *, uploader_need: int | None = None
     columns it had 18 against the uploader's 28, so
     "copperplate-minuscules-week1.png" lost its week and its extension
     beside an uploader column holding "Copperplate". A verified name in
-    `(=...=)` still gets the full width it had."""
+    `(=...=)` still gets the full width it had. Near the table's minimum
+    width the uploader gives way before the filename does."""
+    if terminal_width < _TABLE_MIN_WIDTH:
+        return None
     # The index label: the cursor marker and "[01]".
     idx_w = 5
     size_w = 9
@@ -557,8 +574,61 @@ def _file_column_widths(terminal_width: int, *, uploader_need: int | None = None
     # column, which a row that reached it would make many terminals wrap
     # the cursor from. The column heading and the rules under it are as
     # wide as the row.
-    name_w = max(12, list_width(terminal_width) - (idx_w + size_w + date_w + uploader_w + 4))
+    room = list_width(terminal_width) - (idx_w + size_w + date_w + 4)
+    if room - uploader_w < _FILENAME_MIN_WIDTH:
+        uploader_w = max(len("Uploader"), room - _FILENAME_MIN_WIDTH)
+    name_w = room - uploader_w
+    if name_w < _FILENAME_MIN_WIDTH:
+        return None
     return idx_w, name_w, size_w, date_w, uploader_w
+
+
+def _file_prose_row(
+    idx_label: str,
+    name: str,
+    size: str,
+    uploader: str,
+    *,
+    width: int,
+    highlighted: bool,
+    accent: int | tuple[int, int, int],
+    ellipsis: str,
+) -> str:
+    """One file as prose fitted to `list_width(width)`, for a terminal too
+    narrow for the columns (issue #1452): the board and mail lists' prose
+    rows. The filename comes first and keeps its end (`cut_filename`); the
+    size follows, and the uploader takes what is left. The date goes, as
+    it does from a narrow board row."""
+    row_width = list_width(width)
+    lead = f"{idx_label} "
+    size_part = f" -- {size}"
+    name_room = row_width - visible_width(lead) - visible_width(size_part)
+    if name_room < _FILENAME_MIN_WIDTH:
+        # Too narrow for the size as well: the name alone.
+        size_part = ""
+        name_room = row_width - visible_width(lead)
+    name_cut = cut_filename(name, max(1, name_room), ellipsis=ellipsis)
+    uploader_room = row_width - visible_width(lead + name_cut + size_part) - len(", ")
+    uploader_cut = ""
+    if size_part and uploader_room >= _PROSE_UPLOADER_MIN_WIDTH:
+        uploader_cut = (
+            uploader if visible_width(uploader) <= uploader_room
+            else colored_truncate([(strip_ansi(uploader), None)], uploader_room, ellipsis=ellipsis)
+        )
+    plain = lead + name_cut + size_part + (f", {strip_ansi(uploader_cut)}" if uploader_cut else "")
+    if visible_width(plain) > row_width:
+        # Narrower than even the index label: cut the row as it stands.
+        plain = cut_to_width(plain, row_width)
+        return colored(plain, reverse=True) if highlighted else plain
+    if highlighted:
+        # One reverse-video bar, as the table's cursor row is.
+        return colored(plain, reverse=True)
+    row = colored(idx_label, fg_color=MENU_KEY_COLOR) + " " + colored(name_cut, fg_color=accent)
+    if size_part:
+        row += " -- " + colored(size, fg_color=EMPHASIS_COLOR)
+    if uploader_cut:
+        row += ", " + _uploader_cell(uploader_cut)
+    return row
 
 
 def cut_filename(name: str, width: int, *, ellipsis: str = "...") -> str:
@@ -2105,9 +2175,16 @@ async def _render_file_page(
     uploaders = [
         await lane.run(_uploader_display_name, entry, name_requirement=name_requirement) for entry in page.entries
     ]
-    idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(
+    widths = _file_column_widths(
         session.terminal_width, uploader_need=max((visible_width(u) for u in uploaders), default=0),
     )
+    if widths is None:
+        await _render_file_prose_rows(
+            session, page, uploaders, accent=accent, divider_color=divider_color,
+            unicode_style=unicode_style, highlighted=highlighted,
+        )
+        return
+    idx_w, name_w, size_w, date_w, uploader_w = widths
 
     header_cols = [
         f"{'#':^{idx_w}}",
@@ -2204,20 +2281,61 @@ async def _render_file_page(
             date_cell = colored(date_padded, fg_color=DATE_COLOR)
             uploader_cell = _uploader_cell(uploader_padded)
             await session.write_line(" ".join([idx_cell, name_cell, size_cell, date_cell, uploader_cell]))
-        # Every line, not just the first (issue #463): a description
-        # read out of an archive's FILE_ID.DIZ is up to ten lines of
-        # deliberate layout, and collapsing it into one would throw
-        # away the thing the convention exists to carry. Capped here as
-        # well as at every write path -- a row stored before those
-        # existed (a peer's catalogue entry, a dev script) must not be
-        # able to decide how tall this page is. A blank line inside a
-        # DIZ is written empty rather than as an indent of trailing
-        # spaces.
-        for line in (entry.description or "").splitlines()[:MAX_DESCRIPTION_LINES]:
-            if not line.strip():
-                await session.write_line("")
-                continue
-            await session.write_line(f"      {colored(sanitize_text(line), fg_color=VALUE_COLOR)}")
+        await _write_file_description(session, entry)
+
+
+async def _write_file_description(session: Session, entry: FileEntry) -> None:
+    """The lines under a file's row: its description, indented.
+
+    Every line, not just the first (issue #463): a description read out of
+    an archive's FILE_ID.DIZ is up to ten lines of deliberate layout, and
+    collapsing it into one would throw away the thing the convention exists
+    to carry. Capped here as well as at every write path -- a row stored
+    before those existed (a peer's catalogue entry, a dev script) must not
+    be able to decide how tall this page is. A blank line inside a DIZ is
+    written empty rather than as an indent of trailing spaces."""
+    for line in (entry.description or "").splitlines()[:MAX_DESCRIPTION_LINES]:
+        if not line.strip():
+            await session.write_line("")
+            continue
+        await session.write_line(f"      {colored(sanitize_text(line), fg_color=VALUE_COLOR)}")
+
+
+async def _render_file_prose_rows(
+    session: Session,
+    page: FileEntryPage,
+    uploaders: list[str],
+    *,
+    accent: int | tuple[int, int, int],
+    divider_color: int,
+    unicode_style: bool,
+    highlighted: int | None,
+) -> None:
+    """The page's files as prose rows (`_file_prose_row`), for a terminal
+    too narrow for the columns (issue #1452). As the narrow board list
+    does, a plain rule as wide as the rows stands where the column heading
+    and its rules were, and a pinned block's labelled rule takes its place."""
+    width = session.terminal_width
+    ellipsis = ellipsis_for(session, unicode_style=unicode_style)
+    rule = list_rule(width, unicode_style=unicode_style, color=divider_color)
+    top = (
+        list_rule(width, unicode_style=unicode_style, color=divider_color, label="Pinned")
+        if page.pinned_count else rule
+    )
+    await session.write_line(f"\r\n{top}")
+    for position, entry in enumerate(page.entries, start=1):
+        if page.pinned_count and position == page.pinned_count + 1:
+            await session.write_line(rule)
+        is_highlighted = highlighted == (position - 1)
+        idx_label = f"{'>' if is_highlighted else ' '}[{row_number_label(position)}]"
+        name = sanitize_text(entry.filename)
+        if entry.pinned:
+            name = f"pin {name}"
+        await session.write_line(_file_prose_row(
+            idx_label, name, _format_size(entry.size_bytes), uploaders[position - 1],
+            width=width, highlighted=is_highlighted, accent=accent, ellipsis=ellipsis,
+        ))
+        await _write_file_description(session, entry)
 
 
 def _description_draft_path(db: Database, entry: FileEntry, user: User) -> Path:
