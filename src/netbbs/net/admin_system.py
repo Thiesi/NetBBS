@@ -415,7 +415,7 @@ async def _system_menu(
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == HELP_KEY:
-            # No `about`: fifteen keys, one row each, already fill a 24-row
+            # No `about`: sixteen keys, one row each, already fill a 24-row
             # help screen. The briefs carry what each key changes and when.
             await show_menu_help(
                 session, "Settings help", _system_menu_entries(stats),

@@ -291,12 +291,13 @@ MODEL_BUDGETS = Preset(
         PresetTier("generous", "Generous", "1,000,000 tokens a day, 100 requests per caller, long replies"),
     ),
     plan=_model_plan, write=_model_write,
-    pick_preamble="Sets the model conversation's token budgets, rate limits and reply length. Prices, "
-                  "money budgets and every provider and privacy setting stay as they are.",
+    pick_preamble="Sets the model conversation's token budgets, rate limits, reply length and prior "
+                  "exchange lines. Prices, money budgets, the provider and every other privacy setting "
+                  "stay as they are.",
     help_about="Each value this tier would change, as before -> after; values already set that way are "
-               "left out. Apply writes them all at once, used from the next request, with one audit entry; "
-               "Back writes nothing. Prices, money budgets, the provider and privacy settings stay as they "
-               "are, and every value stays editable under Model settings.",
+               "left out: token budgets, requests per caller, cooldown, channel rate, output tokens, reply length "
+               "and prior exchange lines. Apply writes them all, used from the next request, with one audit "
+               "entry; Back writes nothing. Prices, money budgets and the provider stay as they are.",
 )
 
 
