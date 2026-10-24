@@ -227,9 +227,86 @@ shows the result.
 - **Left out, because the gain is too small:**
   - backups, presentation and timestamp formats, each three fields or fewer;
   - Limits & retention, whose values are independent.
-- **Deferred:** FTN presets (file-request tiers, more network templates beside
-  fsxNet). They wait until the FTN round (#1154) settles, so they don't land
-  on a subsystem that is still changing.
+- **Deferred, then decided:** FTN presets (file-request tiers, more network
+  templates beside fsxNet). They waited until the FTN round (#1154) had
+  landed, so they wouldn't land on a subsystem that was still changing.
+  Decisions 10-12 settle them.
+
+## FTN and QWKnet, decided 2026-10-24
+
+The FTN round's stages A-E had all merged by then (main at 8fb9c078). The same
+survey was then run over the FTN and QWKnet settings:
+- network, netmail, bundles and file requests;
+- links, hub behaviour, robot areas and publishing;
+- hatching and Origin;
+- QWK offline mail, and QWKnet networks and nodes.
+
+Its findings:
+- **One gap is real: there is no choice of network.** Today [C]reate always
+  pre-fills a single hard-coded network: fsxNet for FTN, DOVE-Net for QWKnet.
+- **Nothing else has a set of interdependent numbers for a preset to tune.**
+  - Hub behaviour (fan-out, transit netmail, the AreaFix server) has no
+    settings. A node becomes a hub by having links.
+  - Netmail, bundles, hatching and Origin are single toggles.
+  - Links, publishing and QWKnet nodes hold values that belong to one link,
+    one network or one node.
+- **File requests have four limits and two switches.** The two switches are
+  "Answer requests" and "Secure links only". Decision 5 keeps both out of any
+  preset, because the first sends files off the node and the second loosens
+  who may ask.
+
+Maintainer decisions of 2026-10-24.
+
+**Decision 10 — network templates on [C]reate (locked in).** [C]reate a
+network first asks which network to start from, and fills the new draft from
+that choice. The templates are data, so more can be added later. Building it
+is issue #1517.
+
+- **FTN:** fsxNet, nixNet, FidoNet and Blank.
+- **QWKnet:** DOVE-Net only. With one template there is no pick, and the
+  draft opens on it as it does today.
+
+**Decision 11 — what a template fills (locked in).** A template is the template
+of Decision 2, applied to a draft that has not been saved. Nothing is written
+before [S]ave, and every value stays editable.
+
+- **It fills the network's public facts:**
+  - the name and domain;
+  - the robot names;
+  - the nodelist echo and its file names.
+- **It fills an uplink and host only where the network has one documented
+  public entry hub.** fsxNet's 21:1/100 and DOVE-Net's VERT qualify. nixNet
+  assigns regional hubs and FidoNet's Net coordinators assign uplinks, so
+  both leave the uplink empty.
+- **It never fills:**
+  - passwords, the TLS pin, or cert and key paths;
+  - this node's address;
+  - the listener host and ports.
+- **It never switches on** Enabled, Answer calls, file-request Answer, Serve
+  nodes, or giving held mail to callers without a password.
+- **It never turns off** "secure links only".
+
+Filling a host here does not contradict Decision 5. Decision 5 is about
+changing saved settings. Here the SysOp sees the host in the draft and confirms
+it by saving.
+
+- **Facts come from the network itself.** A value not confirmed against the
+  network's infopack is left empty rather than guessed. AgoraNet, Micronet and
+  Araknet are added once their facts are in hand.
+
+**Decision 12 — no other FTN or QWKnet presets (locked in).**
+
+- **Declined:** file-request tiers. Without the two switches, a tier would
+  only move four numbers whose defaults are sound. Field help explains what
+  each limit caps (#1514).
+- **Declined:** a "leaf vs hub" tier. Hub behaviour has no settings to set.
+- **Declined:** presets for netmail, bundles, links, publishing, hatching,
+  Origin, QWK offline mail and QWKnet nodes, for the reasons in the findings
+  above.
+
+The same survey found FTN and QWKnet saves whose audit entries leave out values
+they write, and some that audit in a separate transaction. They are fixed as
+bug #1515, in the same way as #1505.
 
 ## Found by the survey, decided alongside
 

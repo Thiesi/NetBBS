@@ -2190,6 +2190,19 @@ listed under "Planned" at the end of this section.
 Every network is off until the SysOp enables it, and settings take effect
 without a restart, as MRC's do (§6.3).
 
+A new network starts from a template the SysOp picks: fsxNet, nixNet, FidoNet
+or Blank (issue #1517; §16, "Issue #1395", Decisions 10-12).
+- **What a template fills.** Only the unsaved draft, and only the network's
+  public facts: name, domain, robot names, the nodelist echo and file names.
+  It fills an uplink and host only where the network has one documented public
+  entry hub.
+- **What it never does.** It never fills a password, pin, path, this node's
+  address or a listener value. It never switches anything on, and never turns
+  "secure links only" off.
+
+QWKnet's [C]reate works the same way, with DOVE-Net as its only template
+(§6.11).
+
 **Transport: native BinkP, both directions.** The node speaks binkp/1.1
 (FSP-1024) in-process, with multiple batches, falling back to binkp/1.0
 (FTS-1026) with a mailer that doesn't offer them, and with CRAM-MD5 (FTS-1027)
