@@ -180,10 +180,15 @@ async def ftn_links_screen(session: Session, lane: DatabaseLane, actor: User, ne
                           f"{network.our_address.four_d}.1.",
             refresh=_refresh, on_create=_create, item_keys={"d": _delete, "a": _areas},
             live_keys={"r": _offered},
-            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a point or downlink"),
+            live_nav=[MenuEntry(label=menu_key("D", "elete"), brief="Remove a point or downlink",
+                                detailed="Remove it; what waits for it is dropped, its senders told"),
                       MenuEntry(label=menu_key("A", "reas"), brief="What the highlighted link carries"),
                       MenuEntry(label=menu_key("R", "obot areas"), brief="What AreaFix and FileFix offer links")],
             live_label=lambda: status or "Points and downlinks this BBS serves on this network",
+            help_about=("This network's points and downlinks: kind, whether it calls in or is polled, status, "
+                        "its areas, last call and what waits for it. Picking one edits it. Only a call that "
+                        "proves a link's session password gets its mail, and links call the answer port, so "
+                        "the network must answer calls."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -252,10 +257,15 @@ def link_fields() -> list[FieldSpec]:
                        "mail. A downlink is a node this BBS feeds; its own points are reached through it."),
         FieldSpec(key="address", label="Address", render=lambda d: d["address"] or "(not set)",
                   prompt=text_field("address", required=True), section="Link",
-                  brief="zone:net/node.point for a point, zone:net/node for a downlink"),
+                  brief="zone:net/node.point for a point, zone:net/node for a downlink",
+                  help="A point's is this BBS's address and a point number (21:1/199.1); a downlink's is "
+                       "another node, not the uplink. Mail for that address, and for a downlink's own points, "
+                       "waits for this link."),
         FieldSpec(key="name", label="Name", render=lambda d: d["name"] or "(none)",
                   prompt=_optional_text_field("name"), section="Link",
-                  brief="Who runs it, or the system's name, for this list"),
+                  brief="Who runs it, or the system's name, for this list",
+                  help="Up to 40 characters. A point's pointlist line uses it for an empty system name or "
+                       "sysop."),
         FieldSpec(key="status", label="Status", render=lambda d: STATUS_LABELS[d["status"]],
                   prompt=choice_field("status", statuses), step=choice_step("status", statuses), section="Link",
                   brief="Disabled: it must still log in, but gets nothing",
@@ -269,7 +279,9 @@ def link_fields() -> list[FieldSpec]:
                        "link's mail; a wrong one ends the call."),
         FieldSpec(key="packet_password", label="Packet password", render=secret("packet_password"),
                   prompt=_secret("packet_password", "Packet password"), section="Passwords",
-                  brief="Up to 8 characters, if the link uses one"),
+                  brief="Up to 8 characters, if the link uses one",
+                  help="Written into every packet sent to the link, and checked, without case, on every packet "
+                       "from it: a packet with another one is held. Empty: nothing is checked."),
         # --- robot and TIC passwords (issue #1479) ---
         FieldSpec(key="areafix_password", label="AreaFix password", render=secret("areafix_password"),
                   prompt=_secret("areafix_password", "AreaFix password"), section="Passwords",
@@ -280,7 +292,9 @@ def link_fields() -> list[FieldSpec]:
                   render=lambda d: "set" if d["filefix_password"] else (
                       "(the AreaFix password)" if d["areafix_password"] else "(not set)"),
                   prompt=_secret("filefix_password", "FileFix password"), section="Passwords",
-                  brief="What its FileFix requests carry; empty uses the AreaFix password"),
+                  brief="What its FileFix requests carry; empty uses the AreaFix password",
+                  help="Empty: FileFix takes its AreaFix password. The link can change it itself with %PWD to "
+                       "FileFix."),
         FieldSpec(key="tic_password", label="TIC password", render=secret("tic_password"),
                   prompt=_secret("tic_password", "TIC password"), section="Passwords",
                   brief="The Pw of TICs both ways; none: no file echoes to or from it",
@@ -295,12 +309,17 @@ def link_fields() -> list[FieldSpec]:
         FieldSpec(key="host", label="Host",
                   render=lambda d: d["host"] or ("(points call in)" if d["kind"] == POINT else "(not set)"),
                   prompt=_optional_text_field("host"), section="Calls",
-                  brief="Where a polled downlink answers BinkP"),
+                  brief="Where a polled downlink answers BinkP",
+                  help="A host name or IP address, needed for poll. A port written here wins over Port: "
+                       "host:24554, or [2001:db8::1]:24554 for IPv6."),
         FieldSpec(key="port", label="Port", render=lambda d: str(d["port"]), prompt=_int_field("port", "Port"),
-                  section="Calls", brief="Usually 24554"),
+                  section="Calls", brief="Usually 24554",
+                  help="Used only when this BBS calls the downlink."),
         FieldSpec(key="bundle", label="Bundle mail", render=lambda d: BUNDLE_LABELS[d["bundle"]],
                   prompt=choice_field("bundle", bundles), step=choice_step("bundle", bundles), section="Calls",
-                  brief="Send its packets bare or in a ZIP bundle"),
+                  brief="Send its packets bare or in a ZIP bundle",
+                  help="Off sends bare packets, which every mailer takes. ZIP sends each call's packet in one "
+                       "bundle. Bundles the link sends are opened either way."),
     ]
 
 
@@ -442,9 +461,14 @@ async def link_areas_screen(session: Session, lane: DatabaseLane, actor: User, n
             title=f"Areas of {sanitize_text(link.label)}", own=True,
             empty_message="It carries nothing yet. [A]dd an area, or offer areas so it can link them by AreaFix.",
             refresh=_load, live_keys={"a": _add}, item_keys={"d": _remove},
-            live_nav=[MenuEntry(label=menu_key("A", "dd"), brief="Give it an area this BBS carries"),
+            live_nav=[MenuEntry(label=menu_key("A", "dd"), brief="Give it an area this BBS carries",
+                                detailed="Give it any area this BBS carries, offered or not"),
                       MenuEntry(label=menu_key("D", "elete"), brief="Take the highlighted area away")],
             live_label=lambda: status or "Pick an area to switch it between read-write and read-only",
+            help_about=("The echoes and file echoes this link carries. Read-write: it gets the area and may "
+                        "send to it. Read-only: it gets the area, but what it sends there is held for you. "
+                        "Picking an area switches it at once; a link's own AreaFix keeps a read-only area "
+                        "read-only."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
@@ -490,6 +514,10 @@ async def offered_areas_screen(session: Session, lane: DatabaseLane, actor: User
             empty_message="This BBS carries no echo or file echo on the network yet: map a board or file area first.",
             refresh=_load,
             live_label=lambda: status or "Pick an area to offer it to points and downlinks, or stop offering it",
+            help_about=("Every echo and file echo this BBS carries on the network. A point or downlink can link "
+                        "an offered one itself with an AreaFix or FileFix request; nothing is offered until you "
+                        "pick it. Picking switches it at once. Links that carry an area keep it when you stop "
+                        "offering it."),
             start_stable_id=start,
             description_level=await lane.run(menu_description_level, actor),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,

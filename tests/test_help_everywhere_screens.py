@@ -579,9 +579,84 @@ def test_the_ftn_status_screen_has_help_and_h_is_still_held_items(db, lane, syso
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
     asyncio.run(ftn_status_screen(session, lane, sysop, _controls()))
     text = session.squeezed()
-    assert "Echomail & netmail help" in text and "What the echomail and netmail gateway last did" in text
-    assert "[H]eld items" in text.split("Echomail & netmail help")[1]
+    assert "Echomail & netmail help" in text and "Each network's last call and error" in text
+    assert "[H]eld items Release, save, export or delete what was held" in text.split("Echomail & netmail help")[1]
     assert session.leftover == []
+
+
+def _boxed(session) -> list[str]:
+    """The content rows of the boxed help screen a session was shown."""
+    rows = strip_ansi("".join(session.written)).split("\r\n")
+    top = max(i for i, row in enumerate(rows) if row.startswith("╭"))
+    bottom = next(i for i in range(top, len(rows)) if rows[i].startswith("╰"))
+    return rows[top + 1:bottom]
+
+
+def _fits(rows: list[str]) -> bool:
+    return len(rows) <= 20 and all(len(row) <= 78 for row in rows)
+
+
+@pytest.fixture
+def boxed_chrome(monkeypatch):
+    """Every FTN and QWKnet screen drawn in the boxed style, whose help
+    frame shows exactly how much of a terminal it takes."""
+    import dataclasses
+
+    from netbbs.net import admin_ui, ftn_console, ftn_links_console, ftn_publish_console, qwknet_console
+
+    real = admin_ui._load_chrome
+
+    async def boxed(lane, actor):
+        return dataclasses.replace(await real(lane, actor), unicode_style=True)
+
+    for module in (ftn_console, ftn_links_console, ftn_publish_console, qwknet_console):
+        monkeypatch.setattr(module, "_load_chrome", boxed)
+
+
+@pytest.mark.parametrize("screen", ["status", "publishing"])
+def test_the_ftn_detail_screens_explain_each_key_on_one_screen(db, lane, sysop, boxed_chrome, screen):
+    from netbbs.net import ftn_console, ftn_publish_console
+    from tests.test_ftn_console import _controls, _network
+
+    network = _network(db)
+    session = FakeSession([HELP_KEY, _DISMISS, "b"])
+    if screen == "status":
+        asyncio.run(ftn_console.ftn_status_screen(session, lane, sysop, _controls()))
+        expected = "Ask a node for files; they come to Held items"
+    else:
+        asyncio.run(ftn_publish_console.ftn_publish_screen(session, lane, sysop, network))
+        expected = "Each point's pointlist line, listed or not"
+    rows = _boxed(session)
+    assert expected in re.sub(r" {2,}", " ", " ".join(rows))
+    assert _fits(rows)
+
+
+def test_the_ftn_and_qwknet_lists_have_their_own_help_on_one_screen(db, lane, sysop, boxed_chrome):
+    from netbbs.boards.boards import create_board
+    from netbbs.ftn.address import FtnAddress
+    from netbbs.ftn.links import POINT, FtnLink, save_link
+    from netbbs.ftn.networks import set_board_area
+    from netbbs.net import ftn_console, ftn_links_console, qwknet_console
+    from netbbs.qwknet.networks import QwknetNetwork, save_network
+    from tests.test_ftn_console import _network
+
+    network = _network(db)
+    set_board_area(db, create_board(db, "general", creator=sysop), network.id, "FSX_GEN")
+    save_link(db, FtnLink(network_id=network.id, kind=POINT, address=FtnAddress(21, 1, 199, 1), session_password="x"))
+    save_network(db, QwknetNetwork(name="DOVE-Net", our_id="NETBBS", hub_id="VERT", host="vert.synchro.net"))
+    screens = {
+        "The FTN networks this BBS is on": lambda s: ftn_console.ftn_networks_screen(s, lane, sysop),
+        "This network's points and downlinks": lambda s: ftn_links_console.ftn_links_screen(s, lane, sysop, network),
+        "Every echo and file echo this BBS carries":
+            lambda s: ftn_links_console.offered_areas_screen(s, lane, sysop, network),
+        "The QWK networks this BBS is on": lambda s: qwknet_console.qwknet_networks_screen(s, lane, sysop),
+    }
+    for about, run in screens.items():
+        session = FakeSession([HELP_KEY, _DISMISS, "b"])
+        asyncio.run(run(session))
+        rows = _boxed(session)
+        assert about in " ".join(rows), about
+        assert _fits(rows), (about, len(rows))
 
 
 # -- account screens -------------------------------------------------------------
