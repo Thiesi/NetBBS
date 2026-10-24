@@ -2472,7 +2472,7 @@ async def _user_detail_screen(
                 )
                 if await prompt_yes_no(session, prompt, default=False):
                     if blocked:
-                        await lane.run(unblock_user, target)
+                        await lane.run(unblock_user, target, actor=actor)
                         _announce_line(session, f"{target.username!r} can log in again.")
                     else:
                         try:

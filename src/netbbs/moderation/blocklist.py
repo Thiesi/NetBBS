@@ -111,6 +111,13 @@ def block_user(db: Database, target: User, *, blocked_by: User, reason: str | No
             """,
             (target.id, reason, blocked_by.id, created_at),
         )
+        # The block and its entry in the account's history commit together.
+        from netbbs.moderation.log import record_action_without_commit
+
+        record_action_without_commit(
+            db, actor=blocked_by, action="block_user", target_user_id=target.id,
+            detail=f"reason={reason}" if reason else None,
+        )
     except sqlite3.IntegrityError as exc:
         db.connection.rollback()
         raise BlocklistError(f"{target.username!r} is already blocked") from exc
@@ -123,7 +130,7 @@ def block_user(db: Database, target: User, *, blocked_by: User, reason: str | No
     return _get_entry_for_user(db, target)
 
 
-def unblock_user(db: Database, target: User) -> None:
+def unblock_user(db: Database, target: User, *, actor: User | None = None) -> None:
     """Remove `target` from the blocklist, if present. Not an error if
     they weren't blocked in the first place — same "idempotent removal"
     shape as most unblock/unban operations.
@@ -133,11 +140,22 @@ def unblock_user(db: Database, target: User) -> None:
     a pre-existing fingerprint-keyed row from before that function
     stopped creating them (see `block_user`'s own docstring), so an old
     database's legacy block is still fully removable here even if it was
-    never migrated via `migrate_blocklist_key_to_local_user`."""
-    db.connection.execute(
-        "DELETE FROM blocklist WHERE local_user_id = ? OR fingerprint = ?",
-        (target.id, target.fingerprint),
-    )
+    never migrated via `migrate_blocklist_key_to_local_user`.
+
+    With `actor`, a removal that took a block away is recorded in the
+    account's history in the same transaction."""
+    try:
+        removed = db.connection.execute(
+            "DELETE FROM blocklist WHERE local_user_id = ? OR fingerprint = ?",
+            (target.id, target.fingerprint),
+        ).rowcount
+        if removed and actor is not None:
+            from netbbs.moderation.log import record_action_without_commit
+
+            record_action_without_commit(db, actor=actor, action="unblock_user", target_user_id=target.id)
+    except BaseException:
+        db.connection.rollback()
+        raise
     db.connection.commit()
 
 
