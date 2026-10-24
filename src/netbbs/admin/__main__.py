@@ -581,7 +581,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Replace an FTN network's stored nodelist with the given nodelist file, or the list in a ZIP; "
             "its CRC-16 is checked when its first line carries one. "
             "Netmail to a node the list says answers BinkP then goes to it directly; the rest goes "
-            "via the uplink. The console does the same from Node, Echomail & netmail (FTN), [N]odelist import. "
+            "via the uplink. The console does the same from Settings, Echomail & netmail (FTN), a network's "
+            "[N]odelist import. "
             "Safe while the node runs."
         ),
     )

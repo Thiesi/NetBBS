@@ -1025,11 +1025,13 @@ async def _registration_detail(session: Session, lane: DatabaseLane, row, *, bas
                 if row.status != "revoked":
                     help_entries.append(MenuEntry(
                         label=menu_key("R", "evoke"),
-                        brief="Take the name out of DNS and keep it from its holder; asks for a reason first",
+                        brief="Out of DNS now, beyond its holder's reach; asks a reason and the name",
                     ))
                 await show_menu_help(
                     session, "Registration help", help_entries,
-                    about="One name the managed-DNS service holds, as the service reports it.",
+                    about="One name the managed-DNS service holds, as the service reports it: its state, "
+                          "the node holding it, the address published for it and its timeline. A revoked "
+                          "name stays out of everyone's reach for the cooldown, then frees.",
                     header_color=presentation["header_color"], unicode_style=presentation["unicode_style"],
                 )
                 break  # drawn again

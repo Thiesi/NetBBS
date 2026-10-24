@@ -493,7 +493,7 @@ def test_a_managed_dns_registration_has_help(lane):
         presentation=presentation,
     ))
     text = session.squeezed()
-    assert "Registration help" in text and "[R]evoke Take the name out of DNS" in text
+    assert "Registration help" in text and "[R]evoke Out of DNS now, beyond its holder" in text
     assert text.count("harbor.netbbs.org") == 2
     assert session.leftover == []
 
