@@ -1840,10 +1840,9 @@ async def _remote_catalogue(
         own=True,
         empty_message="No remote catalogue entries.",
         help_about=(
-            "Files other nodes offer in this Linked area, with size and the node they come from. "
-            "[LOCAL] is already here: download it from the area's own list. Picking a [REMOTE] one "
-            "asks before fetching it to this node, where everyone in the area can then download it. "
-            "[IDENTITY CHANGED] means that node's key is not the one this node knew: be careful."
+            "Files other nodes offer in this Linked area. [LOCAL] is already in the area's list. "
+            "Picking a [REMOTE] one asks, then fetches it here for everyone in the area. "
+            "[IDENTITY CHANGED]: that node's key is not the one this node knew."
         ),
         description_level=await lane.run(menu_description_level, user),
         redraw_in_place=redraw_in_place,
