@@ -6,8 +6,8 @@ caller, use the [user handbook](NetBBS-User-Handbook.md#play-a-door-game) and ea
 game's own help. For building a door, use the
 [developer handbook](NetBBS-Developer-Handbook.md#developing-a-native-door).
 
-NetBBS supplies integration and three bundled games: Retro Trivia, Voidrunner,
-and War Dialer. Third-party games and their execution environments are installed
+NetBBS supplies integration and four bundled games: Retro Trivia, Voidrunner,
+War Dialer and Lunar Lander. Third-party games and their execution environments are installed
 by the SysOp. **MANUAL — outside NetBBS** identifies work on the host or in another
 program. NetBBS does not download games, obtain licenses, or install emulators.
 A single script of your own can be sent from inside NetBBS with **Content → Doors
@@ -27,6 +27,7 @@ several files or their own directory layout still go onto the host directly.
 - [Remote services](#remote-services-tunnel-first) and [BBSLink](#bbslink)
 - [War Dialer maintenance and recovery](#war-dialer-shared-world-sessions)
 - [Voidrunner saves and recovery](#voidrunner-careers-and-concurrent-sessions)
+- [Lunar Lander pilot records](#lunar-lander-pilot-records)
 - [Verification and troubleshooting](#verification-and-troubleshooting)
 
 ## Bundled games at a glance
@@ -36,11 +37,13 @@ several files or their own directory layout still go onto the host directly.
 | Retro Trivia | Fresh question round each launch; no persistent career to migrate |
 | Voidrunner | Per-player career files and scores; one session per pilot; save root depends on the service environment |
 | War Dialer | Shared SQLite world owned by one node; concurrent play; maintenance required for administrative season/reset operations |
+| Lunar Lander | Real-time flight; per-node SQLite pilot records, best landing per mission; needs an 80x24 terminal |
 
-The three games are developed in their own repositories,
+The four games are developed in their own repositories,
 [Thiesi/Voidrunner](https://github.com/Thiesi/Voidrunner),
-[Thiesi/RetroTrivia](https://github.com/Thiesi/RetroTrivia) and
-[Thiesi/WarDialer](https://github.com/Thiesi/WarDialer), and each NetBBS
+[Thiesi/RetroTrivia](https://github.com/Thiesi/RetroTrivia),
+[Thiesi/WarDialer](https://github.com/Thiesi/WarDialer) and
+[Thiesi/LunarLander](https://github.com/Thiesi/LunarLander), and each NetBBS
 release bundles one tagged release of each. Report game bugs there; the save,
 world, backup and resize behaviour below is NetBBS's and is reported here.
 
@@ -420,6 +423,41 @@ Backups predating this component restore the node without touching external game
 data. Restore a separately retained, matching game backup manually in that case.
 Copy completed backups off-machine and manage retention separately; NetBBS does
 not configure a scheduler, remote storage, or automatic deletion.
+
+## Lunar Lander pilot records
+
+Lunar Lander keeps one SQLite file, `pilots.db`: each pilot's best landing on
+each ranked mission. Training, crashes and aborted flights are never recorded.
+A flight has no save of its own, so a caller who hangs up mid-flight loses that
+flight and nothing else.
+
+| | |
+| --- | --- |
+| **Location** | `<database>.doors/lunar_lander/pilots.db`, beside War Dialer's world |
+| **Override** | `DOOR_LL_DATA_DIR` in the door's profile environment |
+| **Terminal** | At least 80x24; the flight pauses below that until the caller enlarges it |
+| **Guests** | A guest call flies against its own copy, thrown away at hang-up |
+| **CPU** | 900 CPU seconds a launch when registered from the Gallery without a profile, instead of the usual 300: real-time flight spends CPU steadily. A profile's own `cpu_seconds` wins |
+
+NetBBS sets the location for a door registered from the Gallery. The door's own
+default, `data/` beside the script, would be inside the installed package, which
+may be read-only and is replaced by every upgrade.
+
+**Backup:** node backups include the records as a checksummed `lunar-lander`
+component, snapshotted with SQLite's backup API. Callers can keep playing while
+it runs. A records file that is not Lunar Lander's, is damaged, is a symbolic
+link or is over 256 MiB stops the backup with an error naming it; move it aside
+to back up the node.
+
+**Restore:** stop the node. The records return to the restored database's own
+`<database>.doors/lunar_lander/` with no option to set. Restoring an archive
+taken without Lunar Lander moves any live records into the rollback directory,
+so they never sit beside a database that did not issue their user IDs.
+
+> [!NOTE]
+> Records kept under a profile's own `DOOR_LL_DATA_DIR` are outside the node
+> backup. Back them up with SQLite's backup API, as the game's own
+> `OPERATIONS.md` describes.
 
 ## What is supported, and what has been verified?
 

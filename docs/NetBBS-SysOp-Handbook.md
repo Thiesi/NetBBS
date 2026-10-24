@@ -1540,8 +1540,9 @@ The minimum age and verified-name requirements still apply.
 
 ### Register a bundled game
 
-Open **Content ▸ Doors ▸ Gallery** to register Retro Trivia, Voidrunner, or
-War Dialer. Gallery entries fill a draft with the installed interpreter and
+Open **Content ▸ Doors ▸ Gallery** to register Retro Trivia, Voidrunner,
+War Dialer, or Lunar Lander. Lunar Lander needs a terminal of at least 80x24;
+it pauses the flight on anything smaller until the caller enlarges it. Gallery entries fill a draft with the installed interpreter and
 sensible defaults; review and <kbd>S</kbd> **Save**.
 
 ### Set up any other door
@@ -4048,10 +4049,11 @@ Each guest call is kept apart from the next in three more ways:
 - **Posts and files:** it may edit, withdraw or describe only the posts and
   files it wrote during that call. Whatever earlier guests wrote under the
   account stays as it is, and says so.
-- **Bundled games:** it plays Voidrunner, War Dialer and Retro Trivia under an
-  identity of its own, with a save that is thrown away at hang-up. A guest
-  sees the real Hall of Fame and the real War Dialer world, but its career,
-  its callsign and its moves never reach them.
+- **Bundled games:** it plays Voidrunner, War Dialer, Lunar Lander and Retro
+  Trivia under an identity of its own, with a save that is thrown away at
+  hang-up. A guest sees the real Hall of Fame, War Dialer world and best
+  pilots, but its career, its callsign, its moves and its landings never
+  reach them.
 
 > [!WARNING]
 > Your own (non-bundled) doors still see the guest account; gate them by
@@ -4541,6 +4543,7 @@ Files, keys, and game saves also live outside it. For `/var/lib/netbbs/netbbs.db
 | Managed-DNS state and credentials | Database plus credential files beside it |
 | SSH host key and custom banners | Files beside the database that begin with its file name minus `.db`, e.g. `netbbs_ssh_host_key`, `netbbs_ssh_host_key_rsa` and `netbbs_welcome_banner.ans` (see [Custom banners and mastheads](#custom-banners-and-mastheads)) |
 | War Dialer world | `/var/lib/netbbs/netbbs.db.doors/war-dialer.db`, unless overridden |
+| Lunar Lander pilot records | `/var/lib/netbbs/netbbs.db.doors/lunar_lander/pilots.db`, unless the door's profile sets `DOOR_LL_DATA_DIR` |
 | Voidrunner careers | `/var/lib/netbbs/netbbs.db.doors/voidrunner/`, unless `VOIDRUNNER_SAVE_DIR` overrides it (a node upgraded from the old default copies the service account's `~/.netbbs/voidrunner_saves/` there at its first start) |
 | Third-party games | Each door's installation directory and any author-documented external state |
 | TOML and service configuration | `/etc/netbbs/` and the installed service files |
@@ -4641,6 +4644,10 @@ that silently captured no careers at all
 
 War Dialer has separate world capture and restore rules; see the
 [door guide](NetBBS-door-guide.md).
+
+Lunar Lander's pilot records are included automatically and can be backed up
+while callers play. Restore puts them back beside the database; stop the node
+first, as for any restore.
 
 Third-party installation directories are excluded unless you include them:
 press <kbd>D</kbd> on the Backup screen to switch its **Door installations**
