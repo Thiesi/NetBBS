@@ -542,7 +542,7 @@ def _format_size(size_bytes: int) -> str:
 # mail lists switch at.
 _TABLE_MIN_WIDTH = 60
 _FILENAME_MIN_WIDTH = 12
-# A prose row shows the uploader only when it has this many columns left.
+# A prose row cuts the uploader only when it has this many columns left.
 _PROSE_UPLOADER_MIN_WIDTH = 6
 
 
@@ -603,14 +603,16 @@ def _file_prose_row(
     lead = f"{idx_label} "
     size_part = f" -- {size}"
     name_room = row_width - visible_width(lead) - visible_width(size_part)
-    if name_room < _FILENAME_MIN_WIDTH:
-        # Too narrow for the size as well: the name alone.
+    if visible_width(name) > name_room and name_room < _FILENAME_MIN_WIDTH:
+        # The name does not fit beside the size, and cutting it for the
+        # size would leave too little of it: the name alone.
         size_part = ""
         name_room = row_width - visible_width(lead)
     name_cut = cut_filename(name, max(1, name_room), ellipsis=ellipsis)
     uploader_room = row_width - visible_width(lead + name_cut + size_part) - len(", ")
     uploader_cut = ""
-    if size_part and uploader_room >= _PROSE_UPLOADER_MIN_WIDTH:
+    # Whole when it fits; cut only when enough of it is left to read.
+    if uploader and uploader_room >= min(_PROSE_UPLOADER_MIN_WIDTH, visible_width(uploader)):
         uploader_cut = (
             uploader if visible_width(uploader) <= uploader_room
             else colored_truncate([(strip_ansi(uploader), None)], uploader_room, ellipsis=ellipsis)

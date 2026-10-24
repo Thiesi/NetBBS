@@ -418,6 +418,15 @@ keeps a listing page bounded), and within the same byte ceiling §11.2's
 can carry. The area listing renders every line of it, because a DIZ's line
 layout is content.
 
+The area listing follows §3.6. It is a table (number, filename, size, date,
+uploader) in display-width columns. Near its minimum the uploader column gives
+way before the filename, because the filename is what a caller reads a file
+list for. Below 60 columns, the width the board and mail lists switch at
+(§6.1, §6.4), a row becomes prose: "[01] name -- size, uploader". The filename
+keeps its end and extension, the size follows, and the uploader takes what is
+left. The date is dropped first, and the uploader goes before the size (issue
+#1452).
+
 ### 6.3 Real-time chat
 
 Local chat is typed event traffic, not preformatted strings. Initial event types
