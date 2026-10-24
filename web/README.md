@@ -209,15 +209,46 @@ the classes still fit.
 The three bundled games have dedicated pages with their gameplay galleries
 and scene players. Lunar Lander has a playable release-candidate page, with
 real captures from its published candidate and an explicit separate-download
-status; it is not yet bundled with the current NetBBS release. Blacksite has
-a development preview: describe planned play, label the status, and never
+status; it is not yet bundled with the current NetBBS release. Blacksite is
+in development and not yet released: its page separates what is built from
+what is still coming, labels the status, and shows only real captures. Never
 manufacture a screenshot.
 Their images are copied without modification from
 `Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
 `Thiesi/LunarLander` (`assets/lunar-lander-social.jpg`). Both repositories are
-BSD-2-Clause licensed. The Blacksite concept-art page declares
+BSD-2-Clause licensed. Both banners stay labelled as concept art. A page with
+no captures at all may declare
 `<meta name="netbbs-capture-kind" content="concept-art">`; the page checker
-requires labelled artwork and no terminal captures for that declaration.
+then requires labelled artwork and no terminal captures. No page declares it
+now.
+
+Blacksite's screenshots come from `Thiesi/Blacksite` at commit
+`d80dacdd58065f221d199b69df573fcf12f7d7cf` (package 0.0.20, slices S01-S24).
+The game is not vendored here. `website_capture_blacksite.py` refuses any
+other checkout HEAD, starts the game's own service in-process on a private
+loopback port, and runs the real door client (`python -m blacksite.door`) over
+stdio pipes, as a NetBBS native stdio door does. It plays one new Ghost through
+the Wake, the training drone, a Lattice run into the Vatline core, Clinic Row
+and Meridian Plaza, typing keys one at a time and waiting for the server to
+confirm each step: no teleports, grants or fixtures. Before each capture it
+presses Ctrl-L, the game's redraw key, and keeps the bytes from that full
+repaint onward, so each raw file is a complete frame as the door wrote it.
+
+```sh
+git clone https://github.com/Thiesi/Blacksite /path/to/Blacksite
+git -C /path/to/Blacksite checkout d80dacdd58065f221d199b69df573fcf12f7d7cf
+python scripts/website_capture_blacksite.py --source /path/to/Blacksite --out-dir web/shots
+python scripts/website_ansi_to_html.py web/shots/raw-blacksite-lattice.txt web/shots/shot-blacksite-lattice.html
+python scripts/website_ansi_to_html.py web/shots/raw-blacksite-city.txt web/shots/shot-blacksite-city.html
+python scripts/website_ansi_to_html.py web/shots/raw-blacksite-plaza.txt web/shots/shot-blacksite-plaza.html
+```
+
+Use the NetBBS venv's Python 3.12; the game has no runtime dependencies. The
+helper takes about three minutes. Combat and ICE use the game's randomness,
+so a recapture shows the same places with different numbers. The converter
+does not render SGR 2 (faint); remembered terrain shows in the game's own
+darker colours without the extra dimming a terminal adds. Blacksite's frames
+are box drawing, not half blocks, so they keep the stills' 1.55 line height.
 
 Lunar Lander's screenshots come from the published `v0.1.0-rc.3` asset,
 `lunar_lander.py`, SHA-256
@@ -236,8 +267,8 @@ python scripts/website_capture_lunar_lander.py flying web/shots/raw-lunar_lander
 
 Convert at 80x24 with `website_ansi_to_html.py`. Lunar Lander's scenery uses
 half-block pixels, so the still captures also need `line-height:1.2`.
-Only Blacksite retains the concept-art page declaration. Lunar Lander's hero
-image remains source concept art; its page and overview use the real splash.
+Lunar Lander's hero image remains source concept art; its page and overview
+use the real splash.
 
 Capture the real launch splashes through the games' own `play_splash` functions:
 
@@ -261,7 +292,8 @@ when changing a game page; the live checkers include all five game URLs.
 own scripts for unrelated interactions.
 
 `doors.html` is the game overview: one real launch splash per playable game
-(including Lunar Lander's release candidate), Blacksite's labelled concept art, a short description and a
+(including Lunar Lander's release candidate), Blacksite's labelled concept art
+(it has no launch splash yet; its real captures are on its own page), a short description and a
 link to each dedicated page. Keep gameplay galleries and scene players on the
 individual pages. The landing page keeps at most one still per game in its
 general screenshot gallery. Every public page links to the overview.
