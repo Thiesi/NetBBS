@@ -1560,6 +1560,8 @@ async def pick_item(
                 continue
             selected_item = page_items[highlighted]
             await end_choice_line(session)
+            if key.kind == EditorKeyKind.ENTER:
+                _guard_enter_after_choice(session, ended_by_enter=True)
             if on_toggle is not None:
                 await on_toggle(selected_item)
                 page_items = await _render()
@@ -1671,6 +1673,7 @@ async def pick_item(
                 await session.write("Choice: ")
                 continue
             if len(matches) == 1 and _pickable(matches[0]) and on_toggle is None:
+                _guard_enter_after_choice(session, ended_by_enter=True)
                 return matches[0]
             # Recorded only now (Codex review). Setting it before the
             # match check meant a search that found nothing still became
@@ -1791,6 +1794,7 @@ async def pick_item(
                 chosen = _numbered(page_items, int(char))
                 if chosen is not None:
                     await end_choice_line(session)
+                    _guard_enter_after_choice(session, ended_by_enter=True)
                     if on_toggle is not None:
                         await on_toggle(chosen)
                         page_items = await _render()
@@ -1821,6 +1825,10 @@ async def pick_item(
                 # directly after the echoed "02" with no separation at
                 # all, on the same line.
                 await end_choice_line(session)
+                # No Enter was needed, but callers type one anyway: it
+                # belongs to this choice, not to the next screen or a door's
+                # first question (issue #1546).
+                _guard_enter_after_choice(session, ended_by_enter=False)
                 if on_toggle is not None:
                     await on_toggle(chosen)
                     page_items = await _render()
@@ -1830,6 +1838,16 @@ async def pick_item(
             continue
 
         await session.write(reject_keystroke())
+
+
+def _guard_enter_after_choice(session: Session, *, ended_by_enter: bool) -> None:
+    """Arm the session's Enter guard (issue #1546) behind a completed
+    choice: the whole Enter a two-digit choice didn't need, or only the LF
+    still to come of the Enter that ended one. Sessions without it (test
+    doubles, other adapters) are left alone."""
+    arm = getattr(session, "arm_enter_guard", None)
+    if arm is not None:
+        arm(tail_only=ended_by_enter)
 
 
 async def _read_navigable_key(session: Session, *, distinguish_ctrl_h: bool = False) -> EditorKey:

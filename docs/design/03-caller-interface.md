@@ -1178,6 +1178,16 @@ board's posts, the mailbox and a file area (issue #1158,
 `netbbs.net.row_numbers`). The three that draw their own screen used to take
 one digit, `1`-`9`, so a row past the ninth had no number to type.
 
+A two-digit choice acts on its second digit, but callers end it with Enter
+out of habit, and that Enter belongs to the choice (issue #1546). After a
+picker choice, the next input is dropped once if it is a line ending (CR, LF,
+CR LF or CR NUL) arriving within a second (`char_input.arm_enter_guard`).
+Any other key, or a longer pause, is read unchanged. This covers whatever comes
+next, a door included: `08`, Enter, `2` starts the door with `2` waiting and
+nothing before it. After a choice that already ended with Enter (one digit
+and Enter, a highlighted row), only the rest of that Enter is dropped, never
+a second one.
+
 A whole word typed at a one-key prompt ("Communities", "no") acts on
 its first letter only: after a main-menu key or a yes/no answer, letters that
 follow within 0.6 seconds of each other, and the Enter that ends them, are
