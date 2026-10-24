@@ -659,20 +659,12 @@ def expire_unanswered_relay_mail(db: Database, *, now: datetime.datetime | None 
     return cursor.rowcount
 
 
-def unexpire_link_message_delivery(db: Database, content_id: str) -> None:
-    """The other half of `expire_link_message_delivery`, called when a
-    SysOp replays a dead-lettered/cancelled `link_mail_delivery` work
-    item (`netbbs.link.work_items.replay_work_item`) -- undoes the
-    expiry so the next successful push can still lead to a genuine
-    accepted/bounced resolution, rather than the message staying
-    permanently `'expired'` even though delivery is being retried again."""
-    unexpire_link_message_delivery_without_commit(db, content_id)
-    db.connection.commit()
-
-
 def unexpire_link_message_delivery_without_commit(db: Database, content_id: str) -> None:
-    """`unexpire_link_message_delivery` inside the caller's own
-    transaction, for `replay_work_item` (issue #1535)."""
+    """The other half of `expire_link_message_delivery`: put an expired
+    letter back to pending when a SysOp replays its dead-lettered or
+    cancelled delivery, inside `replay_work_item`'s own transaction
+    (issue #1535), so the next push can still end in a genuine accepted
+    or bounced answer."""
     db.connection.execute(
         "UPDATE mail_messages SET link_delivery_status = 'pending', link_delivery_reason = NULL, "
         "link_delivery_notice_pending = 0, link_relay_handoff_at = NULL "

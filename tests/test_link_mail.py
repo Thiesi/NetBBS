@@ -39,7 +39,7 @@ from netbbs.link.mail import (
     pending_delivery_notices,
     record_link_message_refused,
     record_relay_handoff,
-    unexpire_link_message_delivery,
+    unexpire_link_message_delivery_without_commit,
 )
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
@@ -507,7 +507,9 @@ def test_expire_and_unexpire_link_message_delivery(db, alice, node_identity, rem
     _, status = get_link_message_for_delivery(db, message.content_id)
     assert status == "expired"
 
-    unexpire_link_message_delivery(db, message.content_id)
+    unexpire_link_message_delivery_without_commit(db, message.content_id)
+
+    db.connection.commit()
     _, status = get_link_message_for_delivery(db, message.content_id)
     assert status == "pending"
 
@@ -604,7 +606,9 @@ def test_expiry_flags_the_sender_and_a_replay_takes_it_back(db, alice, node_iden
     expire_link_message_delivery(db, message.content_id)
     assert tuple(_delivery_row(db)) == ("expired", None, 1)
 
-    unexpire_link_message_delivery(db, message.content_id)
+    unexpire_link_message_delivery_without_commit(db, message.content_id)
+
+    db.connection.commit()
     assert tuple(_delivery_row(db)) == ("pending", None, 0)
 
 
@@ -731,7 +735,9 @@ def test_a_replay_forgets_an_old_relay_handoff(db, alice, node_identity, remote_
     record_relay_handoff(db, message.content_id, now=_HANDOFF)
     expire_link_message_delivery(db, message.content_id)
 
-    unexpire_link_message_delivery(db, message.content_id)
+    unexpire_link_message_delivery_without_commit(db, message.content_id)
+
+    db.connection.commit()
 
     assert tuple(_handoff_row(db)) == ("pending", None, 0, None)
 
