@@ -220,6 +220,19 @@ def test_help_that_fits_is_not_paged():
     assert "Short help" in text and "(1/" not in text and "Next page" not in text
 
 
+def test_a_resource_screens_field_help_ends_with_its_own_keys():
+    from netbbs.net.resource_editor import FieldSpec, _show_field_help
+
+    fields = [FieldSpec(key="1", label="Name", render=lambda draft: "", prompt=None, help="What callers see.")]
+    keys = [MenuEntry(label=menu_key("P", "ending posts"), brief="Approve or reject held posts")]
+    session = FakeSession([_DISMISS])
+    asyncio.run(_show_field_help(session, fields, keys=keys, unicode_style=True))
+    text = session.squeezed()
+    assert "What callers see." in text
+    assert text.index("Keys on this screen") > text.index("What callers see.")
+    assert "[P]ending posts Approve or reject held posts" in text
+
+
 def test_a_page_break_keeps_a_heading_with_the_rows_under_it():
     from netbbs.net.help_overlay import _pages
 
@@ -321,6 +334,7 @@ def test_a_pickers_own_help_names_the_linked_mark_the_session_actually_sees(mark
 
 def test_a_picker_without_help_about_keeps_its_navigation_help():
     session = FakeSession([HELP_KEY, _DISMISS, "b"])
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _pick(session)
     text = session.squeezed()
     assert "Navigation help" in text
