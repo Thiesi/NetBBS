@@ -210,6 +210,74 @@ def test_show_detail_help_has_a_default_title_and_names_the_page_keys_when_paged
     assert "< > PgUp/PgDn" in text
 
 
+def test_show_detail_help_entries_say_what_each_key_does():
+    session = FakeSession([HELP_KEY, _DISMISS, "b"])
+    _detail(session, help_about="What the node is doing.",
+            help_entries=[MenuEntry(label=menu_key("R", "efresh"), brief="Read the figures again")])
+    help_text = session.squeezed().split("What the node is doing.")[1]
+    assert "[R]efresh Read the figures again" in help_text
+
+
+# -- the picker's own screen help (issue #1514) -----------------------------------
+
+
+def _pick(session, **kwargs):
+    from netbbs.net.picker import pick_item
+
+    kwargs.setdefault("live_nav", [MenuEntry(label=menu_key("D", "elete"), brief="Remove the highlighted one")])
+    return asyncio.run(pick_item(
+        session, ["alpha", "beta"], name_of=lambda item: item, stable_id_of=["alpha", "beta"].index,
+        title="Things", empty_message="Nothing.", item_keys={"d": lambda item: asyncio.sleep(0, None)},
+        unicode_style=True, **kwargs,
+    ))
+
+
+def _help_box_rows(session) -> list[str]:
+    """The content rows of the last boxed help screen written."""
+    rows = strip_ansi("".join(session.written)).split("\r\n")
+    top = max(i for i, row in enumerate(rows) if row.startswith("╭"))
+    bottom = next(i for i in range(top, len(rows)) if rows[i].startswith("╰"))
+    return rows[top + 1:bottom]
+
+
+def test_a_picker_with_help_about_shows_its_own_help_on_one_screen():
+    session = FakeSession([HELP_KEY, _DISMISS, "b"])
+    assert _pick(session, help_about="What these things are, and what picking one does.") is None
+    rows = _help_box_rows(session)
+    text = re.sub(r" {2,}", " ", " ".join(rows))
+    assert "What these things are, and what picking one does." in text
+    assert "[D]elete Remove the highlighted one" in text
+    assert "[/] Find" in text and "B or Esc" in text
+    assert "Navigation help" not in session.text()
+    # It fits an 80x24 terminal: title, rows, bottom rule and the dismiss prompt.
+    assert len(rows) <= 20
+    assert all(len(row) <= 78 for row in rows)
+
+
+@pytest.mark.parametrize("marker_only", [True, False])
+def test_a_pickers_own_help_names_the_linked_mark_the_session_actually_sees(marker_only):
+    from netbbs.net.picker import _screen_help_lines
+    from netbbs.rendering.theme import LINKED_MARKER
+
+    text = " ".join(_plain(_screen_help_lines(
+        "Boards.", on_sort=None, has_refresh=False, has_create=False, live_nav=(), has_unpickable=False,
+        has_linked=True, linked_marker_only=marker_only, multiple=False, header_color=0,
+    )))
+    if marker_only:
+        assert f"A name ending in{LINKED_MARKER} is Linked" in text
+        assert "colour" not in text
+    else:
+        assert "A name in the Linked colour is Linked" in text
+
+
+def test_a_picker_without_help_about_keeps_its_navigation_help():
+    session = FakeSession([HELP_KEY, _DISMISS, "b"])
+    _pick(session)
+    text = session.squeezed()
+    assert "Navigation help" in text
+    assert "Remove the highlighted one" in text
+
+
 def test_question_mark_is_help_to_a_screen_that_asks_for_it_and_a_character_otherwise():
     async def read(data: bytes, **kwargs):
         return await char_input.read_editor_key(FakeByteSource(data), **kwargs)
