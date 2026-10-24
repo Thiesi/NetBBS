@@ -777,7 +777,7 @@ def test_the_monitor_has_help_and_repaints(lane, sysop, editor, key):
         session, lane, sysop, _controls(), disconnect=lambda entry: asyncio.sleep(0),
     ))
     text = session.squeezed()
-    assert "Monitor help" in text and "[S]noop Watch the selected caller's screen" in text
+    assert "Monitor help" in text and "[S]noop Watch their screen live" in text
     # Repainted in full after the help: the table's header row comes back.
     assert "USER" in text.split("Monitor help")[1]
     assert session.leftover == []
