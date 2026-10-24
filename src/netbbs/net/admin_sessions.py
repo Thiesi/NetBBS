@@ -182,8 +182,11 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Node management help", _node_menu_entries(session),
-                about="The running node: who is connected, and taking it down for maintenance or a "
-                      "shutdown. Maintenance mode stays on until you turn it off.",
+                about="Right now: whether maintenance mode is on, how many sessions are connected, "
+                      "and any drain or shutdown counting down. Maintenance mode refuses every login "
+                      "below SysOp but leaves connected callers alone; it lasts until you turn it off "
+                      "or the node restarts. Drain disconnects everyone below SysOp, who may log back "
+                      "in. Shutdown ends every session, yours too, and stops the node.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -403,7 +406,8 @@ async def disconnect_session_draft(
                 render=lambda d: sanitize_text(d["message"]) if d.get("message") else "(none)",
                 prompt=text_field("message"),
                 brief="Shown to them before disconnect",
-                help="Optional. Delivered to that session just before its connection is closed.",
+                help="Optional. Shown on that caller's screen just before the connection closes; "
+                     "the disconnect and the message are recorded in the moderation log.",
             ),
         ],
         draft=draft, save=save,
@@ -469,8 +473,10 @@ def _shutdown_field_specs() -> list[FieldSpec]:
             step=choice_step("mode", _SHUTDOWN_DRAIN_MODES),
             brief="Graceful (wait) or immediate",
             help=(
-                "Graceful warns everyone, then waits the delay below before disconnecting "
-                "them. Immediate disconnects everyone right away, ignoring the delay."
+                "Either way new logins stop at once. Graceful warns every session, yours too, "
+                "with a countdown over the delay below, then disconnects them and stops the "
+                "node; it can be cancelled until then. Immediate disconnects everyone and "
+                "stops the node right away."
             ),
         ),
         FieldSpec(
@@ -478,14 +484,16 @@ def _shutdown_field_specs() -> list[FieldSpec]:
             render=lambda d: f"{d['delay_seconds']:g}s" if d["mode"] == "graceful" else "n/a (immediate)",
             prompt=_delay_seconds_field(),
             brief="Seconds before disconnecting",
-            help="How long to wait, once triggered, before disconnecting everyone. Only used in graceful mode.",
+            help="Seconds from Save until everyone is disconnected, in graceful mode only. "
+                 "Starts at the TOML's shutdown.graceful_delay_seconds.",
         ),
         FieldSpec(
             key="message", label="Custom message",
             render=lambda d: d.get("message") or "(default message)",
             prompt=text_field("message"),
             brief="Replaces the default notice",
-            help='Broadcast to every connected session instead of the default "going down" notice.',
+            help='Replaces the "This node is going down" notice at every step of the '
+                 'countdown, for every session. Empty keeps the default.',
         ),
     ]
 
@@ -524,7 +532,8 @@ async def _scheduled_action_prelude(
                 ))
             await show_menu_help(
                 session, "Scheduled action help", help_entries,
-                about="Something is already scheduled. Back leaves it exactly as it is.",
+                about="Something is already counting down. Cancelling a shutdown also lets logins "
+                      "in again. Back leaves it exactly as it is.",
             )
             await _write_wrapped_subtitle(session, status_text, color=ALERT_COLOR, bold=True)
             await session.write_line(action_bar(options, width=session.terminal_width, height=session.terminal_height))
@@ -719,14 +728,16 @@ def _drain_field_specs() -> list[FieldSpec]:
             render=lambda d: f"{d['delay_seconds']:g}s",
             prompt=_delay_seconds_field(),
             brief="Seconds before disconnecting",
-            help="How long to wait, once triggered, before disconnecting every non-SysOp session.",
+            help="Seconds from Save until every session below SysOp is disconnected, with "
+                 "countdown warnings on the way. SysOp sessions are never touched.",
         ),
         FieldSpec(
             key="message", label="Custom message",
             render=lambda d: d.get("message") or "(default message)",
             prompt=text_field("message"),
             brief="Replaces the default notice",
-            help='Broadcast to every non-SysOp session instead of the default "going down" notice.',
+            help='Replaces the default warning at every step of the countdown, for every '
+                 'session below SysOp. Empty keeps the default.',
         ),
     ]
 

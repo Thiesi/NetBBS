@@ -207,12 +207,12 @@ def _audit_details_text(details: dict) -> str:
 
 
 _TRUST_MENU = (
-    MenuEntry(label=menu_key("S", "ubjects"), brief="Trusted node/user subjects"),
-    MenuEntry(label=menu_key("D", "omains"), brief="Trusted federation domains"),
-    MenuEntry(label=menu_key("A", "nchors"), brief="Root trust anchor keys"),
-    MenuEntry(label=menu_key("R", "eporters"), brief="Who can report abuse remotely"),
-    MenuEntry(label=menu_key("I", "dentity authorities"), brief="Attestation authority list"),
-    MenuEntry(label=menu_key("P", "ublished identity"), brief="What it asserts about its users"),
+    MenuEntry(label=menu_key("S", "ubjects"), brief="Remote nodes and users, and their state"),
+    MenuEntry(label=menu_key("D", "omains"), brief="Groups of reporters that count as one"),
+    MenuEntry(label=menu_key("A", "nchors"), brief="Recorded anchor nodes (no effect yet)"),
+    MenuEntry(label=menu_key("R", "eporters"), brief="Whose signals and vouches count here"),
+    MenuEntry(label=menu_key("I", "dentity authorities"), brief="Whose verified ages and names count"),
+    MenuEntry(label=menu_key("P", "ublished identity"), brief="Verified ages and names sent out"),
     MenuEntry(label=menu_key("V", "ouches"), brief="Identities this node vouches for"),
     MenuEntry(label=menu_key("C", "onflict signals"), brief="Equivocation it reported"),
     MenuEntry(label=menu_key("E", "xceptions"), brief="Sole-authority deviations"),
@@ -297,8 +297,10 @@ async def _trust_menu(
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Policy trust help", _TRUST_MENU,
-                about="Whom this node trusts on NetBBS Link, and what it vouches for and reports about "
-                      "others. A safety deviation means an exception lets one authority decide alone.",
+                about="How this node judges other Link nodes and their callers. Every remote identity "
+                      "starts on probation; Subjects shows each one's state and overrides it. Every change "
+                      "is audited (History). SAFETY DEVIATION: an exception lets one reporter restrict on "
+                      "its own word.",
                 header_color=header_color, unicode_style=unicode_style,
             )
         else:
@@ -531,8 +533,11 @@ async def _vouch_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Vouch help",
             help_about=(
-                "A vouch tells other nodes on the Link that you stand behind this identity. Issuing one asks "
-                "for a reason and one confirmation before it is published."
+                "Whether this node vouches for the identity, and how its vouches leave the node. [I]ssue "
+                "asks for a reason, published with the vouch, then once more before signing; issuing again "
+                "replaces the reason. It counts only at nodes that name this one a trusted reporter allowed "
+                "to vouch, and changes nothing here. [W]ithdraw publishes a signed withdrawal. Vouches "
+                "renew themselves, and pause while you quarantine or block the identity."
             ),
         )
         if choice == "b":
@@ -624,7 +629,11 @@ async def _published_vouches_screen(
             subtitle="Identities this node vouches for to the nodes that subscribe to it.",
             rows=rows, options=["w"] if intents else [],
             help_title="Vouches help",
-            help_about="The identities this node vouches for, as the nodes that subscribe to it see them.",
+            help_about=(
+                "Every identity this node vouches for, its status and published reason. Vouches are issued "
+                "on a subject's own screen. [W]ithdraw picks one and publishes a signed withdrawal, which "
+                "its subscribers apply at their next pull."
+            ),
         )
         if choice == "b":
             return
@@ -818,8 +827,10 @@ async def _trust_subject_screen(
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
                 help_title="Trust subject help",
                 help_about=(
-                    "One node or remote user, and how far this node trusts it in each area. Establish and Deny "
-                    "open the override editor already filled in; nothing changes before you save."
+                    "A remote node or user: its state per trust dimension and why. Until a node is "
+                    "established in identity integrity and resource behavior, content it authors is held "
+                    "back; a probationary user's posts wait for approval. Quarantine refuses new content and "
+                    "hides what was accepted; block also refuses key and recovery messages. Nothing is deleted."
                 ),
             )
             if choice == "b":
@@ -961,8 +972,11 @@ async def _issued_signals_screen(
             rows=rows, options=[], extra_actions=extra,
             help_title="Signals help",
             help_about=(
-                "Equivocation this node caught and reported: a node that signed two different versions of "
-                "the same thing."
+                "Signals this node signed about nodes it caught signing two different objects into one "
+                "place of a chain. Nothing here issues one. [T]urn off stops new signals and revokes the "
+                "published ones at the next sync pass; the quarantine they reported stays. [R]evoke "
+                "withdraws one signal and keeps its evidence. A signal counts at a subscriber only with a "
+                "second, independent domain."
             ),
         )
         if choice == "b":
@@ -1044,8 +1058,9 @@ async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) ->
         await show_menu_help(
             session, "Trust dimension help",
             _TRUST_DIMENSION_HELP if allow_all else _TRUST_DIMENSION_HELP[:-1],
-            about="Trust is kept separately in three areas, so a node can be trusted in one and "
-                  "blocked in another. Any other key leaves the choice as it was.",
+            about="Each dimension has its own state. A node's content arrives only while identity "
+                  "integrity and resource behavior are both established; content conduct is about what "
+                  "a node or user posts. Any other key leaves the choice as it was.",
         )
     if allow_all and choice == "a":
         return _ALL_DIMENSIONS
@@ -1057,9 +1072,9 @@ async def _pick_trust_dimension(session: Session, *, allow_all: bool = False) ->
 
 
 _TRUST_DIMENSION_HELP = (
-    MenuEntry(label=menu_key("I", "dentity integrity"), brief="Its keys and signatures"),
-    MenuEntry(label=menu_key("R", "esource behavior"), brief="Load, floods and abuse"),
-    MenuEntry(label=menu_key("C", "ontent conduct"), brief="What it posts and says"),
+    MenuEntry(label=menu_key("I", "dentity integrity"), brief="Its keys, signatures, equivocation"),
+    MenuEntry(label=menu_key("R", "esource behavior"), brief="Floods, quotas, relay and storage use"),
+    MenuEntry(label=menu_key("C", "ontent conduct"), brief="Spam, harassment, moderation judgments"),
     MenuEntry(label=menu_key("A", "ll three"), brief="The same state in all three"),
 )
 
@@ -1278,10 +1293,10 @@ async def _trust_list_choice(
 
 
 _TRUST_STATE_HELP = (
-    MenuEntry(label=menu_key("P", "robationary"), brief="Unproven, as every subject starts"),
-    MenuEntry(label=menu_key("E", "stablished"), brief="Trusted without waiting"),
-    MenuEntry(label=menu_key("Q", "uarantined"), brief="Held back, as a trigger would"),
-    MenuEntry(label=menu_key("D", "enied"), brief="Blocked; wins over everything"),
+    MenuEntry(label=menu_key("P", "robationary"), brief="Its new content held or sent for approval"),
+    MenuEntry(label=menu_key("E", "stablished"), brief="Accepted now, without waiting out probation"),
+    MenuEntry(label=menu_key("Q", "uarantined"), brief="New content refused, accepted content hidden"),
+    MenuEntry(label=menu_key("D", "enied"), brief="Blocked: as quarantine, recovery refused too"),
 )
 
 
@@ -1337,7 +1352,8 @@ async def _set_trust_override_screen(
                 break
             await show_menu_help(
                 session, "Trust state help", _TRUST_STATE_HELP,
-                about="The state this override forces. Any other key leaves the state as it was.",
+                about="The state this override holds the subject in until you clear it; evidence and "
+                      "probation no longer change it. Any other key leaves the state as it was.",
             )
         state = {
             "p": TrustState.PROBATIONARY, "e": TrustState.ESTABLISHED,
@@ -1354,8 +1370,9 @@ async def _set_trust_override_screen(
             prompt=_dimension_prompt,
             brief="Which trust dimension to force",
             help=(
-                "Identity integrity, resource behavior, or content conduct -- each is tracked separately. "
-                "All three sets one override per dimension: what establishing or blocking means."
+                "Identity integrity, resource behavior or content conduct, each with its own state. A node's "
+                "content arrives only once the first two are established. All three sets one override in "
+                "each, which is what Establish and Deny do."
             ),
         ),
         FieldSpec(
@@ -1364,8 +1381,10 @@ async def _set_trust_override_screen(
             prompt=_state_prompt,
             brief="The state to force",
             help=(
-                "Probationary, established, quarantined, or blocked. Forcing ESTABLISHED bypasses the "
-                "automatic probation requirements and is recorded as an audited safety deviation."
+                "Held until the override is cleared. Probationary: its content is held back, a user's posts "
+                "wait for approval. Established: accepted now; skipping probation asks once more. "
+                "Quarantined: new content refused, what was accepted is hidden, not deleted. Blocked: the "
+                "same, and key changes and recovery messages are refused too."
             ),
         ),
         FieldSpec(
@@ -1373,7 +1392,7 @@ async def _set_trust_override_screen(
             render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
             prompt=text_field("reason", required=True),
             brief="Mandatory audit note",
-            help="Recorded in the trust decision history alongside the override.",
+            help="Required. Kept with the override in the subject's trust history; never sent to other nodes.",
         ),
     ]
 
@@ -1561,7 +1580,10 @@ async def _trust_decision_history_screen(
         session, lane, actor, "Trust decision history",
         sections=[Section(None, body)],
         help_title="Trust history help",
-        help_about="Every trust decision this node made about this subject, newest first.",
+        help_about=(
+            "Every change of this subject's state, by policy or by override, newest first, with the "
+            "reason and the evidence counted then; for a user, its age and name decisions too."
+        ),
     )
 
 
@@ -1585,8 +1607,11 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
             rows=rows, options=["a"],
             help_title="Trust domains help",
             help_about=(
-                "Groups of reporters whose signals count together. A signal needs agreement from two "
-                "independent domains unless an exception says otherwise."
+                "Groups of reporters that may share an owner or interest, so several of them count as one. "
+                "Remote reports quarantine an identity only from two domains whose weights add up to 2.0; "
+                "a node leaves probation by vouches from reporters in two domains, a user from one. "
+                "[A]dd/update creates a domain or, with an existing ID, changes it; every state is "
+                "recomputed at once."
             ),
         )
         if choice == "b":
@@ -1614,21 +1639,24 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
                 render=lambda d: sanitize_text(d["domain_id"]) if d["domain_id"] else "(required)",
                 prompt=_id_then_seed,
                 brief="Stable identifier for the domain",
-                help="The identifier trusted reporters are assigned to. Reusing an existing ID updates it.",
+                help="What a reporter's Domain ID names. Typing an existing ID loads it, and saving updates it; "
+                     "domains are never removed here.",
             ),
             FieldSpec(
                 key="display_name", label="Display name",
                 render=lambda d: sanitize_text(d["display_name"]) if d["display_name"] else "(none)",
                 prompt=text_field("display_name"),
                 brief="Human-readable name",
-                help="Shown in listings and audit history instead of the bare ID.",
+                help="A label for the listing and the history; it changes nothing else.",
             ),
             FieldSpec(
                 key="weight", label="Weight",
                 render=lambda d: f"{d['weight']:.2f}",
                 prompt=_float_field("weight", label="Weight (0.0-1.0)", minimum=0.0, maximum=1.0),
                 brief="0.0-1.0 influence on trust signals",
-                help="How much a signal from this domain's reporters counts, from 0.0 (ignored) to 1.0 (full).",
+                help="0.0 to 1.0: what this domain adds toward the 2.0 a remote quarantine needs, so two "
+                     "domains below 1.0 can't quarantine on their own. 0.0 makes its reports count for "
+                     "nothing. Vouches count per domain whatever the weight.",
             ),
         ]
 
@@ -1737,12 +1765,14 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
         )] if anchors else [Note("No trust anchors are configured.")]
         choice = await _trust_list_choice(
             session, lane, actor, listing, title="Trust anchors",
-            subtitle="Nodes whose trust signals this node accepts as a root.",
+            subtitle="Nodes recorded as trust anchors. Nothing acts on them yet.",
             rows=rows, options=["a", "r"] if anchors else ["a"],
             help_title="Trust anchors help",
             help_about=(
-                "The nodes whose trust signals this node accepts as a starting point for everything else it "
-                "trusts."
+                "A list of nodes you name as anchors, with a reason, kept and audited. This version of "
+                "NetBBS does not consult it: an anchor gets no reporter authority, its signals and vouches "
+                "count only if it is also a trusted reporter, and nothing is accepted or refused because "
+                "of it. [A]dd/update and [R]emove change only the list."
             ),
         )
         if choice == "b":
@@ -1805,7 +1835,7 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
                 render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
                 prompt=text_field("reason", required=True),
                 brief="Mandatory audit note",
-                help="Why this node's trust signals are anchored. Recorded in the configuration history.",
+                help="Required. Kept with the anchor and in the configuration history.",
             ),
         ]
 
@@ -1869,7 +1899,13 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             subtitle="Who may report abuse to this node, in which domain and for what.",
             rows=rows, options=["a", "r"] if reporters else ["a"],
             help_title="Trusted reporters help",
-            help_about="Who may report abuse to this node, in which trust domain, and about what.",
+            help_about=(
+                "Nodes whose signed signals and vouches this node pulls and counts. Only once a reporter is "
+                "established here in identity integrity and resource behavior, and only within its Scopes: "
+                "a signal outside them is ignored. One domain never quarantines alone, short of an exception; "
+                "any counted report keeps the identity on probation. Vouches count only where May vouch is on. "
+                "[A]dd/update loads a reporter by choosing its node; held-back content is retried."
+            ),
         )
         if choice == "b":
             return
@@ -1944,7 +1980,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 render=lambda d: sanitize_text(d["domain_id"]) if d["domain_id"] else "(required)",
                 prompt=text_field("domain_id", required=True),
                 brief="Domain this reporter belongs to",
-                help="Must name a configured trust domain (see Trust [D]omains).",
+                help="An existing trust domain (Policy trust > Domains). Reporters in one domain count once "
+                     "together, at that domain's weight.",
             ),
             FieldSpec(
                 key="scopes", label="Scopes",
@@ -1952,9 +1989,10 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 prompt=text_field("scopes", required=True),
                 brief="dimension:category, by commas",
                 help=(
-                    "Which evidence this reporter may speak to, as dimension:category pairs separated by "
+                    "The only signals of this reporter that count, as dimension:category pairs separated by "
                     "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam. "
-                    "dimension:* grants every category of that dimension, listed by name once saved."
+                    "dimension:* grants every category this version knows, listed by name once saved; a "
+                    "category added by a later version is never granted by it."
                 ),
             ),
             FieldSpec(
@@ -1963,7 +2001,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 prompt=choice_field("can_vouch_nodes", [False, True]),
                 step=choice_step("can_vouch_nodes", [False, True]),
                 brief="Toggle node vouching",
-                help="Whether a vouch from this reporter counts toward a node leaving probation.",
+                help="Whether its vouch counts toward a node leaving probation here, which also needs 30 "
+                     "days, three days of contact and vouches from two domains.",
             ),
             FieldSpec(
                 key="can_vouch_users",
@@ -1972,7 +2011,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
                 prompt=choice_field("can_vouch_users", [False, True]),
                 step=choice_step("can_vouch_users", [False, True]),
                 brief="Toggle user vouching",
-                help="Whether a vouch from this reporter counts toward a remote user leaving probation.",
+                help="Whether its vouch counts toward a remote user leaving probation here, which also needs "
+                     "14 days and activity on three days.",
             ),
         ]
 
@@ -2030,7 +2070,13 @@ async def _attestation_authorities_screen(
             subtitle="Nodes whose signed age/name attestations this node believes.",
             rows=rows, options=["a", "r"] if authorities else ["a"],
             help_title="Identity authorities help",
-            help_about="Nodes whose signed statements about a caller's age or name this node believes.",
+            help_about=(
+                "Nodes whose signed verified age or real name of their callers this node accepts, for the "
+                "attributes listed. Accepted ones count as verified for that remote caller here. A node's "
+                "statements count only while its identity integrity is established here, and nothing "
+                "arrives until its SysOp names this node a recipient. With none listed, no remote "
+                "attestation is accepted. Separate from reporters: one role never grants the other."
+            ),
         )
         if choice == "b":
             return
@@ -2102,14 +2148,15 @@ async def _attestation_authorities_screen(
                 prompt=choice_field("attributes", attribute_sets),
                 step=choice_step("attributes", attribute_sets),
                 brief="age, name, or both",
-                help="Which verified attributes this authority's signed attestations are accepted for.",
+                help="Which of its attestations are accepted: age, name or both. Others it sends are kept but "
+                     "not accepted.",
             ),
             FieldSpec(
                 key="reason", label="Reason",
                 render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
                 prompt=text_field("reason", required=True),
                 brief="Mandatory audit note",
-                help="Why this node is trusted to verify identities. Recorded in the configuration history.",
+                help="Required. Kept with the authority and in the configuration history.",
             ),
         ]
 
@@ -2162,7 +2209,12 @@ async def _attestation_recipients_screen(
             subtitle="Nodes that receive this node's identity attestations.",
             rows=rows, options=["a", "r"] if recipients else ["a"],
             help_title="Attestation recipients help",
-            help_about="The nodes this node sends its own identity attestations to.",
+            help_about=(
+                "Nodes sent a sealed snapshot of every verified age and real name a caller here chose to "
+                "share over Link; only the recipient can open it. A change goes out at the next sync pass. "
+                "With none listed, nothing leaves. [R]emove sends that node a final, empty snapshot, which "
+                "makes a NetBBS node forget what it holds from this one."
+            ),
         )
         if choice == "b":
             return
@@ -2180,9 +2232,9 @@ async def _attestation_recipients_screen(
                 continue
             await session.write_line(
                 colored(
-                    "This stops future sharing. What the node already holds stays with it "
-                    "until each attestation expires, within 90 days, and it receives no "
-                    "further revocations.",
+                    "This stops sharing with it. Your node sends it one final, empty snapshot, "
+                    "retried for up to 90 days, and a node running NetBBS then forgets everything "
+                    "it holds from this one.",
                     fg_color=MUTED_COLOR,
                 )
             )
@@ -2235,7 +2287,7 @@ async def _attestation_recipients_screen(
                 render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
                 prompt=text_field("reason", required=True),
                 brief="Mandatory audit note",
-                help="Why this node is trusted with callers' verified birthdates and real names. Recorded in the audit trail.",
+                help="Required. Kept with the recipient and in the configuration history.",
             ),
         ]
 
@@ -2434,7 +2486,13 @@ async def _published_identity_screen(
             actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Published identity help",
-            help_about="What this node tells other Link nodes about its own users, such as verified age or name.",
+            help_about=(
+                "The verified ages and names of this node's callers that it signs for Link, and the "
+                "recipients that get them. Only callers who switched sharing on are listed; you can't "
+                "switch it on for them. [W]ithdraw switches one caller's sharing off and signs its "
+                "revocation; recipients drop it with the next snapshot. [R]ecipients names who receives "
+                "them. Show all adds ended ones."
+            ),
         )
         if choice == "b":
             return
@@ -2567,8 +2625,8 @@ async def _remote_attestation_override_screen(
                            brief="Accept or reject it yourself"),
                  MenuEntry(label=menu_key("C", "lear override"),
                            brief="Judge it by its signature again")],
-                about="Another node's signed statement about this user's age or name. An override "
-                      "decides it here, whatever the signature says, and is audited.",
+                about="Whether this remote user's age or name, as signed by their node, is accepted here. "
+                      "An override decides that yourself until cleared, and is audited.",
             )
             await _ask()
             continue
@@ -2622,9 +2680,9 @@ async def _remote_attestation_override_screen(
             prompt=choice_field("decision", decisions), step=choice_step("decision", decisions),
             brief="reject, or accept current record",
             help=(
-                "Reject refuses the attestation regardless of its signature. Accept only holds while a "
-                "current signed record from a configured authority exists -- it never revives an expired "
-                "or revoked one."
+                "Reject refuses it whoever signed it. Accept takes the newest current signed record this "
+                "node holds for it, even one whose signer is not an identity authority here; with none "
+                "current, nothing is accepted, and an expired or revoked one never counts."
             ),
         ),
         FieldSpec(
@@ -2632,7 +2690,7 @@ async def _remote_attestation_override_screen(
             render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
             prompt=text_field("reason", required=True),
             brief="Mandatory audit note",
-            help="Recorded with the override in the subject's decision history.",
+            help="Required. Kept with the override in the subject's trust history.",
         ),
     ]
 
@@ -2643,7 +2701,7 @@ async def _remote_attestation_override_screen(
         if accepted:
             confirmed = await prompt_yes_no(
                 session,
-                "Accept only while a current signed record from a configured authority exists?",
+                "Accept the newest current signed record, whoever signed it, while one exists?",
                 default=False,
             )
             if not confirmed:
@@ -2707,8 +2765,10 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             rows=rows, options=["a", "r"] if exceptions else ["a"],
             help_title="Exceptions help",
             help_about=(
-                "Places where one trust authority may decide alone, instead of two independent domains "
-                "agreeing. Each one is a deliberate safety deviation."
+                "Each row lets one trusted reporter quarantine on its own word in one category, without a "
+                "second domain. It counts only within that reporter's own Scopes, and a self-verifying "
+                "signal still needs its proof to check out here. [A]dd/update asks once more before saving; "
+                "[R]emove restores the two-domain rule. States are recomputed at once."
             ),
         )
         if choice == "b":
@@ -2761,7 +2821,8 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
                     "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 ),
                 brief="The single reporter to trust alone",
-                help="A stored peer, or a name/DNS name/technical identity typed in.",
+                help="A stored peer, or a name/DNS name/technical identity typed in. It must also be a "
+                     "trusted reporter with this scope, or the exception does nothing.",
             ),
             FieldSpec(
                 key="dimension", label="Dimension",
@@ -2782,7 +2843,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
                 render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
                 prompt=text_field("reason", required=True),
                 brief="Mandatory audit note",
-                help="Why one reporter is enough here. Recorded in the configuration history.",
+                help="Required. Kept with the exception and in the configuration history.",
             ),
         ]
 
@@ -2857,7 +2918,10 @@ async def _trust_config_history_screen(session: Session, lane: DatabaseLane, act
         subtitle="Every change to this node's trust policy, newest first.",
         sections=[Section(None, body)],
         help_title="Trust configuration history help",
-        help_about="Every change to this node's trust policy, newest first, and who made it.",
+        help_about=(
+            "Every change to domains, anchors, reporters, exceptions, identity authorities, recipients and "
+            "vouches, newest first, with what was set. Overrides are in each subject's own history."
+        ),
     )
 
 
@@ -2919,8 +2983,10 @@ async def _retired_usernames_screen(session: Session, lane: DatabaseLane, actor:
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Held names help",
             help_about=(
-                "Names of deleted accounts that nobody may register again, so no one inherits their Link "
-                "mail address or reputation. Releasing a name frees it for anyone."
+                "Names held for deleted and renamed accounts on a node that has run Link: nobody can "
+                "register or be renamed to one. [R]elease frees a name for anyone, who then takes over its "
+                "Link mail address, authorship and what other nodes recorded about it; mail to a renamed "
+                "account's old name stops reaching it. Asks once; it can't be undone."
             ),
         )
         message = None

@@ -467,8 +467,11 @@ async def _post_action_screen(
             redraw_in_place=redraw_in_place, unicode_style=unicode_style, page=page,
             help_title="Held post help",
             help_about=(
-                "A post waiting for moderation. Read it in full, then approve it so readers see it, or "
-                "reject it."
+                "A post or edit held for moderation, shown as readers will see it; for an edit, the "
+                "current text follows. [A]pprove publishes it, and sends it on to Link, FTN or QWKnet "
+                "if the board is carried there. [R]eject deletes it and tells the author, by mail with "
+                "their text, giving the reason you type. Pin keeps it at the top of the board; exempt "
+                "keeps it from expiring."
             ),
         )
         if choice == "b":
@@ -717,7 +720,8 @@ async def _file_action_screen(
             await show_menu_help(
                 session, "Pending file help", _file_action_entries(can_download=can_download, can_flag=can_flag),
                 about="An upload waiting for approval. Callers see it in the area only once it is "
-                      "approved; rejecting deletes it.",
+                      "approved, which also offers it to Link nodes if the area is Linked. Rejecting "
+                      "removes it from the area for good.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw()

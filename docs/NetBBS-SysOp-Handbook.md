@@ -2272,8 +2272,12 @@ forged identity.
 Under **Settings ▸ Policy trust**, inspect a subject's effective state and
 history before applying an override.
 
-- Domains, anchors, and reporters determine whose signals count; multiple
+- Domains and reporters determine whose signals and vouches count; multiple
   identities from one trust domain do not become independent votes.
+- A reporter's signals count only within its scopes, and only once it is
+  established here.
+- **Anchors** is a recorded, audited list only: this version of NetBBS
+  accepts or refuses nothing because a node is an anchor.
 - Quarantine restricts exchange; it does not erase previously accepted
   content.
 - A sole-authority exception deliberately weakens the usual multi-source
@@ -4039,7 +4043,7 @@ Under **Operations ▸ Node and sessions**:
 | --- | --- |
 | <kbd>W</kbd> **Who** | Lists sessions and disconnects one. |
 | <kbd>O</kbd> **Observe live** | Opens the Monitor (below). |
-| <kbd>M</kbd> **Maintenance mode** | Blocks new non-SysOp logins. |
+| <kbd>M</kbd> **Maintenance mode** | Blocks new non-SysOp logins until you turn it off or the node restarts; connected callers stay. |
 | <kbd>D</kbd> **Drain** | Warns and disconnects non-SysOp sessions after a delay. |
 | <kbd>L</kbd> **Lock & drain** | Combines both for planned work. |
 | <kbd>S</kbd> **Shutdown** | Stops the node after warning callers. |

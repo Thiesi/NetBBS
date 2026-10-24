@@ -195,10 +195,12 @@ async def link_moderators_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Link moderators help",
             help_about=(
-                "Give a user of another node moderation of what this node originates on NetBBS Link: one "
-                "linked board or channel, one of this node's Link Communities, or all of it. Nodes that "
-                "carry those boards and channels then accept that user's moderation. Your own node's "
-                "moderators need no grant here."
+                "Users of other nodes who moderate what this node originates on Link, and below, what this "
+                "node's own users may moderate elsewhere. A grant covers one linked board or channel, one "
+                "of this node's Link Communities, or everything it originates, and every node carrying it "
+                "accepts that user's moderation. [A]dd signs the new roster at Save; carriers learn it with "
+                "their next pass. [R]emove asks once; each carrier stops accepting it as the change arrives. "
+                "Your own node's moderators need no grant here."
             ),
         )
         message = None
@@ -253,7 +255,8 @@ async def _add(session: Session, lane: DatabaseLane, actor: User, link_context: 
         FieldSpec(
             key="user", label="User", render=lambda d: sanitize_text(d["user"]) or "(not chosen)",
             prompt=text_field("user", required=True), brief="name@TheirBBS",
-            help="The user on another node, as name@TheirBBS -- the address Link mail reaches them at.",
+            help="The user on another node, as name@TheirBBS -- the address Link mail reaches them at. "
+                 "Checked when you save.",
         ),
         FieldSpec(
             key="scope", label="On", render=lambda d: d["scope"].label if d["scope"] is not None else "(not chosen)",
@@ -264,7 +267,9 @@ async def _add(session: Session, lane: DatabaseLane, actor: User, link_context: 
             key="preset", label="May", render=_may_render, prompt=_may_prompt,
             step=_may_step,
             brief="What they may do there",
-            help="Edit and remove posts on boards; mute, ban and set the topic in channels; or part of that.",
+            help="Enter or Space steps through what fits On: a board, edit and remove posts or remove only; "
+                 "a channel, mute, ban and set the topic or mute and ban only; a Community or everything, "
+                 "all of it, posts only or channels only.",
         ),
     ]
 

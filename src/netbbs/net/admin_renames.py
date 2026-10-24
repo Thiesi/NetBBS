@@ -191,8 +191,10 @@ async def _decide_request(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Name request help",
             help_about=(
-                "Approve renames the account at once and ends its live sessions. Refuse asks for a "
-                "reason, which the caller sees at their next login."
+                "A caller's request for a new username, with the names the account had before. "
+                "[A]pprove asks once, then renames the account at once and ends its live sessions; "
+                "the name is checked again first. [R]efuse needs a reason, which the caller sees at "
+                "their next login. [B]ack leaves the request open."
             ),
         )
         message = None

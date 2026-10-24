@@ -716,8 +716,12 @@ async def _node_map_sysop_screen(
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
                 help_title="Node map help",
                 help_about=(
-                    "Every node this one knows on the Link, including those callers don't see because you "
-                    "quarantined or blocked them, with trust, addresses and reliability."
+                    "One node as this one knows it: its trust state per dimension and, on probation, what "
+                    "is still missing; Exchange says what is held back from it and whether it takes what "
+                    "this node sends. Callers don't see a node you quarantine or block. The trust keys "
+                    "appear once the node is a trust subject (it exchanged a hello or was introduced): "
+                    "[E]stablish and [D]eny open the override editor set for all three dimensions, [C]lear "
+                    "override returns to what policy computes, [T]rust details opens its full trust screen."
                 ),
             )
             if choice == "b":
@@ -892,9 +896,12 @@ async def _carry_decisions_screen(
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
                 help_title="Carry help",
                 help_about=(
-                    "A board, file area, channel or Community another node offers to share with this one. "
-                    "Accepting starts carrying it here -- for a Community, subscribing to what it lists; "
-                    "excluding turns the offer away."
+                    "A board, file area, channel or Community another node shares, waiting for your decision "
+                    "or turned away. [A]ccept makes a local copy now, and its content arrives with the next "
+                    "sync passes; for a Community, what it lists is carried within the carry caps. An "
+                    "[E]xcluded one is not fetched, and peers are told. [R]estore takes an excluded one on "
+                    "again. [P]urge deletes what a hidden one kept, after you type its name; it stays "
+                    "excluded."
                 ),
             )
             message = None
@@ -1059,7 +1066,8 @@ async def _dial_in_editor(
             help=(
                 "Where a caller reaches this board: telnet://host:port, ssh://host:port or an "
                 f"https:// URL, at most {MAX_DIAL_IN_URL_BYTES} bytes. Plain http:// is not accepted. "
-                "Empty the line to drop the entry."
+                "Empty the line to drop the entry. Peers get the saved list with the next hello; "
+                "saving all four empty publishes none."
             ),
         )
         for position, key in enumerate(slots, start=1)
@@ -1203,8 +1211,11 @@ async def _link_status_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Link status help",
             help_about=(
-                "This node's place on NetBBS Link: its identity, capacity, relays and verified peers, and "
-                "the offers waiting for a decision."
+                "This node on Link: its identity, mode and capacity, relays, probation both ways, what "
+                "waits, and offers to decide. [R]etry now ends every wait and runs a sync pass at once. "
+                "[A]cknowledge dismisses the identity-change notices shown; it changes no trust. [P]eers is "
+                "the node map; [O]ffered and [E]xcluded are shared resources waiting for, or turned away "
+                "by, a decision."
             ),
         )
         message = None
@@ -1325,8 +1336,9 @@ async def _node_keys_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Node keys help",
             help_about=(
-                "This node's Link keys. The root key is the node's address and never changes; the signing "
-                "and transport keys can be replaced from their own screens."
+                "This node's Link keys. The root key behind the fingerprint is the node's address and no "
+                "rotation changes it. [S]igning key and [T]ransport key open that key's history and its two "
+                "kinds of replacement; they need the running node."
             ),
         )
         if choice == "b":
@@ -1381,8 +1393,10 @@ async def _node_key_detail(
             page=page, redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Node key help",
             help_about=(
-                "One key and its history. Rotate replaces it routinely; Compromised also tells peers to stop "
-                "believing what the old key signed. Both are final."
+                "One key and its history. [R]otate retires it for a new one; what it signed stays valid. "
+                "[C]ompromised also tells every peer to refuse what the old key signed that it does not "
+                "already hold; this node then re-signs its own content (signing key) or ends its live "
+                "sessions (transport key). Each asks once, and can't be undone."
             ),
         )
         if choice == "b":
@@ -1477,7 +1491,12 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
             sections=[Section("Work items by status", rows)], actions=actions, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Outbox help",
-            help_about="Link mail and acknowledgements waiting to go out, and those that keep failing.",
+            help_about=(
+                "Outgoing Link mail and delivery acknowledgements, counted by status. Pending ones go out on "
+                "the next sync pass; retrying ones wait between tries; after 10 failed tries or too long, "
+                "one is dead-lettered and its letter marked expired. [I]tems lists the retrying and "
+                "dead-lettered ones."
+            ),
         )
         message = None
         if choice == "b":
@@ -1534,9 +1553,10 @@ async def _outbox_item_screen(
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         help_title="Work item help",
         help_about=(
-            "One outgoing delivery that is retrying or gave up. Replay sends it again now; cancel stops "
-            "retrying it. Delete forgets one that gave up, when its recipient is gone for good; the "
-            "letter stays expired."
+            "One outgoing delivery that is retrying or gave up. [R]eplay puts a dead-lettered one back "
+            "to pending with fresh tries, for the next sync pass, and un-expires its letter. [C]ancel "
+            "stops retrying one for good. [D]elete forgets one that gave up, when its recipient is gone "
+            "for good; the letter stays expired."
         ),
     )
     if choice == "r":
@@ -1707,7 +1727,12 @@ async def _mail_tools_screen(
             actions=actions,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Mail help",
-            help_about="How much mail each mailbox holds, and the Link mail this node refused to deliver.",
+            help_about=(
+                "How full this node's mailboxes are, and Link mail it refused. [W]rite to all callers sends "
+                "one letter from your account to every account that takes mail, and they can reply; "
+                "[N]otice to all callers sends it from the BBS, with no reply. [M]ailboxes lists each "
+                "account; [R]efused Link mail lists what was turned away. Subjects and bodies are never shown."
+            ),
         )
         if choice == "b":
             return
@@ -1775,7 +1800,11 @@ async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -
             page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Mailboxes help",
-            help_about="Each member's mailbox and how much it holds.",
+            help_about=(
+                "Every account with mail and how full it is. Of the cap is the Inbox against its limit; a "
+                "full one drops its oldest read letter, one full of unread letters refuses new mail. Kept "
+                "has its own limit. [O]rder switches between fullest first and by name."
+            ),
         )
         if choice == "b":
             return
@@ -1830,7 +1859,11 @@ async def _refused_link_mail_screen(
             page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Refused Link mail help",
-            help_about="Letters from other nodes that this node would not deliver, and why.",
+            help_about=(
+                "Letters from other nodes this node would not deliver, newest first, with why and how often "
+                "the sender tried; each sender got a bounce. [O]pen shows one, with the trust of its node "
+                "and sender."
+            ),
         )
         if choice == "b":
             return
@@ -1940,7 +1973,11 @@ async def _refused_letter_screen(
             actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Refused letter help",
-            help_about="One refused letter: who sent it, to whom, and why it was refused.",
+            help_about=(
+                "One refused letter: who sent it, how it arrived, why it was refused, and the trust its node "
+                "and sender have here. [N]ode trust and [U]ser trust open their trust screens, where "
+                "establishing one lets their next letter in; a refusal not about trust says so."
+            ),
         )
         if choice == "b":
             return
