@@ -446,9 +446,8 @@ async def admin_menu(
             console, quick = _admin_menu_entries(node_controls, link_context)
             await show_menu_help(
                 session, "SysOp console help", [*console, *quick],
-                about="The landing page of the SysOp console: the node's health and what waits for "
-                      "you above, every area of the console below. Quick keys jump straight to a "
-                      "screen that also sits deeper in the menus.",
+                about="Above: the node's health and what waits for you. Below: every area of the "
+                      "console, then quick keys for screens that also sit deeper in the menus.",
                 header_color=dashboard_state["header_color"], unicode_style=dashboard_state["unicode_style"],
             )
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
@@ -658,7 +657,8 @@ async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None
             _announce_line(session, "You are no longer marked away.")
             return
         if choice == HELP_KEY:
-            help_entries = [MenuEntry(label=menu_key("S", "et"), brief="A one-line notice, optional date")]
+            help_entries = [MenuEntry(label=menu_key("S", "et"),
+                                      brief="Line and optional return date")]
             if notice is not None:
                 help_entries.append(MenuEntry(label=menu_key("E", "nd it"), brief="Stop being marked away"))
             header_color, unicode_style = await lane.run(
@@ -666,8 +666,10 @@ async def _away_screen(session: Session, lane: DatabaseLane, user: User) -> None
             )
             await show_menu_help(
                 session, "Away notice help", help_entries,
-                about="Tell members you are away. The notice shows beside your name under Operators; "
-                      "it changes none of your permissions.",
+                about="Tell members you are away. The notice shows beside your name under Operators, and "
+                      "when everyone who can approve accounts is away, new callers waiting for approval "
+                      "are told who is back first. A return date ends it by itself the day after. It "
+                      "changes none of your permissions.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             continue
@@ -1456,7 +1458,7 @@ def _operations_menu_entries(
         MenuEntry(label=menu_key("F", "ull backups"), brief="Create and review complete backups"),
         MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
         MenuEntry(label=menu_key("S", "earch indexes"), brief="Check and rebuild Find's indexes"),
-        MenuEntry(label=menu_key("A", "udit log"), brief="Moderation action history"),
+        MenuEntry(label=menu_key("A", "udit log"), brief="Moderation and admin actions"),
         MenuEntry(label=menu_key("E", "rror log"), brief="Warnings and errors in netbbs.log"),
         MenuEntry(label=menu_key("M", "ail"), brief="Mailbox sizes, refused Link mail"),
     ]

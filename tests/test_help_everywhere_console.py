@@ -62,7 +62,7 @@ def _assert_help_then_redraw(text: str, help_title: str, about_word: str, redraw
 
 def test_the_landing_page_has_help(db, lane, sysop):
     text = _console(FakeSession([H, " ", "b"]), lane, sysop)
-    _assert_help_then_redraw(text, "SysOp console help", "landing page", "SysOp operations console")
+    _assert_help_then_redraw(text, "SysOp console help", "what waits for you", "SysOp operations console")
     assert "Durable node configuration" in _after(text, "SysOp console help")
 
 
@@ -86,7 +86,7 @@ def test_the_staff_console_has_help(db, lane, sysop):
     [
         (["u"], "Users help", "user accounts", "romote/demote"),
         (["o"], "Operations help", "running node", "rune drafts"),
-        (["s"], "Settings help", "lasting configuration", "astheads & banners"),
+        (["s"], "Settings help", "next start", "astheads & banners"),
         (["s", "n"], "Node name help", "corner of every screen", "Recolor the node name"),
         (["s", "p"], "Policy trust help", "safety deviation", "dentity authorities"),
         (["c"], "Content help", "approval", "rant moderator"),
@@ -193,7 +193,7 @@ def test_the_gradient_screen_has_help(db, lane, sysop):
 def test_the_update_screen_has_help(db, lane, sysop):
     text = _console(FakeSession(["s", "u", H, " ", "b", "b", "b"]), lane, sysop)
     _assert_help_then_redraw(text, "Self-update help", "never installs", "Self-update")
-    assert "GitHub token for release checks" in text
+    assert "GitHub token; kept masked" in text
 
 
 def test_the_managed_dns_screen_has_help(db, lane, sysop):
