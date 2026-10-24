@@ -240,7 +240,7 @@ def test_review_ctrl_h_shows_real_help_text_for_every_field():
     text = _text(session)
     assert action == ReviewAction.COMMIT
     assert "the recipient this will be sent to" in text.lower()
-    assert "reopens whichever editor you're currently using" in text.lower()
+    assert "reopens your editor with the text intact" in text.lower()
 
 
 def test_review_ctrl_h_narrows_to_the_highlighted_field():
@@ -256,7 +256,7 @@ def test_review_ctrl_h_narrows_to_the_highlighted_field():
     # help should show, not Subject's or Body's.
     assert action == ReviewAction.COMMIT
     assert "the recipient this will be sent to" in text.lower()
-    assert "reopens whichever editor you're currently using" not in text.lower()
+    assert "reopens your editor with the text intact" not in text.lower()
 
 
 def test_review_arrow_nav_activates_the_highlighted_field():

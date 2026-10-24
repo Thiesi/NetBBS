@@ -149,7 +149,10 @@ async def manage_password_screen(session: Session, lane: DatabaseLane, target: U
                 ))
             await show_menu_help(
                 session, "Password help", help_entries,
-                about=f"The password that signs in to {possessive} account.",
+                about=(
+                    f"Whether {possessive} account has a password, and how many SSH keys can sign in to it. "
+                    "A new password applies from the next sign-in; sessions already signed in stay."
+                ),
                 unicode_style=await lane.run(unicode_style_enabled, changed_by),
             )
         else:
