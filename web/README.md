@@ -207,14 +207,37 @@ the classes still fit.
 ## Individual game pages
 
 The three bundled games have dedicated pages with their gameplay galleries
-and scene players. Blacksite and Lunar Lander have development previews:
-describe planned play, label the status, and never manufacture a screenshot.
+and scene players. Lunar Lander has a playable release-candidate page, with
+real captures from its published candidate and an explicit separate-download
+status; it is not yet bundled with the current NetBBS release. Blacksite has
+a development preview: describe planned play, label the status, and never
+manufacture a screenshot.
 Their images are copied without modification from
 `Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
 `Thiesi/LunarLander` (`assets/lunar-lander-social.jpg`). Both repositories are
-BSD-2-Clause licensed. The concept-art pages declare
+BSD-2-Clause licensed. The Blacksite concept-art page declares
 `<meta name="netbbs-capture-kind" content="concept-art">`; the page checker
 requires labelled artwork and no terminal captures for that declaration.
+
+Lunar Lander's screenshots come from the published `v0.1.0-rc.3` asset,
+`lunar_lander.py`, SHA-256
+`75efa163b3cdadc5b8c56881460a1adea313e5e51f8c455589d623ed73aa3c78`.
+`website_capture_lunar_lander.py` verifies that digest, then uses the game's
+own `Display.draw` and `Display.encode`, as its upstream capture tool does.
+The flight capture advances the real model with controls for eight seconds;
+the briefing uses a fixed 2026-10-24 daily calendar. No pilot records are made.
+Download the script and `SHA256SUMS` from that release, then capture:
+
+```sh
+python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/rc.3/lunar_lander.py
+python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/rc.3/lunar_lander.py
+python scripts/website_capture_lunar_lander.py flying web/shots/raw-lunar_lander-flying.txt --source /path/to/rc.3/lunar_lander.py
+```
+
+Convert at 80x24 with `website_ansi_to_html.py`. Lunar Lander's scenery uses
+half-block pixels, so the still captures also need `line-height:1.2`.
+Only Blacksite retains the concept-art page declaration. Lunar Lander's hero
+image remains source concept art; its page and overview use the real splash.
 
 Capture the real launch splashes through the games' own `play_splash` functions:
 
