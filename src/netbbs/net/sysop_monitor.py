@@ -643,11 +643,11 @@ async def _chat(
 
 #: The monitor's help: its action bar, one key a row.
 _HELP_ENTRIES = (
-    MenuEntry(label=menu_key("S", "noop"), brief="Watch the selected caller's screen, live; they are not told"),
-    MenuEntry(label=menu_key("C", "hat"), brief="Break into the selected caller's session for a chat"),
-    MenuEntry(label=menu_key("M", "essage"), brief="Send the selected caller a one-line message"),
-    MenuEntry(label=menu_key("K", "ick"), brief="Disconnect the selected caller, with an optional message"),
-    MenuEntry(label=menu_key("U", "nwind"), brief="Send the selected caller back to the main menu"),
+    MenuEntry(label=menu_key("S", "noop"), brief="Watch their screen live; they aren't told, the node log is"),
+    MenuEntry(label=menu_key("C", "hat"), brief="Break in for a chat; after it they are back where they were"),
+    MenuEntry(label=menu_key("M", "essage"), brief="One line, shown on their screen at once"),
+    MenuEntry(label=menu_key("K", "ick"), brief="Disconnect them, with an optional message; logged"),
+    MenuEntry(label=menu_key("U", "nwind"), brief="Send a logged-in caller back to the main menu"),
     MenuEntry(label=menu_key("O", "rder"), brief="Sort by time on, idle time or user name"),
     MenuEntry(label=menu_key("Q", "uit"), brief="Leave the monitor"),
 )
@@ -661,8 +661,10 @@ async def _show_monitor_help(session: Session, state: MonitorState, *, unicode_s
         await show_menu_help(
             session, "Monitor help", _HELP_ENTRIES,
             about=(
-                "Everyone connected to this node, refreshed every few seconds. "
-                "Up and Down select a caller; the actions work on the selected one."
+                "Everyone connected, refreshed every two seconds: how they came in (VIA), from where, "
+                "time on, idle time, terminal and what they are doing. The top row flags a shutdown or "
+                "drain counting down, maintenance mode and the MRC link. Up and Down select a caller; "
+                "the actions work on the selected one. Chat is refused during a file transfer."
             ),
             header_color=state.header_color, unicode_style=unicode_style,
         )

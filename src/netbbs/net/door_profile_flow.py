@@ -239,51 +239,92 @@ async def edit_door_profile(session, lane, actor, door, *, door_services=None):
         fields.append(FieldSpec(key=key, label=label,
                                  section=section, render=lambda d, k=key: sanitize_text(str(d.get(k, ""))) or "(none)",
                                  prompt=prompt or text_field(key), help=help, step=step))
-    add("preset", "Setup template", "Runtime", preset_prompt)
-    add("import", "Import JSON", "Runtime", import_prompt)
+    add("preset", "Setup template", "Runtime", preset_prompt,
+        help="Replaces this whole draft with a bundled template (DOS games, DoorParty, BBSLink, VM and more). "
+             "Nothing is stored until Save; fill in its local paths first.")
+    add("import", "Import JSON", "Runtime", import_prompt,
+        help="Replaces the draft with a profile JSON file on this node: a bare profile, or one with "
+             "executable_path and args as well. Nothing is stored until Save.")
     add("original_api", "Restore original API on Save", "Runtime",
         original_api_prompt,
         help="Remove compatibility settings on Save. Keeps executable/arguments and game data; correct paths first if needed. Toggle off to keep the profile draft.")
-    add("adapter", "Adapter", "Runtime", choice_field("adapter", list(ADAPTERS)))
-    add("endpoint", "I/O endpoint", "Runtime", choice_field("endpoint", ["stdio", "pty", "socketpair"]))
-    add("executable_path", "Executable/runtime path", "Runtime")
+    add("adapter", "Adapter", "Runtime", choice_field("adapter", list(ADAPTERS)),
+        help="How the door runs: native (a program on this node), dosbox (DOSBox-X), rlogin (a remote door "
+             "server), bbslink (the BBSLink network) or vm (a guest image). Each needs its own options.")
+    add("endpoint", "I/O endpoint", "Runtime", choice_field("endpoint", ["stdio", "pty", "socketpair"]),
+        help="How a local door gets the caller: stdio pipes, a pseudo-terminal, or a socket whose descriptor "
+             "DOOR32.SYS names (socketpair needs DOOR32.SYS in Drop formats; DOSBox needs socketpair).")
+    add("executable_path", "Executable/runtime path", "Runtime",
+        help="The program to start: the door itself, or the emulator for dosbox and vm.")
     add("args_line", "Arguments", "Runtime", help="Fixed argv. Available substitutions: {node_dir}, {node}, {door32}, {door_sys}, {install_dir}.")
-    add("install_dir", "Persistent installation directory", "Files")
-    add("drop_files", "Drop formats (JSON array)", "Files")
-    add("drop_subdir", "Node drop subdirectory", "Files")
-    add("filename_case", "Filename case", "Files", choice_field("filename_case", ["upper", "lower"]))
-    add("encoding", "Door encoding", "Terminal", choice_field("encoding", ["utf-8", "cp437", "raw"]))
-    add("width", "Columns (0=caller)", "Terminal")
-    add("height", "Rows (0=caller)", "Terminal")
-    add("baud", "Nominal baud", "Terminal")
+    add("install_dir", "Persistent installation directory", "Files",
+        help="Absolute path the door runs in and keeps its game data in; also how simultaneous callers are "
+             "numbered. Empty: a fresh temporary directory each run. DOSBox needs one.")
+    add("drop_files", "Drop formats (JSON array)", "Files",
+        help='Drop files written for each run, e.g. ["DOOR.SYS", "DOOR32.SYS"]. Also DORINFO1.DEF, DORINFOx.DEF '
+             "and CHAIN.TXT. [] writes none.")
+    add("drop_subdir", "Node drop subdirectory", "Files",
+        help="A DOS-safe name (1-8 characters) the drop files go in. Empty: the run's own directory.")
+    add("filename_case", "Filename case", "Files", choice_field("filename_case", ["upper", "lower"]),
+        help="Whether drop files are written DOOR.SYS or door.sys; {door32} and {door_sys} follow it.")
+    add("encoding", "Door encoding", "Terminal", choice_field("encoding", ["utf-8", "cp437", "raw"]),
+        help="What the door's output is: utf-8, cp437 (translated for each caller's terminal), or raw bytes "
+             "passed through untouched. DOSBox needs cp437.")
+    add("width", "Columns (0=caller)", "Terminal",
+        help="A fixed terminal width for the door; a caller with a narrower terminal is refused. 0 gives the "
+             "door the caller's own size. Set both columns and rows, or neither.")
+    add("height", "Rows (0=caller)", "Terminal",
+        help="A fixed terminal height; a caller with fewer rows is refused. 0: the caller's own.")
+    add("baud", "Nominal baud", "Terminal",
+        help="The speed written into the drop files, 300-115200. Nothing is slowed down by it.")
     add("resize_signal", "Signal door on terminal resize", "Terminal", bool_field("resize_signal"),
         step=bool_step("resize_signal"),
         help="Native stdio/socket doors only, and only while columns and rows are 0. Rewrites door_info.json with "
              "the new size and sends SIGUSR1. Leave off unless the door documents that it handles SIGUSR1: the "
              "default action for that signal terminates a process. PTY doors are resized through their terminal.")
-    add("security_level", "Game security level", "Limits")
+    add("security_level", "Game security level", "Limits",
+        help="The security level written into the drop files, 0-255, the same for every caller. It does not "
+             "decide who may play: Min play level does.")
     add("time_limit", "Time limit (seconds, 0=none)", "Limits",
         help="Wall-clock ceiling for one caller's run. 0 removes it: the door then ends only when it exits, "
              "the caller disconnects, or the node stops.")
     add("cpu_seconds", "CPU seconds (0=none)", "Limits",
         help="RLIMIT_CPU for this door's caller processes. Raise it for a door which renders continuously; "
              "0 removes it and leaves only the wall-clock limit.")
-    add("max_sessions", "Maximum simultaneous callers", "Limits")
-    add("memory_mb", "Memory ceiling (MiB)", "Limits")
+    add("max_sessions", "Maximum simultaneous callers", "Limits",
+        help="How many callers may play at once, 1-36; each gets its own node number. More than 1 needs "
+             "Multi-node certified on. A caller beyond it is told the door is busy.")
+    add("memory_mb", "Memory ceiling (MiB)", "Limits",
+        help="The address-space limit for each caller's door process, 64-2048 MiB.")
     add("stop_grace_seconds", "Stop grace (seconds)", "Limits",
         help="How long this door gets to exit after SIGTERM before it is killed, on a caller disconnect, "
              "a timeout or node shutdown. A door which exits promptly never waits this long; raise it for one which writes game data on the way out.")
     add("multinode_certified", "Multi-node certified by SysOp", "Limits", bool_field("multinode_certified"),
-        step=bool_step("multinode_certified"))
-    add("environment", "Custom environment (JSON)", "Advanced")
-    add("runner", "External runner argv (JSON)", "Advanced")
-    add("options", "Adapter options (JSON)", "Advanced")
+        step=bool_step("multinode_certified"),
+        help="Your word that this door is safe with several callers in one installation at once. Required "
+             "before Maximum simultaneous callers can be above 1.")
+    add("environment", "Custom environment (JSON)", "Advanced",
+        help='Extra environment variables, e.g. {"TERM": "ansi"}: TERM, LANG, LC_ALL, TZ, PATH, '
+             "WAR_DIALER_DB_PATH and DOOR_* names only, at most 32.")
+    add("runner", "External runner argv (JSON)", "Advanced",
+        help="An absolute program and arguments to launch the door through, as a JSON array. [] runs it "
+             "directly.")
+    add("options", "Adapter options (JSON)", "Advanced",
+        help="The adapter's own settings as a JSON object, such as DOSBox's DOS command, the remote host for "
+             "rlogin, or the VM image; the door guide lists each adapter's keys.")
     add("service", "Companion service (JSON)", "Advanced",
         help="Optional long-lived process for this door: argv, start (with_node/on_first_caller), "
              "stop_grace_seconds, service_memory_mb and health. Empty for doors which need none.")
-    add("preflight", "Check setup", "Validation", check_prompt)
-    add("test", "Test as SysOp", "Validation", test_prompt)
-    add("probe", "Emulator capability probe", "Validation", probe_prompt)
+    add("preflight", "Check setup", "Validation", check_prompt,
+        help="Checks this draft, unsaved, without running it: paths, permissions and settings that go "
+             "together. Runs nothing.")
+    add("test", "Test as SysOp", "Validation", test_prompt,
+        help="Runs this draft as you, unsaved, after asking. It is the real program and may change its game "
+             "data. A door with a companion service is tested against the running service, so save and "
+             "restart that first.")
+    add("probe", "Emulator capability probe", "Validation", probe_prompt,
+        help="DOSBox and VM only: after asking, runs the emulator with NetBBS's own test program instead of "
+             "the game, to show serial or guest I/O works.")
 
     async def save(draft):
         candidate = _candidate(door, draft)

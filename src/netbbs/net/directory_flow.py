@@ -116,6 +116,10 @@ async def _browse_directory(
             title="User directory",
             own=True,
             empty_message="No registered users yet.",
+            help_about=(
+                "Every account on this board and when it joined. [PUBLIC BIO] has a profile anyone can "
+                "read, [PRIVATE BIO] one its owner keeps private, [NO BIO] none yet. Pick one to see their card."
+            ),
             live_keys=live_keys,
             live_nav=live_nav,
             redraw_in_place=redraw_in_place_enabled(db, user),
@@ -198,7 +202,10 @@ async def _show_vcard(
             if action == HELP_KEY:
                 await show_menu_help(
                     session, "Member profile help", entries,
-                    about="What this member has chosen to share about themselves.",
+                    about=(
+                        "What this member chose to share: the rest of their profile stays hidden from "
+                        "others. Your own card shows everything."
+                    ),
                     header_color=effective_header_color(session, db),
                     unicode_style=unicode_style_enabled(db, requesting_user),
                 )
@@ -449,7 +456,10 @@ async def _caller_who_screen(
             if action == HELP_KEY:
                 await show_menu_help(
                     session, "Who's online help", [entry for _, entry in options],
-                    about="What you can do with the caller you picked.",
+                    about=(
+                        "What you can do with the caller you picked. A live message or chat invite is "
+                        "offered only when they accept direct messages and do not block you."
+                    ),
                     header_color=effective_header_color(session, db),
                     unicode_style=unicode_style_enabled(db, user),
                 )
@@ -720,6 +730,10 @@ async def _caller_who_screen(
             title="Who's online",
             own=True,
             empty_message="No one else is online right now.",
+            help_about=(
+                "Everyone else signed in now, here and on linked nodes: when they connected, and the "
+                "game they are in when you could open it too. Pick one to message, mail or block them."
+            ),
             # Issue #304: the network beyond this node, when the MRC
             # bridge knows its size -- company a caller can go and find.
             masthead=_mrc_network_masthead(node_controls),

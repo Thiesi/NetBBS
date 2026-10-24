@@ -188,8 +188,10 @@ async def _channel_menu(
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Chat channels help", _CHANNEL_MENU,
-                about="Add chat channels and change or remove existing ones. Pick a channel from the "
-                      "list to edit it.",
+                about="Chat channels on this node, carried Linked and MRC-bridged ones included. List "
+                      "opens a channel on its own screen: its fields change who may join and how it is "
+                      "listed, in force once saved; its actions show mutes and bans and the moderation "
+                      "history, schedule Notices, Link it, bridge it to MRC or delete it.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
@@ -250,9 +252,8 @@ def _channel_field_specs(
             prompt=_int_field("min_level", "Minimum level"),
             brief="Level required to join",
             help=(
-                "The permission level a caller needs to join this channel. Unlike boards/"
-                "file areas, a channel's own level never inherits from its Community -- "
-                "always a plain number, 0 meaning no gate."
+                "The level a caller needs to see and join this channel. Never taken from its "
+                "Community. 0: no level gate."
             ),
             section="Access",
         ),
@@ -262,9 +263,8 @@ def _channel_field_specs(
             prompt=_min_age_field("min_age", "age_requirement"),
             brief="Minimum caller age required",
             help=(
-                "The minimum caller age required to join this channel, checked against a "
-                "caller's own birthdate (Your profile › Name & details) even if they've "
-                "chosen not to show it publicly. 'none' means no age gate."
+                "The minimum age to join this channel, checked against a caller's birthdate even if "
+                "they keep it private. 'none' uses its Community's default, or no gate outside one."
             ) + _VERIFIED_AGE_HELP,
             section="Access",
         ),
@@ -274,7 +274,7 @@ def _channel_field_specs(
             render=lambda d: _name_requirement_label(d.get("name_requirement")),
             prompt=_name_requirement_field(),
             step=_name_requirement_step(),
-            help=_NAME_REQUIREMENT_HELP,
+            help=_NAME_REQUIREMENT_HELP + " 'none' uses its Community's rule.",
             brief="How chatters must be identified",
             section="Access",
         ),
@@ -287,9 +287,9 @@ def _channel_field_specs(
             ),
             brief="Parent community, if any",
             help=(
-                "The Community this channel belongs to, if any -- a channel inside a "
-                "Community can inherit its default age/name-requirement settings instead of "
-                "each needing its own. 'none' keeps it outside every Community."
+                "The Community it is listed under in Topics. A Min age or Name requirement left at "
+                "'none' then takes that Community's default; its level never does. 'none': outside "
+                "every Community, still in the main channel list."
             ),
             section="Organization",
         ),
@@ -304,8 +304,8 @@ def _channel_field_specs(
             ),
             brief="Where it's grouped in listings",
             help=(
-                "Where this channel is grouped when browsing listings -- purely "
-                "organizational, has no effect on who can join."
+                "The folder it is listed in when callers browse channels (Content > Categories). Has "
+                "no effect on who can join. 'none': listed at the top level."
             ),
             section="Organization",
         ),
@@ -766,6 +766,11 @@ async def _list_channels_screen(
         columns=_CHANNEL_COLUMNS,
         column_values_of=lambda c: _channel_columns(c, effective[c.id], c.channel_id in to_review),
         title="Chat channels", own=True,
+        help_about=(
+            'Every channel: the level to join, its access (open, members for members-only, hidden) '
+            'and its gates. Gates: 18+ an age, name a verified name, name+ one shown. Pick one to '
+            'open its screen.'
+        ),
         empty_message="No chat channels yet.",
         linked_of=lambda c: c.id in linked_channels,  # issue #1104
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
@@ -1019,6 +1024,10 @@ async def _channel_restrictions_screen(session: Session, lane: DatabaseLane, act
             stable_id_of=lambda r: r.id,
             description_of=lambda r: _description_of(r, usernames, display_format, display_timezone),
             title=f"Restrictions on {channel.name!r}",
+            help_about=(
+                'Active mutes and bans in this channel: when each ends, who imposed it and why. Picking '
+                'one asks, then lifts it at once.'
+            ),
             empty_message="No active mute/ban restrictions on this chat channel.",
             redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
             unicode_style=await lane.run(unicode_style_enabled, actor),
@@ -1067,7 +1076,11 @@ def _link_channel_field_specs() -> list[FieldSpec]:
             render=lambda d: _optional_int_label(d.get("default_min_level")),
             prompt=_optional_int_field("default_min_level", "Recommended minimum level"),
             brief="Sent to peers as a default",
-            help="Recommends a minimum level to peers that don't set their own. 'none' sends no recommendation.",
+            help=(
+                "The level a node that starts carrying this channel gives its copy; its SysOp can "
+                "change it there. Signed into the channel's Link record on Save, so it cannot be "
+                "changed afterwards. 'none': no recommendation, so their copy starts at 0."
+            ),
         ),
         FieldSpec(
             key="default_min_age",
@@ -1075,7 +1088,7 @@ def _link_channel_field_specs() -> list[FieldSpec]:
             render=lambda d: _optional_int_label(d.get("default_min_age")),
             prompt=_min_age_field("default_min_age"),
             brief="Sent to peers as a default",
-            help="Recommends a minimum caller age to peers that don't set their own.",
+            help="The minimum age a carrying node's copy starts with. Fixed on Save. 'none': no age gate.",
         ),
         FieldSpec(
             key="default_name_requirement",
@@ -1084,7 +1097,7 @@ def _link_channel_field_specs() -> list[FieldSpec]:
             prompt=_name_requirement_field("default_name_requirement"),
             step=_name_requirement_step("default_name_requirement"),
             brief="Sent to peers as a default",
-            help=_NAME_REQUIREMENT_HELP + " Recommended to peers that don't set their own.",
+            help="The name requirement a carrying node's copy starts with. Fixed on Save. " + _NAME_REQUIREMENT_HELP,
         ),
     ]
 

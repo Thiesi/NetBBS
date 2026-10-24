@@ -180,7 +180,7 @@ from netbbs.net.admin_fields import (
     _read_seeded_line,
     _resolve_redraw_preference,
 )
-from netbbs.net.admin_trust import _retired_usernames_screen
+from netbbs.net.admin_trust import _help_entries, _retired_usernames_screen
 from netbbs.net.admin_renames import rename_account_directly, username_requests_screen
 from netbbs.auth.renames import count_open_username_requests, open_username_request, username_history
 from netbbs.net.admin_sessions import _request_live_access_recheck, _revoke_live_sessions
@@ -327,9 +327,10 @@ async def _users_menu(
         elif choice == HELP_KEY:
             await show_menu_help(
                 session, "Users help", _users_menu_entries(),
-                about="Every action on user accounts: creating and finding them, their levels, "
-                      "who may sign up, callers' requests for a new username, and the names "
-                      "deleted and renamed accounts still hold.",
+                about="Counts: every account, those that can log in (Active), signups waiting for "
+                      "approval (Pending), disabled accounts and SysOps. User list, Promote/demote, "
+                      "Enable/disable and Delete all open the account list; each change is made on the "
+                      "account's own screen.",
                 header_color=stats["header_color"], unicode_style=stats["unicode_style"],
             )
             await _draw_users_menu(session, stats=stats)
@@ -496,6 +497,11 @@ async def _level_detail_screen(
                 column_values_of=_gate_columns,
                 description_of=_gate_description,
                 title=f"Level {level_label(level, names)}", own=True,
+                help_about=(
+                    "What this level opens, gate by gate: the type, the access, the level it opens at, where "
+                    "that level comes from, and other gates still in the way. [V]iew steps through four "
+                    "views; picking a board, area, channel or door opens its own screen to change its levels."
+                ),
                 empty_message=f"Nothing in this view of level {level}.",
                 refresh=_load,
                 live_keys={"v": _next_view},
@@ -600,6 +606,11 @@ async def _levels_screen(
                 f"{step.users} user{'s' if step.users != 1 else ''}; opens {ladder_summary(step)}"
             ),
             title="Level Admin SysOp Tool (LAST)", own=True,
+            help_about=(
+                "Each row is a level in use: how many accounts hold it and what it adds to the levels "
+                "below. Picking one shows everything it opens. A level's name is only a label; renaming "
+                "it changes nobody's access."
+            ),
             empty_message="No levels in use.",
             refresh=_load,
             live_keys={"g": _other_level, "a": _ladder_preset},
@@ -787,6 +798,12 @@ async def _promotion_rules_screen(session: Session, lane: DatabaseLane, actor: U
                 f"needs {row.rule.describe()}; {row.qualifying} ready; opens {row.opens}"
             ),
             title="Promotion rules", own=True,
+            help_about=(
+                "Each rule raises an account from its From level to its To level once it meets every "
+                "need, checked at each login, one step per login. Ready counts who it would raise at "
+                "their next login. Picking a rule edits it. Staff, SysOps and levels set by hand are "
+                "never raised."
+            ),
             empty_message="No promotion rules. [C]reate one: levels then change by hand only.",
             refresh=_load,
             on_create=_create,
@@ -1022,7 +1039,8 @@ def _create_user_field_specs() -> list[FieldSpec]:
             key="username", label="Username",
             render=lambda d: d.get("username") or "",
             prompt=text_field("username", required=True),
-            help="Letters, digits, '_', '-', and '.' only. Case-insensitive uniqueness.",
+            help="Up to 32 letters, digits, '_', '-' and '.'. Unique ignoring case; a name "
+                 "held after a delete or rename (Users > Held names) is refused.",
         ),
         FieldSpec(
             key="password", label="Password",
@@ -1037,16 +1055,17 @@ def _create_user_field_specs() -> list[FieldSpec]:
             key="verify_key", label="Public key",
             render=lambda d: "set" if d.get("verify_key") else "(not set)",
             prompt=_create_user_pubkey_field(),
-            help="For SSH key-based login. Paste as base64, or a full 'ssh-ed25519 ...' line.",
+            help="Lets the account sign in over SSH without a password. Paste an Ed25519 key "
+                 "as base64 or a full 'ssh-ed25519 ...' line; blank clears it from this draft.",
         ),
         FieldSpec(
             key="level", label="Starting level",
             render=lambda d: str(d.get("level", 0)),
             prompt=_int_field("level", "Starting level"),
             help=(
-                "The account's initial permission level. 0 is an ordinary caller; higher "
-                "numbers unlock moderator/SysOp capability (see the Level field on an "
-                "existing account's own detail screen for the specific thresholds)."
+                "The level the account starts at, 0 to 255. What each level opens is on "
+                "Users > Levels; 255 makes it a SysOp. Promotion rules may raise it later. "
+                "An account made here needs no approval and gets the welcome letter."
             ),
         ),
     ]
@@ -1814,10 +1833,9 @@ async def _read_user_detail_key(session: Session) -> tuple[EditorKey, bool]:
     return EditorKey(EditorKeyKind.CHAR, char=raw), True
 
 
-# Ctrl-H's own content for the five arrow-selectable fields
-# (`_USER_DETAIL_FIELD_ORDER`) -- dogfood feature request, this screen
-# had no on-demand help at all until now. Keyed the same as
-# `_USER_DETAIL_FIELD_ORDER`, not a `FieldSpec` list, since this
+# Ctrl-H's own content for the arrow-selectable fields
+# (`_USER_DETAIL_FIELD_ORDER`), shown when one is highlighted. Keyed the
+# same as `_USER_DETAIL_FIELD_ORDER`, not a `FieldSpec` list, since this
 # screen's status lines are drawn by `_draw_user_detail` directly, not
 # through `netbbs.net.resource_editor`.
 _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
@@ -1844,31 +1862,35 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
     ),
     "l": (
         "Level",
-        "The account's permission level. 0 is an ordinary caller; higher numbers unlock "
-        "moderator/SysOp capability.",
+        "Decides which boards, file areas, channels and doors the account reaches "
+        "(Users > Levels shows what each level opens). A change shows what the account "
+        "gains and loses before you apply it, and its live sessions follow at once. "
+        "Setting it here turns promotion rules off for the account. 255 is SysOp and "
+        "only a SysOp gives it; staff can set up to 254.",
     ),
     "t": (
         "Status",
-        "Enable/disable this account. A disabled account can't log in; existing posts/"
-        "files/messages they created are untouched.",
+        "Active, pending approval, or disabled. Disabling refuses every login and ends "
+        "the account's live sessions; its posts, files and mail stay. Enabling lets it "
+        "log in again, unless it is also blocked.",
     ),
     "s": (
         "Staff",
-        "Staff permissions: approve accounts, manage accounts (disable/"
-        "enable, password reset, display name and birthdate, levels up to 254) and "
-        "moderate everything. Co-SysOp sets "
-        "all three. A staff member never acts on level 255 or on other staff, and can't "
-        "grant anything.",
+        "What the account may do beyond its level: approve accounts, manage accounts "
+        "(level up to 254, disable, password, display name, birthdate, Profile) and "
+        "moderate every board, file area and channel. Co-SysOp sets all three. Staff "
+        "never act on a SysOp or other staff, and can't grant anything.",
     ),
     "i": (
         "Can verify identity",
-        "Lets this account confirm other callers' age or real name. It is separate "
-        "from moderator grants and staff permissions.",
+        "Lets this account record a caller's verified age or real name. Verified age "
+        "opens age-gated areas, and other Link nodes that trust this node may accept it "
+        "too. Separate from staff permissions and moderator grants; a SysOp always can.",
     ),
     "k": (
         "Public key",
-        "This account's SSH/Link public key. Setting or replacing it here lets them log "
-        "in over SSH with key-based authentication.",
+        "The account's SSH public keys. Opens a screen to add or remove them; a key "
+        "lets the account sign in over SSH without a password.",
     ),
     "p": (
         "Password",
@@ -1879,9 +1901,9 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
     ),
     "r": (
         "Blocked",
-        "The local blocklist -- a separate, fingerprint-based mechanism from Status/"
-        "disable, designed to extend to remote nodes/traffic later. Unlike disabling, a "
-        "block also survives the account being re-enabled.",
+        "The local blocklist, kept apart from Status: a blocked account is refused at "
+        "every login even while it is enabled, and its live sessions end when it is "
+        "blocked. Only a SysOp blocks or unblocks; enabling the account does not lift it.",
     ),
     "e": (
         "Edit profile",
@@ -1893,6 +1915,28 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
         "it sets the guest defaults, what every guest starts with; only a SysOp can.",
     ),
 }
+
+
+# One line per key for the whole-screen help, in the menu's order: what
+# pressing it does. A highlighted field's Ctrl-H gives its full text above.
+_USER_DETAIL_KEY_HELP: tuple[tuple[str, str, str], ...] = (
+    ("a", "[A]pprove", "Pending signup can log in; welcome letter goes"),
+    ("l", "[L]evel", "Previews gains and losses, then applies"),
+    ("u", "[U]se promotion rules", "Rules may raise this account again, or not"),
+    ("t", "[T]oggle enable/disabled", "Disabling ends live sessions; posts stay"),
+    ("n", "[N]ame", "Correct or clear their display name"),
+    ("c", "[C]hange username", "Rename it; shows what changes before applying"),
+    ("w", "[W]hen born", "Correct or clear the birthdate age gates use"),
+    ("e", "[E]dit profile", "Their Profile, acting on their account"),
+    ("s", "[S]taff", "Staff permissions and the Co-SysOp preset"),
+    ("i", "[I]dentity verification", "May record callers' verified age or name"),
+    ("v", "[V]erification: revoke", "Withdraw a verified age or real name"),
+    ("k", "[K]ey", "Add or remove their SSH public keys"),
+    ("p", "[P]assword", "Set a new one, or remove it (key login only)"),
+    ("r", "[R]estrict login", "Blocklist: refused at login even if enabled"),
+    ("h", "[H]istory", "Every admin action on this account"),
+    ("d", "[D]ecline / [D]elete", "Turn down a signup; delete is permanent"),
+)
 
 
 async def _edit_account_detail(
@@ -2007,12 +2051,46 @@ async def _revoke_verification(session: Session, lane: DatabaseLane, actor: User
         _announce_line(session, f"No verified {label} on record for {target.username!r} any more.")
 
 
+def _user_detail_help_lines(
+    target: User, allowed: frozenset[str], *, verified: bool, header_color: int | tuple[int, int, int],
+) -> list[str]:
+    """The whole-screen help: what the screen shows, then one row per key
+    this screen offers on `target` right now. One row each, so it fits a
+    24-row terminal; a highlighted field's Ctrl-H gives the full text."""
+    shown = {
+        key for key in allowed
+        if (key != "a" or target.pending_approval) and (key != "v" or verified)
+    }
+    rows = []
+    for key, label, text in _USER_DETAIL_KEY_HELP:
+        if key not in shown:
+            continue
+        if key == "d":
+            label, text = (
+                ("[D]ecline", "Turn down this signup and remove it") if target.pending_approval
+                else ("[D]elete", "Remove the account permanently; asks its name")
+            )
+        rows.append((label, text))
+    width = max((len(label) for label, _ in rows), default=0)
+    lines = [
+        "The account's fields, then its record: when it joined, how many admin "
+        "actions name it, and its moderator grants.",
+        "",
+    ]
+    lines.extend(f"  {label}{' ' * (width - len(label) + 2)}{text}" for label, text in rows)
+    lines.append(colored(
+        "Up/Down highlights a field; Ctrl-H then explains it in full.", fg_color=header_color,
+    ))
+    return lines
+
+
 async def _show_user_detail_help(
-    session: Session, lane: DatabaseLane, *, selected: str | None, unicode_style: bool = False
+    session: Session, lane: DatabaseLane, target: User, *, selected: str | None,
+    allowed: frozenset[str], unicode_style: bool = False,
 ) -> None:
-    """Same "narrow to the highlighted field if one is selected, else
-    list everything" shape `netbbs.net.resource_editor._show_field_help`
-    already establishes for `edit_resource_draft`'s own Ctrl-H."""
+    """Ctrl-H narrows to the highlighted field if one is selected, as
+    `netbbs.net.resource_editor._show_field_help` does; with none, it
+    lists this screen's keys one row each."""
     header_color = await lane.run(effective_header_color_256)
     if selected is not None:
         label, help_text = _USER_DETAIL_HELP[selected]
@@ -2021,12 +2099,15 @@ async def _show_user_detail_help(
             header_color=header_color, unicode_style=unicode_style,
         )
         return
-    lines: list[str] = []
-    for label, help_text in _USER_DETAIL_HELP.values():
-        lines.append(colored(label, fg_color=header_color, bold=True))
-        lines.append(f"  {help_text}")
-        lines.append("")
-    await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
+    verified = (
+        await lane.run(get_attestation, target, "age") is not None
+        or await lane.run(get_attestation, target, "name") is not None
+    )
+    await show_help(
+        session, f"{sanitize_text(target.username)} help",
+        _user_detail_help_lines(target, allowed, verified=verified, header_color=header_color),
+        header_color=header_color, unicode_style=unicode_style,
+    )
 
 
 def _gate_row(gate: Gate, extra: str | None = None) -> tuple[str, str, str]:
@@ -2070,7 +2151,14 @@ async def _preview_level_change(
         actions=[("a", menu_key("A", "pply")), _BACK_ACTION],
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         help_title="Level change help",
-        help_about="What this account gains and loses by moving to the new level. Nothing changes until you confirm.",
+        help_about=(
+            "What this account gains and loses by moving to the new level, counting its moderator "
+            "grants. Still blocked lists what the new level opens but another gate, such as an age "
+            "check, keeps closed."
+        ),
+        help_entries=_help_entries([("a", menu_key("A", "pply"))], {
+            "a": "Set the level; promotion rules stop for it",
+        }),
     )
     return choice == "a"
 
@@ -2205,7 +2293,9 @@ async def _user_detail_screen(
                 await session.write("\a")
                 continue
             if key.kind == EditorKeyKind.CTRL and key.char == "h":
-                await _show_user_detail_help(session, lane, selected=selected, unicode_style=unicode_style)
+                await _show_user_detail_help(
+                    session, lane, target, selected=selected, allowed=allowed, unicode_style=unicode_style,
+                )
                 blocked = await _redraw()
                 continue
             if key.kind == EditorKeyKind.ENTER or (key.kind == EditorKeyKind.CHAR and key.char == " "):
@@ -2220,7 +2310,9 @@ async def _user_detail_screen(
                     # to plain `read_key()`) delivers Ctrl-H as an ordinary
                     # character, never as `EditorKeyKind.CTRL` -- same dual
                     # path `edit_resource_draft` itself handles.
-                    await _show_user_detail_help(session, lane, selected=selected, unicode_style=unicode_style)
+                    await _show_user_detail_help(
+                        session, lane, target, selected=selected, allowed=allowed, unicode_style=unicode_style,
+                    )
                     blocked = await _redraw()
                     continue
                 if choice in field_order:
@@ -2380,7 +2472,7 @@ async def _user_detail_screen(
                 )
                 if await prompt_yes_no(session, prompt, default=False):
                     if blocked:
-                        await lane.run(unblock_user, target)
+                        await lane.run(unblock_user, target, actor=actor)
                         _announce_line(session, f"{target.username!r} can log in again.")
                     else:
                         try:
@@ -2479,8 +2571,10 @@ async def _staff_permissions_screen(
         if choice == HELP_KEY:
             await show_menu_help(
                 session, "Staff permissions help", _STAFF_PERMISSIONS_HELP,
-                about="What this account may do as staff. Each key turns one permission on or off, "
-                      "and asks first; the account's live sessions pick up the change.",
+                about="What this account may do beyond its level, yes or no each. Every change "
+                      "asks first, is recorded, and reaches the account's live sessions at once. "
+                      "Staff never act on a SysOp or other staff and can't grant anything; members "
+                      "see staff listed under Operators.",
                 header_color=header_color, unicode_style=unicode_style,
             )
             continue
@@ -2527,10 +2621,10 @@ async def _staff_permissions_screen(
 # The staff screen's own briefs are each permission's on/off state; its help
 # says what each one lets the account do instead.
 _STAFF_PERMISSIONS_HELP = (
-    MenuEntry(label=menu_key("A", "pprove accounts"), brief="Approve or decline new accounts"),
-    MenuEntry(label=menu_key("M", "anage accounts"), brief="Levels, disabling, passwords"),
-    MenuEntry(label=menu_key("G", "lobal moderation"), brief="Every board, area and channel"),
-    MenuEntry(label=menu_key("V", "erify identity"), brief="Verify callers' age or real name"),
+    MenuEntry(label=menu_key("A", "pprove accounts"), brief="Approve or decline pending signups"),
+    MenuEntry(label=menu_key("M", "anage accounts"), brief="Level, disable, password, name", detailed="Level to 254, disable, password, name, birthdate"),
+    MenuEntry(label=menu_key("G", "lobal moderation"), brief="Every board, file area, channel", detailed="Moderate every board, file area and channel"),
+    MenuEntry(label=menu_key("V", "erify identity"), brief="Record callers' age or real name", detailed="Record callers' verified age or real name"),
     MenuEntry(label=menu_key("C", "o-SysOp preset"), brief="All three permissions at once"),
     MenuEntry(label=menu_key("N", "one"), brief="Remove every staff permission"),
 )
@@ -2676,9 +2770,15 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Registration help",
             help_about=(
-                "Who may create an account on this node by themselves, and the question new callers answer "
-                "while approval is required."
+                "Who may sign up by themselves, over telnet and SSH alike. A change applies to the next "
+                "signup; accounts already pending stay pending."
             ),
+            help_entries=_help_entries([("o", menu_key("O", "pen")), ("a", menu_key("A", "pproval required")), ("c", menu_key("C", "losed")), ("q", menu_key("Q", "uestion"))], {
+                "o": "New accounts can log in at once",
+                "a": "No login until approved on their account",
+                "c": "No signups; you create accounts here",
+                "q": "Asked only while approval is required",
+            }),
         )
         if choice == "b":
             return

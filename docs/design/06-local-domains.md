@@ -2282,7 +2282,11 @@ sessions, a record of each file whose transfer is not yet settled -- state
 this node does not keep, and which an implementation tested only against
 itself could get wrong in the direction that loses mail. Duplicates are absorbed as before: a message
 is marked sent only on `M_GOT`, and the tosser's dupe check drops a repeat.
-ND waits for interop tests against a real binkd (#1493).
+ND is **not planned** (#1493, closed 2026-10-24). The duplicate it prevents
+is already dropped by the message and TIC dupe checks, so it would save only
+the rare re-sent file, and building it safely would need binkd's semantics
+from its source and an interop rig with real binkd. Peers negotiate options,
+so none needs it. A network that ever *requires* ND would be a new issue.
 
 **A call that fails part way** keeps what moved before it failed. Each file
 received whole was confirmed to the remote, which let go of it, so it is

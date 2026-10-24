@@ -158,6 +158,7 @@ from netbbs.net.admin_trust import (
     _Listing,
     _TRUST_QUICK_ACTIONS,
     _TRUST_STATE_TONE,
+    _help_entries,
     _clear_trust_override_screen,
     _retry_deferred_events,
     _trust_quick_action,
@@ -662,6 +663,11 @@ async def _node_map_sysop_screen(
             columns=NODE_MAP_COLUMNS,
             column_values_of=_cells,
             title=title, own=True,
+            help_about=(
+                "Every node known here, as callers see it under Directory > Node map, plus unverified "
+                "peer-list candidates and nodes you quarantine or block, which callers don't see. Picking "
+                "one shows its trust, addresses, relays and reliability."
+            ),
             empty_message="No other nodes are known here yet.",
             start_stable_id=reopen_at,
             redraw_in_place=chrome.redraw_in_place,
@@ -716,9 +722,17 @@ async def _node_map_sysop_screen(
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
                 help_title="Node map help",
                 help_about=(
-                    "Every node this one knows on the Link, including those callers don't see because you "
-                    "quarantined or blocked them, with trust, addresses and reliability."
+                    "One node as this one knows it: its trust per dimension and, on probation, what is still "
+                    "missing; Exchange says what is held back from it and whether it takes what this node "
+                    "sends. Callers don't see a node you quarantine or block. The trust keys appear once it "
+                    "is a trust subject."
                 ),
+                help_entries=_help_entries(actions, {
+                    "e": "Established in all three; asks a reason",
+                    "d": "Blocked in all three; asks a reason",
+                    "c": "Back to what policy computes",
+                    "t": "Its full trust screen",
+                }),
             )
             if choice == "b":
                 break
@@ -860,6 +874,10 @@ async def _carry_decisions_screen(
                 + (f", {d.member_count} member{'' if d.member_count == 1 else 's'}" if d.member_count is not None else "")
             ),
                 title=title if total <= len(decisions) else f"{title} (newest {len(decisions)} of {total})", own=True,
+                help_about=(
+                    "Boards, file areas, channels and Communities other nodes share that wait for your "
+                    "decision, or that you turned away. Picking one shows it, with what you can do."
+                ),
                 empty_message="Nothing here.",
                 redraw_in_place=chrome.redraw_in_place,
                 unicode_style=chrome.unicode_style,
@@ -892,10 +910,15 @@ async def _carry_decisions_screen(
                 redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
                 help_title="Carry help",
                 help_about=(
-                    "A board, file area, channel or Community another node offers to share with this one. "
-                    "Accepting starts carrying it here -- for a Community, subscribing to what it lists; "
-                    "excluding turns the offer away."
+                    "A board, file area, channel or Community another node shares, waiting for your decision "
+                    "or turned away. For a Community, what it lists is carried within the carry caps."
                 ),
+                help_entries=_help_entries(actions, {
+                    "a": "Local copy now; content follows with syncs",
+                    "e": "Not fetched, and peers are told",
+                    "r": "Take it on again",
+                    "p": "Delete what it kept; asks its name",
+                }),
             )
             message = None
             if choice in ("a", "r") and selected.kind == "communities":
@@ -1059,7 +1082,8 @@ async def _dial_in_editor(
             help=(
                 "Where a caller reaches this board: telnet://host:port, ssh://host:port or an "
                 f"https:// URL, at most {MAX_DIAL_IN_URL_BYTES} bytes. Plain http:// is not accepted. "
-                "Empty the line to drop the entry."
+                "Empty the line to drop the entry. Peers get the saved list with the next hello; "
+                "saving all four empty publishes none."
             ),
         )
         for position, key in enumerate(slots, start=1)
@@ -1203,9 +1227,19 @@ async def _link_status_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Link status help",
             help_about=(
-                "This node's place on NetBBS Link: its identity, capacity, relays and verified peers, and "
-                "the offers waiting for a decision."
+                "This node on Link: its identity, mode and capacity, relays, probation both ways, what "
+                "waits, and shared resources waiting for a decision."
             ),
+            help_entries=_help_entries(actions, {
+                "p": "The node map: every node known here",
+                "a": "Dismiss identity-change notices; trust stays",
+                "r": "End every wait and run a sync pass now",
+                "k": "This node's keys and their rotation",
+                "d": "The addresses other boards show for it",
+                "m": "Other nodes' users who moderate yours",
+                "o": "Shared resources waiting for a decision",
+                "e": "Shared resources turned away",
+            }),
         )
         message = None
         if choice == "b":
@@ -1325,9 +1359,13 @@ async def _node_keys_screen(
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Node keys help",
             help_about=(
-                "This node's Link keys. The root key is the node's address and never changes; the signing "
-                "and transport keys can be replaced from their own screens."
+                "This node's Link keys. The root key behind the fingerprint is the node's address; no "
+                "rotation changes it. Rotating needs the running node."
             ),
+            help_entries=_help_entries(actions, {
+                "s": "Its history, and how to replace it",
+                "t": "Its history, and how to replace it",
+            }),
         )
         if choice == "b":
             return
@@ -1381,9 +1419,14 @@ async def _node_key_detail(
             page=page, redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Node key help",
             help_about=(
-                "One key and its history. Rotate replaces it routinely; Compromised also tells peers to stop "
-                "believing what the old key signed. Both are final."
+                "One key and its history. Compromised makes peers refuse what the old key signed that "
+                "they don't already hold, and this node re-signs its content (signing key) or ends its "
+                "live sessions (transport key). Each asks once and can't be undone."
             ),
+            help_entries=_help_entries([("r", menu_key("R", "otate")), ("c", menu_key("C", "ompromised"))], {
+                "r": "New key; what the old one signed stays valid",
+                "c": "New key; the old one is called compromised",
+            }),
         )
         if choice == "b":
             return
@@ -1477,7 +1520,12 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
             sections=[Section("Work items by status", rows)], actions=actions, message=message,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Outbox help",
-            help_about="Link mail and acknowledgements waiting to go out, and those that keep failing.",
+            help_about=(
+                "Outgoing Link mail and delivery acknowledgements, counted by status. Pending ones go out "
+                "on the next sync pass; retrying ones wait between tries; after 10 failed tries or too "
+                "long, one is dead-lettered and its letter marked expired."
+            ),
+            help_entries=_help_entries(actions, {"i": "The retrying and dead-lettered ones"}),
         )
         message = None
         if choice == "b":
@@ -1534,10 +1582,13 @@ async def _outbox_item_screen(
         redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
         help_title="Work item help",
         help_about=(
-            "One outgoing delivery that is retrying or gave up. Replay sends it again now; cancel stops "
-            "retrying it. Delete forgets one that gave up, when its recipient is gone for good; the "
-            "letter stays expired."
+            "One outgoing delivery that is retrying or gave up, with its last error."
         ),
+        help_entries=_help_entries(actions, {
+            "r": "Retry from scratch; un-expires its letter",
+            "c": "Stop retrying it for good",
+            "d": "Forget it; its letter stays expired",
+        }),
     )
     if choice == "r":
         def _replay(db: Database) -> WorkItem:
@@ -1707,7 +1758,16 @@ async def _mail_tools_screen(
             actions=actions,
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Mail help",
-            help_about="How much mail each mailbox holds, and the Link mail this node refused to deliver.",
+            help_about=(
+                "How full this node's mailboxes are, and Link mail it refused. Subjects and bodies are "
+                "never shown."
+            ),
+            help_entries=_help_entries(actions, {
+                "w": "A letter from you to every account",
+                "n": "The same from the BBS; no replies",
+                "m": "Every account with mail, how full",
+                "r": "Link mail this node turned away",
+            }),
         )
         if choice == "b":
             return
@@ -1775,7 +1835,12 @@ async def _mailboxes_screen(session: Session, lane: DatabaseLane, actor: User) -
             page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Mailboxes help",
-            help_about="Each member's mailbox and how much it holds.",
+            help_about=(
+                "Every account with mail and how full it is. Of the cap is the Inbox against its limit; a "
+                "full one drops its oldest read letter, one full of unread letters refuses new mail. Kept "
+                "has its own limit."
+            ),
+            help_entries=_help_entries([("o", "[O]rder")], {"o": "Fullest first, or by name"}),
         )
         if choice == "b":
             return
@@ -1830,7 +1895,13 @@ async def _refused_link_mail_screen(
             page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Refused Link mail help",
-            help_about="Letters from other nodes that this node would not deliver, and why.",
+            help_about=(
+                "Letters from other nodes this node would not deliver, newest first, with why and how "
+                "often the sender tried; each sender got a bounce."
+            ),
+            help_entries=_help_entries([("o", menu_key("O", "pen"))], {
+                "o": "One letter, with its node's and sender's trust",
+            }),
         )
         if choice == "b":
             return
@@ -1940,7 +2011,15 @@ async def _refused_letter_screen(
             actions=actions, page=listing.page, message=listing.take_message(),
             redraw_in_place=chrome.redraw_in_place, unicode_style=chrome.unicode_style,
             help_title="Refused letter help",
-            help_about="One refused letter: who sent it, to whom, and why it was refused.",
+            help_about=(
+                "One refused letter: who sent it, how it arrived, why, and the trust its node and sender "
+                "have here. Establishing one lets their next letter in; a refusal not about trust says "
+                "so."
+            ),
+            help_entries=_help_entries(actions, {
+                "n": "Its node's trust screen",
+                "u": "Its sender's trust screen",
+            }),
         )
         if choice == "b":
             return

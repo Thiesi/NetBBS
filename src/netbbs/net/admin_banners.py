@@ -30,7 +30,7 @@ from netbbs.sysop_uploads import (
     SysOpUploadTarget,
     destination_problem,
 )
-from netbbs.net.help_overlay import show_help, show_menu_help
+from netbbs.net.help_overlay import show_menu_help
 from netbbs.net.location import crumbs, entered, located
 from netbbs.net.resource_editor import (
     inline_field,
@@ -390,7 +390,13 @@ async def _banners_and_mastheads_menu(
             await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
-            await _banner_router_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            await _banner_router_help_screen(
+                session, "Mastheads & banners help", _ROUTER_MENU,
+                "Every piece of art and text you can add to the caller's screens. Mastheads sit above "
+                "the main menu and the board, file-area and channel lists, or replace them; session "
+                "banners greet callers, see them off and frame signup.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -409,11 +415,7 @@ async def _draw_banners_and_mastheads_menu(
     )
     await session.write_line(
         "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("M", "astheads"), brief="Art above the menu and pickers"),
-                MenuEntry(label=menu_key("S", "ession banners"), brief="Welcome, logoff, new-account text"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
-            ],
+            list(_ROUTER_MENU),
             description_level,
             width=session.terminal_width,
             height=session.terminal_height,
@@ -704,54 +706,61 @@ def _browsable_ans_files(directory: Path, *, exclude: Path) -> list[Path]:
     return sorted(p for p in directory.glob("*.ans") if p.is_file() and p != exclude)
 
 
-async def _banner_help_screen(
-    session: Session, *, path: Path, header_color: int | tuple[int, int, int], unicode_style: bool,
-) -> None:
-    """Ctrl-H's own content for every banner/masthead customization menu
-    in this section (dogfood feature request) -- one shared listing
-    rather than a per-screen copy, matching `netbbs.net.picker.
-    _show_picker_help`'s own precedent for reusable on-demand help
-    within a single module.
+#: What a banner's or masthead's keys change, by key, for its help screen.
+_SLOT_KEY_HELP = {
+    "p": "As callers would get it now, filled in",
+    "s": "2400, 9600 or 38400 bps, or at once; a key skips",
+    "t": "After 10, 30 or 60 s the rest is drawn at once",
+    "m": "Above the screen, or the screen with live slots",
+    "c": "Its slots, its problems and whether it fits",
+    "e": "Callers get it the next time it is due",
+    "d": "Callers stop getting it; the file stays",
+    "o": "Edit the file in the ANSI art editor",
+    "g": "Preview a sample; Apply overwrites and enables",
+    "f": "Other .ans files beside it; Load overwrites",
+    "u": "From your computer, replacing the file",
+    "r": "Deletes the file for good and turns it off",
+}
 
-    A SysOp with shell/SFTP access had no way to discover *where* a
-    hand-authored `.ans` file actually has to go: this screen's own
-    status line shows the current target path, but never the "why", and
-    [F]rom disk (where it exists) only ever lists files already sitting
-    in that same directory -- easy to try once, find nothing, and
-    conclude the feature is broken (a real dogfood report) rather than
-    realizing the file just isn't in the right place yet."""
-    lines = [
-        colored("Placing your own .ans file", fg_color=header_color, bold=True),
-        "  Send it with [U]pload, or place it (e.g. via SFTP/SCP) at exactly this path, then [E]nable:",
-        f"  {path}",
-        "  Or save it under any other name in that same directory and pick it up "
-        "with [F]rom disk instead of overwriting this one directly.",
-        "",
-        colored("Gallery vs. From disk", fg_color=header_color, bold=True),
-        "  [G]allery applies one of NetBBS's own bundled sample designs -- no "
-        "filesystem access to this node needed. [F]rom disk loads a file you've "
-        "already placed here yourself.",
-    ]
-    await show_help(session, "Banner/masthead help", lines, header_color=header_color, unicode_style=unicode_style)
+
+_ROUTER_MENU = (
+    MenuEntry(label=menu_key("M", "astheads"), brief="Art above the menu and pickers"),
+    MenuEntry(label=menu_key("S", "ession banners"), brief="Welcome, logoff, new-account text"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
+)
+_SESSION_BANNER_MENU = (
+    MenuEntry(label=menu_key("W", "elcome banner"), brief="Art shown when a caller connects"),
+    MenuEntry(label=menu_key("L", "ogoff banner"), brief="Shown on an intentional Log off"),
+    MenuEntry(label=menu_key("P", "re-signup"), brief="Shown once, before Create account"),
+    MenuEntry(label=menu_key("A", "fter signup"), brief="Shown once signup succeeds"),
+    MenuEntry(label=menu_key("N", "ew-account letter"), brief="Mail every new account finds"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
+)
+_MASTHEAD_MENU = (
+    MenuEntry(label=menu_key("M", "ain menu"), brief="Above the menu, or as the menu"),
+    MenuEntry(label=menu_key("D", "iscussion boards"), brief="Above the list, or as the list"),
+    MenuEntry(label=menu_key("F", "ile areas"), brief="Above the list, or as the list"),
+    MenuEntry(label=menu_key("C", "hat channels"), brief="Above the picker, or as the list"),
+    MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
+)
 
 
 async def _banner_router_help_screen(
-    session: Session, *, header_color: int | tuple[int, int, int], unicode_style: bool
+    session: Session, title: str, entries, about: str, *,
+    header_color: int | tuple[int, int, int], unicode_style: bool,
 ) -> None:
-    """Ctrl-H's content one level above `_banner_help_screen`: this
-    screen and its two children (Banners, Mastheads) are pure navigation
-    -- none of them owns a single target file, so `_banner_help_screen`'s
-    own "here's the exact path" answer doesn't apply yet. Dogfood report:
+    """Ctrl-H on the three navigation screens above the banners and
+    mastheads: their keys, and where each piece's own help says its file
+    goes, since none of these owns a file itself. Dogfood report:
     a SysOp reasonably tries Ctrl-H at the first screen they land on, not
     only at a specific banner's own menu, and got silently nothing here
     -- worse than no hint at all, since every leaf screen one level down
     does answer Ctrl-H."""
-    lines = [
-        colored("Placing your own .ans file", fg_color=header_color, bold=True),
-        "  Each banner/masthead below has its own file and its own exact path --",
-        f"  pick one, then press {help_key_label(session)} on that screen to see where it goes.",
-    ]
-    await show_help(session, "Banner/masthead help", lines, header_color=header_color, unicode_style=unicode_style)
+    await show_menu_help(
+        session, title, entries,
+        about=f"{about} Each has its own .ans file; {help_key_label(session)} on its screen says where it goes.",
+        header_color=header_color, unicode_style=unicode_style,
+    )
 
 
 async def _toggle_main_menu_art_mode(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -944,7 +953,12 @@ async def _banners_menu(
             await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
-            await _banner_router_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            await _banner_router_help_screen(
+                session, "Session banners help", _SESSION_BANNER_MENU,
+                "Banners shown at points in a caller's session, each off until you enable it, and the "
+                "letter mailed to every new account.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -965,14 +979,7 @@ async def _draw_banners_menu(
     )
     await session.write_line(
         "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("W", "elcome banner"), brief="Art shown when a caller connects"),
-                MenuEntry(label=menu_key("L", "ogoff banner"), brief="Shown on an intentional Log off"),
-                MenuEntry(label=menu_key("P", "re-signup"), brief="Shown once, before Create account"),
-                MenuEntry(label=menu_key("A", "fter signup"), brief="Shown once signup succeeds"),
-                MenuEntry(label=menu_key("N", "ew-account letter"), brief="Mail every new account finds"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
-            ],
+            list(_SESSION_BANNER_MENU),
             description_level,
             width=session.terminal_width,
             height=session.terminal_height,
@@ -1036,7 +1043,13 @@ async def _mastheads_menu(session: Session, lane: DatabaseLane, actor: User) -> 
             await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == HELP_KEY:
             await session.write_line("")
-            await _banner_router_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            await _banner_router_help_screen(
+                session, "Mastheads help", _MASTHEAD_MENU,
+                "Art for the main menu and the three browsing lists, at every level (top, a category, a "
+                "Community). Each is drawn above its menu or list, or, with Mode on its screen, is the "
+                "menu or list itself with live slots.",
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -1059,13 +1072,7 @@ async def _draw_mastheads_menu(
     )
     await session.write_line(
         "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("M", "ain menu"), brief="Above the menu, or as the menu"),
-                MenuEntry(label=menu_key("D", "iscussion boards"), brief="Above the list, or as the list"),
-                MenuEntry(label=menu_key("F", "ile areas"), brief="Above the list, or as the list"),
-                MenuEntry(label=menu_key("C", "hat channels"), brief="Above the picker, or as the list"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
-            ],
+            list(_MASTHEAD_MENU),
             description_level,
             width=session.terminal_width,
             height=session.terminal_height,
@@ -1383,8 +1390,27 @@ async def _toggle_credit_screen(session: Session, lane: DatabaseLane, actor: Use
 
 
 async def _slot_help_screen(session: Session, lane: DatabaseLane, slot: _BannerSlot, unicode_style: bool) -> None:
-    await _banner_help_screen(
-        session, path=await lane.run(slot.path_of),
+    """A banner's or masthead's help: what each of its keys changes, then
+    where its file lives."""
+    from netbbs.rendering.ansi import strip_ansi
+
+    entries = _slot_entries(
+        slot, status=await lane.run(slot.status_of),
+        speed=await lane.run(art_speed, slot.art_kind) if slot.art_kind is not None else 0,
+        time_limit=await lane.run(art_time_limit, slot.art_kind) if slot.art_kind is not None else 0,
+        mode=await lane.run(slot.mode.read) if slot.mode is not None else None,
+    )
+    help_entries = []
+    for entry in entries:
+        key = strip_ansi(entry.label)[1:2].lower()
+        detail = _SLOT_KEY_HELP.get(key)
+        if key == "c" and slot.credit:
+            detail = "Show or hide the art's credit under the banner"
+        help_entries.append(MenuEntry(label=entry.label, brief=entry.brief, detailed=detail))
+    path = await lane.run(slot.path_of)
+    await show_menu_help(
+        session, f"{slot.title} help", help_entries,
+        about=f"Its file: {path}. Upload, or copy an .ans there yourself (SFTP, SCP), then Enable.",
         header_color=await lane.run(effective_header_color_256), unicode_style=unicode_style,
     )
 
@@ -1420,6 +1446,17 @@ async def _draw_slot_menu(
         rows += 1
         # One row each on the main menu's, so its screen fits 80x24 with [S]peed.
         rows += await _write_wrapped_subtitle(session, slot.mode.line(mode))
+    entries = _slot_entries(slot, status=status, speed=speed, time_limit=time_limit, mode=mode)
+    await _write_banner_menu(
+        session, entries, description_level, used_rows=rows,
+        help_text="(Ctrl-H for where to place your own .ans files)",
+    )
+    await _choice_prompt(session)
+
+
+def _slot_entries(slot: _BannerSlot, *, status, speed, time_limit, mode) -> list[MenuEntry]:
+    """The keys a banner's or masthead's screen offers, as its menu and its
+    help both show them."""
     entries = [MenuEntry(
         label=menu_key("P", "review"),
         brief="Show it as callers see it" if slot.mode is not None else f"Show the {slot.noun} as callers see it",
@@ -1445,11 +1482,7 @@ async def _draw_slot_menu(
         *_remove_file_entry(status),
         MenuEntry(label=menu_key("B", "ack"), brief=f"Return to {slot.back_to}"),
     ]
-    await _write_banner_menu(
-        session, entries, description_level, used_rows=rows,
-        help_text="(Ctrl-H for where to place your own .ans files)",
-    )
-    await _choice_prompt(session)
+    return entries
 
 
 async def _preview_slot(
@@ -1989,19 +2022,21 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
             key="accent", label="Accent",
             render=_render("accent"), prompt=_theme_color_field("accent"),
             brief="Board/channel/user-name color",
-            help="Used for board, channel, and user names and other navigable items. R,G,B or 'default'.",
+            help=("Board, channel and user names and other things you can pick, for every caller from their "
+                  "next screen; a 256- or 16-colour terminal gets the nearest colour. R,G,B (0-255 each) or "
+                  "'default'."),
         ),
         FieldSpec(
             key="header", label="Header",
             render=_render("header"), prompt=_theme_color_field("header"),
             brief="Section-header color",
-            help="Used for section titles and frame borders. R,G,B or 'default'.",
+            help="Section titles and frame borders, for every caller from their next screen. R,G,B or 'default'.",
         ),
         FieldSpec(
             key="clock", label="Clock",
             render=_render("clock"), prompt=_theme_color_field("clock"),
             brief="Main-menu clock color",
-            help="Used for the main-menu prompt's time display. R,G,B or 'default'.",
+            help="The time in the main-menu prompt, for every caller. R,G,B or 'default'.",
         ),
     ]
 
