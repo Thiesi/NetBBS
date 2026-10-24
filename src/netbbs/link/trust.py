@@ -155,13 +155,6 @@ class TrustDomainConfig:
 
 
 @dataclass(frozen=True)
-class TrustAnchorConfig:
-    fingerprint: str
-    reason: str
-    created_at: str
-
-
-@dataclass(frozen=True)
 class TrustedReporterConfig:
     fingerprint: str
     domain_id: str
@@ -396,63 +389,11 @@ def list_trust_domains(db: Database) -> list[TrustDomainConfig]:
     ]
 
 
-def configure_trust_anchor(
-    db: Database,
-    fingerprint: str,
-    *,
-    reason: str,
-    actor_user_id: int | None = None,
-    now_iso: str | None = None,
-) -> None:
-    """Configure an explicit anchor without granting reporter authority."""
-    if not fingerprint or not reason.strip():
-        raise ValueError("trust anchor fingerprint and reason must not be empty")
-    now_value, _ = _now(now_iso)
-    with db.connection:
-        exists = db.connection.execute(
-            "SELECT 1 FROM link_trust_anchors WHERE fingerprint = ?", (fingerprint,)
-        ).fetchone()
-        db.connection.execute(
-            """INSERT INTO link_trust_anchors
-               (fingerprint, reason, actor_user_id, created_at) VALUES (?, ?, ?, ?)
-               ON CONFLICT(fingerprint) DO UPDATE SET
-                 reason = excluded.reason, actor_user_id = excluded.actor_user_id""",
-            (fingerprint, reason, actor_user_id, now_value),
-        )
-        _audit_config(
-            db, "anchor", fingerprint, "updated" if exists else "created",
-            {"reason": reason}, actor_user_id, now_value,
-        )
-
-
-def remove_trust_anchor(
-    db: Database,
-    fingerprint: str,
-    *,
-    actor_user_id: int | None = None,
-    now_iso: str | None = None,
-) -> None:
-    now_value, _ = _now(now_iso)
-    with db.connection:
-        row = db.connection.execute(
-            "SELECT reason FROM link_trust_anchors WHERE fingerprint = ?", (fingerprint,)
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"unknown trust anchor: {fingerprint!r}")
-        db.connection.execute(
-            "DELETE FROM link_trust_anchors WHERE fingerprint = ?", (fingerprint,)
-        )
-        _audit_config(
-            db, "anchor", fingerprint, "removed", {"reason": row["reason"]},
-            actor_user_id, now_value,
-        )
-
-
-def list_trust_anchors(db: Database) -> list[TrustAnchorConfig]:
-    rows = db.connection.execute(
-        "SELECT fingerprint, reason, created_at FROM link_trust_anchors ORDER BY fingerprint"
-    ).fetchall()
-    return [TrustAnchorConfig(row["fingerprint"], row["reason"], row["created_at"]) for row in rows]
+# Issue #1528: trust anchors were removed -- they were configured and listed
+# but no trust decision ever read them. The `link_trust_anchors` table stays in
+# the schema (migrations are immutable) so a database with rows in it still
+# opens; nothing reads or writes it. Old `anchor` rows in
+# `link_trust_config_audit` stay in the configuration history.
 
 
 def _recompute_all(
@@ -1244,8 +1185,8 @@ def recompute_all_trust_states(
 
 def trust_policy_generation(db: Database) -> tuple[int, ...]:
     """A value that changes whenever a SysOp changes trust policy (issue #700):
-    an override set or cleared, or an anchor, domain, reporter or
-    sole-authority exception changed. Read from the tables those writes
+    an override set or cleared, or a domain, reporter or sole-authority
+    exception changed. Read from the tables those writes
     already leave rows in, so a change made with `python -m netbbs.admin`,
     where no running node can be told, is seen by the sync loop on its next
     pass without a marker of its own."""

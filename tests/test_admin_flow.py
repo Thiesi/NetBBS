@@ -835,50 +835,33 @@ def test_sysop_menu_can_reject_remote_attestation_for_one_user(db, lane, sysop):
     assert "Remote attestation override applied and audited." in _written_text(session)
 
 
-def test_trust_anchor_editor_picks_a_stored_peer_and_remove_uses_a_picker(db, lane, sysop):
-    """Issue #282: the node is a picker over stored peers (typed input
-    still available as the first entry), and removal picks from the
-    anchors that exist instead of re-typing a reference."""
-    from netbbs.link.node_identity import bootstrap_node_identity
-    from netbbs.link.protocol import LinkNode
-    from netbbs.link.store import save_peer
-    from netbbs.link.trust import list_trust_anchors
+def test_policy_trust_no_longer_offers_anchors(db, lane, sysop):
+    """Issue #1528: trust anchors were configured and listed but never read
+    by any trust decision, so the screen and its key are gone. [A] on
+    Policy trust is now an unhandled key, and nothing writes the table."""
+    from netbbs.net.admin_trust import _TRUST_MENU
 
-    peer = LinkNode(identity=bootstrap_node_identity("anchor-peer"))
-    save_peer(db, peer.handle_hello(peer.build_hello(
-        addresses=None, outgoing_only=True, created_at="2026-09-04T09:00:00+00:00",
-        friendly_name="Anchor Peer",
-    )))
-
-    # [A]dd -> Node (01) -> the stored peer is entry 02 (01 is "type it") -> Reason (02) -> [S]ave.
-    session = FakeSession(["s", "p", "a", "a", "0", "1", "0", "2", "0", "2", "runs the seed", "s", "b", "b", "b", "b"])
+    assert all("nchors" not in entry.label for entry in _TRUST_MENU)
+    session = FakeSession(["s", "p", "a", "b", "b", "b"])
     _run(session, lane, sysop)
-    anchors = list_trust_anchors(db)
-    assert [a.fingerprint for a in anchors] == [peer.identity.fingerprint]
     text = _visible(_written_text(session))
-    assert "Anchor Peer" in text and "Trust anchor changed and audited." in text
-
-    # [R]emove -> picker (the only anchor) -> confirm.
-    session = FakeSession(["s", "p", "a", "r", "0", "1", "y", "b", "b", "b", "b"])
-    _run(session, lane, sysop)
-    assert list_trust_anchors(db) == []
-    assert "Trust anchor removed and audited." in _written_text(session)
+    assert "Trust anchors" not in text
+    assert "Anchors" not in text
+    assert db.connection.execute("SELECT COUNT(*) FROM link_trust_anchors").fetchone()[0] == 0
 
 
 def test_trust_editors_back_leaves_policy_untouched(db, lane, sysop):
-    from netbbs.link.trust import list_sole_authorities, list_trust_anchors, list_trust_domains, list_trusted_reporters
+    from netbbs.link.trust import list_sole_authorities, list_trust_domains, list_trusted_reporters
 
     session = FakeSession([
         "s", "p",
         "d", "a", "i", "half-typed", "b", "y", "b",  # domain editor, then discard
-        "a", "a", "b", "b",  # anchor editor untouched -> silent back
         "r", "a", "b", "b",
         "e", "a", "b", "b",
         "b", "b", "b",
     ])
     _run(session, lane, sysop)
     assert list_trust_domains(db) == []
-    assert list_trust_anchors(db) == []
     assert list_trusted_reporters(db) == []
     assert list_sole_authorities(db) == []
     assert "saved and audited" not in _written_text(session)
@@ -904,15 +887,16 @@ def test_trust_override_rejected_save_keeps_the_draft(db, lane, sysop):
     assert state.explanation["override_reason"] == "resource abuse reviewed"
 
 
-def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(db, lane, sysop):
+def test_node_picker_selection_still_warns_about_a_reused_familiar_name(db, lane, sysop):
     """Codex review on #290: picking a stored peer from the node picker
     must go through the same changed-identity confirmation a typed
-    name does, and declining it keeps the draft without a node."""
+    name does, and declining it keeps the draft without a node. Moved
+    from the trust anchor screen to identity authorities, which share the
+    node picker, when anchors were removed (issue #1528)."""
     from netbbs.link.events import build_endpoint_descriptor
     from netbbs.link.node_identity import bootstrap_node_identity
     from netbbs.link.protocol import PeerRecord
     from netbbs.link.store import save_peer
-    from netbbs.link.trust import list_trust_anchors
 
     original = bootstrap_node_identity("original-familiar-node")
     replacement = bootstrap_node_identity("replacement-familiar-node")
@@ -940,13 +924,13 @@ def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(
     save_profile(replacement, friendly_name="Familiar Node", created_at="2026-09-04T08:02:00+00:00")
 
     # [A]dd -> Node (01) -> pick the replacement (most recently contacted, entry 02) -> warning -> "n".
-    session = FakeSession(["s", "p", "a", "a", "0", "1", "0", "2", "n", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "p", "i", "a", "0", "1", "0", "2", "n", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "different cryptographic identity" in text
     assert "No trust policy change made." in text
     assert re.search(r"Node: +\(not chosen\)", _visible(text))
-    assert list_trust_anchors(db) == []
+    assert list_attestation_authorities(db) == []
 
 
 def test_attestation_authority_update_keeps_its_existing_scope(db, lane, sysop):
@@ -978,17 +962,23 @@ def test_trust_domain_update_keeps_the_stored_weight(db, lane, sysop):
     assert [(d.domain_id, d.display_name, d.weight) for d in domains] == [("friends", "Close friends", 0.25)]
 
 
-def test_trust_anchor_removal_picker_shows_the_technical_identity(db, lane, sysop):
-    from netbbs.link.trust import configure_trust_anchor, list_trust_anchors
+def test_trusted_reporter_removal_picker_shows_the_technical_identity(db, lane, sysop):
+    """Moved from the trust anchor screen when anchors were removed (issue
+    #1528): the removal picker and its confirmation both show the
+    technical identity, not only the familiar name."""
+    from netbbs.link.trust import configure_trust_domain, configure_trusted_reporter, list_trusted_reporters
 
     fingerprint = "abcdefghijklmnopqrstuvwxyz234567"
-    configure_trust_anchor(db, fingerprint, reason="runs the seed", actor_user_id=sysop.id)
-    # [R]emove -> the only anchor -> confirm.
-    session = FakeSession(["s", "p", "a", "r", "0", "1", "y", "b", "b", "b", "b"])
+    configure_trust_domain(db, "friends", display_name="Friends", weight=1.0, actor_user_id=sysop.id)
+    configure_trusted_reporter(
+        db, fingerprint, domain_id="friends", scopes=[("identity_integrity", "signed_equivocation")], actor_user_id=sysop.id,
+    )
+    # [R]emove -> the only reporter -> confirm.
+    session = FakeSession(["s", "p", "r", "r", "0", "1", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert text.count(fingerprint) >= 2  # in the picker row and in the confirmation
-    assert list_trust_anchors(db) == []
+    assert list_trusted_reporters(db) == []
 
 
 # -- create user ----------------------------------------------------------
@@ -8430,6 +8420,83 @@ def test_outbox_cancels_a_retrying_item(db, lane, sysop):
     assert "[C]ancel (stop retrying) [B]ack" in text
     assert "Cancelled -- status is now 'cancelled'." in text
     assert [entry.status for entry in list_work_items(db)] == ["cancelled"]
+
+
+def _cancelled_work_item(db, sysop):
+    from netbbs.link.work_items import KIND_LINK_MAIL_DELIVERY, cancel_work_item, enqueue_work_item_without_commit, record_failure
+
+    item = enqueue_work_item_without_commit(db, kind=KIND_LINK_MAIL_DELIVERY, reference_id="msg1", target_fingerprint="fp1")
+    record_failure(db, item, error="connection refused")
+    return cancel_work_item(db, item.id, cancelled_by=sysop)
+
+
+def test_outbox_replays_a_cancelled_item(db, lane, sysop):
+    # Issue #1529: a SysOp who cancelled an item by mistake gets it back
+    # from the console. The outcome shows on the Outbox's next redraw and
+    # the replay is audited like any other.
+    from netbbs.link.work_items import list_work_items
+    from netbbs.moderation.log import list_actions_for_object
+
+    item = _cancelled_work_item(db, sysop)
+    session = FakeSession(["o", "o", "i", "0", "1", "r", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Cancelled: 1" in text
+    assert "[I]tems needing attention" in text
+    assert "cancelled, 1 attempt(s)" in text  # the picker row
+    assert "[R]eplay now [D]elete [B]ack" in text
+    assert "[C]ancel (stop retrying)" not in text
+    assert "Replayed -- status is now 'pending'." in text
+    assert "Press any key" not in text
+    assert [entry.status for entry in list_work_items(db)] == ["pending"]
+    assert [e.action for e in list_actions_for_object(db, "link_work_item", item.id)][-1] == "replay_link_work_item"
+
+
+def test_outbox_deletes_a_cancelled_item(db, lane, sysop):
+    from netbbs.link.work_items import list_work_items
+
+    _cancelled_work_item(db, sysop)
+    session = FakeSession(["o", "o", "i", "0", "1", "d", "y", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Delete this work item for good? It is never sent." in text
+    assert "Deleted the link_mail_delivery to " in text
+    assert list_work_items(db) == []
+
+
+def test_outbox_cancelled_item_help_names_replay_and_delete(db, lane, sysop):
+    from netbbs.net.char_input import HELP_KEY
+
+    _cancelled_work_item(db, sysop)
+    session = FakeSession(["o", "o", "i", "0", "1", HELP_KEY, " ", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Retry from scratch" in text
+    assert "Forget it; it is never sent" in text
+    assert "Stop retrying it for good" not in text
+
+
+def test_outbox_offers_no_items_for_pending_or_pushed_work(db, lane, sysop):
+    # Pending goes out on its own next sync pass and pushed already went:
+    # neither is listed, so neither can be replayed from the console.
+    from netbbs.link.work_items import KIND_LINK_MAIL_ACK, KIND_LINK_MAIL_DELIVERY, enqueue_work_item_without_commit, record_success
+
+    enqueue_work_item_without_commit(db, kind=KIND_LINK_MAIL_DELIVERY, reference_id="msg1", target_fingerprint="fp1")
+    pushed = enqueue_work_item_without_commit(db, kind=KIND_LINK_MAIL_ACK, reference_id="ack1", target_fingerprint="fp1")
+    record_success(db, pushed)
+
+    session = FakeSession(["o", "o", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    text = _normalized_visible(_written_text(session))
+    assert "Pending: 1" in text
+    assert "Pushed: 1" in text
+    assert "Nothing currently retrying, dead-lettered or cancelled." in text
+    assert "[I]tems needing attention" not in text
+    assert "[R]eplay now" not in text
 
 
 # -- Link status (issue #60, narrow scope) -----------------------------------

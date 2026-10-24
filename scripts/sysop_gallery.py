@@ -81,6 +81,10 @@ WALKS: dict[str, tuple[list[str], str]] = {
     "operations > mail > a refused letter": (["o", "m", "r", "o", "0", "1"], "Refused letter"),
     "settings": (["s"], "Settings"),
     "settings > node name": (["s", "n"], "Node name"),
+    "settings > ftn networks": (["s", "e"], "FTN networks"),
+    "settings > ftn networks > new network template": (["s", "e", "c"], "New FTN network"),  # issue #1517
+    "settings > ftn networks > new from nixnet": (["s", "e", "c", "0", "2"], "New FTN network"),
+    "settings > qwknet networks > new network": (["s", "d", "c"], "New QWKnet network"),
     "settings > join link": (["s", "j"], "Join NetBBS Link"),
     "settings > update": (["s", "u"], "Self-update"),
     "settings > operating limits": (["s", "o"], "Operating limits"),
@@ -95,7 +99,6 @@ WALKS: dict[str, tuple[list[str], str]] = {
     "settings > file area masthead": (["s", "m", "m", "f"], "File area masthead"),
     "settings > chat channel masthead": (["s", "m", "m", "c"], "Chat channel picker masthead"),
     "trust > domains": (["s", "p", "d"], "Trust domains"),
-    "trust > anchors": (["s", "p", "a"], "Trust anchors"),
     "trust > reporters": (["s", "p", "r"], "Trusted reporters"),
     "trust > identity authorities": (["s", "p", "i"], "Identity authorities"),
     "trust > published identity": (["s", "p", "p"], "Published identity"),

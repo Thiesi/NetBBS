@@ -13,7 +13,7 @@ from netbbs.files import entries as entries_module
 from netbbs.files.areas import create_file_area
 from netbbs.files.entries import upload_file
 from netbbs.net.char_input import EditorKey, EditorKeyKind
-from netbbs.net.file_flow import _file_column_widths, _show_area
+from netbbs.net.file_flow import _file_column_widths, _file_prose_row, _show_area
 from netbbs.rendering import (
     AUTHOR_COLOR,
     DATE_COLOR,
@@ -136,6 +136,57 @@ def test_column_widths_geometry_on_narrow_terminals():
     assert date_w == 16
     total = idx_w + 1 + name_w + 1 + size_w + 1 + date_w + 1 + uploader_w
     assert total <= 70
+
+
+@pytest.mark.parametrize("width", [60, 61, 62, 63, 64])
+def test_column_widths_near_the_table_minimum_fit_the_row(width):
+    """Near the table's minimum the uploader column gives way before the
+    filename, so the row stays inside `list_width` (issue #1452): at 60
+    columns with a full uploader column it was wider than the terminal."""
+    idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(width, uploader_need=28)
+    assert name_w >= 12 and uploader_w >= len("Uploader")
+    assert idx_w + 1 + name_w + 1 + size_w + 1 + date_w + 1 + uploader_w == width - 1
+
+
+@pytest.mark.parametrize("width", [59, 50, 40, 20])
+def test_column_widths_below_the_table_minimum_are_prose(width):
+    assert _file_column_widths(width) is None
+
+
+def test_a_short_filename_keeps_its_size_and_uploader_on_a_tight_prose_row():
+    """The size goes only when the name would not fit beside it (review of
+    #1532): " [01] f0.txt -- 123.4 MiB, mod" is exactly 30 columns, and a
+    31-column terminal holds it."""
+    row = _file_prose_row(
+        " [01]", "f0.txt", "123.4 MiB", "mod", width=31, highlighted=False, accent=1, ellipsis="...",
+    )
+    assert re.sub(r"\x1b\[[0-9;]*m", "", row) == " [01] f0.txt -- 123.4 MiB, mod"
+    long_row = _file_prose_row(
+        " [01]", "a-rather-long-filename.zip", "123.4 MiB", "mod",
+        width=31, highlighted=False, accent=1, ellipsis="...",
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", long_row)
+    assert "MiB" not in plain and plain.endswith(".zip") and visible_width(plain) <= 30
+
+
+@pytest.mark.parametrize("width", [50, 30, 12])
+def test_the_narrow_highlighted_row_is_a_reverse_video_bar(tmp_path, monkeypatch, width):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    area, user = _setup_area(db, count=3, monkeypatch=monkeypatch)
+    session = FakeInteractiveSession(editor_keys=[EditorKey(EditorKeyKind.DOWN)], width=width)
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(_show_area(session, lane, area, user))
+
+    bars = [line for line in session.output.split(chr(10)) if ">[01]" in line]
+    assert bars, "the highlighted row was never drawn"
+    assert bars[-1].startswith("\x1b[7m"), bars[-1]
+    rows = [line for line in session.visible_output.split(chr(10)) if re.search(r"\[0\d\]", line)]
+    assert rows and all(visible_width(line) <= width - 1 for line in rows)
+
+    lane.close()
+    db.close()
 
 
 # -- Columnar Header & Directory Layout --

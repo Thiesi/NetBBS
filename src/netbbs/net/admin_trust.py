@@ -1,7 +1,6 @@
 """SysOp console trust screens.
 
-Vouches, trust subjects and overrides, trust domains, anchors and
-reporters, attestation authorities and recipients, the published identity,
+Vouches, trust subjects and overrides, trust domains and reporters, attestation authorities and recipients, the published identity,
 exceptions and retired usernames. Split out of `netbbs.net.admin_flow`
 (issue #1311).
 """
@@ -74,14 +73,12 @@ from netbbs.link.trust import (
     TrustSubject,
     clear_trust_override,
     configure_sole_authority,
-    configure_trust_anchor,
     configure_trust_domain,
     configure_trusted_reporter,
     ALL_CATEGORIES,
     get_effective_trust_state,
     known_categories,
     list_sole_authorities,
-    list_trust_anchors,
     list_trust_config_audit,
     list_trust_decision_audit,
     list_trust_domains,
@@ -89,7 +86,6 @@ from netbbs.link.trust import (
     list_trust_subjects,
     list_trusted_reporters,
     remove_sole_authority,
-    remove_trust_anchor,
     remove_trusted_reporter,
     set_trust_override,
 )
@@ -209,7 +205,6 @@ def _audit_details_text(details: dict) -> str:
 _TRUST_MENU = (
     MenuEntry(label=menu_key("S", "ubjects"), brief="Remote nodes, users, their state", detailed="Remote nodes and users, and their state"),
     MenuEntry(label=menu_key("D", "omains"), brief="Reporter groups that count as one", detailed="Groups of reporters that count as one"),
-    MenuEntry(label=menu_key("A", "nchors"), brief="A recorded list; has no effect", detailed="Recorded anchor nodes (no effect yet)"),
     MenuEntry(label=menu_key("R", "eporters"), brief="Whose signals and vouches count", detailed="Whose signals and vouches count here"),
     MenuEntry(label=menu_key("I", "dentity authorities"), brief="Whose verified age or name counts", detailed="Whose verified ages and names count"),
     MenuEntry(label=menu_key("P", "ublished identity"), brief="Verified ages and names sent out"),
@@ -265,16 +260,14 @@ async def _trust_menu(
         if choice == "b":
             await session.write_line("")
             return
-        if choice in ("d", "a", "r", "e"):
-            # Issue #700: a change to anchors, domains, reporters or their
+        if choice in ("d", "r", "e"):
+            # Issue #700: a change to domains, reporters or their
             # exceptions can change how any held-back event is judged, so
             # everything set aside is retried on a pass that starts now.
             # Offline, the running node sees the same change on its next pass.
             before = await lane.run(trust_policy_generation)
             if choice == "d":
                 await _trust_domains_screen(session, lane, actor)
-            elif choice == "a":
-                await _trust_anchors_screen(session, lane, actor)
             elif choice == "r":
                 await _trust_reporters_screen(session, lane, actor)
             else:
@@ -703,7 +696,7 @@ async def _trust_subjects_screen(
         # silent early return (no held prompt at all) -- under
         # `redraw_in_place`, the very next redraw wiped the empty_message
         # before it could be read. Every sibling trust screen (Domains,
-        # Anchors, ...) stays on an interactive prompt regardless of list
+        # Reporters, ...) stays on an interactive prompt regardless of list
         # state; a real subject list can also go stale while this screen
         # is open, same reasoning `login_flow`'s "Who's online" already
         # documents for its own `refresh`.
@@ -1772,112 +1765,6 @@ async def _resolve_admin_node_reference(
         return reference.strip().lower()
     _announce_line(session, colored("No linked node matches that name or fingerprint.", fg_color=ERROR_COLOR))
     return None
-
-
-@located("Trust anchors")
-async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """Listing plus `[A]dd/update` (a draft editor: node, reason),
-    `[R]emove` (a picker over the anchors that actually exist, then one
-    confirm), `[B]ack` -- issue #282."""
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    listing = _Listing()
-    while True:
-        anchors = await lane.run(list_trust_anchors)
-        labels = {a.fingerprint: (await lane.run(identity_for_fingerprint, a.fingerprint)).label for a in anchors}
-        rows: list[Field | Note | Table] = [Table(
-            ("Node", "Reason"),
-            [[(labels[a.fingerprint], ACCENT_COLOR), a.reason] for a in anchors], flex=1,
-        )] if anchors else [Note("No trust anchors are configured.")]
-        choice = await _trust_list_choice(
-            session, lane, actor, listing, title="Trust anchors",
-            subtitle="Nodes recorded as trust anchors. Nothing acts on them yet.",
-            rows=rows, options=["a", "r"] if anchors else ["a"],
-            help_title="Trust anchors help",
-            help_about=(
-                "A list of nodes you name as anchors, kept and audited. This version of NetBBS does not "
-                "consult it: an anchor gets no reporter authority, and nothing is accepted or refused "
-                "because of it."
-            ),
-            help_briefs={"a": "Name a node an anchor, with a reason", "r": "Take a node off the list"},
-        )
-        if choice == "b":
-            return
-        if choice == "r":
-            selected = await pick_item(
-                session, anchors,
-                name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: _stable_id_for(a.fingerprint),
-                description_of=lambda a: f"{a.fingerprint} -- {a.reason}",
-                title="Remove which trust anchor?", empty_message="No trust anchors are configured.",
-                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-                accent_color=await lane.run(effective_accent_color_256),
-                header_color=await lane.run(effective_header_color_256),
-            )
-            if selected is None:
-                continue
-            if not await prompt_yes_no(
-                session,
-                f"Remove {sanitize_text(labels[selected.fingerprint])} "
-                f"[{sanitize_text(selected.fingerprint)}] as a trust anchor?",
-                default=False,
-            ):
-                continue
-            try:
-                await lane.run(remove_trust_anchor, selected.fingerprint, actor_user_id=actor.id)
-            except ValueError as exc:
-                listing.say(f"Trust anchor not changed: {exc}", error=True)
-                continue
-            listing.say("Trust anchor removed and audited.")
-            continue
-
-        draft: dict = {"node": None, "node_label": None, "reason": ""}
-        existing_anchors = {a.fingerprint: a for a in anchors}
-        node_field = _node_reference_field(
-            "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-        )
-
-        async def _node_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
-            # A *changed* node replaces the dependent field from that
-            # node's stored record (or resets it for a node without one)
-            # -- never reseeds on a picker backed out of, and never mixes
-            # one node's fields with another's (Codex review on #290).
-            before = draft["node"]
-            await node_field(session, lane, draft)
-            if draft["node"] == before:
-                return
-            existing = existing_anchors.get(draft["node"])
-            draft["reason"] = existing.reason if existing is not None else ""
-
-        fields = [
-            FieldSpec(
-                key="node", label="Node",
-                render=_node_render("node"),
-                prompt=_node_then_seed,
-                brief="Which linked node to anchor",
-                help="A stored peer, or a name/DNS name/technical identity typed in.",
-            ),
-            FieldSpec(
-                key="reason", label="Reason",
-                render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
-                prompt=text_field("reason", required=True),
-                brief="Mandatory audit note",
-                help="Required. Kept with the anchor and in the configuration history.",
-            ),
-        ]
-
-        async def save(draft: dict) -> bool | None:
-            if draft["node"] is None or not draft["reason"]:
-                raise ValueError("choose a Node and give a Reason first")
-            await lane.run(
-                configure_trust_anchor, draft["node"], reason=draft["reason"], actor_user_id=actor.id,
-            )
-            listing.say("Trust anchor changed and audited.")
-            return True
-
-        await _trust_editor(
-            session, lane, actor, title="Trust anchor", fields=fields, draft=draft, save=save, node_key="node",
-        )
 
 
 def _parse_reporter_scopes(value: str) -> list[tuple[TrustDimension, str]]:
@@ -2959,8 +2846,9 @@ async def _trust_config_history_screen(session: Session, lane: DatabaseLane, act
         sections=[Section(None, body)],
         help_title="Trust configuration history help",
         help_about=(
-            "Every change to domains, anchors, reporters, exceptions, identity authorities, recipients and "
-            "vouches, newest first, with what was set. Overrides are in each subject's own history."
+            "Every change to domains, reporters, exceptions, identity authorities, recipients and "
+            "vouches, newest first, with what was set. Overrides are in each subject's own history. "
+            "Anchor rows are from an earlier version, which kept a list of trust anchors."
         ),
     )
 

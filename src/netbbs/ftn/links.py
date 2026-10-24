@@ -211,7 +211,7 @@ def validate_link(network: FtnNetwork, link: FtnLink) -> FtnLink:
     return replace(link, network_id=network.id, address=address, name=name, host=host, port=port)
 
 
-def save_link(db: Database, link: FtnLink) -> FtnLink:
+def save_link(db: Database, link: FtnLink, *, commit: bool = True) -> FtnLink:
     """Create (no `id`) or update a link; returns it as stored."""
     network = get_network(db, link.network_id)
     if network is None:
@@ -255,13 +255,16 @@ def save_link(db: Database, link: FtnLink) -> FtnLink:
     except FtnLinkError:
         db.connection.rollback()
         raise
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return validated
 
 
-def delete_link(db: Database, link_id: int) -> int:
+def delete_link(db: Database, link_id: int, *, commit: bool = True) -> int:
     """Remove a link. What waits for it is dropped, each netmail's sender
-    told; returns how many messages and files were dropped."""
+    told; returns how many messages and files were dropped. Dropping them
+    commits on its own whatever `commit` says; `commit=False` leaves only
+    the link's own row to the caller's transaction."""
     from netbbs.ftn.outbound import drop_link_rows
 
     link = get_link(db, link_id)
@@ -269,7 +272,8 @@ def delete_link(db: Database, link_id: int) -> int:
         return 0
     dropped = drop_link_rows(db, link_id, f"{link.address.four_d} is no longer served by this BBS")
     db.connection.execute("DELETE FROM ftn_links WHERE id = ?", (link_id,))
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return dropped
 
 

@@ -213,7 +213,7 @@ public-readiness gate. Its implemented foundation is:
 
 - formal threat model from issue #55 — specified in §12;
 - persisted local trust inputs, projections, probation, and policy evaluation
-  (issue #126) — implemented: separate anchors/reporters/domains, node/user
+  (issue #126) — implemented: separate reporters/domains, node/user
   subjects, dimension-scoped evidence and vouches, transactional state/audit,
   startup reconciliation, recovery hold, and bounded inactive retention;
 - signed trust-signal/vouch subscriptions and evidence verification (issue

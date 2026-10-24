@@ -270,7 +270,7 @@ class ImportOutcome:
 
 
 def import_list(db: Database, network_id: int, data: bytes, *, how: str, require_crc: bool,
-                zone: int | None = None) -> ImportOutcome:
+                zone: int | None = None, commit: bool = True) -> ImportOutcome:
     """Check `data`'s CRC-16, then replace the network's stored nodelist with
     it and keep its raw text for later diffs, in one transaction. Nothing
     changes if it can't be read: `NodelistError` says why. `zone` as for
@@ -303,7 +303,8 @@ def import_list(db: Database, network_id: int, data: bytes, *, how: str, require
     except BaseException:
         db.connection.rollback()
         raise
-    db.connection.commit()
+    if commit:
+        db.connection.commit()
     return ImportOutcome(len(entries), header.day, header.crc)
 
 

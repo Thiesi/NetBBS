@@ -50,7 +50,7 @@ from netbbs.ftn.echolist import (
 )
 from netbbs.ftn.networks import DEFAULT_AREAFIX_ROBOT, DEFAULT_FILEFIX_ROBOT, FtnNetwork, get_network
 from netbbs.ftn.queue import FtnQueueFullError
-from netbbs.moderation.log import record_action
+from netbbs.moderation.log import record_action_without_commit
 from netbbs.net.admin_ui import _announce, _load_chrome, pick_item
 from netbbs.net.char_input import InputCancelled
 from netbbs.net.menu_description_preference import menu_description_level
@@ -173,9 +173,10 @@ async def change_robot_password(session: Session, lane: DatabaseLane, actor: Use
         return None
 
     def _persist(db: Database) -> str:
-        note = queue_password_change(db, get_network(db, network.id), actor, robot, first)
-        record_action(db, actor=actor, action="change_ftn_robot_password",
-                      detail=f"{network.name}: sent %PWD to {label}")
+        with db.connection:  # the password, the request and the entry together (issue #1515)
+            note = queue_password_change(db, get_network(db, network.id), actor, robot, first, commit=False)
+            record_action_without_commit(db, actor=actor, action="change_ftn_robot_password",
+                                         detail=f"{network.name}: sent %PWD to {label}, password=changed")
         return note
 
     try:

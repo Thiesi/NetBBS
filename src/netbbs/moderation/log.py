@@ -20,6 +20,7 @@ target user just leaves them NULL.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 
 from netbbs.auth.users import User
@@ -105,6 +106,36 @@ def record_action_without_commit(
         "SELECT * FROM moderation_log WHERE id = ?", (cursor.lastrowid,)
     ).fetchone()
     return _row_to_entry(row)
+
+
+def _shown_value(value: object) -> str:
+    if value is None or value == "":
+        return "(none)"
+    if isinstance(value, (set, frozenset, list, tuple)):
+        return ",".join(str(item) for item in sorted(value)) or "(none)"
+    if isinstance(value, str) and (not value.isprintable() or any(c.isspace() or c in "='\"" for c in value)):
+        return repr(value)
+    return str(value)
+
+
+def change_detail(subject: str, before: Mapping[str, object] | None, after: Mapping[str, object], *,
+                  secrets: Collection[str] = ()) -> str:
+    """An audit entry's detail for a save (issue #1515): `subject: ` and
+    `key=value` for every value in `after` that differs from `before`, or
+    every value when `before` is None (a creation). A key in `secrets` is
+    always listed, and only as `changed` or `unchanged`, never its value;
+    on a creation it is compared with empty. A value with spaces or quotes
+    is shown quoted, an empty one as `(none)`."""
+    parts = []
+    for key, value in after.items():
+        previous = before.get(key) if before is not None else None
+        if key in secrets:
+            if before is None:
+                previous = ""
+            parts.append(f"{key}={'changed' if value != previous else 'unchanged'}")
+        elif before is None or previous != value:
+            parts.append(f"{key}={_shown_value(value)}")
+    return f"{subject}: " + (" ".join(parts) if parts else "no change")
 
 
 def list_actions_for_object(db: Database, object_type: str, object_id: int) -> list[ModerationLogEntry]:
