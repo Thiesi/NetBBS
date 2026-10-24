@@ -448,7 +448,7 @@ def test_the_file_listing_has_help_and_is_drawn_again(db, lane, alice, editor, k
     session = FakeSession([key, _DISMISS, "b"], editor=editor)
     asyncio.run(_show_area(session, lane, area, alice))
     text = session.squeezed()
-    assert "File area help" in text and "newest first under any pinned on top" in text
+    assert "File area help" in text and "any pinned on top, then oldest to newest" in text
     assert "[U]pload" in text.split("File area help")[1]
     assert "pkg1.tar.gz" in text.split("File area help")[1]
     assert session.leftover == []

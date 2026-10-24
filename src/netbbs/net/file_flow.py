@@ -1351,8 +1351,8 @@ async def _area_screen(
                 await show_menu_help(
                     session, "File area help", [*options, *hints],
                     about=(
-                        "The files in this area, newest first under any pinned on top: name, size, date, "
-                        "uploader, then the description. Enter or a file's number downloads it. "
+                        "The files in this area, any pinned on top, then oldest to newest: name, size, "
+                        "date, uploader, then the description. Enter or a file's number downloads it. "
                         "In a moderated area an upload waits for approval before others see it."
                     ),
                     header_color=await lane.run(effective_header_color_256), unicode_style=unicode_style,
