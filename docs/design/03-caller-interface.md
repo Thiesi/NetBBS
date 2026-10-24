@@ -1345,7 +1345,7 @@ this from `edit_resource_draft`; a screen with a cursor of its own says where
 it drew the value (`netbbs.net.resource_editor.editing_in_place`): the
 account detail for Level, Display name and Birthdate, and the review after
 writing a post or mail for To and Subject. Fields that open a picker or a
-list of their own (a trust anchor's node, the MRC room blocklist) are not
+list of their own (a trusted reporter's node, the MRC room blocklist) are not
 typed fields, a multi-line text opens its editor, and the level ladder's
 `[N]ame` and `[G]o to level` act on a list row and keep their prompt. A
 screen that scrolls, one taller than the terminal, or redraw-in-place off

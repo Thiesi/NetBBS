@@ -58,7 +58,6 @@ authority does not grant age/name-attestation authority, or vice versa.
 
 Establishment and authority to influence policy are different roles:
 
-- a **trust anchor** is explicitly configured by the SysOp;
 - an **established identity** has graduated or was established manually;
 - a **trusted reporter** is explicitly configured for named dimensions and
   categories. `dimension:*` is shorthand, expanded when the grant is saved into
@@ -69,8 +68,12 @@ Establishment and authority to influence policy are different roles:
 - a **trust domain** locally groups reporters which may share control or
   incentives.
 
+There is no trust-anchor role. An earlier version let a SysOp record trust
+anchors, but no trust decision read them, so they were removed (§16, issue
+#1528).
+
 No role is inferred transitively. A vouch may help probation graduation but
-cannot create a trust anchor, reporter, attestation authority, or trust domain.
+cannot create a reporter, attestation authority, or trust domain.
 When a SysOp selects a node by friendly or DNS name for one of these
 security-policy roles, the UI shows the resolved technical identity. If that
 fingerprint has an undismissed cryptographic-identity warning, the warning is
