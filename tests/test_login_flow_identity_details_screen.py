@@ -145,6 +145,7 @@ def test_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     # One more page than before issue #596: the two Link-sharing entries now
     # say who receives the value and what withdrawal can and cannot do.
     session = FakeSession([HELP_KEY, " ", " ", "b"])
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
     assert "No help is available" not in text

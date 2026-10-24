@@ -68,6 +68,8 @@ from netbbs.rendering import (
     move_cursor,
     sanitize_text,
     screen_title,
+    strip_ansi,
+    visible_width,
     wrap_to_width,
 )
 from netbbs.rendering.reflow import wrap_terminal_text
@@ -1015,6 +1017,7 @@ async def edit_resource_draft(
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_field_help(
                 session, fields, selected=help_selected(), header_color=header_color, unicode_style=unicode_style,
+                keys=extra_entries,
             )
             continue
         if key.kind == EditorKeyKind.CTRL and key.char == "c":
@@ -1081,6 +1084,7 @@ async def edit_resource_draft(
         if choice == HELP_KEY:
             await _show_field_help(
                 session, fields, selected=help_selected(), header_color=header_color, unicode_style=unicode_style,
+                keys=extra_entries,
             )
             continue
         if choice == back_hotkey or choice == CANCEL_KEY:
@@ -1219,9 +1223,11 @@ async def _show_field_help(
     session: Session, fields: list[FieldSpec], *, selected: int | None = None,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
     unicode_style: bool = False,
+    keys: Sequence[MenuEntry] = (),
 ) -> None:
     """Ctrl-H's own content (issue #150): every field with a `help`
-    string authored, one after another.
+    string authored, one after another, then `keys` -- a resource
+    screen's own actions on its bar -- with what each does (issue #1514).
 
     Issue #160's own cursor-navigation follow-up narrows this once a
     field is arrow-highlighted: a caller already sitting on one
@@ -1247,7 +1253,8 @@ async def _show_field_help(
         return
 
     documented = [f for f in fields if f.help]
-    if not documented:
+    described = [entry for entry in keys if entry.detailed or entry.brief]
+    if not documented and not described:
         await show_help(
             session, "Field help", ["No help is available for this screen yet."], header_color=header_color,
             unicode_style=unicode_style,
@@ -1257,6 +1264,13 @@ async def _show_field_help(
     for f in documented:
         lines.append(colored(f.label, fg_color=header_color, bold=True))
         lines.append(f"  {f.help}")
+        lines.append("")
+    if described:
+        lines.append(colored("Keys on this screen", fg_color=header_color, bold=True))
+        width = max(visible_width(strip_ansi(entry.label)) for entry in described)
+        for entry in described:
+            label = strip_ansi(entry.label)
+            lines.append(f"  {label}{' ' * (width - visible_width(label) + 2)}{entry.detailed or entry.brief}")
         lines.append("")
     await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
 

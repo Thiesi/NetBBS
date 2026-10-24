@@ -677,6 +677,12 @@ answers, and on-screen hints name the key that works
 (`char_input.help_key_label`). Authoring help text per field is
 incremental, not required for every field up front.
 
+A help screen should fit one 80x24 screen. Help taller than the terminal is
+shown a page at a time, numbered in its title: any key turns the page, and
+Esc or B closes it early (issue #1514). With no field highlighted, a draft
+editor's Ctrl-H lists every field's help, then the screen's own action keys
+and what each does.
+
 Ctrl-C (confirmed with Thiesi, dogfood question) is an *incremental*, not a
 universal, cancel key: `char_input.read_key()` returns it as a distinct
 `CANCEL_KEY` sentinel, the same "return a distinguishable value, let call

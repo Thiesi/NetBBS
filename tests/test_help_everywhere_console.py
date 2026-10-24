@@ -100,13 +100,17 @@ def test_the_staff_console_has_help(db, lane, sysop):
 )
 def test_each_console_menu_has_help(db, lane, sysop, keys, help_title, about_word, redraw_marker):
     # Help, then back out of every screen the keys opened, then the landing page.
-    text = _console(FakeSession([*keys, H, " ", *["b"] * (len(keys) + 1)]), lane, sysop)
+    session = FakeSession([*keys, H, " ", *["b"] * (len(keys) + 1)])
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
+    text = _console(session, lane, sysop)
     _assert_help_then_redraw(text, help_title, about_word, redraw_marker)
 
 
 def test_a_menu_key_still_works_after_help(db, lane, sysop):
     # Settings -> help -> Node name -> back -> back -> back.
-    text = _console(FakeSession(["s", H, " ", "n", "b", "b", "b"]), lane, sysop)
+    session = FakeSession(["s", H, " ", "n", "b", "b", "b"])
+    session.terminal_height = 200  # the whole help on one page
+    text = _console(session, lane, sysop)
     assert "Recolor the node name" in _after(text, "Settings help")
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 from netbbs.rendering.menu import continue_prompt
 from netbbs.net.session import Session
 from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, visible_width, wrap_to_width
+from netbbs.rendering.reflow import wrap_terminal_text
 
 
 async def show_help(
@@ -30,7 +31,8 @@ async def show_help(
     unicode_style: bool = False,
 ) -> None:
     """Print a titled help block, then wait for any keystroke before
-    returning. `lines` are written as-is (already-composed strings) --
+    returning. A block taller than the terminal is shown a page at a
+    time, numbered in its title; Esc or B closes it early. `lines` are written as-is (already-composed strings) --
     this function has no opinion on their content, only on presenting
     and waiting. A `line` that needs wrapping (see `unicode_style`
     below) must be plain, unstyled text -- wrapping is not ANSI-safe
@@ -53,18 +55,20 @@ async def show_help(
     (e.g. composition's Body field help) still fits inside it instead of
     spilling past the right border with only its first physical row
     prefixed."""
+    height = getattr(session, "terminal_height", 24) or 24
     if not unicode_style:
-        await session.write_line(colored(title, fg_color=header_color, bold=True))
-        for line in lines:
-            await session.write_line(line)
-        await session.write_line(continue_prompt())
-        # HELP_KEY (Ctrl-H) is a real terminal control byte, not a synthesized
-        # signal -- a client's own key-repeat can queue several of it before
-        # this screen ever draws. Without discarding those first, the very
-        # next queued repeat instantly satisfies this dismiss read, closing
-        # the screen before a human eye can register it (dogfood report).
-        await session.discard_buffered_input()
-        await session.read_any_key()
+        # Help taller than the terminal is shown a page at a time (issue
+        # #1514), so its top never scrolls away unread. A line counts as the
+        # rows `write_line` wraps it to, at word boundaries.
+        term_width = max(1, getattr(session, "terminal_width", 80) or 80)
+        pages = _pages(lines, max(3, height - 2), lambda line: wrap_terminal_text(line, term_width).count("\r\n") + 1)
+        for number, page in enumerate(pages, 1):
+            heading = title if len(pages) == 1 else f"{title} ({number}/{len(pages)})"
+            await session.write_line(colored(heading, fg_color=header_color, bold=True))
+            for line in page:
+                await session.write_line(line)
+            if not await _pause(session, last=number == len(pages)):
+                return
         return
     width = min(getattr(session, "terminal_width", 80), 78)
     # Dogfood report: content rows never closed with their own right-
@@ -77,9 +81,6 @@ async def show_help(
     # one column narrower, minimizing how many already-tuned wrap points
     # in existing callers' help text this shifts.
     inner_width = max(1, width - 4)
-    rule_len = max(0, width - len(title) - 6)
-    hdr = colored(f"╭── {title} " + "─" * rule_len + "╮", fg_color=header_color, bold=True)
-    await session.write_line(f"\r\n{hdr}")
     # Dogfood report: these side borders used to render as plain,
     # uncolored text -- an inherited shortcut from an earlier fix where
     # coloring them broke tests doing plain substring matches against
@@ -87,23 +88,68 @@ async def show_help(
     # Matches `netbbs.rendering.layout.double_frame`'s own "║ "/" ║"
     # convention: same header_color, same bold, as the top/bottom rule.
     side_border = colored("│", fg_color=header_color, bold=True)
+    rows: list[str] = []
     for line in lines:
         # The wrapper's hard-break fallback is used only when an indivisible
         # token (typically a path) is wider than the content area.  That keeps
         # the closing border visible and makes every physical row bounded;
         # ordinary prose still wraps only at whitespace boundaries.
-        wrapped_lines = (
-            [line] if visible_width(line) <= inner_width
-            else wrap_to_width(line, inner_width)
-        )
-        for wrapped in wrapped_lines:
-            pad = " " * max(0, inner_width - visible_width(wrapped))
-            await session.write_line(f"{side_border}  {wrapped}{pad}{side_border}")
-    footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)
-    await session.write_line(footer)
-    await session.write_line(continue_prompt())
+        rows.extend([line] if visible_width(line) <= inner_width else wrap_to_width(line, inner_width))
+    # The blank line, the top and bottom rules and the prompt take four rows.
+    pages = _pages(rows, max(3, height - 4), lambda row: 1)
+    for number, page in enumerate(pages, 1):
+        heading = title if len(pages) == 1 else f"{title} ({number}/{len(pages)})"
+        rule_len = max(0, width - len(heading) - 6)
+        hdr = colored(f"╭── {heading} " + "─" * rule_len + "╮", fg_color=header_color, bold=True)
+        await session.write_line(f"\r\n{hdr}")
+        for row in page:
+            pad = " " * max(0, inner_width - visible_width(row))
+            await session.write_line(f"{side_border}  {row}{pad}{side_border}")
+        footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)
+        await session.write_line(footer)
+        if not await _pause(session, last=number == len(pages)):
+            return
+
+
+def _pages(rows: list[str], capacity: int, cost) -> list[list[str]]:
+    """`rows` cut into pages of at most `capacity` terminal rows, `cost(row)`
+    being how many rows one takes. A page break falls after a blank row
+    where one is near, so a heading isn't left at the foot of a page."""
+    pages: list[list[str]] = [[]]
+    used = 0
+    for row in rows:
+        need = cost(row)
+        if pages[-1] and used + need > capacity:
+            page = pages[-1]
+            # Move a trailing heading block (the rows after the last blank
+            # one, if they are few) over to the next page with this row.
+            blank = max((i for i, r in enumerate(page) if not r.strip()), default=-1)
+            carried = page[blank + 1:] if 0 <= blank and len(page) - blank - 1 <= 2 else []
+            if carried:
+                del page[blank + 1:]
+            while page and not page[-1].strip():
+                page.pop()
+            pages.append(carried)
+            used = sum(cost(r) for r in carried)
+        if not pages[-1] and not row.strip():
+            continue  # no page starts with a blank row
+        pages[-1].append(row)
+        used += need
+    return pages
+
+
+async def _pause(session: Session, *, last: bool) -> bool:
+    """Wait for a key under a help page. False when the caller closed the
+    help early with Esc or B; the last page closes on any key."""
+    await session.write_line(continue_prompt() if last else continue_prompt("Next page, Esc closes"))
+    # HELP_KEY (Ctrl-H) is a real terminal control byte, not a synthesized
+    # signal -- a client's own key-repeat can queue several of it before
+    # this screen ever draws. Without discarding those first, the very
+    # next queued repeat instantly satisfies this dismiss read, closing
+    # the screen before a human eye can register it (dogfood report).
     await session.discard_buffered_input()
-    await session.read_any_key()
+    key = await session.read_any_key()
+    return not last and key not in ("\x1b", "b", "B")
 
 
 # -- help built from a screen's own keys (issue #1158) -------------------------

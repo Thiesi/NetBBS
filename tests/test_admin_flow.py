@@ -2828,6 +2828,7 @@ def test_create_board_ctrl_h_shows_real_help_text_for_every_field(db, lane, syso
     # had no help= authored at all.
     inputs = ["m", "m", "c", "CTRL+H", " ", "b", "b", "b", "b"]
     session = FakeSession(inputs)
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
@@ -3706,6 +3707,7 @@ def test_create_and_delete_area_flow(db, lane, sysop):
 def test_create_area_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
     inputs = ["m", "f", "c", "CTRL+H", " ", "b", "b", "b", "b"]
     session = FakeSession(inputs)
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
@@ -4224,6 +4226,7 @@ def test_create_and_delete_door_flow(db, lane, sysop, tmp_path):
 def test_create_door_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
     inputs = ["m", "d", "c", "CTRL+H", " ", "b", "b", "b", "b"]
     session = FakeSession(inputs)
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
@@ -4277,6 +4280,7 @@ def test_door_requires_a_non_blank_executable_path(db, lane, sysop):
 def test_create_channel_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
     inputs = ["m", "l", "c", "CTRL+H", " ", "b", "b", "b", "b"]
     session = FakeSession(inputs)
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
@@ -4408,6 +4412,7 @@ def test_grant_blanket_across_all_channels(db, lane, sysop):
 def test_create_community_ctrl_h_shows_real_help_text_for_every_field(db, lane, sysop):
     inputs = ["m", "t", "c", "CTRL+H", " ", "b", "b", "b", "b"]
     session = FakeSession(inputs)
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No help is available" not in text
@@ -5111,6 +5116,8 @@ def test_welcome_banner_ctrl_h_keeps_every_piece_of_a_long_path_visible(tmp_path
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
 
     session = FakeSession(["s", "m", "s", "w", "\x08", "x", "b", "b", "b", "b", "b"])
+
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     lane.close()
@@ -5634,6 +5641,8 @@ def test_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     from netbbs.net.main_menu_banner import main_menu_banner_path
 
     session = FakeSession(["s", "m", "m", "m", "\x08", "x", "b", "b", "b", "b", "b"])
+
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(main_menu_banner_path(db)), session.terminal_width - 4)
@@ -6567,6 +6576,8 @@ def test_board_list_masthead_ctrl_h_shows_where_to_place_the_file(db, lane, syso
     from netbbs.net.board_list_banner import board_list_banner_path
 
     session = FakeSession(["s", "m", "m", "d", "\x08", "x", "b", "b", "b", "b", "b"])
+
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(text, str(board_list_banner_path(db)), session.terminal_width - 4)
@@ -6738,6 +6749,8 @@ def test_chat_channel_picker_masthead_ctrl_h_shows_where_to_place_the_file(db, l
     from netbbs.net.chat_channel_picker_banner import chat_channel_picker_banner_path
 
     session = FakeSession(["s", "m", "m", "c", "\x08", "x", "b", "b", "b", "b", "b"])
+
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     _run(session, lane, sysop)
     text = _written_text(session)
     _assert_wrapped_token_visible(

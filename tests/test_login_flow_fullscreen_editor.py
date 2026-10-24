@@ -211,6 +211,7 @@ def test_profile_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     # despite cursor-nav being wired in ("No help is available ... yet"
     # for every one of them).
     session = FakeSession(["CTRL+h", " ", "b"])
+    session.terminal_height = 200  # the whole help on one page: this checks what it says
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
     assert "No help is available" not in text
