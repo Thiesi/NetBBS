@@ -402,10 +402,21 @@ class SSHSession(Session):
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
-            value = await self._receive_byte_with_timeout(remaining)
-            if value is None:
+            try:
+                data = await asyncio.wait_for(self._process.stdin.read(1), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived):
                 continue
-            received.append(value)
+            except (asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS):
+                # Gone: the first read after this says so (review on #1563).
+                break
+            if not data:
+                # End of input. Unlike a timeout this repeats at once, so
+                # retrying would spin until the deadline (review on #1563).
+                break
+            self.note_input()
+            received.append(data[0])
             reported, _ = take_position_report(bytes(received))
             if reported:
                 break

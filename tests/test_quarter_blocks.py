@@ -204,11 +204,16 @@ def test_telnet_without_an_answerback_keeps_quarter_blocks():
 
 
 class _Stdin:
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, *, closed: bool = False):
         self.data = bytearray(data)
+        self.closed = closed
+        self.reads = 0
 
     async def read(self, n):
+        self.reads += 1
         if not self.data:
+            if self.closed:
+                return b""
             await asyncio.sleep(3600)
         chunk = bytes(self.data[:n])
         del self.data[:n]
@@ -253,6 +258,22 @@ def test_ssh_keeps_quarter_blocks_for_a_terminal_without_puttys_answerback():
 def test_ssh_does_not_wait_long_for_a_terminal_that_answers_nothing():
     session, _sent, left = _ssh_probe(b"", timeout=0.05)
     assert session.quadrant_blocks is True and left == b""
+
+
+def test_ssh_stops_probing_at_once_when_the_caller_has_gone():
+    """Review on #1563: an empty read is end of input, not "nothing yet",
+    and retrying it spun until the deadline."""
+    async def scenario():
+        process = _TerminalProcess(b"")
+        process.stdin.closed = True
+        session = SSHSession(process)
+        started = asyncio.get_running_loop().time()
+        await session.probe_answerback(timeout=5.0)
+        return asyncio.get_running_loop().time() - started, process.stdin.reads
+
+    elapsed, reads = asyncio.run(scenario())
+    assert reads == 1
+    assert elapsed < 1.0
 
 
 def test_ssh_does_not_probe_a_cp437_terminal():
