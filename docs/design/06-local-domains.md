@@ -621,7 +621,7 @@ protocol is `docs/NetBBS-bot-api.md`. What a caller sees of one:
   announcements and other unprompted lines stay one line (§16, issue #1373).
 - **Door game results.** A bot granted a door as an event source may announce
   what callers earn there -- a rank, a top-tier achievement, a season's
-  medals, a capture, a perfect round -- in a line NetBBS words, such as
+  medals, a capture, a perfect round, a new season -- in a line NetBBS words, such as
   `Nib reached Merchant Captain in Voidrunner.` `!top <door>` answers the
   door's own top ten. Both name only callers whose profile switch "Game
   results announced in chat" is on (the default), and only for doors every

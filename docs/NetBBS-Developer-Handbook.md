@@ -457,8 +457,8 @@ Backups leave those out rather than carry a name that does not travel.
 ### Game events and standings
 
 Since `door_api` 5 a door can report what a caller earned -- a rank, a
-top-tier achievement, a season's medals, a capture, a perfect round -- and a
-top-ten standings table. Nothing is published when you report it: NetBBS keeps
+top-tier achievement, a season's medals, a capture, a perfect round, or a
+new season of the game itself -- and a top-ten standings table. Nothing is published when you report it: NetBBS keeps
 the event in a bounded journal, and a chat bot the SysOp granted your door
 announces it, in a sentence NetBBS words, in the channel the SysOp chose.
 `!top <door>` answers your standings. Both go through the same drop directory
@@ -469,7 +469,7 @@ for your door, a switch of its own beside posting:
 
 ```json
 "events": {
-  "types": ["rank", "achievement", "medal", "capture", "perfect"],
+  "types": ["rank", "achievement", "medal", "capture", "perfect", "season"],
   "events_per_hour": 12,
   "title_max": 80,
   "standings_rows": 10
@@ -482,6 +482,7 @@ short title:
 ```json
 {"event": {"type": "rank", "user_id": 12, "title": "Merchant Captain"}}
 {"event": {"type": "medal", "user_ids": [7, 12, 31], "title": "Season 4"}}
+{"event": {"type": "season", "title": "7 missions, through November"}}
 ```
 
 | `type` | `title` | What a bot says |
@@ -491,8 +492,14 @@ short title:
 | `medal` | the season, with `user_ids` (1-3, gold first) instead of `user_id` | `Season 4 of War Dialer closed: gold Vex, silver Quill, bronze Nib.` |
 | `capture` | what was captured | `Quill captured the Kowloon exchange in War Dialer.` |
 | `perfect` | optional: the round's topic | `Mara answered every question in a Retro Trivia round (Arcade Classics).` |
+| `season` | what the new season holds, with no `user_id` | `A new Lunar Lander season begins: 7 missions, through November.` |
 
 - The set is fixed: another `type` is refused, and you cannot word the line.
+  Send a type only when `types` lists it: `season` arrived within `door_api` 5
+  in NetBBS 7.43.0, and an older node refuses it.
+- A `season` event names nobody, so it is never dropped for consent and is
+  refused if it carries a `user_id`. It counts against `events_per_hour` like
+  any other. Send one when a season starts, not on every launch.
   The handle is looked up when the bot announces, so a renamed caller shows
   under their new name.
 - `title` is one plain line of at most 80 characters; control characters and

@@ -139,6 +139,48 @@ def test_the_host_words_each_event_type(db, door, sysop, alice, tmp_path, kind, 
     assert _last_text(db, door) == expected
 
 
+def test_a_new_season_names_nobody_and_is_announced(db, door, sysop, alice, tmp_path):
+    """Issue #1561: the game's own news, so no consent check can drop it."""
+    _events_on(db, door, sysop)
+    receipt = _event(db, door, tmp_path, type="season", title="7 missions, through November")
+    assert receipt["status"] == "accepted" and receipt["named"] == 0
+    assert _last_text(db, door) == "A new Voidrunner season begins: 7 missions, through November."
+    assert db.connection.execute("SELECT COUNT(*) FROM door_event_subjects").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("event, reason", [
+    ({"type": "season", "user_id": 1, "title": "x"}, "names no caller"),
+    ({"type": "season", "user_ids": [1], "title": "x"}, "names no caller"),
+    ({"type": "season"}, "must be a string"),
+    ({"type": "season", "title": " "}, "must not be empty"),
+])
+def test_a_season_event_needs_a_title_and_no_caller(db, door, sysop, alice, tmp_path, event, reason):
+    _events_on(db, door, sysop)
+    receipt = _event(db, door, tmp_path, **event)
+    assert receipt["status"] == "rejected" and reason in receipt["reason"]
+
+
+def test_a_season_counts_against_the_hourly_ceiling(db, door, sysop, alice, tmp_path):
+    _events_on(db, door, sysop, per_hour=1)
+    assert _event(db, door, tmp_path, type="season", title="Season 1")["status"] == "accepted"
+    receipt = _event(db, door, tmp_path, type="season", title="Season 2")
+    assert receipt["status"] == "rejected" and "rate limit" in receipt["reason"]
+
+
+def test_a_bot_receives_a_season_with_no_subjects(db, sysop, channel, door, tmp_path):
+    bot = _bot(db, sysop, channel, door)
+    _events_on(db, door, sysop)
+    _event(db, door, tmp_path, type="season", title="Season 2")
+    event = source_event(db, bot.id, door_batch(db, bot.id, 0)[0][0])
+    assert event["kind"] == "season" and event["subjects"] == []
+    assert event["text"] == "A new Voidrunner season begins: Season 2."
+    # The door's audience gate still applies.
+    db.connection.execute("UPDATE doors SET min_play_level = 20 WHERE id = ?", (door.id,))
+    db.connection.commit()
+    with pytest.raises(BotError, match="no longer announced"):
+        source_event(db, bot.id, door_batch(db, bot.id, 0)[0][0])
+
+
 def test_a_season_close_names_only_medallists_who_allow_it(db, door, sysop, alice, bob, tmp_path):
     carol = create_user(db, "carol", password="hunter2", user_level=10)
     _events_on(db, door, sysop)
@@ -467,3 +509,47 @@ def test_baud_answers_top_with_no_rows_as_a_line_even_with_blocks():
     baud.handle({"type": "result", "id": sent[-1]["id"], "ok": True,
                  "value": {"available": False, "doors": [], "text": "No door has published standings yet."}})
     assert sent[-1]["text"] == "alice: No door has published standings yet."
+
+
+def test_the_season_migration_keeps_events_subjects_and_ids(tmp_path, monkeypatch):
+    """Issue #1561: widening the type CHECK rebuilds `door_events`, whose
+    subjects cascade from it and whose ids feed every bot's cursor."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.database import Database
+    from netbbs.storage.migrations import MIGRATIONS
+
+    index = next(i for i, m in enumerate(MIGRATIONS) if "Issue #1561" in m.description)
+    db_path = tmp_path / "node.db"
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:index])
+    old = Database(db_path)
+    sysop = create_user(old, "sysop", password="hunter2", user_level=255)
+    alice = create_user(old, "alice", password="hunter2", user_level=10)
+    door = create_door(old, "Voidrunner", "/bin/true", creator=sysop)
+    connection = old.connection
+    for title in ("Rookie", "Ace", "Gone"):
+        cursor = connection.execute(
+            "INSERT INTO door_events (door_id, type, title, created_at) VALUES (?, 'rank', ?, 'x')",
+            (door.id, title))
+        connection.execute("INSERT INTO door_event_subjects (event_id, position, user_id) VALUES (?, 0, ?)",
+                           (cursor.lastrowid, alice.id))
+    # The newest event is gone, as `forget_door` leaves it: its id stays spent.
+    connection.execute("DELETE FROM door_events WHERE title = 'Gone'")
+    connection.commit()
+    old.connection.close()
+
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS)
+    db = Database(db_path)
+    rows = [tuple(r) for r in db.connection.execute("SELECT id, title FROM door_events ORDER BY id")]
+    assert rows == [(1, "Rookie"), (2, "Ace")]
+    assert [tuple(r) for r in db.connection.execute(
+        "SELECT event_id, user_id FROM door_event_subjects ORDER BY event_id")] == [(1, alice.id), (2, alice.id)]
+    cursor = db.connection.execute(
+        "INSERT INTO door_events (door_id, type, title, created_at) VALUES (?, 'season', 'Season 1', 'x')",
+        (door.id,))
+    assert cursor.lastrowid == 4, "id 3 was handed out before the upgrade"
+    # The subjects still cascade, and the journal is still bounded.
+    db.connection.execute("DELETE FROM door_events WHERE id = 1")
+    assert db.connection.execute("SELECT COUNT(*) FROM door_event_subjects").fetchone()[0] == 1
+    triggers = {r[0] for r in db.connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
+    assert "door_events_bound" in triggers
+    assert db.connection.execute("PRAGMA foreign_key_check").fetchall() == []
