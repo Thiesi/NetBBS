@@ -4475,6 +4475,14 @@ telnet caller 203.0.113.9 terminal type: 'syncterm' (answered); character set cp
 
 Look there if a caller's screen looks wrong.
 
+**Quarter blocks:** NetBBS also asks each Telnet and SSH terminal for its
+*answerback*. PuTTY answers `PuTTY` unless its user changed that, and
+PuTTY's default fonts lack the quarter blocks (`▗▟▙▖`) that some games,
+such as Lunar Lander, draw pictures with. Such a caller gets half blocks in
+their place, and the log line ends `answerback 'PuTTY', no quarter blocks`.
+A caller with a better font sets **Profile ▸ Quarter blocks** to On. Doors
+learn the result from `door_info.json`'s `quadrants` field.
+
 Classic terminals:
 
 - Classic terminals such as SyncTERM jump to the next line as soon as they
@@ -4493,7 +4501,8 @@ Classic terminals:
 
 **After sign-in:**
 
-- Each caller's own **Profile ▸ Character set** choice applies.
+- Each caller's own **Profile ▸ Character set** and **Quarter blocks**
+  choices apply.
 - A caller whose terminal wasn't recognised is asked once which of two sample
   lines looks right.
 

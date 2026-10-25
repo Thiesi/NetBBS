@@ -14,6 +14,7 @@ login.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 from netbbs.rendering.charset import CP437, UTF8, Charset
@@ -53,6 +54,7 @@ def describe_detection(
     charset: Charset,
     certain: bool,
     sixteen_colors: bool = False,
+    answerback: str | None = None,
 ) -> str:
     """One log line saying what a connecting terminal reported and the
     character set chosen from it, so a SysOp can read a client's terminal
@@ -61,10 +63,49 @@ def describe_detection(
     reported = ", ".join(repr(clean_terminal_type(name)) for name in names) or "none"
     certainty = "certain" if certain else "uncertain, asked after login"
     colors = "; 16 colours" if sixteen_colors else ""
+    quadrants = f"; answerback {answerback!r}, no quarter blocks" if answerback else ""
     return (
         f"{transport} caller {peer or '?'} terminal type: {reported} ({outcome}); "
-        f"character set {charset} ({certainty}){colors}"
+        f"character set {charset} ({certainty}){colors}{quadrants}"
     )
+
+
+# The answerback probe (issue #1560). PuTTY's default Windows fonts,
+# Courier New and Consolas, have the half blocks but not the quarter blocks
+# (U+2596-U+259F), and PuTTY calls itself `xterm`, so no terminal type says
+# so. What PuTTY does say is its answerback: it answers ENQ with "PuTTY"
+# unless its user changed that. Under Auto, such a caller gets half blocks;
+# one with a better font turns quarter blocks back on in Your profile.
+#
+# Only a known answerback is taken out of the input. Anything else that
+# arrives while the probe waits may be the caller typing, and is kept.
+ANSWERBACK_REQUEST = b"\x05"
+#: Device status report, "where is the cursor?". Every ANSI terminal
+#: answers, in order, after any answerback: its reply ends the wait. Only
+#: SSH needs it; Telnet's terminal-type exchange marks the same point.
+POSITION_REQUEST = b"\x1b[6n"
+#: Answerbacks of terminals whose usual font lacks the quarter blocks.
+QUADRANTLESS_ANSWERBACKS = (b"PuTTY",)
+_POSITION_REPORT = re.compile(rb"\x1b\[[0-9]{1,4};[0-9]{1,4}R")
+
+
+def take_answerback(data: bytes) -> tuple[str | None, bytes]:
+    """The known answerback in `data`, if there is one, and `data` without
+    it. The answerback comes first unless the caller typed before it."""
+    for known in QUADRANTLESS_ANSWERBACKS:
+        at = data.find(known)
+        if at >= 0:
+            return known.decode("ascii"), data[:at] + data[at + len(known):]
+    return None, data
+
+
+def take_position_report(data: bytes) -> tuple[bool, bytes]:
+    """Whether `data` holds the reply to `POSITION_REQUEST`, and `data`
+    without it."""
+    match = _POSITION_REPORT.search(data)
+    if match is None:
+        return False, data
+    return True, data[:match.start()] + data[match.end():]
 
 
 def terminal_wraps_immediately(names: Iterable[str]) -> bool:

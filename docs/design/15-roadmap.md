@@ -464,6 +464,7 @@ Compatibility extension (issues #296/#297):
   within a version when ignoring it costs a door nothing, as
   `datetime_format` (the node's display format, issue #1545) and
   `charset` (the character set the caller's terminal shows, issue #1557)
+  and `quadrants` (whether it shows quarter blocks, issue #1560)
   were in `door_api` 5: a bump would make every door that refuses an unknown
   version stop launching. Removing a profile restores the
   stdio API but does not pin the metadata to an older version — the file is a

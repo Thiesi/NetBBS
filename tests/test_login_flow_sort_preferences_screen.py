@@ -152,14 +152,14 @@ def test_profile_screen_shows_the_saved_preference_count_and_offers_the_menu_opt
     # `PAGE_DOWN` press the way a full navigable session could -- the
     # only way to reach the Account page here is a field-number jump
     # (every number works regardless of current page, by design), so
-    # this types 23, Sort preferences itself (which also opens its own
+    # this types 25, Sort preferences itself (which also opens its own
     # picker screen), backs out of that picker, and checks the
     # resulting Profile re-render -- now sitting on the Account page --
     # instead of the very first, pre-navigation one.
     set_sort_preference(db, alice, "channel", "alphabetical")
     set_sort_preference(db, alice, "board", "volume")
-    session = FakeSession(["2", "4", "b", "b"])
+    session = FakeSession(["2", "5", "b", "b"])
     asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible_text(session)
     assert re.search(r"Sort preferences: +2 saved", text)
-    assert "24 Sort preferences:" in text  # the numbered field itself
+    assert "25 Sort preferences:" in text  # the numbered field itself
