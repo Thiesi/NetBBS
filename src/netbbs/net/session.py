@@ -27,6 +27,7 @@ from netbbs.rendering.charset import (
     art_glyphs_to_cp437_controls,
     art_pictographs_to_glyphs,
     map_text,
+    without_quadrants,
 )
 from netbbs.rendering.pipe_codes import PastedColor
 from netbbs.rendering.reflow import fills_last_column, wrap_terminal_text
@@ -385,6 +386,15 @@ class Session(ABC):
     #: The terminal types the client reported, in order (Telnet TTYPE, or
     #: the SSH PTY request's terminal type).
     terminal_types: tuple[str, ...] = ()
+    #: Whether a UTF-8 terminal is sent quarter blocks (U+2596-U+259F,
+    #: issue #1560), or the half and full blocks CP437 gets instead. The
+    #: caller's preference decides; `detected_quadrants` is what Auto uses.
+    quadrant_blocks: bool = True
+    #: False when the terminal answered ENQ with an answerback whose usual
+    #: font lacks the quarter blocks (`netbbs.net.terminal_detect`).
+    detected_quadrants: bool = True
+    #: The terminal's answer to ENQ, if a probe got one.
+    answerback: str | None = None
 
     #: The server-side copy of this caller's screen (issue #764), created
     #: on the first write. See `screen_copy`.
@@ -436,11 +446,19 @@ class Session(ABC):
             # the copy must too.
             self._copy_output(self._raw_decoder.decode(b"", final=True))
             self._raw_decoder = None
-        text = map_text(text, self.output_charset)
+        text = self.map_output(text)
         self._copy_output(_normalize_newlines(text))
         if self._output_held:
             return
         await self._send_text(self._colors_out(text))
+
+    def map_output(self, text: str) -> str:
+        """`text` in what this caller's terminal shows: its character set,
+        and half blocks for quarter blocks where its font has none."""
+        text = map_text(text, self.output_charset)
+        if not self.quadrant_blocks and self.output_charset == UTF8:
+            text = without_quadrants(text)
+        return text
 
     async def write_art(self, text: str) -> None:
         """`write` for SysOp art (issue #929): the pictographs of CP437's
@@ -646,7 +664,7 @@ class Session(ABC):
         """Write past a break-in's hold, and past the screen copy: the
         chat is drawn over the caller's screen, and the copy keeps what is
         underneath, to be put back."""
-        await self._send_text(self._colors_out(map_text(text, self.output_charset)))
+        await self._send_text(self._colors_out(self.map_output(text)))
 
     def _copy_restore_ansi(self) -> str:
         """The screen copy as text that repaints the caller's terminal. The

@@ -260,13 +260,13 @@ def test_a_sysop_on_their_own_account_still_proves_the_current_password(db, lane
 
 
 def test_profile_account_password_field_reaches_the_screen(db, lane, alice):
-    session = FakeSession(["2", "6", "c", "hunter2", "via-profile", "via-profile", "b", "b"])
+    session = FakeSession(["2", "7", "c", "hunter2", "via-profile", "via-profile", "b", "b"])
     asyncio.run(_edit_profile(session, lane, alice))
 
     assert _logs_in(db, "alice", "via-profile")
     text = _visible(_written_text(session))
-    assert "26 Password:" in text
-    assert "[01-27] change" in text
+    assert "27 Password:" in text
+    assert "[01-28] change" in text
 
 
 def test_profile_shows_whether_a_password_is_set(db, lane):

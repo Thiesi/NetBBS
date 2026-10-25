@@ -35,6 +35,7 @@ import asyncio
 import logging
 import os
 import stat
+from collections import deque
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -71,9 +72,13 @@ from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.net.banner_fields import banner_fields
 from netbbs.rendering.art_slots import fill_field_slots
 from netbbs.net.terminal_detect import (
+    ANSWERBACK_REQUEST,
+    POSITION_REQUEST,
     classify_terminal_types,
     clean_terminal_type,
     describe_detection,
+    take_answerback,
+    take_position_report,
     terminal_shows_sixteen_colors,
     terminal_supports_truecolor,
     terminal_wraps_immediately,
@@ -90,6 +95,15 @@ _logger = logging.getLogger(__name__)
 # before the attempt ends (issue #835) -- the same three tries Telnet/web
 # signup gives (`netbbs.net.login_flow._REGISTRATION_MAX_ATTEMPTS`).
 _REGISTRATION_USERNAME_TRIES = 3
+
+# The answerback probe (issue #1560): the longest a terminal that answers
+# neither ENQ nor the cursor position request holds up the first screen.
+# Every modern terminal answers the second, which ends the wait after one
+# round trip, so this is only reached by one that does not.
+_ANSWERBACK_PROBE_SECONDS = 0.5
+# Bound on what the probe reads: an answerback plus a position report is
+# a few dozen bytes, and anything past that is the caller typing.
+_MAX_PROBE_BYTES = 128
 
 # Bound on `SSHServer.stop()` waiting for already-admitted connections to
 # drop on their own before it aborts them. Same number as
@@ -365,6 +379,56 @@ class SSHSession(Session):
             outcome="PTY request" if terminal_type else "no PTY terminal type",
             charset=self.output_charset, certain=self.charset_certain, sixteen_colors=self.sixteen_colors,
         ))
+        # Bytes the answerback probe read that were the caller's, served
+        # before anything read later.
+        self._early_input: deque[int] = deque()
+
+    async def probe_answerback(self, timeout: float = _ANSWERBACK_PROBE_SECONDS) -> None:
+        """Ask the terminal for its answerback (issue #1560), before the
+        first screen. SSH has no exchange of its own to time this by, so a
+        cursor position request follows ENQ: a terminal answers both in
+        order, and the position report ends the wait after one round trip.
+        `timeout` bounds it for a terminal that answers neither. Only a
+        UTF-8 terminal is asked, since only there do quarter blocks
+        depend on the font; bytes the caller typed meanwhile are kept."""
+        if self.output_charset != UTF8 or not self.terminal_types:
+            return
+        await self._send_raw(ANSWERBACK_REQUEST + POSITION_REQUEST)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        received = bytearray()
+        reported = False
+        while len(received) < _MAX_PROBE_BYTES:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                data = await asyncio.wait_for(self._process.stdin.read(1), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived):
+                continue
+            except (asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS):
+                # Gone: the first read after this says so (review on #1563).
+                break
+            if not data:
+                # End of input. Unlike a timeout this repeats at once, so
+                # retrying would spin until the deadline (review on #1563).
+                break
+            self.note_input()
+            received.append(data[0])
+            reported, _ = take_position_report(bytes(received))
+            if reported:
+                break
+        _, rest = take_position_report(bytes(received))
+        answerback, rest = take_answerback(rest)
+        self._early_input.extend(rest)
+        if answerback is not None:
+            self.answerback = answerback
+            self.detected_quadrants = self.quadrant_blocks = False
+            _logger.info("SSH caller %s answerback %r: no quarter blocks", self.peer_address or "?", answerback)
+        elif not reported:
+            _logger.debug("SSH caller %s answered no cursor position request", self.peer_address or "?")
 
     async def _send_text(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write performs, and the
@@ -463,6 +527,8 @@ class SSHSession(Session):
         callers should just loop and call this again. The direct SSH
         analogue of `TelnetSession.read_byte`'s IAC/negotiation handling.
         """
+        if self._early_input:
+            return self._early_input.popleft()
         try:
             data = await self._process.stdin.read(1)
         except asyncssh.TerminalSizeChanged as exc:
@@ -484,6 +550,8 @@ class SSHSession(Session):
     async def _receive_byte_with_timeout(self, timeout: float) -> int | None:
         """Bounded peek, matching `TelnetSession.read_byte_with_timeout`
         — see that method's docstring."""
+        if self._early_input:
+            return self._early_input.popleft()
         try:
             data = await asyncio.wait_for(self._process.stdin.read(1), timeout=timeout)
         except asyncio.TimeoutError:
@@ -1025,6 +1093,7 @@ class SSHServer:
     async def _handle_process(self, process: asyncssh.SSHServerProcess) -> None:
         session = SSHSession(process)
         try:
+            await session.probe_answerback()
             await self._session_handler(session)
         except SessionClosedError:
             # A caller hanging up is routine: one INFO line, no traceback.

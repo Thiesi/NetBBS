@@ -67,9 +67,12 @@ _BINARY_REQUEST = bytes([IAC, WILL, BINARY, IAC, DO, BINARY])
 # past all three as one chunk before reading application-level data.
 _TTYPE_REQUEST = bytes([IAC, DO, TTYPE])
 _TTYPE_SEND = bytes([IAC, SB, TTYPE, TTYPE_SEND, IAC, SE])
+# Right after the TTYPE request: ENQ, asking for the answerback (#1560).
+_ANSWERBACK_REQUEST = b"\x05"
 
 _FULL_NEGOTIATION_LEN = (
     len(_INITIAL_NEGOTIATION) + len(_NEW_ENVIRON_REQUEST) + len(_BINARY_REQUEST) + len(_TTYPE_REQUEST)
+    + len(_ANSWERBACK_REQUEST)
 )
 
 
@@ -755,6 +758,7 @@ def test_server_requests_binary_transmission_after_new_environ():
             assert data == _BINARY_REQUEST
             # Issue #929: the terminal-type request comes last.
             assert await reader.readexactly(len(_TTYPE_REQUEST)) == _TTYPE_REQUEST
+            assert await reader.readexactly(len(_ANSWERBACK_REQUEST)) == _ANSWERBACK_REQUEST
             writer.close()
             await writer.wait_closed()
         finally:
@@ -786,7 +790,7 @@ def _new_environ_scenario(colorterm_value: bytes | None):
             # saw an empty capture. Only surfaced on a POSIX host,
             # purely by timing; the byte mismatch is platform-neutral.
             await reader.readexactly(len(_BINARY_REQUEST))
-            await reader.readexactly(len(_TTYPE_REQUEST))
+            await reader.readexactly(len(_TTYPE_REQUEST) + len(_ANSWERBACK_REQUEST))
             if colorterm_value is not None:
                 body = (
                     bytes([NEW_ENVIRON_IS, NEW_ENVIRON_VAR])
@@ -853,7 +857,7 @@ def test_malformed_new_environ_subnegotiation_does_not_raise():
             # saw an empty capture. Only surfaced on a POSIX host,
             # purely by timing; the byte mismatch is platform-neutral.
             await reader.readexactly(len(_BINARY_REQUEST))
-            await reader.readexactly(len(_TTYPE_REQUEST))
+            await reader.readexactly(len(_TTYPE_REQUEST) + len(_ANSWERBACK_REQUEST))
             # Garbage body, not even starting with an IS marker.
             writer.write(bytes([IAC, SB, NEW_ENVIRON, 99, 99, 99, IAC, SE]))
             writer.write(b"x\r\n")

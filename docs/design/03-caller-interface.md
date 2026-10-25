@@ -130,6 +130,36 @@ SSH PTY request) and the character set chosen, so a SysOp can read what a
 client calls itself. Reported names are kept to printable ASCII and 40
 characters before they are stored or logged.
 
+**Quarter blocks (issue #1560).** A UTF-8 terminal can still lack the quarter
+blocks, U+2596–U+259F. PuTTY's default Windows fonts (Courier New, Consolas)
+have the half blocks but not these, PuTTY does not draw them itself, and it
+calls itself `xterm`, so no terminal type gives this away. A session therefore
+carries a second, independent flag: whether it is sent quarter blocks. When it
+is not, `Session.write` and a UTF-8 door's stream (`DoorTerminal`) replace each
+quarter block with the half or full block CP437 gets for it (§3.2 above). That
+substitute has the same width, so no layout moves.
+
+- The caller's preference is Auto (the default), On or Off; On and Off always
+  win.
+- Auto is on, except for a terminal whose answerback says PuTTY. NetBBS sends
+  ENQ (0x05), and PuTTY answers `PuTTY` unless its user changed that. Only a
+  known answerback is taken out of the input; anything else that arrives meanwhile
+  may be the caller typing and is kept for the first screen.
+- Telnet sends ENQ right after the TTYPE request. The client answers it a round
+  trip before its terminal type, so the TTYPE wait collects the answerback with
+  the early input and adds no wait of its own. A read that ends partway into
+  a known answerback reads on for at most 250 ms.
+- SSH has no exchange to time the answer by, so ENQ is followed by a cursor
+  position request (`ESC[6n`). A terminal answers both in order, and the
+  position report ends the wait after one round trip. A terminal that answers
+  neither holds the first screen up for at most 0.5 s. Only a UTF-8 SSH session
+  is asked.
+- The browser terminal is never asked. Its font is the page's, which has the
+  blocks.
+
+A door is told the result as `quadrants` in `door_info.json`: true only for a
+UTF-8 terminal that is sent quarter blocks.
+
 **Keys from classic terminals (issue #964).** SyncTERM sends BBS-convention
 sequences for some editing keys (CTerm manual, "Sequences sent by SyncTERM"):
 `ESC[K` for End, `ESC[V` and `ESC[U` for Page Up and Page Down, `ESC[@` for

@@ -138,9 +138,13 @@ from netbbs.rendering.pipe_codes import CGA_COLOR_NAMES
 from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.net.unicode_style_preference import (
     CHARSET_PREFERENCES,
+    QUADRANT_PREFERENCES,
     apply_charset_preference,
+    apply_quadrant_preference,
     charset_preference,
+    quadrant_preference,
     set_charset_preference,
+    set_quadrant_preference,
     unicode_style_enabled,
 )
 from netbbs.permissions import meets_level
@@ -1299,6 +1303,17 @@ def _charset_label(preference: str, session: Session | None) -> str:
     return {"unicode": "Unicode", "cp437": "CP437", "ascii": "ASCII"}[preference]
 
 
+def _quadrant_label(preference: str, session: Session | None) -> str:
+    """The Quarter blocks value (issue #1560), with a sample of them so a
+    caller can see whether their font has them. `session` as for
+    `_charset_label`."""
+    if preference == "auto" and session is not None:
+        value = "Auto (now on)" if getattr(session, "quadrant_blocks", True) else "Auto (now off: PuTTY detected)"
+    else:
+        value = {"auto": "Auto", "on": "On", "off": "Off"}[preference]
+    return f"{value}  ▗▟█▙▖"
+
+
 def _member_persist(
     user: User, actor: User | None, key: str, setter: Callable[[Database, User, Any], None],
     *, describe: Callable[[str], str], apply: Callable[[Any], None] | None = None,
@@ -1403,6 +1418,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User, *, act
         "animations": await lane.run(animations_enabled, user),
         "unicode_style": await lane.run(unicode_style_enabled, user),
         "charset": await lane.run(charset_preference, user),
+        "quadrants": await lane.run(quadrant_preference, user),
         "mrc_colors": await lane.run(mrc_colors_enabled, user),
         "post_colors": await lane.run(post_colors_enabled, user),
         "mrc_nick_color": await lane.run(mrc_nick_color, user),
@@ -1937,6 +1953,28 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User, *, act
                 "reported when you connected. Unicode suits modern terminals and the browser; "
                 "CP437 suits classic BBS terminals such as SyncTERM and shows ANSI art as drawn; "
                 "ASCII is plain text any terminal shows. Takes effect at once."
+            ),
+            section="Display",
+        ),
+        FieldSpec(
+            key="quadrants",
+            label="Quarter blocks",
+            render=lambda d: _quadrant_label(d["quadrants"], session if actor is None else None),
+            prompt=live_choice_field(
+                "quadrants", list(QUADRANT_PREFERENCES),
+                persist=_member_persist(
+                    user, actor, "quadrants", set_quadrant_preference, describe=describe,
+                    apply=lambda v: apply_quadrant_preference(session, v),
+                ),
+            ),
+            brief="Whether your font has the quarter-block pictures games draw with",
+            help=(
+                "Some games, such as Lunar Lander, draw pictures with quarter blocks. A font "
+                "without them shows boxes instead, as PuTTY's default fonts do. Off sends half "
+                "blocks in their place: a coarser picture, but every font has them. Auto turns "
+                "them off for PuTTY and on everywhere else. If the sample after the value shows "
+                "boxes, choose Off; if PuTTY shows them fine with your font, choose On. Only "
+                "matters with the Unicode character set. Takes effect at once."
             ),
             section="Display",
         ),

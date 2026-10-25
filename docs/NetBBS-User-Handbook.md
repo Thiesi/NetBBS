@@ -1425,6 +1425,19 @@ SSH keys, and your password.
 If your terminal did not say which it is, NetBBS asks once after you log in
 which of two sample lines looks right.
 
+**Profile ▸ Quarter blocks** matters only with Unicode. Some games, such as
+Lunar Lander, draw pictures with quarter blocks (`▗▟▙▖`), and a font without
+them shows boxes instead. PuTTY's default fonts are like that.
+
+| Setting | Suits |
+| --- | --- |
+| **Auto** | The default. Off for PuTTY, on for every other terminal. |
+| **On** | Any font that has them, PuTTY with one such as Cascadia Code included. |
+| **Off** | A font that shows boxes. You get half blocks in their place: a coarser picture, but every font has them. |
+
+The value comes with a sample of quarter blocks. If the sample shows boxes,
+choose **Off**.
+
 **Profile ▸ Color depth** sets how many colors NetBBS sends:
 
 | Setting | Suits |
@@ -1435,6 +1448,7 @@ which of two sample lines looks right.
 | **16** | Classic terminals that show only the sixteen ANSI colors. |
 
 - If lines and arrows look wrong later, change **Character set**.
+- If a game's pictures are full of boxes, set **Quarter blocks** to Off.
 - If text blinks, shows reversed or looks garbled where colors should be,
   set **Color depth** to 16.
 - If you see only a few plain colors on a modern terminal, set **Color

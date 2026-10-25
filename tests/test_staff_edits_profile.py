@@ -41,7 +41,7 @@ _ANIMATIONS = ["1", "8"]
 _CHARSET = ["1", "9"]
 _BIO = ["0", "1"]
 _BLOCKED = ["0", "7"]
-_SSH_KEYS = ["2", "5"]
+_SSH_KEYS = ["2", "6"]
 
 
 @pytest.fixture

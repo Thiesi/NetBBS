@@ -56,9 +56,12 @@ from netbbs.net.session import (
     wait_until_drained,
 )
 from netbbs.net.terminal_detect import (
+    ANSWERBACK_REQUEST,
+    QUADRANTLESS_ANSWERBACKS,
     classify_terminal_types,
     clean_terminal_type,
     describe_detection,
+    take_answerback,
     terminal_shows_sixteen_colors,
     terminal_supports_truecolor,
     terminal_wraps_immediately,
@@ -117,6 +120,15 @@ _MAX_TERMINAL_TYPES = 3
 # screenful before the first screen; a client that sends more ends the
 # wait early instead of growing the buffer (review on #942).
 _MAX_EARLY_INPUT = 1024
+
+# How long to read on when the early input ends with the first bytes of a
+# known answerback (issue #1560): the rest is in the same reply.
+_ANSWERBACK_TAIL_SECONDS = 0.25
+
+
+def _ends_inside_answerback(data: bytes) -> bool:
+    """Whether `data` ends with a proper prefix of a known answerback."""
+    return any(data.endswith(known[:n]) for known in QUADRANTLESS_ANSWERBACKS for n in range(1, len(known)))
 
 
 class TelnetSession(Session):
@@ -236,6 +248,11 @@ class TelnetSession(Session):
         # Last, so every earlier byte sequence stays where tests expect it.
         self._writer.write(bytes([IAC, DO, TTYPE]))
         self._ttype_state = "requested"
+        # Issue #1560: after the TTYPE request, so a client answers it
+        # first and the answerback arrives ahead of the terminal type
+        # itself, which takes a second round trip. The wait below collects
+        # it with the early input, and nothing waits for it on its own.
+        self._writer.write(ANSWERBACK_REQUEST)
         try:
             await self._writer.drain()
         except CLIENT_DISCONNECT_ERRORS as exc:
@@ -275,6 +292,7 @@ class TelnetSession(Session):
                 if len(self._early_input) >= _MAX_EARLY_INPUT:
                     break
         self._ttype_state = "done"
+        await self._finish_answerback()
         charset, certain = classify_terminal_types(self.terminal_types)
         self.output_charset = self.detected_charset = charset if charset is not None else ASCII
         self.charset_certain = certain
@@ -285,7 +303,36 @@ class TelnetSession(Session):
         _logger.info(describe_detection(
             "telnet", self.peer_address, names=self.terminal_types, outcome=outcome,
             charset=self.output_charset, certain=certain, sixteen_colors=self.sixteen_colors,
+            answerback=self.answerback,
         ))
+
+    async def _finish_answerback(self) -> None:
+        """Take a known answerback out of the early input (issue #1560).
+        It is usually all there: it was sent a round trip before the
+        terminal type. A wait that ended early, or a packet split inside
+        the answerback, can leave only its first bytes read, so while the
+        input ends with the start of one, read on for a moment."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ANSWERBACK_TAIL_SECONDS
+        while len(self._early_input) < _MAX_EARLY_INPUT and _ends_inside_answerback(bytes(self._early_input)):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                first = await asyncio.wait_for(self._read_raw_byte(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            try:
+                value = await asyncio.wait_for(self._interpret_byte(first), timeout=_SUBNEGOTIATION_TIMEOUT)
+            except asyncio.TimeoutError as exc:
+                raise SessionClosedError("Telnet command timed out during negotiation") from exc
+            if value is not None:
+                self._early_input.append(value)
+        answerback, rest = take_answerback(bytes(self._early_input))
+        if answerback is not None:
+            self._early_input = deque(rest)
+            self.answerback = answerback
+            self.detected_quadrants = self.quadrant_blocks = False
 
     def _apply_terminal_colors(self) -> None:
         """16 colours for a classic BBS terminal, and for one that named

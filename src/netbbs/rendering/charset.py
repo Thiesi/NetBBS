@@ -255,6 +255,21 @@ def map_text(text: str, charset: Charset) -> str:
     return "".join(out)
 
 
+#: The quarter blocks, U+2596-U+259F (issue #1560). A UTF-8 terminal can
+#: still lack them: PuTTY's default Windows fonts have the half blocks but
+#: not these, and PuTTY does not draw them itself.
+QUADRANTS = frozenset(map(chr, range(0x2596, 0x25A0)))
+# The CP437 substitutes (issue #1557) are ordinary Unicode blocks too, so a
+# UTF-8 terminal without the quarters gets the same picture CP437 does.
+_HALF_BLOCK_FOR_QUADRANT = str.maketrans({ch: _GLYPHS[ch][0] for ch in QUADRANTS})
+
+
+def without_quadrants(text: str) -> str:
+    """`text` with each quarter block replaced by the half or full block of
+    the same width that `map_text` gives a CP437 terminal."""
+    return text.translate(_HALF_BLOCK_FOR_QUADRANT)
+
+
 def encode_text(text: str, charset: Charset) -> bytes:
     """`map_text` followed by encoding: the bytes a terminal with
     `charset` should receive for `text`. Never raises."""

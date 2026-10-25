@@ -92,8 +92,10 @@ from netbbs.net.color_depth_preference import apply_color_depth, color_depth_ove
 from netbbs.welcome_letter import send_welcome_letter
 from netbbs.net.unicode_style_preference import (
     apply_charset_preference,
+    apply_quadrant_preference,
     charset_preference,
     charset_preference_ever_set,
+    quadrant_preference,
     set_charset_preference,
     unicode_style_enabled,
 )
@@ -797,6 +799,8 @@ async def _run_signed_in(
     # The caller's character set preference replaces what was detected at
     # connect time, from the first screen after login on (issue #929).
     apply_charset_preference(session, charset_preference(db, user))
+    # And whether its font has quarter blocks (issue #1560).
+    apply_quadrant_preference(session, quadrant_preference(db, user))
     # And their colour depth replaces the detected one (issue #1348).
     apply_color_depth(session, color_depth_override(db, user))
     # Paced art plays only for a caller who keeps animations on (issue #929).

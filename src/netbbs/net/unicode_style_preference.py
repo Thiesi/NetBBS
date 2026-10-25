@@ -79,3 +79,38 @@ def unicode_style_enabled(db: Database, user: User) -> bool:
 def set_unicode_style_enabled(db: Database, user: User, enabled: bool) -> None:
     """The two-way view: on is Auto, off is ASCII."""
     set_charset_preference(db, user, "auto" if enabled else "ascii")
+
+
+# Quarter blocks (issue #1560): Auto (the default), On or Off. A UTF-8
+# terminal whose font lacks U+2596-U+259F shows them as boxes, and nothing
+# a terminal reports says so. Auto follows the one thing that does hint at
+# it -- PuTTY's default answerback (`netbbs.net.terminal_detect`) -- and
+# On or Off settle it for a caller who knows their font.
+QuadrantPreference = Literal["auto", "on", "off"]
+
+QUADRANT_PREFERENCES: tuple[QuadrantPreference, ...] = ("auto", "on", "off")
+
+_QUADRANT_KEY = "quadrants"
+
+
+def quadrant_preference(db: Database, user: User) -> QuadrantPreference:
+    value = get_user_preference(db, user, _QUADRANT_KEY, default=None)
+    return value if value in QUADRANT_PREFERENCES else "auto"
+
+
+def set_quadrant_preference(db: Database, user: User, value: QuadrantPreference) -> None:
+    if value not in QUADRANT_PREFERENCES:
+        raise ValueError(f"unknown quarter-block preference {value!r}")
+    set_user_preference(db, user, _QUADRANT_KEY, value)
+
+
+def effective_quadrants(preference: QuadrantPreference, session: object) -> bool:
+    """Whether `session` is sent quarter blocks under `preference`. Only a
+    UTF-8 terminal is ever asked: CP437 and ASCII map them anyway."""
+    if preference == "auto":
+        return getattr(session, "detected_quadrants", True)
+    return preference == "on"
+
+
+def apply_quadrant_preference(session: object, preference: QuadrantPreference) -> None:
+    session.quadrant_blocks = effective_quadrants(preference, session)

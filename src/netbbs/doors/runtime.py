@@ -38,7 +38,7 @@ from netbbs.net.session_activity import records_activity
 from netbbs.net.shared_account import signed_in_without_credential
 from netbbs.guest_call import current_guest_call, discard_guest_call, new_guest_call
 from netbbs.moderation.log import record_action
-from netbbs.rendering.charset import CP437, UTF8, encode_text, input_codec
+from netbbs.rendering.charset import CP437, UTF8, encode_text, input_codec, without_quadrants
 
 _logger = logging.getLogger(__name__)
 DOOR_CPU_LIMIT_SECONDS = 300
@@ -143,6 +143,11 @@ def _write_door_info(db, workdir, session, player, war_dialer=False, session_lim
             # CP437 terminal too, so it cannot say this. Added within
             # door_api 5: older nodes omit it.
             "charset": getattr(session, "output_charset", UTF8),
+            # Issue #1560: whether that terminal shows the quarter blocks
+            # (U+2596-U+259F). Never true for CP437 or ASCII. Added within
+            # door_api 5: older nodes omit it.
+            "quadrants": (getattr(session, "output_charset", UTF8) == UTF8
+                          and getattr(session, "quadrant_blocks", True)),
             "transport": getattr(session, "transport_name", "unknown"),
             # Node-wide, not per-caller: NetBBS has one display timezone.
             "timezone": display_timezone,
@@ -618,6 +623,11 @@ class DoorTerminal:
                 data = encode_text(data.decode("cp437"), self.charset)
         elif self.charset != UTF8:
             data = encode_text(self.output_decoder.decode(data), self.charset)
+        elif not getattr(self.session, "quadrant_blocks", True):
+            # Issue #1560: a UTF-8 terminal whose font has no quarter
+            # blocks gets the half blocks a CP437 one does. Only a UTF-8
+            # door can send them; a CP437 door has none to send.
+            data = without_quadrants(self.output_decoder.decode(data)).encode("utf-8")
         await self.session.write_raw(data)
 
 
