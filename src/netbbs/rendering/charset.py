@@ -60,6 +60,12 @@ _GLYPHS: dict[str, tuple[str | None, str]] = {
     "▁": ("_", "_"), "▂": ("▄", "_"), "▃": ("▄", "_"), "▅": ("▄", "_"),
     "▆": ("█", "#"), "▇": ("█", "#"),
     "▰": ("█", "#"), "▱": ("░", "."),
+    # Quadrants (issue #1557), which CP437 lacks: the half or full block
+    # nearest in coverage. A cell's two colours still land roughly where
+    # they were; the two diagonals, half covered, become the half shade.
+    "▘": ("▀", "^"), "▝": ("▀", "^"), "▖": ("▄", "_"), "▗": ("▄", "_"),
+    "▛": ("█", "#"), "▜": ("█", "#"), "▙": ("█", "#"), "▟": ("█", "#"),
+    "▚": ("▒", ":"), "▞": ("▒", ":"),
     # Punctuation and symbols.
     "·": (None, "."), "»": (None, ">"), "«": (None, "<"),
     "›": ("»", ">"), "‹": ("«", "<"),

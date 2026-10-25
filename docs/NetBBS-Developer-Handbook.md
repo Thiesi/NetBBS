@@ -241,6 +241,7 @@ Two kinds of registration deliberately get none of it:
 | `terminal_width`, `terminal_height` | Current geometry; rewritten mid-run if the caller resizes and the door opted in (see the resize section above). |
 | `color_depth` | `truecolor`, `256` or `16`. `16` is a classic BBS terminal that shows only the 16 ANSI colours: draw with SGR 30-37/40-47 and bold for bright. NetBBS rewrites 256-colour and truecolor codes to the nearest of the 16 for such a caller anyway, so a door that ignores the value still shows, only less finely. |
 | `unicode_style` | The caller's own NetBBS glyph preference, so a door can match what they already chose. |
+| `charset` | What the caller's terminal can show: `utf-8`, `cp437` or `ascii`. NetBBS converts the door's output to it, and a character the set lacks becomes the nearest substitute, or `?`. `unicode_style` cannot tell you this, because it is true on a CP437 terminal too, so check `charset` before drawing with characters outside CP437, such as quadrant blocks. Added within `door_api` 5 in NetBBS 7.42.0: an older node omits it, so keep today's behaviour as the fallback. |
 | `transport` | `telnet`, `ssh`, `web`, `local`, or `unknown`. Key decoding and latency assumptions differ, particularly for the browser terminal. |
 | `timezone` | The node's display timezone as an IANA name, for in-game clocks. Node-wide: NetBBS has no per-caller timezone. |
 | `datetime_format` | The node's date and time display format, a Python `strftime` pattern such as the default `%d.%m.%Y %H:%M`, so a door can show dates the way the rest of the node does. It only ever uses `%Y %m %d %H %M %S %y %I %p %A %a %B %b %Z %z %%`, and NetBBS validates it, so it is safe to hand to `strftime`. It may contain `%Z` or `%z`, so format an aware time converted to `timezone`, not a naive one. Node-wide, like `timezone`. Added within `door_api` 5 in NetBBS 7.41.0: an older node omits it, so keep a fallback such as a profile setting of your own. |
@@ -261,8 +262,8 @@ are, not what they may do.
 The version field is the contract discriminator. For supported versions, allow
 documented optional fields to be absent and ignore unknown additive fields.
 A field may also be added within a version, without a `door_api` bump, when
-a door that ignores it loses nothing: `datetime_format` arrived that way in
-`door_api` 5. Such a field is documented with the NetBBS release that first
+a door that ignores it loses nothing: `datetime_format` and `charset` arrived
+that way in `door_api` 5. Such a field is documented with the NetBBS release that first
 sends it, and is absent on older nodes.
 Require whichever identity or capability fields your own feature actually
 needs, and fail clearly if they are unavailable. The implementation currently

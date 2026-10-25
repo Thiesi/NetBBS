@@ -462,8 +462,9 @@ Compatibility extension (issues #296/#297):
   absent field as unknown, and a door may refuse a version it does not
   understand rather than probing for fields. A field may also be added
   within a version when ignoring it costs a door nothing, as
-  `datetime_format` (the node's display format) was in `door_api` 5
-  (issue #1545): a bump would make every door that refuses an unknown
+  `datetime_format` (the node's display format, issue #1545) and
+  `charset` (the character set the caller's terminal shows, issue #1557)
+  were in `door_api` 5: a bump would make every door that refuses an unknown
   version stop launching. Removing a profile restores the
   stdio API but does not pin the metadata to an older version — the file is a
   property of the platform, not of the profile. It never carries a credential,
