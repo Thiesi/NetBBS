@@ -59,10 +59,10 @@ def test_profile_screen_cycles_the_color(db, alice, tmp_path):
 
     lane = DatabaseLane(db.path)
     try:
-        # The screen opens on its first section; the first "21" jumps to
+        # The screen opens on its first section; the first "23" jumps to
         # the Display section and advances yellow (14) to white (15), the
         # second wraps to black (0); b: back. Each press persists at once.
-        session = FakeSession(["2", "2", "2", "2", "b"])
+        session = FakeSession(["2", "3", "2", "3", "b"])
         asyncio.run(profile_flow._edit_profile(session, lane, alice))
         text = _visible(_written_text(session))
         assert "MRC nick color" in text and "white (|15)" in text and "black (|00)" in text
