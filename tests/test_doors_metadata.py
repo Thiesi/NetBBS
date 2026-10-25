@@ -99,6 +99,19 @@ def test_the_node_display_format_is_published(db, tmp_path, player):
     assert info["door_api"] == 5, "an additive field within door_api 5, not a bump"
 
 
+@pytest.mark.parametrize("charset", ["utf-8", "cp437", "ascii"])
+def test_the_callers_character_set_is_published(db, tmp_path, player, charset):
+    """Issue #1557: `unicode_style` is true on a CP437 terminal as well, so
+    only this tells a door that quadrant blocks would arrive as `?`."""
+    session = FakeSession()
+    session.output_charset = charset
+
+    info = _info(db, tmp_path, session=session)
+
+    assert info["charset"] == charset
+    assert info["door_api"] == 5, "an additive field within door_api 5, not a bump"
+
+
 def test_an_invalid_stored_display_format_falls_back_to_the_default(db, tmp_path, player):
     """Like `timezone`: a bad stored value is never handed to a door."""
     from netbbs.config import set_config

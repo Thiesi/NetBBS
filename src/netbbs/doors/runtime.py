@@ -138,6 +138,11 @@ def _write_door_info(db, workdir, session, player, war_dialer=False, session_lim
             # The caller's own display preference, so a door can match the
             # glyph style they already chose rather than guessing.
             "unicode_style": unicode_style_enabled(db, player),
+            # Issue #1557: what the caller's terminal can show, which the
+            # door's output is converted to. `unicode_style` is true on a
+            # CP437 terminal too, so it cannot say this. Added within
+            # door_api 5: older nodes omit it.
+            "charset": getattr(session, "output_charset", UTF8),
             "transport": getattr(session, "transport_name", "unknown"),
             # Node-wide, not per-caller: NetBBS has one display timezone.
             "timezone": display_timezone,

@@ -195,3 +195,19 @@ def test_common_art_symbols_get_a_real_stand_in(charset):
         out = map_text(ch, charset)
         assert "?" not in out, (ch, out)
         assert display_width(out) == display_width(ch), (ch, out)
+
+
+@pytest.mark.parametrize("charset", [CP437, ASCII])
+def test_every_quadrant_block_gets_a_real_stand_in(charset):
+    """Issue #1557: a door drawing scenery in quadrant blocks reached a
+    CP437 terminal as a field of question marks."""
+    for code in range(0x2596, 0x25A0):
+        out = map_text(chr(code), charset)
+        assert "?" not in out, (chr(code), out)
+        assert display_width(out) == 1, (chr(code), out)
+
+
+def test_quadrants_become_the_cp437_block_nearest_in_coverage():
+    assert map_text("▘▝▖▗", CP437) == "▀▀▄▄"
+    assert map_text("▛▜▙▟", CP437) == "████"
+    assert map_text("▚▞", CP437) == "▒▒"
