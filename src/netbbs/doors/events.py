@@ -38,7 +38,10 @@ from netbbs.timeutil import utc_iso, utc_now_iso
 from netbbs.user_preferences import get_user_preference, set_user_preference
 
 #: The fixed event types, in the order the door guide lists them.
-EVENT_TYPES = ("rank", "achievement", "medal", "capture", "perfect")
+EVENT_TYPES = ("rank", "achievement", "medal", "capture", "perfect", "season")
+#: Types that name no caller (issue #1561): a new season is the game's news,
+#: not anyone's result, so no consent or account check applies to it.
+UNNAMED_TYPES = frozenset({"season"})
 #: A season close names its medallists in placement order.
 MEDALS = ("gold", "silver", "bronze")
 TITLE_MAX = 80
@@ -202,6 +205,11 @@ def handle_event(db: Database, door, config, request: object, size: int, answer,
             answer({"status": "rejected",
                     "reason": "a medal event needs 'user_ids': 1-3 different account ids, gold first"})
             return "malformed request"
+    elif kind in UNNAMED_TYPES:
+        if "user_id" in request or "user_ids" in request:
+            answer({"status": "rejected", "reason": f"a {kind} event names no caller"})
+            return "malformed request"
+        named = []
     else:
         one = request.get("user_id")
         if type(one) is not int or one <= 0:
@@ -217,7 +225,7 @@ def handle_event(db: Database, door, config, request: object, size: int, answer,
     # Positions are kept, so the bronze medallist stays bronze when silver
     # is left out.
     subjects = [(position, user_id) for position, user_id in enumerate(named) if announceable(db, user_id)]
-    if not subjects:
+    if not subjects and kind not in UNNAMED_TYPES:
         answer({"status": "dropped",
                 "reason": "no caller it names can be announced: guest, disabled or pending accounts, "
                           "and callers who switched game results off, never are"})
@@ -310,6 +318,8 @@ def _plain(text: str) -> str:
 def event_text(kind: str, title: str, door_name: str, names: list[tuple[int, str]]) -> str:
     """The host's sentence for one event. `names` are (position, handle)."""
     door_name, title = _plain(door_name), _plain(title)
+    if kind == "season":
+        return f"A new {door_name} season begins: {title}."
     if kind == "medal":
         medals = ", ".join(f"{MEDALS[position]} {name}" for position, name in names)
         return f"{title} of {door_name} closed: {medals}."
@@ -344,7 +354,7 @@ def announced_event(db: Database, door, event_id: int) -> AnnouncedEvent | None:
         user = announceable(db, subject["user_id"])
         if user is not None:
             names.append((subject["position"], _plain(user.username)))
-    if not names:
+    if not names and row["type"] not in UNNAMED_TYPES:
         return None
     return AnnouncedEvent(row["type"], _plain(row["title"]), tuple(n for _, n in names),
                           event_text(row["type"], row["title"], door.name, names)[:500])

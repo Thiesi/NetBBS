@@ -555,9 +555,11 @@ Compatibility extension (issues #296/#297):
   through the same file drop, a door whose SysOp switched events on (a
   per-door switch on its `[O]utbound` screen, off by default, with its own
   hourly ceiling of 12 by default, advertised as `outbound.events`) reports
-  one of five fixed event types -- `rank`, `achievement`, `medal`,
-  `capture`, `perfect` -- with the subject's `user_id` (a `medal` event
-  names up to three, gold first, as `user_ids`) and a title of at most 80
+  one of six fixed event types -- `rank`, `achievement`, `medal`,
+  `capture`, `perfect`, `season` -- with the subject's `user_id` (a `medal` event
+  names up to three, gold first, as `user_ids`; a `season`, added within
+  `door_api` 5 for issue #1561, names nobody and announces the game's own
+  new season) and a title of at most 80
   characters, and may write a standings snapshot of at most 10 rows, each
   replacing the last. A request is refused, with a receipt, while events are
   off or the door is gated; one naming only callers who may not be named is
