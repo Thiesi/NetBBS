@@ -250,3 +250,66 @@ def test_restore_over_damaged_live_records_moves_them_aside(tmp_path, db_path, i
     rollback = restore_backup(source=archive, db_path=db_path, identity_dir=identity_dir)
     assert _pilots(_records(db_path)) == ["Armstrong"]
     assert (rollback / "lunar-lander" / "pilots.db").read_bytes().startswith(b"not a database")
+
+
+# Schema 2 (issue #1561): Lunar Lander v0.5.0's achievements and programs,
+# as its own SCHEMA creates them (the final table list is on the issue).
+_SCHEMA_2_ADDED = (
+    "CREATE TABLE counters (node TEXT, user INTEGER, name TEXT, value INTEGER)",
+    "CREATE TABLE achievements (node TEXT, user INTEGER, key TEXT, achieved TEXT)",
+    "CREATE TABLE programs (id INTEGER PRIMARY KEY, node TEXT, user INTEGER, season TEXT, preset TEXT, "
+    "started TEXT, ended TEXT, status TEXT, score INTEGER)",
+    "CREATE TABLE program_missions (program INTEGER, mission TEXT, sim_runs INTEGER, sim_seconds REAL, "
+    "real_started TEXT, result TEXT, score INTEGER, variation INTEGER)",
+)
+
+
+def _upgrade_to_schema_2(path, *, skip=None):
+    """What Lunar Lander v0.5.0 does to a schema 1 file on its first open."""
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        for statement in _SCHEMA_2_ADDED:
+            if skip is None or skip not in statement:
+                conn.execute(statement)
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+
+
+def test_schema_2_records_round_trip_through_a_backup(tmp_path, db_path, identity_dir):
+    _land(db_path, 1, "Armstrong")
+    _upgrade_to_schema_2(_records(db_path))
+    archive = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    manifest = json.loads((archive / "manifest.json").read_text())
+    assert manifest["lunar_lander"]["schema_version"] == 2
+    # The bundled v0.1.0 refuses schema 2, so a later pilot arrives as v0.5.0 would write one.
+    with contextlib.closing(sqlite3.connect(_records(db_path))) as conn:
+        conn.execute("INSERT INTO pilots (node, user, handle) VALUES ('node-a', 2, 'Aldrin')")
+        conn.commit()
+    assert _pilots(_records(db_path)) == ["Aldrin", "Armstrong"]
+    restore_backup(source=archive, db_path=db_path, identity_dir=identity_dir)
+    assert _pilots(_records(db_path)) == ["Armstrong"]
+
+
+def test_a_schema_1_backup_still_restores(tmp_path, db_path, identity_dir):
+    """A newer Lunar Lander upgrades the restored file itself."""
+    _land(db_path, 1, "Armstrong")
+    archive = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    _upgrade_to_schema_2(_records(db_path))
+    restore_backup(source=archive, db_path=db_path, identity_dir=identity_dir)
+    assert _pilots(_records(db_path)) == ["Armstrong"]
+
+
+@pytest.mark.parametrize("damage", ["unknown version", "missing table", "schema 1 tables at version 2"])
+def test_records_this_build_does_not_know_are_refused(tmp_path, db_path, identity_dir, damage):
+    _land(db_path, 1, "Armstrong")
+    path = _records(db_path)
+    if damage == "unknown version":
+        _upgrade_to_schema_2(path)
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.execute("PRAGMA user_version = 3")
+    elif damage == "missing table":
+        _upgrade_to_schema_2(path, skip="program_missions")
+    else:
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.execute("PRAGMA user_version = 2")
+    with pytest.raises(BackupError, match="not a Lunar Lander records database this build knows"):
+        create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")

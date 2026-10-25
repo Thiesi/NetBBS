@@ -160,6 +160,15 @@ _WAR_DIALER_MAX_BYTES = 512 * 1024 * 1024
 #: an upper bound on a file that should stay a few hundred kilobytes.
 _LUNAR_LANDER_MAX_BYTES = 256 * 1024 * 1024
 _LUNAR_LANDER_APPLICATION_ID = 0x4C4C0001
+#: Every records schema this build knows, and exactly the tables each has.
+#: Schema 2 (Lunar Lander v0.5.0, issue #1561) adds achievements and
+#: programs. Lunar Lander upgrades a schema 1 file in place on its first
+#: open, only adding tables, so a restored schema 1 backup is fine under a
+#: newer game.
+_LUNAR_LANDER_TABLES = {
+    1: frozenset({"pilots", "scores"}),
+    2: frozenset({"pilots", "scores", "counters", "achievements", "programs", "program_missions"}),
+}
 _VOIDRUNNER_MAX_FILES = 10_000
 _VOIDRUNNER_MAX_FILE_BYTES = 4 * 1024 * 1024
 _VOIDRUNNER_MAX_TOTAL_BYTES = 512 * 1024 * 1024
@@ -883,7 +892,7 @@ def _inspect_lunar_lander(path: Path) -> int:
             integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
     except sqlite3.Error as exc:
         raise BackupError(f"Lunar Lander records cannot be read: {path}: {exc}") from exc
-    if identity != _LUNAR_LANDER_APPLICATION_ID or version != 1 or tables != {"pilots", "scores"}:
+    if identity != _LUNAR_LANDER_APPLICATION_ID or tables != _LUNAR_LANDER_TABLES.get(version):
         raise BackupError(f"{path} is not a Lunar Lander records database this build knows "
                           f"(application id {identity:#x}, schema {version}). Move it aside to back up the node.")
     if integrity != "ok":

@@ -71,6 +71,15 @@ refuses while a game holds their write lock. An archive without the component
 restores the absence: live records move into the rollback generation, since
 they name user IDs the restored database may never have issued. A profile
 that sets its own `DOOR_LL_DATA_DIR` keeps its records outside the backup.
+The records must carry Lunar Lander's application ID and a schema this build
+knows, with exactly that schema's tables. Schema 1 is `pilots` and `scores`;
+schema 2 (Lunar Lander v0.5.0, issue #1561) adds `counters`, `achievements`,
+`programs` and `program_missions`. Anything else is refused, and the manifest
+records which schema was taken. A schema 1 backup restores under a game that
+writes schema 2, which upgrades the file in place by only adding tables. A
+schema 2 backup is refused by a build that knows only schema 1. So the NetBBS
+release that accepts a schema comes no later than the one that bundles the
+game release writing it.
 
 Voidrunner coverage (issue #310): ordinary CLI and SysOp node backups include the
 node's Voidrunner save directory (`<db>.doors/voidrunner/`, or the SysOp's
