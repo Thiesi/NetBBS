@@ -495,13 +495,12 @@ short title:
 | `season` | what the new season holds, with no `user_id` | `A new Lunar Lander season begins: 7 missions, through November.` |
 
 - The set is fixed: another `type` is refused, and you cannot word the line.
-  Send a type only when `types` lists it: `season` arrived within `door_api` 5
-  in NetBBS 7.43.0, and an older node refuses it.
+  The handle is looked up when the bot announces, so a renamed caller shows
+  under their new name. Send a type only when `types` lists it: `season`
+  arrived within `door_api` 5 in NetBBS 7.43.0, and an older node refuses it.
 - A `season` event names nobody, so it is never dropped for consent and is
   refused if it carries a `user_id`. It counts against `events_per_hour` like
   any other. Send one when a season starts, not on every launch.
-  The handle is looked up when the bot announces, so a renamed caller shows
-  under their new name.
 - `title` is one plain line of at most 80 characters; control characters and
   line breaks become spaces.
 - **Report only what was earned live, in this session.** A save upgraded to a
