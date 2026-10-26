@@ -26,6 +26,7 @@ web/
   netbbs-lunar-lander.html -> https://www.netbbs.org/lunar-lander.html
   game-scenes.js        -> https://www.netbbs.org/game-scenes.js
   blacksite-hero.png     -> https://www.netbbs.org/blacksite-hero.png
+  blacksite-interface-mockup.png -> https://www.netbbs.org/blacksite-interface-mockup.png
   lunar-lander-hero.jpg  -> https://www.netbbs.org/lunar-lander-hero.jpg
   favicon.ico            -> https://www.netbbs.org/favicon.ico   the icon: a
   favicon.svg            -> https://www.netbbs.org/favicon.svg   terminal with a
@@ -87,9 +88,9 @@ what is live is what `main` says. Where it is hosted, how to reach that host,
 and the exact copy-and-install steps are operational details. They live in the
 maintainer's private operations notes, not in this public repository.
 
-The individual game pages also need `game-scenes.js` and the two hero images
-at the site root, under the exact names in the map above. Verify their hashes
-alongside the HTML. The `shots/` files are source captures embedded into HTML;
+The individual game pages also need `game-scenes.js`, the two hero images and
+`blacksite-interface-mockup.png` at the site root, under the exact names in
+the map above. Copy each of them and verify its hash alongside the HTML. The `shots/` files are source captures embedded into HTML;
 they do not need to be served for the game pages to work.
 
 A deploy backs up each page it replaces, outside the web-served directory. The
@@ -230,20 +231,29 @@ Voidrunner, War Dialer and Retro Trivia also have scene players. Lunar Lander
 is bundled since NetBBS 7.41.0, and its page shows captures of the release
 NetBBS bundles. Blacksite is
 in development and not yet released: its page separates what is built from
-what is still coming, labels the status, and shows only real captures. Never
-manufacture a screenshot.
-Their images are copied without modification from
+what is still coming and labels the status. It shows no terminal captures,
+only its labelled concept art and a labelled mockup of the planned interface.
+Never manufacture a screenshot, and never let a mockup pass for one.
+Their banners are copied without modification from
 `Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
 `Thiesi/LunarLander` (`assets/lunar-lander-social.jpg`). Both repositories are
 BSD-2-Clause licensed. Both banners stay labelled as concept art. A page with
 no captures at all may declare
 `<meta name="netbbs-capture-kind" content="concept-art">`; the page checker
-then requires labelled artwork and no terminal captures. No page declares it
-now.
+then requires labelled artwork and no terminal captures. Blacksite's page
+declares it.
 
-Blacksite's screenshots come from `Thiesi/Blacksite` at commit
-`d80dacdd58065f221d199b69df573fcf12f7d7cf` (package 0.0.20, slices S01-S24).
-The game is not vendored here. `website_capture_blacksite.py` refuses any
+`blacksite-interface-mockup.png` is copied without modification from
+`Thiesi/Blacksite` at commit `c351cac254382d3bcae8644680b70f91e26c0500`,
+`docs/design/proposals/68-presentation/target/tin-halo-scene-132x50-truecolor.png`:
+a design target for the Tin Halo scene at 132 x 50 in truecolor, not a frame
+the game draws. Its caption and alt text say so.
+
+Blacksite's page showed three screenshots until the maintainer asked for them
+to be removed; their raw and converted files went with them. The helper that
+took them is kept, so they can be retaken. They came from `Thiesi/Blacksite`
+at commit `d80dacdd58065f221d199b69df573fcf12f7d7cf` (package 0.0.20, slices
+S01-S24). The game is not vendored here. `website_capture_blacksite.py` refuses any
 other checkout HEAD, starts the game's own service in-process on a private
 loopback port, and runs the real door client (`python -m blacksite.door`) over
 stdio pipes, as a NetBBS native stdio door does. It plays one new Ghost through
@@ -337,7 +347,7 @@ own scripts for unrelated interactions.
 
 `doors.html` is the game overview: one real launch splash per playable game
 (Lunar Lander's included), Blacksite's labelled concept art
-(it has no launch splash yet; its real captures are on its own page), a short description and a
+(it has no launch splash yet; its interface mockup is on its own page), a short description and a
 link to each dedicated page. Keep gameplay galleries and scene players on the
 individual pages. The landing page keeps at most one still per game in its
 general screenshot gallery. Every public page links to the overview.
