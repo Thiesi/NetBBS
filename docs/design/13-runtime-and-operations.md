@@ -74,10 +74,11 @@ that sets its own `DOOR_LL_DATA_DIR` keeps its records outside the backup.
 The records must carry Lunar Lander's application ID and a schema this build
 knows, with exactly that schema's tables. Schema 1 is `pilots` and `scores`;
 schema 2 (Lunar Lander v0.5.0, issue #1561) adds `counters`, `achievements`,
-`programs` and `program_missions`. Anything else is refused, and the manifest
-records which schema was taken. A schema 1 backup restores under a game that
-writes schema 2, which upgrades the file in place by only adding tables. A
-schema 2 backup is refused by a build that knows only schema 1. So the NetBBS
+`programs` and `program_missions`; schema 3 (issue #1577) adds `ghosts` and
+`tours`. Anything else is refused, and the manifest records which schema was
+taken. An older backup restores under a game that writes a newer schema, which
+upgrades the file in place by only adding tables. A backup in a newer schema is
+refused by a build that does not know it. So the NetBBS
 release that accepts a schema comes no later than the one that bundles the
 game release writing it.
 
