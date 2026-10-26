@@ -284,15 +284,52 @@ def test_a_schema_1_backup_restores_and_the_game_upgrades_it(tmp_path, db_path, 
     assert _pilots(_records(db_path)) == ["Aldrin", "Armstrong"]
 
 
-@pytest.mark.parametrize("damage", ["unknown version", "missing table", "schema 1 tables at version 2"])
+def _as_schema_3(path):
+    """The file the next Lunar Lander keeps (issue #1577): schema 2 plus its
+    best-run ghosts and Grand Tours, as listed there."""
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        conn.execute("CREATE TABLE ghosts (node TEXT NOT NULL, user INTEGER NOT NULL, mission TEXT NOT NULL, "
+                     "score INTEGER NOT NULL, recorded TEXT NOT NULL, data BLOB NOT NULL, "
+                     "PRIMARY KEY (node, user, mission), "
+                     "FOREIGN KEY (node, user) REFERENCES pilots (node, user))")
+        conn.execute("CREATE TABLE tours (id INTEGER PRIMARY KEY, node TEXT NOT NULL, user INTEGER NOT NULL, "
+                     "started TEXT NOT NULL, ended TEXT, status TEXT NOT NULL, landed INTEGER NOT NULL, "
+                     "retries INTEGER NOT NULL, seconds REAL NOT NULL, score INTEGER NOT NULL, "
+                     "FOREIGN KEY (node, user) REFERENCES pilots (node, user))")
+        conn.execute("INSERT INTO ghosts SELECT node, user, mission, score, achieved, zeroblob(512) FROM scores")
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+
+
+def _ghosts(path):
+    with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        return conn.execute("SELECT COUNT(*), SUM(length(data)) FROM ghosts").fetchone()
+
+
+def test_schema_3_records_round_trip_through_a_backup(tmp_path, db_path, identity_dir):
+    _land(db_path, 1, "Armstrong")
+    _as_schema_3(_records(db_path))
+    archive = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    assert json.loads((archive / "manifest.json").read_text())["lunar_lander"]["schema_version"] == 3
+    _records(db_path).unlink()
+    restore_backup(source=archive, db_path=db_path, identity_dir=identity_dir)
+    assert backup_module._inspect_lunar_lander(_records(db_path)) == 3
+    assert _pilots(_records(db_path)) == ["Armstrong"]
+    assert _ghosts(_records(db_path)) == (1, 512)
+
+
+@pytest.mark.parametrize("damage", ["unknown version", "missing table", "schema 1 tables at version 2",
+                                    "schema 2 tables at version 3"])
 def test_records_this_build_does_not_know_are_refused(tmp_path, db_path, identity_dir, damage):
     _land(db_path, 1, "Armstrong")
     path = _records(db_path)
     with contextlib.closing(sqlite3.connect(path)) as conn:
         if damage == "unknown version":
-            conn.execute("PRAGMA user_version = 3")
+            conn.execute("PRAGMA user_version = 4")
         elif damage == "missing table":
             conn.execute("DROP TABLE program_missions")
+        elif damage == "schema 2 tables at version 3":
+            conn.execute("PRAGMA user_version = 3")
         else:
             for table in _SCHEMA_2_TABLES:
                 conn.execute(f"DROP TABLE {table}")

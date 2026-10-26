@@ -162,12 +162,14 @@ _LUNAR_LANDER_MAX_BYTES = 256 * 1024 * 1024
 _LUNAR_LANDER_APPLICATION_ID = 0x4C4C0001
 #: Every records schema this build knows, and exactly the tables each has.
 #: Schema 2 (Lunar Lander v0.5.0, issue #1561) adds achievements and
-#: programs. Lunar Lander upgrades a schema 1 file in place on its first
-#: open, only adding tables, so a restored schema 1 backup is fine under a
-#: newer game.
+#: programs; schema 3 (issue #1577) adds ghosts and tours. Lunar Lander
+#: upgrades an older file in place on its first open, only adding tables,
+#: so a restored older backup is fine under a newer game.
 _LUNAR_LANDER_TABLES = {
     1: frozenset({"pilots", "scores"}),
     2: frozenset({"pilots", "scores", "counters", "achievements", "programs", "program_missions"}),
+    3: frozenset({"pilots", "scores", "counters", "achievements", "programs", "program_missions",
+                  "ghosts", "tours"}),
 }
 _VOIDRUNNER_MAX_FILES = 10_000
 _VOIDRUNNER_MAX_FILE_BYTES = 4 * 1024 * 1024
