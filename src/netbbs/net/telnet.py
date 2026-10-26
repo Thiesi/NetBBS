@@ -155,9 +155,6 @@ class TelnetSession(Session):
         # Keystrokes that arrived while the first screen waited for TTYPE:
         # real caller input, served before anything read later.
         self._early_input: deque[int] = deque()
-        # Where `read_byte_with_timeout` is inside a Telnet command, so that
-        # none of its bytes count as caller input (issue #762).
-        self._peek_command: str | None = None
         self._close_timeout_seconds = close_timeout_seconds
         # Conservative defaults (also the Session base class defaults);
         # updated in place by _handle_subnegotiation if/when the client
@@ -585,62 +582,40 @@ class TelnetSession(Session):
 
     async def _receive_byte_with_timeout(self, timeout: float) -> int | None:
         """
-        Peek a single raw byte within `timeout` seconds, or `None` if
+        Peek a single data byte within `timeout` seconds, or `None` if
         nothing arrives or the connection closes — used by
         `netbbs.net.char_input` for bounded lookahead (the LF half of a
-        CRLF pair; the rest of an escape sequence). Deliberately doesn't
-        go through the IAC/negotiation interpretation `read_byte` does —
-        this is a narrow, bounded peek, not a full protocol read; a
-        pre-existing limitation carried over unchanged from before this
-        module's character-mode logic moved to `char_input`.
+        CRLF pair; the rest of an escape sequence) and timed waits.
+
+        A Telnet command met here is interpreted as `read_byte` does, and
+        the peek goes on waiting for data until its time is up. Before issue
+        #1575 it returned the command's raw bytes, so a
+        NAWS that landed in a peek reached the caller's input as data and
+        its size was never taken; a door then opened at the old size.
         """
         if self._early_input:
             return self._early_input.popleft()
-        try:
-            peek = await asyncio.wait_for(self._reader.read(1), timeout=timeout)
-        except (asyncio.TimeoutError, *CLIENT_DISCONNECT_ERRORS):
-            return None
-        if not peek:
-            return None
-        self._note_peeked_input(peek[0])
-        return peek[0]
-
-    def _note_peeked_input(self, byte: int) -> None:
-        """Stamp idle time for a byte the raw peek above returned, unless
-        it belongs to a Telnet command (issue #762). The peek does not parse
-        negotiation, so this follows just enough of it: IAC and the command
-        byte after it, the option byte after WILL/WONT/DO/DONT, and
-        everything from IAC SB to IAC SE. Keepalive traffic must not make an
-        idle caller look active."""
-        state = self._peek_command
-        if state == "subnegotiation":
-            # Only IAC SE ends it: a payload byte may be 0xF0 itself (a
-            # NAWS width of 240), and IAC IAC is an escaped payload 0xFF.
-            if byte == IAC:
-                self._peek_command = "subnegotiation-iac"
-            return
-        if state == "subnegotiation-iac":
-            self._peek_command = None if byte == SE else "subnegotiation"
-            return
-        if state == "iac":
-            if byte == IAC:
-                # An escaped 0xFF is real data.
-                self._peek_command = None
-                self.note_input()
-            elif byte in (WILL, WONT, DO, DONT):
-                self._peek_command = "option"
-            elif byte == SB:
-                self._peek_command = "subnegotiation"
-            else:
-                self._peek_command = None
-            return
-        if state == "option":
-            self._peek_command = None
-            return
-        if byte == IAC:
-            self._peek_command = "iac"
-            return
-        self.note_input()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                peek = await asyncio.wait_for(self._reader.read(1), timeout=remaining)
+            except (asyncio.TimeoutError, *CLIENT_DISCONNECT_ERRORS):
+                return None
+            if not peek:
+                return None
+            # The rest of a command is bounded as during negotiation: a
+            # client that sends IAC and then nothing must not hold a timed
+            # wait open forever.
+            try:
+                value = await asyncio.wait_for(self._interpret_byte(peek[0]), timeout=_SUBNEGOTIATION_TIMEOUT)
+            except asyncio.TimeoutError as exc:
+                raise SessionClosedError("Telnet command timed out") from exc
+            if value is not None:
+                return value
 
     async def _handle_subnegotiation(self) -> None:
         """

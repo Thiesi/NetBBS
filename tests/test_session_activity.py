@@ -319,12 +319,12 @@ def test_a_telnet_peek_through_negotiation_is_not_input(stream):
         reader = asyncio.StreamReader()
         telnet = TelnetSession(reader, _UnusedWriter())
         reader.feed_data(stream)
-        for _ in stream:
-            assert await telnet.read_byte_with_timeout(0.1) is not None
+        # The peek interprets the whole command (issue #1575) and, with no
+        # data after it, runs out: nothing was typed.
+        assert await telnet.read_byte_with_timeout(0.1) is None
         assert telnet.last_input_at is None
         reader.feed_data(bytes([IAC, IAC]))  # an escaped 0xFF is data
-        await telnet.read_byte_with_timeout(0.1)
-        await telnet.read_byte_with_timeout(0.1)
+        assert await telnet.read_byte_with_timeout(0.1) == 0xFF
         assert telnet.last_input_at is not None
 
     asyncio.run(scenario())

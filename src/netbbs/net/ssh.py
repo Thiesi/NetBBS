@@ -406,7 +406,10 @@ class SSHSession(Session):
                 data = await asyncio.wait_for(self._process.stdin.read(1), timeout=remaining)
             except asyncio.TimeoutError:
                 break
-            except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived):
+            except asyncssh.TerminalSizeChanged as exc:
+                self._resized(exc)
+                continue
+            except asyncssh.BreakReceived:
                 continue
             except (asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS):
                 # Gone: the first read after this says so (review on #1563).
@@ -532,10 +535,7 @@ class SSHSession(Session):
         try:
             data = await self._process.stdin.read(1)
         except asyncssh.TerminalSizeChanged as exc:
-            if exc.width > 0:
-                self.terminal_width, _ = clamp_terminal_size(exc.width, self.terminal_height)
-            if exc.height > 0:
-                _, self.terminal_height = clamp_terminal_size(self.terminal_width, exc.height)
+            self._resized(exc)
             return None
         except asyncssh.BreakReceived:
             return None
@@ -552,16 +552,36 @@ class SSHSession(Session):
         — see that method's docstring."""
         if self._early_input:
             return self._early_input.popleft()
-        try:
-            data = await asyncio.wait_for(self._process.stdin.read(1), timeout=timeout)
-        except asyncio.TimeoutError:
-            return None
-        except (asyncssh.TerminalSizeChanged, asyncssh.BreakReceived, asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS):
-            return None
-        if not data:
-            return None
-        self.note_input()
-        return data[0]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                data = await asyncio.wait_for(self._process.stdin.read(1), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None
+            except asyncssh.TerminalSizeChanged as exc:
+                # Kept, and the peek waits on: a window change is not input.
+                self._resized(exc)
+                continue
+            except (asyncssh.BreakReceived, asyncssh.DisconnectError, *CLIENT_DISCONNECT_ERRORS):
+                return None
+            if not data:
+                return None
+            self.note_input()
+            return data[0]
+
+    def _resized(self, exc: asyncssh.TerminalSizeChanged) -> None:
+        """Take the caller's new window size. Every read that can meet a
+        window change keeps it: one dropped by a timed wait (issue #1575) stayed lost
+        until the next resize, so a door opened at the size the caller
+        logged on with."""
+        if exc.width > 0:
+            self.terminal_width, _ = clamp_terminal_size(exc.width, self.terminal_height)
+        if exc.height > 0:
+            _, self.terminal_height = clamp_terminal_size(self.terminal_width, exc.height)
 
 
 class _NetBBSSSHServer(asyncssh.SSHServer):
