@@ -102,8 +102,13 @@ DISPLAY_ENCODINGS = {"auto": "Automatic", "utf-8": "UTF-8", "cp437": "CP437"}
 _CP437_TRANSLATION = str.maketrans({
     "╭": "┌", "╮": "┐", "╯": "┘", "╰": "└",
     "▁": "_", "▂": "▄", "▃": "▄", "▅": "█", "▆": "█", "▇": "█",
+    # A gauge's eighth blocks: any part of a cell is at least half of one.
+    "▏": "▌", "▎": "▌", "▍": "▌", "▋": "▌", "▊": "█", "▉": "█",
+    # Quarter blocks: CP437 has the halves, so each becomes the half it leans to.
+    "▘": "▀", "▝": "▀", "▖": "▄", "▗": "▄", "▚": "▒", "▞": "▒",
+    "▛": "▀", "▜": "▀", "▙": "▄", "▟": "▄",
     "◆": "*", "◈": "+", "◉": "@", "◇": "o", "○": ".", "●": "o",
-    "▮": "█", "▯": "░", "▚": "▒", "▲": "^", "▼": "v", "▸": ">", "›": ">",
+    "▮": "█", "▯": "░", "▲": "^", "▼": "v", "▸": ">", "›": ">",
     "⟦": "[", "⟧": "]", "•": "·", "…": ".", "∿": "~", "≋": "≈",
     "‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-",
 })
@@ -290,6 +295,72 @@ def _load_door_info(drop_file: str | None = None) -> dict:
     return default
 
 
+_CUBE = (0, 95, 135, 175, 215, 255)
+
+
+def xterm256(color: tuple[int, int, int]) -> int:
+    """The nearest of the 6x6x6 cube, or of the grey ramp for a color that is grey.
+
+    Lunar Lander's reading, copied rather than imported like every helper here:
+    a dark tint is nearer a grey by distance than any cube entry, and glass that
+    turned into cube green would glow instead of receding.
+    """
+    def nearest(value: int) -> int:
+        return min(range(6), key=lambda index: abs(_CUBE[index] - value))
+
+    r, g, b = (nearest(c) for c in color)
+    cube = (_CUBE[r], _CUBE[g], _CUBE[b])
+    level = max(0, min(23, round((sum(color) / 3 - 8) / 10)))
+    grey = (8 + level * 10,) * 3
+
+    def distance(other: tuple[int, ...]) -> int:
+        return sum((x - y) ** 2 for x, y in zip(color, other))
+
+    if max(color) - min(color) < 24 and distance(grey) < distance(cube):
+        return 232 + level
+    return 16 + 36 * r + 6 * g + b
+
+
+def ansi16(color: tuple[int, int, int]) -> int:
+    """A color's sixteen-color reading by hue family, not by distance.
+
+    By distance, every dim phosphor tone in a ramp lands on the same grey; by
+    family a dark green stays green and only its brightness picks 2 or 10.
+    Also Lunar Lander's, minus its night-sky rule.
+    """
+    r, g, b = (c / 255 for c in color)
+    high, low = max(r, g, b), min(r, g, b)
+    if high < 0.16:
+        return 0
+    if (high - low) / high < 0.22:
+        return 15 if high > 0.85 else 7 if high > 0.5 else 8
+    if high == r:
+        hue = (60 * (g - b) / (high - low)) % 360
+    elif high == g:
+        hue = 60 * (b - r) / (high - low) + 120
+    else:
+        hue = 60 * (r - g) / (high - low) + 240
+    if hue < 18 or hue >= 340:
+        return 1 + (8 if high > 0.8 else 0)
+    family = 3 if hue < 70 else 2 if hue < 160 else 6 if hue < 200 else 4 if hue < 265 else 5
+    return family + (8 if high > 0.62 else 0)
+
+
+def mix(a: tuple[int, int, int], b: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    amount = max(0.0, min(1.0, amount))
+    return tuple(round(x + (y - x) * amount) for x, y in zip(a, b))
+
+
+def ramp(stops: list[tuple[int, int, int]], t: float) -> tuple[int, int, int]:
+    """A point `t` (0..1) along a polyline of colors."""
+    t = max(0.0, min(1.0, t))
+    if len(stops) == 1:
+        return stops[0]
+    scaled = t * (len(stops) - 1)
+    index = min(len(stops) - 2, int(scaled))
+    return mix(stops[index], stops[index + 1], scaled - index)
+
+
 class Palette:
     """The War Dialer presentation palette (design doc: the War Dialer
     presentation contract, issue #494).
@@ -341,20 +412,59 @@ class Palette:
         self.default_ascii = False
         self.monochrome = False
         self.fast = False
+        # "quad" (quarter blocks) or "half"; see `pixel_across`.
+        self.pixels = "half" if os.environ.get("DOOR_PIXELS", "").strip().lower() == "half" else "quad"
 
-    def _sgr(self, rgb: tuple[int, int, int], idx256: int) -> str:
+    def _sgr(self, rgb: tuple[int, int, int], idx256: int | None = None) -> str:
         if self.monochrome or self.color_depth == "none":
             return ""
         if self.color_depth == "16":
-            # Named roles have authored fallbacks; animation ramps stay green.
-            return f"{ESC}[{self.BASIC.get(idx256, 92 if max(rgb) >= 180 else 32)}m"
+            # Named roles have authored fallbacks; anything else is read by
+            # its hue rather than collapsed to green.
+            code = self.BASIC.get(idx256) if idx256 is not None else None
+            if code is None:
+                index = ansi16(rgb)
+                code = 30 + index if index < 8 else 90 + index - 8
+            return f"{ESC}[{code}m"
         if self._truecolor:
             r, g, b = rgb
             return f"{ESC}[38;2;{r};{g};{b}m"
-        return f"{ESC}[38;5;{idx256}m"
+        return f"{ESC}[38;5;{xterm256(rgb) if not idx256 else idx256}m"
 
     def role(self, name: str) -> str:
         return self._sgr(*self.ROLES[name])
+
+    def rgb(self, name: str) -> tuple[int, int, int]:
+        return self.ROLES[name][0]
+
+    def tone(self, rgb: tuple[int, int, int], idx256: int | None = None) -> str:
+        """Any color as a foreground, at this caller's depth (Carrier Detect, #24).
+
+        `idx256` is an authored 256-color stand-in; without one it is computed."""
+        return self._sgr(tuple(max(0, min(255, int(v))) for v in rgb), idx256)
+
+    def ground(self, rgb: tuple[int, int, int]) -> str:
+        """Any color as a *background* -- or nothing where a background would hurt.
+
+        Backgrounds are a 256-color and truecolor luxury here: a sixteen-color
+        caller's black is whatever their terminal calls black, and a panel of
+        ANSI blue or green behind phosphor text is the opposite of glass.
+        """
+        if not self.surfaces:
+            return ""
+        r, g, b = (max(0, min(255, int(v))) for v in rgb)
+        if self._truecolor:
+            return f"{ESC}[48;2;{r};{g};{b}m"
+        # The surfaces are too dark for the nearest-color reading to keep them
+        # apart (glass and its scanlines are both 232; a chip is black), so
+        # each has an authored index, as the roles do.
+        return f"{ESC}[48;5;{SURFACE_256.get((r, g, b)) or xterm256((r, g, b))}m"
+
+    @property
+    def surfaces(self) -> bool:
+        """Whether this caller gets backgrounds: glass, keycaps, lit tabs."""
+        return (not self.monochrome and not self.fast and not self.ascii_art
+                and self.color_depth not in ("none", "16"))
 
     # -- the nine roles ----------------------------------------------------
 
@@ -456,10 +566,14 @@ _GLYPHS = {
     # visible gaps at the cell seams in many monospace fonts, so the border
     # read as a failed render rather than a box. Voidrunner's light frame does
     # not have the problem on the same terminal, which is the evidence.
-    "tl": ("┌", "+"), "tr": ("┐", "+"),
-    "bl": ("└", "+"), "br": ("┘", "+"),
+    # Rounded corners since Carrier Detect (#24): the splash's ring is a
+    # rounded loop, and the panels it hands over to are the same glass.
+    # CP437 has no arcs and gets the square corners.
+    "tl": ("╭", "+"), "tr": ("╮", "+"),
+    "bl": ("╰", "+"), "br": ("╯", "+"),
     "h": ("─", "-"), "v": ("│", "|"),
     "ml": ("├", "+"), "mr": ("┤", "+"),
+    "mt": ("┬", "+"), "mb": ("┴", "+"),
     "mine": ("◆", "#"), "rival": ("◈", "%"),
     "npc": ("◉", "@"), "free": ("◇", "."),
     "crew_on": ("●", "*"), "crew_off": ("○", "."),
@@ -651,13 +765,41 @@ def out(text: str = "") -> None:
         raise BrokenPipeError('Terminal output closed') from exc
 
 
+#: Columns every screen row is indented by: a wide terminal's console sits in
+#: its middle rather than against its left edge (Carrier Detect, #24).
+_MARGIN = 0
+#: Terminals at least this wide get the centred console, up to WIDE_PANEL wide.
+WIDE_FROM, WIDE_PANEL = 100, 104
+
+
+def panel_width(width: int) -> int:
+    """The columns a screen is laid out in, for a terminal `width` wide.
+
+    Up to 99 columns this is what it always was -- 78, or the whole terminal
+    below that -- so every page budget and narrow layout is untouched. From
+    WIDE_FROM a screen grows to WIDE_PANEL and is centred: tables stop cutting
+    names, the switchboard fits one page, and prose keeps a readable measure.
+    """
+    if width >= WIDE_FROM:
+        return min(width - 4, WIDE_PANEL)
+    return min(78, width)
+
+
+def apply_layout(width: int) -> int:
+    """Set the margin for a terminal `width` wide; return the panel width."""
+    global _MARGIN
+    panel = panel_width(width)
+    _MARGIN = (width - panel) // 2 if width >= WIDE_FROM else 0
+    return panel
+
+
 def out_line(text: str = "") -> None:
-    out(_wrap_output(text, _OUTPUT_WIDTH) + "\r\n")
+    out(" " * _MARGIN + _wrap_output(text, max(1, _OUTPUT_WIDTH - _MARGIN)) + "\r\n")
 
 
 def out_prompt(text: str) -> None:
     """Write a prompt without relying on the terminal's soft wrapping."""
-    out(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)))
+    out(" " * _MARGIN + _wrap_output(text, max(1, _OUTPUT_WIDTH - _MARGIN - 1)))
 
 
 # A keystroke that interrupted motion waits here for whoever reads next.
@@ -3029,6 +3171,11 @@ def resolve_root_exchange(
                          f"{actor.handle} rooted your exchange, {exchange.name}! {counted(prior_garrison, 'defender')} returned to your available crew.", now)
         elif not success and prior_controller is not None:
             record_event(conn, prior_controller, actor.handle, f"{actor.handle} tried to root {exchange.name} and failed.", now)
+        # The caller's own receipt, without an actor for the reason the garrison
+        # receipt gives: a played Root turn always leaves its line on the feed.
+        record_event(conn, actor.user_id, None,
+                     f"Rooted {exchange.name}; garrison now {exchange.garrison}." if success
+                     else f"Tried to root {exchange.name}; its defenses held.", now, seen=True)
     return success, exchange.name, busted
 
 
@@ -3144,6 +3291,78 @@ def sty(style: str, text: str) -> str:
     return f"{style}{text}{RESET}" if style else text
 
 
+# -- Carrier Detect surfaces (#24) ---------------------------------------------
+# A framed screen is a slab of phosphor glass, darker and greener than whatever
+# the caller's terminal is, with every other row a shade deeper: the tube's
+# scanlines, which double as row striping for a table. Controls -- the key bar,
+# the prompt -- sit under it, off the glass. Backgrounds exist only where
+# `Palette.surfaces` says so, so sixteen-color, monochrome, plain and Fast
+# callers see exactly the frame they always did.
+GLASS = (8, 18, 12)
+GLASS_SCAN = (5, 13, 8)
+TAB = (22, 58, 36)          # the screen's lit title tab
+KEYCAP = (66, 45, 4)        # an amber key's plate
+CHIP = (40, 30, 6)          # a badge's plate
+CAPTION_BAND = (18, 46, 30)  # a scene's lower third
+#: The surfaces' 256-color readings, chosen rather than computed: each must
+#: stay distinct from the glass it sits on, in the hue it has in truecolor.
+SURFACE_256 = {GLASS: 233, GLASS_SCAN: 232, TAB: 22, KEYCAP: 94, CHIP: 58, CAPTION_BAND: 235}
+GLOW = 22                   # cells a rule glows for beside the label it carries
+
+
+def glaze(p: "Palette", row: str, rgb: tuple[int, int, int] = GLASS) -> str:
+    """Lay a styled row on a background that survives the row's own resets.
+
+    Every segment closes itself with SGR 0 (`sty`), which would drop the
+    background with it, so the background is re-applied after each reset.
+    """
+    bg = p.ground(rgb)
+    if not bg:
+        return row
+    return bg + row.replace(RESET, RESET + bg) + RESET
+
+
+def keycap(p: "Palette", key: str) -> str:
+    """A hotkey: `[T]` in amber, on an amber plate where backgrounds exist.
+
+    The brackets stay. They are what a caller who has played since issue #200
+    reads as "press this", what the gallery's walks and the tests read, and
+    what Fast, plain and sixteen-color callers see unchanged.
+    """
+    text = f"[{key}]"
+    if p.surfaces:
+        return p.ground(KEYCAP) + p.amber + BOLD + text + RESET
+    return sty(p.amber + BOLD, text)
+
+
+def afterglow(p: "Palette", glyph: str, count: int, *, hot: tuple[int, int, int] | None = None,
+              reverse: bool = False) -> str:
+    """A run of rule that glows beside the label it follows and cools to chrome.
+
+    A phosphor trace fading behind a beam: the label is where the beam was.
+    Flat chrome wherever surfaces are off, so the fade never costs a sixteen-
+    color caller anything but the bytes it never receives.
+    """
+    chrome = p.phosphor_dim + BOLD
+    if count <= 0:
+        return ""
+    if not p.surfaces:
+        return sty(chrome, glyph * count)
+    cool = p.rgb("phosphor_dim")
+    start = mix(hot or p.rgb("phosphor"), cool, 0.1)
+    parts: list[str] = []
+    previous, run = None, ""
+    for index in range(count):
+        step = (count - 1 - index) if reverse else index
+        style = p.tone(mix(start, cool, min(1.0, step / GLOW) ** 0.6)) + BOLD
+        if style != previous and run:
+            parts.append(sty(previous, run))
+            run = ""
+        previous, run = style, run + glyph
+    parts.append(sty(previous, run))
+    return "".join(parts)
+
+
 def _fit(text: str, width: int) -> str:
     """Truncate *plain* text to `width` display columns, marking the cut."""
     if width <= 0:
@@ -3175,8 +3394,10 @@ def label_value(p: Palette, label: str, value: str, *, style: str = "") -> str:
 
 
 def badge(p: Palette, text: str, *, style: str = "") -> str:
-    """A bracketed tier/risk badge: `[ELITE]` in the insignia brackets."""
-    return sty((style or p.amber) + BOLD, f"{gl('ins_l')}{text}{gl('ins_r')}")
+    """A bracketed tier/risk badge: `[ELITE]` in the insignia brackets, lit on
+    a plate where backgrounds exist."""
+    chip = sty((style or p.amber) + BOLD, f"{gl('ins_l')}{text}{gl('ins_r')}")
+    return glaze(p, chip, CHIP) if p.surfaces else chip
 
 
 def meter(p: Palette, value: float, maximum: float, width: int, *,
@@ -3189,6 +3410,8 @@ def meter(p: Palette, value: float, maximum: float, width: int, *,
     """
     width = max(1, width)
     share = 0.0 if maximum <= 0 else clamp(value / maximum, 0.0, 1.0)
+    if p.surfaces and not _ASCII_DECOR:
+        return _signal_meter(p, value, share, width, climb=climb, style=style)
     filled = int(round(width * share))
     if filled == 0 and value > 0:
         filled = 1
@@ -3200,6 +3423,43 @@ def meter(p: Palette, value: float, maximum: float, width: int, *,
             style = p.alarm if share >= 0.8 else p.amber if share >= 0.5 else p.phosphor
     return (sty(style, gl("meter_on") * filled)
             + sty(p.phosphor_dim, gl("meter_off") * (width - filled)))
+
+
+#: Left-anchored eighth blocks: a gauge resolves to an eighth of a cell.
+EIGHTHS = " ▏▎▍▌▋▊▉█"
+#: Heat's ramp, laid along the whole track rather than chosen by the level:
+#: the cool end is phosphor, the far end is the bust line's alarm red, so a
+#: half-full gauge already shows amber at its tip (Carrier Detect, #24).
+HEAT_RAMP = [(57, 255, 20), (190, 230, 30), (255, 176, 0), (255, 110, 40), (255, 60, 60)]
+SIGNAL_RAMP = [(30, 140, 60), (57, 255, 20), (150, 255, 190)]
+
+
+def _signal_meter(p: Palette, value: float, share: float, width: int, *, climb: bool,
+                  style: str = "") -> str:
+    """A meter at eighth-cell resolution, its fill shaded along its length.
+
+    Same reading as the whole-cell meter: something is never drawn as nothing,
+    and not-all is never drawn as all.
+    """
+    eighths = int(round(width * 8 * share))
+    if eighths == 0 and value > 0:
+        eighths = 1
+    if eighths >= width * 8 and share < 1.0:
+        eighths = width * 8 - 1
+    full, part = divmod(eighths, 8)
+    stops = HEAT_RAMP if climb else SIGNAL_RAMP
+    track = mix(p.rgb("phosphor_dim"), GLASS, 0.55)
+    lit = full + (1 if part else 0)
+    out_cells: list[str] = []
+    for index in range(lit):
+        glyph = EIGHTHS[8] if index < full else EIGHTHS[part]
+        position = (index + 0.5) / width if climb else (index + 0.5) / max(1, lit)
+        # A caller's own color (an odds gauge's) is kept flat; the ramp is
+        # the meter's voice only when nobody asked for one.
+        out_cells.append(sty(style or p.tone(ramp(stops, position)), glyph))
+    # The track is one style, so one run.
+    out_cells.append(sty(p.tone(track), gl("meter_off") * (width - lit)) if width > lit else "")
+    return "".join(out_cells)
 
 
 def pips(p: Palette, remaining: int, total: int, *, cap: int = 15) -> str:
@@ -3339,6 +3599,92 @@ def scene_map(p: Palette, exchanges: list[Exchange], viewer_id: int | None,
     return [side(top), middle, side(bottom)]
 
 
+RING_MIN_WIDTH = 50
+#: Panel columns from which the switchboard lays its instruments and the ring
+#: side by side: the wide console's inner width, never an 80-column terminal's.
+CONSOLE_WIDTH = 92
+
+
+def switch_ring(p: Palette, exchanges: list[Exchange], viewer_id: int | None,
+                width: int) -> list[str] | None:
+    """The ten exchanges as a lit switch ring with their names on it (#24).
+
+    The same loop `scene_map` draws -- one to five along the top, six to ten
+    back along the bottom, the verticals closing it -- at a size that carries
+    each exchange's number on its node and its name beside it. A link between
+    two neighbours one crew holds is lit in that crew's color, so a run of
+    territory reads as a run before any name is read. The counts sit inside
+    the loop. None when the ring would not fit; `scene_map` draws then.
+    """
+    if len(exchanges) != 10 or width < RING_MIN_WIDTH:
+        return None
+    half = 5
+    top, bottom = exchanges[:half], list(reversed(exchanges[half:]))
+    # A rail is a corner, two of rule, a node every `span` columns -- glyph and
+    # two digits -- two more of rule and a corner: 4 * span + 9 columns.
+    span = min(18, (width - 9) // (half - 1))
+    total = span * (half - 1) + 9
+    pad = " " * max(0, (width - total) // 2)
+    chrome = p.phosphor_dim
+
+    def kind(exchange: Exchange) -> str:
+        return owner_node(p, exchange, viewer_id)[2]
+
+    def holder(exchange: Exchange):
+        if exchange.controller_user_id is not None:
+            return ("crew", exchange.controller_user_id)
+        return ("npc", exchange.npc_key) if exchange.npc_key else None
+
+    def link_style(a: Exchange, b: Exchange) -> str:
+        # Lit only when one and the same crew holds both ends: two rivals, or
+        # two operators, next to each other are two holders, not a run.
+        if holder(a) is not None and holder(a) == holder(b):
+            return owner_node(p, a, viewer_id)[1]
+        return chrome
+
+    def rail(row: list[Exchange], left: str, right: str) -> str:
+        parts = [sty(chrome, left + gl("h") * 2)]
+        for index, exchange in enumerate(row):
+            glyph, style, _ = owner_node(p, exchange, viewer_id)
+            parts.append(sty(style + BOLD, glyph) + sty(p.grey, f"{exchange.id:02d}"))
+            if index + 1 < len(row):
+                parts.append(sty(link_style(exchange, row[index + 1]), gl("h") * (span - 3)))
+        parts.append(sty(chrome, gl("h") * 2 + right))
+        return pad + "".join(parts)
+
+    def names(row: list[Exchange]) -> str:
+        # Each name starts over its own node, three columns into the rail.
+        out_row = "   "
+        for index, exchange in enumerate(row):
+            _, style, _ = owner_node(p, exchange, viewer_id)
+            last = index + 1 == len(row)
+            room = max(4, width - len(pad) - 3 - span * index) if last else span - 1
+            text = _fit(exchange_short_name(exchange), room)
+            out_row += sty(style, text) + ("" if last else " " * (span - _dlen(text)))
+        return pad + out_row
+
+    legend = "   ".join(scene_legend(p, exchanges, viewer_id))
+    room = total - 2
+    if _dlen(legend) > room:
+        legend = "  ".join(scene_legend(p, exchanges, viewer_id))
+    middle = (sty(chrome, gl("link_v")) + " " * max(0, (room - _dlen(legend)) // 2) + legend
+              + " " * max(0, room - _dlen(legend) - (room - _dlen(legend)) // 2) + sty(chrome, gl("link_v")))
+    if _dlen(legend) > room:
+        return None  # the counts are never dropped: the compact map wraps them
+    return [names(top), rail(top, gl("tl"), gl("tr")), pad + middle,
+            rail(bottom, gl("bl"), gl("br")), names(bottom)]
+
+
+def compact_scene(p: Palette, exchanges: list[Exchange], viewer_id: int | None,
+                  width: int) -> list[str]:
+    """The compact map with its counts: beside the ring's top row where they
+    fit, wrapped under it where they do not."""
+    ring = scene_map(p, exchanges, viewer_id, width)
+    legend = scene_legend(p, exchanges, viewer_id)
+    beside = compose([ring[0]] + legend, width)
+    return beside + ring[1:] if len(beside) == 1 else ring + compose(legend, width)
+
+
 def scene_legend(p: Palette, exchanges: list[Exchange], viewer_id: int | None) -> list[str]:
     """What the ring's four glyphs mean, counted for this world.
 
@@ -3433,7 +3779,7 @@ def feed(p: Palette, events: list[GameEvent], width: int, *, limit: int = 6) -> 
                                max(8, width - _dlen(lead))).split("\r\n")
         tone = p.magenta if hostile else p.ink
         rows.append(bullet + " " + sty(p.grey, stamp) + " " + sty(tone, wrapped[0]))
-        rows.extend(" " * _dlen(lead) + sty(tone, line) for line in wrapped[1:])
+        rows.extend(Cont(" " * _dlen(lead) + sty(tone, line)) for line in wrapped[1:])
     return rows or [sty(p.grey, NO_EVENTS)]
 
 
@@ -3491,7 +3837,7 @@ def _key_grid(p: Palette, texts: list[tuple[str, str]], width: int) -> list[str]
     for start in range(0, len(texts), columns):
         chunk = texts[start:start + columns]
         rows.append((" " * gap).join(
-            sty(p.amber + BOLD, f"[{key}]") + " " + sty(p.mint, text)
+            keycap(p, key) + " " + sty(p.mint, text)
             + " " * max(0, spans[index] - _dlen(f"[{key}] {text}"))
             for index, (key, text) in enumerate(chunk)).rstrip())
     return rows
@@ -3527,7 +3873,7 @@ def prose_rows(p: Palette, text: str, width: int, *, style: str = "") -> list[st
             if not piece:
                 continue
             if piece.startswith("[") and piece.endswith("]"):
-                parts.append(sty(p.amber + BOLD, piece) if len(piece) == 3
+                parts.append(keycap(p, piece[1]) if len(piece) == 3
                              else sty(p.cyan, piece))
             elif piece.startswith("$"):
                 parts.append(sty(p.amber, piece))
@@ -3589,12 +3935,25 @@ def scanline(p: Palette, width: int, *, trailing: str = "") -> str:
     stops = ((p.mint, gl("scan_hi")), (p.phosphor, gl("scan_mid")),
              (p.phosphor_dim, gl("scan_lo")))
     out = []
+    # Where there is glass the color fades cell by cell as well (#24); the
+    # density still steps in thirds, which is what monochrome keeps.
+    glow = [p.rgb("mint"), p.rgb("phosphor"), p.rgb("phosphor_dim"), mix(p.rgb("phosphor_dim"), GLASS, 0.6)]
     for index in range(span):
         # Which third of the run this cell is in, without accumulating the
         # rounding error a per-stop slice width would.
         style, glyph = stops[min(len(stops) - 1, index * len(stops) // span)]
+        if p.surfaces:
+            style = p.tone(ramp(glow, index / max(1, span - 1)))
         out.append(sty(style, glyph))
     return "".join(out) + ("  " + trailing if trailing else "")
+
+
+class Cont(str):
+    """A card row that carries on the row above it, such as the wrapped tail of
+    a feed receipt; `paginate_cards` never starts a page with one it could
+    have kept with its head."""
+
+    __slots__ = ()
 
 
 def paginate_cards(blocks: list[tuple[str, list[str]]],
@@ -3607,7 +3966,9 @@ def paginate_cards(blocks: list[tuple[str, list[str]]],
     exactly the number of cards on the screen. The first card on a page is
     opened by the top border and is free unless it is labelled. A card too long
     for one page is continued with its heading repeated, rather than having its
-    tail orphaned under the next card's name.
+    tail orphaned under the next card's name. A `Cont` row stays on the page of
+    the row above it, so a wrapped receipt moves to the next page whole rather
+    than ending this one mid-sentence -- unless it is longer than a page.
     """
     capacity = max(1, capacity)
     pages: list[list[tuple[str, list[str]]]] = []
@@ -3625,8 +3986,24 @@ def paginate_cards(blocks: list[tuple[str, list[str]]],
                 page, used = [], 0
                 overhead = 1 if heading else 0
             room = max(1, capacity - used - overhead)
+            if room < len(rows):
+                cut = room
+                while cut and isinstance(rows[cut], Cont):
+                    cut -= 1
+                if cut:
+                    room = cut
+                elif page:
+                    pages.append(page)
+                    page, used = [], 0
+                    continue
             take, rows = rows[:room], rows[room:]
-            page.append((heading if first or not heading else f"{heading} (cont.)", take))
+            if first or not heading:
+                shown = heading
+            elif isinstance(heading, Split):
+                shown = Split(f"{heading.left} (cont.)", heading.right, heading.column)
+            else:
+                shown = f"{heading} (cont.)"
+            page.append((shown, take))
             used += overhead + len(take)
             first = False
     if page:
@@ -3692,7 +4069,9 @@ def _panel_width(p: "Palette", width: int) -> int:
     return max(1, width - 5) if _panel_framed(p, width) else width
 
 
-def _frame_rule(p: Palette, left: str, right: str, label: str, trailing, inner: int) -> str:
+def _frame_rule(p: Palette, left: str, right: str, label: str, trailing, inner: int,
+                *, tab: bool = False, joint: int | None = None, joint_glyph: str = "mb",
+                right_label: str = "") -> str:
     """One border row, with an optional heading on the left and notes on the right.
 
     Chrome is phosphor-dim (issue #519: it was phosphor, the same color as a
@@ -3719,9 +4098,34 @@ def _frame_rule(p: Palette, left: str, right: str, label: str, trailing, inner: 
                 kept = candidate
     fill = max(1, inner - spent - (_dlen(kept) + 3 if kept else 0))
     row = sty(chrome, left)
+    start = 1 + spent  # the row column the fill begins at
+    if joint is not None and not start <= joint < start + fill:
+        joint = None  # a joint that would land on a label is not drawn
     if label:
-        row += sty(chrome, rule + " ") + sty(p.mint + BOLD, label) + sty(chrome, " ")
-    row += sty(chrome, rule * fill)
+        brand = gl("brand") + " "
+        if tab and label.startswith(brand):
+            # The screen's own name is a lit tab: the brand glyph in phosphor,
+            # the title in mint, on a plate a shade brighter than the glass.
+            styled = sty(p.phosphor + BOLD, brand.strip()) + " " + sty(p.mint + BOLD, label[len(brand):])
+        else:
+            styled = sty(p.mint + BOLD, label)
+        plate = glaze(p, " " + styled + " ", TAB) if tab and p.surfaces else (
+            sty(chrome, " ") + styled + sty(chrome, " "))
+        row += sty(chrome, rule) + plate
+    if joint is None:
+        row += afterglow(p, rule, fill) if label else sty(chrome, rule * fill)
+    else:
+        # A split card's divider meets this rule: `┬` above it, `┴` below.
+        # The second heading, when there is one, starts just past the joint.
+        before, after = joint - start, fill - (joint - start) - 1
+        row += (afterglow(p, rule, before) if label else sty(chrome, rule * before))
+        row += sty(chrome, gl(joint_glyph))
+        second = _fit(right_label, max(0, after - 4)) if right_label else ""
+        if second:
+            row += sty(chrome, rule + " ") + sty(p.mint + BOLD, second) + sty(chrome, " ")
+            row += afterglow(p, rule, after - _dlen(second) - 3)
+        else:
+            row += sty(chrome, rule * after)
     if kept:
         row += sty(chrome, " ") + sty(p.grey, kept) + sty(chrome, " " + rule)
     row += sty(chrome, right)
@@ -3781,18 +4185,56 @@ def frame_rows(p: Palette, width: int, blocks: list[tuple[str, list[str]]], *,
     inner = max(1, width - 2)
     brand = f"{gl('brand')} {title}" if title else ""
     rows: list[str] = []
+    joint: int | None = None  # the divider column a split card leaves open below it
+
+    def opening(heading) -> str:
+        if isinstance(heading, Split):
+            # The divider sits one column past the left side's rows: the
+            # border, the two-space indent, the left width and a space.
+            return _frame_rule(p, gl("ml"), gl("mr"), heading.left, "", inner,
+                               joint=heading.column + 4, joint_glyph="mt", right_label=heading.right)
+        return _frame_rule(p, gl("ml"), gl("mr"), heading, "", inner, joint=joint)
+
     for index, (heading, body) in enumerate(blocks):
         if index == 0:
-            rows.append(_frame_rule(p, gl("tl"), gl("tr"), brand, trailing, inner))
+            rows.append(_frame_rule(p, gl("tl"), gl("tr"), brand, trailing, inner, tab=True))
             if heading:
-                rows.append(_frame_rule(p, gl("ml"), gl("mr"), heading, "", inner))
+                rows.append(opening(heading))
         else:
-            rows.append(_frame_rule(p, gl("ml"), gl("mr"), heading, "", inner))
+            rows.append(opening(heading))
+        joint = heading.column + 4 if isinstance(heading, Split) else None
         rows.extend(_frame_row(p, row, inner) for row in body)
     if not rows:
-        rows.append(_frame_rule(p, gl("tl"), gl("tr"), brand, trailing, inner))
-    rows.append(_frame_rule(p, gl("bl"), gl("br"), "", "", inner))
-    return rows
+        rows.append(_frame_rule(p, gl("tl"), gl("tr"), brand, trailing, inner, tab=True))
+    rows.append(_frame_rule(p, gl("bl"), gl("br"), "", "", inner, joint=joint))
+    return [glaze(p, row, GLASS if index % 2 == 0 else GLASS_SCAN) for index, row in enumerate(rows)]
+
+
+class Split(tuple):
+    """A card heading for two columns side by side: `left` and `right` name
+    them, `column` is the body column their divider stands in. Its rows come
+    from `split_rows`."""
+
+    def __new__(cls, left: str, right: str, column: int):
+        return super().__new__(cls, (left, right, column))
+
+    left = property(lambda self: self[0])
+    right = property(lambda self: self[1])
+    column = property(lambda self: self[2])
+
+    def __str__(self) -> str:  # what a Fast-mode heading row prints
+        return f"{self.left} / {self.right}"
+
+
+def split_rows(p: "Palette", left: list[str], right: list[str], left_width: int) -> list[str]:
+    """Two columns of styled rows, the left padded to `left_width`, a chrome
+    divider between them (Carrier Detect, #24)."""
+    divider = sty(p.phosphor_dim + BOLD, gl("v"))
+    count = max(len(left), len(right))
+    left = left + [""] * (count - len(left))
+    right = right + [""] * (count - len(right))
+    return [(row if ESC in row or not row else sty(p.ink, row)) + " " * max(0, left_width - _dlen(row))
+            + " " + divider + " " + other for row, other in zip(left, right)]
 
 
 def frame_cost(p: "Palette", width: int) -> int:
@@ -3864,6 +4306,310 @@ def reveal(p: Palette, rows: list[str], *, frame: float = MOTION_FRAME_SECONDS,
         out_line(row)
         if not skipped:
             skipped = _beat(frame, hand_back=hand_back)
+
+
+# ---------------------------------------------------------------------------
+# Pixels (Carrier Detect, #24). Marquee art -- the masthead, the splash's logo,
+# a promotion's tier name -- is composed as rows of RGB pixels and laid onto
+# cells as quarter blocks: two pixels across a cell and two down, each cell
+# showing the two colors that lose least (Lunar Lander's encoder, copied rather
+# than imported). A pixel of `None` is the surface behind the art.
+#
+# Quarter blocks need Unicode all the way to the caller and a font that has
+# them. CP437 has only the halves, and NetBBS says when a caller's font has
+# none (`quadrants: false`); `DOOR_PIXELS=half` asks for halves anyway. Halves
+# show one pixel across a cell, so the same art is averaged in pairs. Plain
+# ASCII decorations get no pixel art at all: every caller of it has a text
+# alternative beside it.
+# ---------------------------------------------------------------------------
+
+QUADRANTS = " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█"
+Pixel = tuple[int, int, int] | None
+
+
+def pixel_across(p: Palette) -> int:
+    """Pixels to a cell across: 2 with quarter blocks, 1 with half blocks."""
+    if p.pixels == "half" or _OUTPUT_ENCODING == "cp437":
+        return 1
+    return 2
+
+
+def _average(colors: list[tuple[int, int, int]]) -> tuple[int, int, int]:
+    return tuple(round(sum(c[i] for c in colors) / len(colors)) for i in range(3))
+
+
+def _quadrant(a: Pixel, b: Pixel, c: Pixel, d: Pixel) -> tuple[str, Pixel, Pixel]:
+    """(glyph, foreground, background) for four pixels: upper left, upper right,
+    lower left, lower right. `None` can only ever be the background, because
+    the surface behind the art is the terminal's own color and has no SGR."""
+    quad = (a, b, c, d)
+    if all(pixel is None for pixel in quad):
+        return " ", None, None
+    if any(pixel is None for pixel in quad):
+        lit = [pixel for pixel in quad if pixel is not None]
+        mask = sum(1 << n for n, pixel in enumerate(quad) if pixel is not None)
+        return QUADRANTS[mask], _average(lit), None
+    if len(set(quad)) <= 2:
+        bg = d
+        mask = sum(1 << n for n, color in enumerate(quad) if color != bg)
+        fg = next((color for color in quad if color != bg), bg)
+        return (QUADRANTS[mask], fg, bg) if mask else (" ", None, bg)
+    best = None
+    for mask in range(1, 8):  # the lower-right pixel always takes the background
+        groups = ([px for n, px in enumerate(quad) if mask >> n & 1],
+                  [px for n, px in enumerate(quad) if not mask >> n & 1])
+        means = [_average(group) for group in groups]
+        loss = sum((px[i] - m[i]) ** 2 for group, m in zip(groups, means) for px in group for i in range(3))
+        if best is None or loss < best[0]:
+            best = (loss, mask, means)
+    _, mask, (fg, bg) = best
+    return (QUADRANTS[mask], fg, bg) if fg != bg else (" ", None, bg)
+
+
+def _half(upper: Pixel, lower: Pixel) -> tuple[str, Pixel, Pixel]:
+    if upper is None and lower is None:
+        return " ", None, None
+    if upper is None:
+        return "▄", lower, None
+    if lower is None:
+        return "▀", upper, None
+    return ("█", upper, None) if upper == lower else ("▀", upper, lower)
+
+
+def pixel_cells(p: Palette, pixels: list[list[Pixel]]) -> list[list[tuple[str, str]]]:
+    """Pixel rows -> rows of (glyph, style) cells for this caller.
+
+    `pixels` is laid out two across a cell (quarter-block resolution); with half
+    blocks each pair is averaged first. Where backgrounds are off (sixteen
+    colors, monochrome) the art is its silhouette: dark bloom and shadow drop
+    out, and every lit pixel is shape in its cell's average hue, rather than a
+    second color printed as a block of its own.
+    """
+    across = pixel_across(p)
+    if not p.surfaces:
+        # Bloom and shadow are tints of the surface; without backgrounds they
+        # would print as blocks of their own. Only the lit strokes remain.
+        pixels = [[px if px is not None and max(px) >= 96 else None for px in row] for row in pixels]
+    rows = len(pixels) + len(pixels) % 2
+    width = max((len(row) for row in pixels), default=0)
+    grid = [list(row) + [None] * (width - len(row)) for row in pixels]
+    grid += [[None] * width] * (rows - len(grid))
+    cells: list[list[tuple[str, str]]] = []
+    for r in range(0, rows, 2):
+        upper, lower = grid[r], grid[r + 1]
+        out_row = []
+        for x in range(0, width, 2):
+            a, b = upper[x], upper[x + 1] if x + 1 < width else None
+            c, d = lower[x], lower[x + 1] if x + 1 < width else None
+            if not p.surfaces:
+                # One color a cell and no background: every lit pixel is
+                # shape, in the average of the cell's lit colors.
+                lit = [px for px in ((a, b, c, d) if across == 2 else
+                                     (a or b, a or b, c or d, c or d)) if px is not None]
+                if across == 2:
+                    mask = sum(1 << n for n, px in enumerate((a, b, c, d)) if px is not None)
+                else:
+                    mask = (3 if (a or b) else 0) | (12 if (c or d) else 0)
+                glyph, fg, bg = (QUADRANTS[mask], _average(lit), None) if lit else (" ", None, None)
+            elif across == 2:
+                glyph, fg, bg = _quadrant(a, b, c, d)
+            else:
+                def pair(left: Pixel, right: Pixel) -> Pixel:
+                    lit = [px for px in (left, right) if px is not None]
+                    return _average(lit) if lit else None
+                glyph, fg, bg = _half(pair(a, b), pair(c, d))
+            style = (p.tone(fg) if fg is not None else "") + (p.ground(bg) if bg is not None else "")
+            if glyph == " " and bg is None:
+                style = ""
+            out_row.append((glyph, style))
+        cells.append(out_row)
+    return cells
+
+
+def pixel_rows(p: Palette, pixels: list[list[Pixel]]) -> list[str]:
+    """Pixel art as styled text rows, runs of one style sent once."""
+    rows = []
+    for cells in pixel_cells(p, pixels):
+        parts, style, run = [], None, ""
+        for glyph, cell_style in cells:
+            if cell_style != style and run:
+                parts.append(sty(style or "", run))
+                run = ""
+            style, run = cell_style, run + glyph
+        if run:
+            parts.append(sty(style or "", run))
+        rows.append("".join(parts))
+    return rows
+
+
+def mask_from_rows(rows: list[str], *, sx: int = 2, sy: int = 2, on: str = "█") -> list[list[bool]]:
+    """Block-letter rows (full, upper-half and lower-half blocks) as a pixel mask,
+    `sx` pixels across each cell and two down. `sy` is fixed at two: a cell has
+    an upper and a lower half, which is what the half blocks already say."""
+    del sy
+    mask: list[list[bool]] = []
+    for row in rows:
+        top, bottom = [], []
+        for ch in row:
+            upper = ch in (on, "▀")
+            lower = ch in (on, "▄")
+            top += [upper] * sx
+            bottom += [lower] * sx
+        mask += [top, bottom]
+    return mask
+
+
+def chamfer(mask: list[list[bool]]) -> list[list[bool]]:
+    """Cut every convex corner by one pixel: blocky strokes read as machined.
+
+    Only a pixel that is a corner on both of its outer sides goes, and only if
+    it is not also the end of a one-pixel stroke, so no letter loses a stem."""
+    h = len(mask)
+    w = len(mask[0]) if h else 0
+
+    def on(y: int, x: int) -> bool:
+        return 0 <= y < h and 0 <= x < w and mask[y][x]
+
+    out_mask = [row[:] for row in mask]
+    for y in range(h):
+        for x in range(w):
+            if not mask[y][x]:
+                continue
+            for dy, dx in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+                if not on(y + dy, x) and not on(y, x + dx) and on(y - dy, x) and on(y, x - dx):
+                    out_mask[y][x] = False
+    return out_mask
+
+
+# The masthead's own letters, drawn at quarter-block resolution: a column of
+# this art is half a cell, a row half a cell, so a two-pixel stem and a
+# one-pixel bar are the same weight on screen. Seven rows: three and a half
+# cells, which is what lets a header carry the wordmark at all.
+_MAST_FONT = {
+    "W": ("##......##", "##......##", "##..##..##", "##..##..##", "##..##..##",
+          ".##.##.##.", "..##..##.."),
+    "A": ("..####..", ".##..##.", "##....##", "##....##", "########", "##....##", "##....##"),
+    "R": ("#######.", "##....##", "##....##", "#######.", "##..##..", "##...##.", "##....##"),
+    "D": ("######..", "##...##.", "##....##", "##....##", "##....##", "##...##.", "######.."),
+    "I": ("##", "##", "##", "##", "##", "##", "##"),
+    "L": ("##......", "##......", "##......", "##......", "##......", "##......", "########"),
+    "E": ("########", "##......", "##......", "######..", "##......", "##......", "########"),
+}
+
+
+def mast_mask(text: str = "WAR DIALER", *, gap: int = 2, space: int = 6) -> list[list[bool]]:
+    rows = [""] * 7
+    for index, ch in enumerate(text):
+        if ch == " ":
+            rows = [row + "." * space for row in rows]
+            continue
+        glyph = _MAST_FONT[ch]
+        follows = index + 1 < len(text) and text[index + 1] != " "
+        rows = [row + glyph[r] + ("." * gap if follows else "") for r, row in enumerate(rows)]
+    return [[ch == "#" for ch in row] for row in rows]
+
+
+#: A result's modem code: (word, tint). Hayes result codes, because the caller
+#: is a modem on a line: a turn that came off CONNECTs, one that did not drops
+#: its carrier, bookkeeping is OK -- and a bust is a bust.
+STAMPS = {True: ("CONNECT", "phosphor"), False: ("NO CARRIER", "amber"),
+          None: ("OK", "cyan"), "busted": ("BUSTED", "alarm")}
+
+
+def outcome_stamp(p: Palette, success: bool | None, busted: bool, width: int) -> list[str]:
+    """The result's code as lit three-row letters, or a badge where there is no
+    room for them or no Unicode to draw them in. Never the only place the
+    outcome is said: the headline under it says it in words."""
+    word, tint = STAMPS["busted" if busted else success]
+    letters = _tier_word(word)
+    if not _ASCII_DECOR and _dlen(letters[0]) + 2 <= width:
+        art = phosphor_logo(mask_from_rows(letters), glow=False, shadow=False, tint=tint)
+        return [center(row, width) for row in pixel_rows(p, art)]
+    return [center(badge(p, word, style=p.role(tint)), width)]
+
+
+def wordmark_fits(p: Palette, width: int) -> bool:
+    """Whether the masthead's pixel wordmark is drawn: Unicode decorations and
+    room for it. Everyone else reads the letter-spaced name."""
+    return not _ASCII_DECOR and width >= 52
+
+
+def wordmark_rows(p: Palette, *, hot: float = 0.0) -> list[str]:
+    return pixel_rows(p, phosphor_logo(mast_mask(), hot=hot))
+
+
+#: (crest, body, deep) ramps for lit art in a role's hue: phosphor for the
+#: wordmark and a CONNECT, alarm for a bust, amber for a NO CARRIER, cyan for OK.
+TINTS = {
+    "phosphor": ((205, 255, 215), (57, 255, 20), (20, 150, 40)),
+    "alarm": ((255, 205, 195), (255, 77, 77), (150, 28, 34)),
+    "amber": ((255, 232, 170), (255, 176, 0), (150, 88, 0)),
+    "cyan": ((205, 245, 255), (56, 214, 255), (18, 104, 150)),
+}
+
+
+def phosphor_logo(mask: list[list[bool]], *, hot: float = 0.0, glow: bool = True,
+                  shadow: bool = True, tint: str = "phosphor") -> list[list[Pixel]]:
+    """A mask lit as phosphor: a vertical ramp from a pale crest to deep green,
+    a bright lip along every top edge, darker scanlines on alternate pixel rows,
+    a drop shadow and a faint bloom around the strokes.
+
+    `hot` (0..1) washes the whole logo toward white: the beam passing over it.
+    """
+    h = len(mask)
+    w = len(mask[0]) if h else 0
+    pad_x, pad_y = (1, 1) if glow else (0, 0)
+    W, H = w + pad_x * 2 + (1 if shadow else 0), h + pad_y * 2 + (1 if shadow else 0)
+    out_px: list[list[Pixel]] = [[None] * W for _ in range(H)]
+
+    def on(y: int, x: int) -> bool:
+        return 0 <= y < h and 0 <= x < w and mask[y][x]
+
+    crest, body, deep = TINTS[tint]
+    halo, shade = mix(deep, (0, 0, 0), 0.62), mix(deep, (0, 0, 0), 0.72)
+    # The outside of the letters, found by flooding in from the border: bloom
+    # and shadow stay out of the counters, so an A, a D and an R keep their
+    # holes at every size. Every border cell seeds it: without the glow's
+    # padding the corner can be a lit pixel, and a flood seeded only there
+    # would find no outside at all -- and draw no shadow.
+    outside = [[False] * W for _ in range(H)]
+    stack = [(y, x) for y in range(H) for x in range(W) if y in (0, H - 1) or x in (0, W - 1)]
+    while stack:
+        y, x = stack.pop()
+        if not (0 <= y < H and 0 <= x < W) or outside[y][x] or on(y - pad_y, x - pad_x):
+            continue
+        outside[y][x] = True
+        stack += [(y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)]
+    if shadow:
+        for y in range(h):
+            for x in range(w):
+                if mask[y][x] and outside[y + pad_y + 1][x + pad_x + 1]:
+                    out_px[y + pad_y + 1][x + pad_x + 1] = shade
+    if glow:
+        for y in range(-pad_y, h + pad_y):
+            for x in range(-pad_x, w + pad_x):
+                if on(y, x) or not outside[y + pad_y][x + pad_x]:
+                    continue
+                if any(on(y + dy, x + dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)):
+                    if out_px[y + pad_y][x + pad_x] is None:
+                        out_px[y + pad_y][x + pad_x] = halo
+    for y in range(h):
+        t = y / max(1, h - 1)
+        base = ramp([crest, body, deep], t)
+        for x in range(w):
+            if not mask[y][x]:
+                continue
+            color = base
+            if not on(y - 1, x):
+                color = mix(color, (240, 255, 240), 0.55)  # the lip along a top edge
+            elif not on(y + 1, x):
+                color = mix(color, mix(deep, (0, 0, 0), 0.4), 0.35)  # the underside, in shade
+            if y % 2 == 1:
+                color = mix(color, (0, 0, 0), 0.12)        # the tube's scanlines
+            if hot:
+                color = mix(color, (235, 255, 240), hot)
+            out_px[y + pad_y][x + pad_x] = color
+    return out_px
 
 
 # ---------------------------------------------------------------------------
@@ -3939,14 +4685,6 @@ def _splash_word(font: dict[str, tuple[str, ...]], text: str, gap: int, space: i
     return out_rows
 
 
-def _splash_rgb(p: Palette, rgb: tuple[int, int, int], idx256: int) -> str:
-    return p._sgr(tuple(max(0, min(255, int(v))) for v in rgb), idx256)
-
-
-def _splash_scale(rgb: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
-    return tuple(int(v * factor) for v in rgb)
-
-
 def splash_layout(width: int, height: int) -> tuple[str, int, int, int, int]:
     """("large" | "compact", top, left, rows, columns) of the composition.
 
@@ -3960,16 +4698,308 @@ def splash_layout(width: int, height: int) -> tuple[str, int, int, int, int]:
     return "compact", max(0, (height - 12) // 2), (width - cols) // 2, 12, cols
 
 
+def splash_core(width: int, height: int) -> tuple[int, int, int, int, float]:
+    """(top, left, rows, columns, scale) of a large splash's composition.
+
+    The composition is the 80x24 one, or on a big terminal a version half as
+    large again; around it, the attract mode's scan fills whatever is left."""
+    if width >= 124 and height >= 34:
+        cols, rows, scale = 124, 32, 1.5
+    else:
+        cols, rows, scale = min(width, 80), 24, 1.0
+    return (height - rows) // 2, (width - cols) // 2, rows, cols, scale
+
+
+def scale_mask(mask: list[list[bool]], factor: float) -> list[list[bool]]:
+    """Nearest-neighbour scaling of a pixel mask."""
+    if factor == 1:
+        return mask
+    h, w = len(mask), len(mask[0]) if mask else 0
+    return [[mask[int(y / factor)][int(x / factor)] for x in range(int(w * factor))]
+            for y in range(int(h * factor))]
+
+
+#: The war dialer's own log: what each number in the scan answered with.
+#: (glyph, share of the numbers, role) -- most ring out to nothing.
+_SCAN_RESULTS = (("·", 0.62, "none"), ("B", 0.11, "busy"), ("V", 0.15, "voice"),
+                 ("F", 0.07, "fax"), ("◆", 0.05, "carrier"))
+SPLASH_SCAN_FRAMES = 24
+
+
+def _attract_frames(p: Palette, info: dict, season_number: int, width: int, height: int,
+                    seed: int) -> list[list[SplashOp]]:
+    """The large splash: the attract mode a caller dials into (Carrier Detect, #24).
+
+    A war dialer sweeps an exchange for carriers -- the game's namesake, which
+    the splash never showed -- and lands on 555-0142. CONNECT; the tube clears;
+    the masthead burns in as quarter-block phosphor; the pitch types itself and
+    the ring of ten exchanges lights in its crews' colors. On a terminal larger
+    than the composition, the scan stays behind it as a dim, living backdrop.
+    """
+    top, left, rows, cols, scale = splash_core(width, height)
+    st = _Stage(p, width, height, seed, geometry=(0, 0, height, width), hint=None)
+    rng = st.rng
+    grey, dim, phosphor = p.grey, p.phosphor_dim, p.phosphor
+    amber_b = p.amber + BOLD
+    ink = p.tone((235, 255, 240))
+    hot = p.tone((190, 255, 205))
+    surf = p.surfaces
+
+    def put(r: int, c: int, text: str, style: str = "") -> None:
+        st.put(top + r, left + c, text, style)
+
+    put(1, cols - len(SPLASH_HINT) - 2, SPLASH_HINT, grey)
+    st.snap()
+
+    # -- the call --------------------------------------------------------------
+    for typed in ("AT", "Z"):
+        put(1, 2 + (0 if typed == "AT" else 2), typed, phosphor)
+        st.snap()
+    put(1, 5, "  OK", grey)
+    st.snap()
+    for start in range(0, 5, 2):
+        put(2, 2 + start, "ATDT "[start:start + 2], phosphor)
+        st.snap()
+
+    # -- the scan ----------------------------------------------------------------
+    cell_w = 7
+    grid_cols = max(1, (width - 2) // cell_w)
+    grid_left = (width - grid_cols * cell_w) // 2 + 1
+    grid_rows = list(range(1, height - 1))
+
+    def in_core(r: int, c: int, rows_from: int = 0) -> bool:
+        return top + rows_from <= r < top + rows and left - cell_w < c < left + cols
+
+    # Every number that fits, except under the modem's own log.
+    cells = [(r, grid_left + k * cell_w) for r in grid_rows for k in range(grid_cols)
+             if not (in_core(r, grid_left + k * cell_w) and r < top + 5)]
+    target = max(1, min(len(cells) - 1, int(len(cells) * (0.58 + 0.1 * rng.random()))))
+    first = (142 - target) % 10000
+    numbers = [f"{(first + index) % 10000:04d}" for index in range(len(cells))]
+    weights = [share for _, share, _ in _SCAN_RESULTS]
+    results = [rng.choices(range(len(_SCAN_RESULTS)), weights)[0] for _ in cells]
+    results[target] = len(_SCAN_RESULTS) - 1
+    unscanned = p.tone(mix(p.rgb("phosphor_dim"), GLASS, 0.6)) if surf else dim
+    looks = {
+        "none": (p.tone(mix(p.rgb("phosphor_dim"), GLASS, 0.25)) if surf else dim, dim),
+        "busy": (p.tone((150, 110, 30)), p.amber),
+        "voice": (grey, grey),
+        "fax": (p.tone((40, 130, 160)), p.cyan),
+        "carrier": (phosphor + BOLD, phosphor + BOLD),
+    }
+    cursor = (p.ground(p.rgb("phosphor")) + p.tone((0, 20, 8))) if surf else ink + BOLD
+
+    def paint(index: int, style: str | None = None) -> None:
+        r, c = cells[index]
+        glyph, _, role = _SCAN_RESULTS[results[index]]
+        number_style, glyph_style = looks[role]
+        st.put(r, c, numbers[index], style or number_style)
+        st.put(r, c + 4, glyph, style or glyph_style)
+
+    # The exchange's numbers print, dim, a band of rows at a time.
+    band = max(1, -(-len(cells) // 4))
+    for start in range(0, len(cells), band):
+        for index in range(start, min(len(cells), start + band)):
+            st.put(*cells[index], numbers[index], unscanned)
+        st.snap()
+    # What the codes mean, beside the log, for as long as the scan is up.
+    legend = [("·", "none", "none"), ("B", "busy", "busy"), ("V", "voice", "voice"),
+              ("F", "fax", "fax"), ("◆", "carrier", "carrier")]
+    legend_len = sum(len(glyph) + 1 + len(word) + 2 for glyph, word, _ in legend) - 2
+    if cols - legend_len - 2 > 2 + 26 + 2:
+        c = cols - legend_len - 2
+        for glyph, word, role in legend:
+            put(3, c, glyph, looks[role][1])
+            put(3, c + 2, word, grey)
+            c += len(glyph) + 1 + len(word) + 2
+    carriers = 0
+    per_frame = max(1, -(-target // SPLASH_SCAN_FRAMES))
+    for start in range(0, target, per_frame):
+        for index in range(start, min(target, start + per_frame)):
+            paint(index)
+            carriers += _SCAN_RESULTS[results[index]][2] == "carrier"
+        now = min(target, start + per_frame)
+        st.put(cells[now][0], cells[now][1], numbers[now], cursor)
+        put(2, 7, f"555-{numbers[now]}", phosphor)
+        tally = f"carriers {carriers:02d}"
+        put(2, cols - len(tally) - 2, tally, grey)
+        st.snap()
+    # The one that answers.
+    for tick in range(3):
+        st.put(cells[target][0], cells[target][1], numbers[target] + "◆",
+               (cursor if tick % 2 == 0 else ink + BOLD))
+        st.snap()
+    put(2, cols - len("carriers 00") - 2, f"carriers {carriers + 1:02d}", amber_b)
+    noise_width = min(26, cols - 3)
+    noise_tones = (dim, grey, p.cyan, p.mint, dim)
+    for _ in range(4):
+        col = 2
+        while col < 2 + noise_width:
+            run = min(rng.randint(2, 5), 2 + noise_width - col)
+            put(3, col, "".join(rng.choice(_SPLASH_NOISE) for _ in range(run)), rng.choice(noise_tones))
+            col += run
+        st.snap()
+    put(3, 2, SPLASH_CONNECT.ljust(noise_width), amber_b)
+    cursor_at = (top + 3, left + 2 + len(SPLASH_CONNECT) + 1)
+    st.snap()
+
+    # -- the tube clears: the composition wipes, the scan around it cools ---------
+    backdrop = p.tone(mix(p.rgb("phosphor_dim"), (0, 0, 0), 0.62)) if surf else ""
+    lit_backdrop = p.tone(mix(p.rgb("phosphor"), (0, 0, 0), 0.55)) if surf else dim
+    core_rows = list(range(top + 5, top + rows))
+    middle = len(core_rows) // 2
+    order = sorted(core_rows, key=lambda r: abs(r - core_rows[middle]))
+    step = max(1, -(-len(order) // 5))
+    outside = [index for index, (r, c) in enumerate(cells) if not in_core(r, c)]
+    for start in range(0, len(order), step):
+        for r in order[start:start + step]:
+            st.clear(r, r, left, left + cols)
+            for cr, c in cells:
+                if cr == r and in_core(r, c):
+                    st.clear(r, r, c, c + 5)  # a number the composition's edge cuts
+        if start == 0:
+            for index in outside:
+                r, c = cells[index]
+                role = _SCAN_RESULTS[results[index]][2] if index <= target else ""
+                if not backdrop:
+                    st.clear(r, r, c, c + 5)
+                elif role == "carrier":
+                    st.put(r, c, numbers[index] + "◆", lit_backdrop)
+                else:
+                    st.put(r, c, numbers[index], backdrop)
+                    st.put(r, c + 4, " ")
+        st.snap()
+
+    # -- the masthead burns in ---------------------------------------------------
+    mask = chamfer(scale_mask(mask_from_rows(_splash_word(_SPLASH_FONT, "WAR DIALER", 2, 4)), scale))
+    logo = pixel_cells(p, phosphor_logo(mask))
+    flare = pixel_cells(p, phosphor_logo(mask, hot=0.7))
+    logo_w = max(len(row) for row in logo)
+    logo_top = 5
+    logo_left = max(0, (cols - logo_w) // 2)
+    beam = max(4, int(6 * scale))
+    for c0 in range(0, logo_w + beam, beam):
+        for r, (row, hot_row) in enumerate(zip(logo, flare)):
+            if c0 < logo_w:
+                st.cells(top + logo_top + r, left + logo_left + c0, hot_row[c0:c0 + beam])
+            if c0 - beam >= 0:
+                st.cells(top + logo_top + r, left + logo_left + c0 - beam, row[c0 - beam:c0])
+        st.snap()
+
+    tagline = SPLASH_TAGLINE if len(SPLASH_TAGLINE) <= cols - 4 else SPLASH_TAGLINE_SHORT
+    tag_row = logo_top + len(logo) + (1 if scale > 1 else 0)
+    tag_col = max(1, (cols - _dlen(tagline)) // 2)
+    chunk = -(-len(tagline) // 3)
+    for index in range(3):
+        piece = tagline[index * chunk:(index + 1) * chunk]
+        if piece:
+            put(tag_row, tag_col + index * chunk, piece, p.mint)
+        st.snap()
+
+    # -- the ring of ten exchanges -------------------------------------------------
+    def holder_style(holder: str | None) -> str:
+        return p.role(holder) + BOLD if holder else dim
+
+    def node_glyph(holder: str | None) -> str:
+        return "●" if holder else "○"
+
+    handle = _event_plain(str(info.get("handle", "Guest")))
+    node = _event_plain(str(info.get("node_name", "NetBBS")))
+    chip = f"◆ SEASON {season_number} ◆"
+    half_h = 3
+    # The ring and its labels, centred in the rows between the pitch and the
+    # caller's line at the foot of the composition.
+    room = (rows - 2) - (tag_row + 1)
+    cy = tag_row + 1 + max(0, (room - (2 * half_h + 3)) // 2) + 1 + half_h
+    cx, half_w = cols // 2, int(26 * scale)
+    x0, x1, y0, y1 = cx - half_w, cx + half_w, cy - half_h, cy + half_h
+    stops = [x0 + round((x1 - x0) * (i + 1) / 5) for i in range(4)]
+    nodes = ([(y0, x) for x in stops] + [(cy, x1)] + [(y1, x) for x in reversed(stops)] + [(cy, x0)])
+    taken = set(nodes)
+    path = ([(y0, x) for x in range(x0, x1 + 1)] + [(y, x1) for y in range(y0 + 1, y1)]
+            + [(y1, x) for x in range(x1, x0 - 1, -1)] + [(y, x0) for y in range(y1 - 1, y0, -1)])
+    corners = {(y0, x0): "╭", (y0, x1): "╮", (y1, x1): "╯", (y1, x0): "╰"}
+    links = [(r, c, corners.get((r, c), "─" if r in (y0, y1) else "│"))
+             for r, c in path if (r, c) not in taken]
+
+    def link_style(r: int) -> str:
+        # Tilted toward the caller: the near edge of the ring is brighter.
+        return p.tone(mix((30, 60, 40), p.rgb("phosphor_dim"), 0.6 + 0.4 * (r - y0) / (y1 - y0)))
+
+    half_links = max(1, -(-len(links) // 2))
+    for start in range(0, len(links), half_links):
+        for r, c, ch in links[start:start + half_links]:
+            put(r, c, ch, link_style(r))
+        st.snap()
+
+    def label(k: int) -> None:
+        r, c = nodes[k]
+        text = f"{k + 1:02d}"
+        if r == y0:
+            put(r - 1, c - 1, text, grey)
+        elif r == y1:
+            put(r + 1, c - 1, text, grey)
+        elif c == x1:
+            put(r, c + 2, text, grey)
+        else:
+            put(r, c - 1 - len(text), text, grey)
+
+    for k in range(10):
+        put(*nodes[k], "◉", ink)
+        if k:
+            put(*nodes[k - 1], node_glyph(_SPLASH_HOLDERS[k - 1]), holder_style(_SPLASH_HOLDERS[k - 1]))
+            label(k - 1)
+        if k == 5:
+            put(cy, cx - len(chip) // 2, chip, amber_b)
+        if k % 2:  # two exchanges light a frame
+            st.snap()
+    put(*nodes[9], node_glyph(_SPLASH_HOLDERS[9]), holder_style(_SPLASH_HOLDERS[9]))
+    label(9)
+    node_text, handle_text = _fit(node, 24), _fit(handle, 18)
+    info_len = _dlen(f"node › {node_text}   ·   handle › {handle_text}")
+    c = max(1, (cols - info_len) // 2)
+    for text, style in (("node › ", grey), (node_text, p.cyan), ("   ·   ", dim),
+                        ("handle › ", grey), (handle_text, p.mint)):
+        put(rows - 1, c, text, style)
+        c += _dlen(text)
+    st.snap()
+
+    # -- carrier held: the cursor blinks, an exchange twinkles, the scan breathes ----
+    lit = [k for k in range(10) if _SPLASH_HOLDERS[k]]
+    glints = [index for index in outside if index <= target
+              and _SCAN_RESULTS[results[index]][2] == "carrier"] if backdrop else []
+    previous, glint, blink = None, None, False
+    for tick in range(8):
+        if tick % 3 == 0:
+            blink = not blink
+            st.put(*cursor_at, "█" if blink else " ", phosphor)
+        if previous is not None:
+            put(*nodes[previous], node_glyph(_SPLASH_HOLDERS[previous]), holder_style(_SPLASH_HOLDERS[previous]))
+        previous = rng.choice(lit) if tick < 7 else None
+        if previous is not None:
+            put(*nodes[previous], "◉", ink)
+        if glint is not None:
+            r, c = cells[glint]
+            st.put(r, c, numbers[glint] + "◆", lit_backdrop)
+        glint = rng.choice(glints) if glints and tick < 7 else None
+        if glint is not None:
+            r, c = cells[glint]
+            st.put(r, c, numbers[glint] + "◆", phosphor + BOLD)
+        st.snap()
+    return st.frames
+
+
 def splash_frames(p: Palette, info: dict, season_number: int, width: int, height: int,
                   *, seed: int = 0) -> list[list[SplashOp]]:
     """The whole animation as frames of cell writes, composed up front.
 
     Pure: no I/O and no clock, so a test can hold every write to the terminal's
-    bounds. `play_splash` puts them on the wire."""
-    rng = random.Random(seed)
+    bounds. `play_splash` puts them on the wire. A large terminal gets the
+    attract mode; the compact composition below is for anything smaller."""
     kind, top, left, rows, cols = splash_layout(width, height)
-    large = kind == "large"
-    tc = p._truecolor
+    if kind == "large":
+        return _attract_frames(p, info, season_number, width, height, seed)
+    rng = random.Random(seed)
     frames: list[list[SplashOp]] = []
 
     def at(r: int, c: int, *segments: tuple[str, str]) -> SplashOp:
@@ -3980,24 +5010,16 @@ def splash_frames(p: Palette, info: dict, season_number: int, width: int, height
 
     phosphor, dim, grey = p.phosphor, p.phosphor_dim, p.grey
     amber_b = p.amber + BOLD
-    ink = _splash_rgb(p, (235, 255, 240), 231)
-    hot = _splash_rgb(p, (190, 255, 205), 157)
+    ink = p.tone((235, 255, 240), 231)
+    hot = p.tone((190, 255, 205), 157)
 
     # -- the call --------------------------------------------------------------
-    hint_col = cols - len(SPLASH_HINT) - 1
-    if large:
-        frame(at(2, hint_col, (grey, SPLASH_HINT)))
-        for typed in ("AT", "Z"):
-            frame(at(2, 3 + (0 if typed == "AT" else 2), (phosphor, typed)))
-        frame(at(2, 6, (grey, "  OK")))
-        dial_row, noise_row, cmd_col = 3, 4, 3
-    else:
-        frame()
-        dial_row, noise_row, cmd_col = 1, 2, 2
+    frame()
+    dial_row, noise_row, cmd_col = 1, 2, 2
     command = f"ATDT {SPLASH_NUMBER}"
     for start in range(0, len(command), 3):
         frame(at(dial_row, cmd_col + start, (phosphor, command[start:start + 3])))
-    noise_width = min(26 if large else 22, cols - cmd_col - 1)
+    noise_width = min(22, cols - cmd_col - 1)
     noise_tones = (dim, grey, p.cyan, p.mint, dim)
     for _ in range(6):
         col = cmd_col
@@ -4012,44 +5034,24 @@ def splash_frames(p: Palette, info: dict, season_number: int, width: int, height
     cursor_at = (noise_row, cmd_col + len(SPLASH_CONNECT) + 1)
 
     # -- the masthead burns in ---------------------------------------------------
-    letters = (_splash_word(_SPLASH_FONT, "WAR DIALER", 2, 4) if large
-               else _splash_word(_SPLASH_FONT_SMALL, "WAR DIALER", 1, 2))
-    if large:
-        # A drop shadow down and to the right, where the letter itself is not.
-        logo_w = len(letters[0]) + 1
-        grid = [list(row.ljust(logo_w)) for row in letters] + [[" "] * logo_w]
-        cells = [[(ch, "logo") if ch != " " else (" ", "") for ch in row] for row in grid]
-        for r in range(1, len(grid)):
-            for c in range(1, logo_w):
-                if cells[r][c][1] == "" and grid[r - 1][c - 1] != " ":
-                    cells[r][c] = ("█", "shadow")
-        logo_top = 6
-    else:
-        logo_w = len(letters[0])
-        cells = [[(ch, "logo") if ch != " " else (" ", "") for ch in row] for row in letters]
-        logo_top = 4
+    letters = _splash_word(_SPLASH_FONT_SMALL, "WAR DIALER", 1, 2)
+    logo_w = len(letters[0])
+    cells = [[(ch, "logo") if ch != " " else (" ", "") for ch in row] for row in letters]
+    logo_top = 4
     logo_h = len(cells)
     logo_left = max(1, (cols - logo_w) // 2 + 1)
 
     # One phosphor ramp down the strokes, a whole row at a time: the color
     # changes between rows of a letter, never inside one, so it cannot break a
-    # letter's shape. The shadow is one dark tone.
-    ramp_tc = [(150, 255, 160), (95, 255, 90), (57, 255, 20), (40, 215, 30), (28, 175, 36)]
-    ramp_256 = [120, 119, 82, 46, 40]
-    if not large:
-        ramp_tc, ramp_256 = [ramp_tc[0], ramp_tc[2], ramp_tc[4]], [ramp_256[0], ramp_256[2], ramp_256[4]]
-
-    def logo_style(r: int, c: int, role: str) -> str:
-        if role == "shadow":
-            return _splash_rgb(p, (16, 58, 30), 22)
-        index = min(r, len(ramp_tc) - 1)
-        return _splash_rgb(p, ramp_tc[index], ramp_256[index])
+    # letter's shape.
+    ramp_tc = [(150, 255, 160), (57, 255, 20), (28, 175, 36)]
+    ramp_256 = [120, 82, 40]
 
     def logo_run(r: int, c0: int, c1: int, override: str | None = None) -> SplashOp:
         segments: list[tuple[str, str]] = []
         for c in range(c0, c1):
             ch, role = cells[r][c]
-            style = (override if role == "logo" and override else logo_style(r, c, role)) if role else ""
+            style = (override or p.tone(ramp_tc[r], ramp_256[r])) if role else ""
             if segments and segments[-1][0] == style:
                 segments[-1] = (style, segments[-1][1] + ch)
             else:
@@ -4068,9 +5070,8 @@ def splash_frames(p: Palette, info: dict, season_number: int, width: int, height
         frame(*ops)
 
     # -- a scanline sweeps the tube; the pitch types itself beneath it -------------
-    tagline = SPLASH_TAGLINE if large and len(SPLASH_TAGLINE) <= cols - 2 else SPLASH_TAGLINE_SHORT
-    tagline = _fit(tagline, cols - 2)
-    tag_row = logo_top + logo_h + (1 if large else 1)
+    tagline = _fit(SPLASH_TAGLINE_SHORT, cols - 2)
+    tag_row = logo_top + logo_h + 1
     tag_col = max(1, (cols - _dlen(tagline)) // 2 + 1)
     sweep_rows = list(range(logo_h)) + [None]
     for index, r in enumerate(sweep_rows):
@@ -4088,7 +5089,7 @@ def splash_frames(p: Palette, info: dict, season_number: int, width: int, height
     if rest:
         frame(at(tag_row, tag_col + len(sweep_rows) * 6, (p.mint, rest)))
 
-    # -- the ring of ten exchanges -------------------------------------------------
+    # -- the ring of ten exchanges, as a chain -------------------------------------
     def holder_style(holder: str | None) -> str:
         return p.role(holder) + BOLD if holder else dim
 
@@ -4096,70 +5097,19 @@ def splash_frames(p: Palette, info: dict, season_number: int, width: int, height
         return "●" if holder else "○"
 
     handle = _event_plain(str(info.get("handle", "Guest")))
-    node = _event_plain(str(info.get("node_name", "NetBBS")))
     chip = f"◆ SEASON {season_number} ◆"
-    if large:
-        # A loop of line, not an ellipse: a terminal draws a rounded box
-        # cleanly, where an ellipse this flat breaks into gaps at its sides.
-        cy, cx, half_w, half_h = 18, cols // 2, 26, 3
-        x0, x1, y0, y1 = cx - half_w, cx + half_w, cy - half_h, cy + half_h
-        stops = [x0 + round((x1 - x0) * (i + 1) / 5) for i in range(4)]
-        nodes = ([(y0, x) for x in stops] + [(cy, x1)]
-                 + [(y1, x) for x in reversed(stops)] + [(cy, x0)])
-        taken = set(nodes)
-        path = ([(y0, x) for x in range(x0, x1 + 1)] + [(y, x1) for y in range(y0 + 1, y1)]
-                + [(y1, x) for x in range(x1, x0 - 1, -1)] + [(y, x0) for y in range(y1 - 1, y0, -1)])
-        corners = {(y0, x0): "╭", (y0, x1): "╮", (y1, x1): "╯", (y1, x0): "╰"}
-        links = [(r, c, corners.get((r, c), "─" if r in (y0, y1) else "│"))
-                 for r, c in path if (r, c) not in taken]
-
-        def link_style(r: int) -> str:
-            # Tilted toward the caller: the near edge of the ring is brighter.
-            if not tc:
-                return dim
-            return _splash_rgb(p, _splash_scale((78, 138, 98), 0.6 + 0.4 * (r - y0) / (y1 - y0)), 0)
-
-        quarter = max(1, -(-len(links) // 4))
-        for start in range(0, len(links), quarter):
-            frame(*(at(r, c, (link_style(r), ch)) for r, c, ch in links[start:start + quarter]))
-
-        def label(k: int) -> SplashOp:
-            r, c = nodes[k]
-            text = f"{k + 1:02d}"
-            if r == y0:
-                return at(r - 1, c - 1, (grey, text))
-            if r == y1:
-                return at(r + 1, c - 1, (grey, text))
-            return at(r, c + 2, (grey, text)) if c == x1 else at(r, c - 1 - len(text), (grey, text))
-
-        info_text = f"node › {_fit(node, 24)}   ·   handle › {_fit(handle, 18)}"
-        info_row = 23
-        for k in range(10):
-            ops = [at(*nodes[k], (ink, "◉"))]
-            if k:
-                ops += [at(*nodes[k - 1], (holder_style(_SPLASH_HOLDERS[k - 1]), node_glyph(_SPLASH_HOLDERS[k - 1]))),
-                        label(k - 1)]
-            if k == 5:
-                ops.append(at(cy, cx - len(chip) // 2 + 1, (amber_b, chip)))
-            frame(*ops)
-        frame(at(*nodes[9], (holder_style(_SPLASH_HOLDERS[9]), node_glyph(_SPLASH_HOLDERS[9]))), label(9),
-              at(info_row, max(1, (cols - _dlen(info_text)) // 2 + 1),
-                 (grey, "node › "), (p.cyan, _fit(node, 24)), (dim, "   ·   "),
-                 (grey, "handle › "), (p.mint, _fit(handle, 18))))
-    else:
-        chain_row, chain_left = 10, max(1, (cols - 19) // 2 + 1)
-        nodes = [(chain_row, chain_left + 2 * k) for k in range(10)]
-        frame(at(chain_row, chain_left, (dim, "─".join("·" * 10))))
-        for k in range(10):
-            ops = [at(*nodes[k], (ink, "◉"))]
-            if k:
-                ops.append(at(*nodes[k - 1], (holder_style(_SPLASH_HOLDERS[k - 1]), node_glyph(_SPLASH_HOLDERS[k - 1]))))
-            frame(*ops)
-        tail = f"{chip}  {handle}"
-        tail = _fit(tail, cols - 2)
-        frame(at(*nodes[9], (holder_style(_SPLASH_HOLDERS[9]), node_glyph(_SPLASH_HOLDERS[9]))),
-              at(11, max(1, (cols - _dlen(tail)) // 2 + 1),
-                 (amber_b, tail[:len(chip)]), (p.mint, tail[len(chip):])))
+    chain_row, chain_left = 10, max(1, (cols - 19) // 2 + 1)
+    nodes = [(chain_row, chain_left + 2 * k) for k in range(10)]
+    frame(at(chain_row, chain_left, (dim, "─".join("·" * 10))))
+    for k in range(10):
+        ops = [at(*nodes[k], (ink, "◉"))]
+        if k:
+            ops.append(at(*nodes[k - 1], (holder_style(_SPLASH_HOLDERS[k - 1]), node_glyph(_SPLASH_HOLDERS[k - 1]))))
+        frame(*ops)
+    tail = _fit(f"{chip}  {handle}", cols - 2)
+    frame(at(*nodes[9], (holder_style(_SPLASH_HOLDERS[9]), node_glyph(_SPLASH_HOLDERS[9]))),
+          at(11, max(1, (cols - _dlen(tail)) // 2 + 1),
+             (amber_b, tail[:len(chip)]), (p.mint, tail[len(chip):])))
 
     # -- carrier held: the cursor blinks, an exchange twinkles ----------------------
     lit = [k for k in range(10) if _SPLASH_HOLDERS[k]]
@@ -4195,6 +5145,8 @@ def splash_hold_prompt(p: Palette, width: int, height: int) -> str:
     "any key skips" stood; the compact one, which has no hint, at the right of
     the dial row."""
     kind, top, left, rows, cols = splash_layout(width, height)
+    if kind == "large":
+        top, left, rows, cols, _ = splash_core(width, height)
     row = 2 if kind == "large" else 1
     col = cols - len(SPLASH_HOLD_HINT) - 1
     return f"{ESC}[{top + row};{left + col}H" + sty(p.amber + BOLD, SPLASH_HOLD_HINT)
@@ -4317,6 +5269,8 @@ _TIER_FONT = {
     "L": ("█  ", "█  ", "▀▀▀"), "N": ("█▄ █", "█ ▀█", "▀  ▀"), "P": ("█▀▄", "█▀ ", "▀  "),
     "R": ("█▀▄", "█▀▄", "▀ ▀"), "S": ("█▀▀", "▀▀█", "▀▀▀"), "T": ("▀█▀", " █ ", " ▀ "),
     "W": ("█   █", "█ █ █", " ▀ ▀ "),
+    # For the result stamps: CONNECT, NO CARRIER, BUSTED, OK.
+    "O": ("█▀█", "█ █", "▀▀▀"), "U": ("█ █", "█ █", "▀▀▀"),
 }
 
 
@@ -4359,8 +5313,21 @@ def _scene_text(text: object, width: int) -> str:
 class _Stage:
     """The splash's composition box as a grid of cells, sent as deltas."""
 
-    def __init__(self, p: Palette, width: int, height: int, seed: int):
+    def __init__(self, p: Palette, width: int, height: int, seed: int, *,
+                 geometry: tuple[int, int, int, int] | None = None, hint: str | None = SCENE_HINT,
+                 glass: bool = True, margin: int = 0):
         kind, self.top, self.left, self.rows, self.cols = splash_layout(width, height)
+        if geometry is not None:
+            # The whole terminal, or any box of it: the splash's attract mode
+            # spreads past the scenes' 80x24 composition (Carrier Detect, #24).
+            self.top, self.left, self.rows, self.cols = geometry
+        elif margin:
+            # A scene composed for the console's width sits where the console
+            # does, `margin` columns in on a wide terminal; its caller says so.
+            # One composed for the terminal itself (the login scenes) is
+            # centred in it already and passes none.
+            self.left += margin
+            width += margin
         self.p, self.large = p, kind == "large"
         self.width, self.height = width, height
         self.rng = random.Random(seed)
@@ -4369,7 +5336,24 @@ class _Stage:
         self._shown = [[blank] * self.cols for _ in range(self.rows)]
         self.frames: list[list[SplashOp]] = []
         self.cursor: tuple[int, int] | None = None
-        self.put(0, self.cols - len(SCENE_HINT) - 1, SCENE_HINT, p.grey)
+        # A scene plays on a pane of the switchboard's own glass, scanlines
+        # and all (#24), so on a big terminal it reads as a screen within the
+        # screen. The first frame lays the whole pane.
+        self.backdrop: list[str] | None = None
+        self.band = ""
+        if geometry is None and glass and p.surfaces:
+            self.backdrop = [p.ground(GLASS if r % 2 == 0 else GLASS_SCAN) for r in range(self.rows)]
+            self._shown = [[("", "unpainted")] * self.cols for _ in range(self.rows)]
+        if hint:
+            self.put(0, self.cols - len(hint) - 1, hint, p.grey)
+
+    def cells(self, r: int, c: int, cells: list[tuple[str, str]]) -> None:
+        """Paint pre-styled cells (pixel art) from (r, c), clipped to the box."""
+        if not 0 <= r < self.rows:
+            return
+        for offset, (ch, style) in enumerate(cells):
+            if 0 <= c + offset < self.cols:
+                self.grid[r][c + offset] = (ch, style)
 
     # -- painting ----------------------------------------------------------------
     def put(self, r: int, c: int, text: str, style: str = "") -> None:
@@ -4387,7 +5371,7 @@ class _Stage:
                     row[c - 1] = (" ", "")
                 if c + span < self.cols and row[c + span][0] == "":
                     row[c + span] = (" ", "")
-                row[c] = (ch, style if ch != " " else "")
+                row[c] = (ch, style if ch != " " or "[48;" in style else "")
                 if span == 2:
                     row[c + 1] = ("", style)
             c += span
@@ -4421,6 +5405,12 @@ class _Stage:
         r = self.rows - 3 if self.large else self.rows - 2
         self.clear(r, r + 1)
         style = style if style is not None else self.p.mint + BOLD
+        # A lower third: the caption on a band of brighter glass, edge to edge.
+        self.band = self.p.ground(CAPTION_BAND)
+        if self.band:
+            for band_row in (r, r + 1):
+                self.cells(band_row, 1, [(" ", self.band)] * (self.cols - 2))
+            style += self.band
         lines = textwrap.wrap(_event_plain(head), self.cols - 4) or [""]
         if len(lines) > 1:
             # A headline that needs two rows keeps both; the detail under it
@@ -4433,7 +5423,7 @@ class _Stage:
         head = _fit(lines[0], self.cols - 4)
         c = self.center(r, head, style)
         if sub:
-            self.center(r + 1, _fit(sub, self.cols - 2), self.p.grey)
+            self.center(r + 1, _fit(sub, self.cols - 4), self.p.grey + self.band)
         self.cursor = (r, min(self.cols - 2, c + _dlen(head) + 1))
 
     # -- sending -------------------------------------------------------------------
@@ -4473,9 +5463,17 @@ class _Stage:
         if self.top + r + 1 == self.height and self.left + end == self.width:
             end -= 1  # the bottom-right cell would scroll some terminals
         segments: list[tuple[str, str]] = []
+        glass = self.backdrop[r] if self.backdrop else ""
         for ch, style in row[start:end]:
-            # A space shows no color, so it rides in whichever segment precedes it.
-            if segments and (segments[-1][0] == style or ch == " "):
+            # The pane shows through wherever a cell brings no background.
+            if glass and "[48;" not in style:
+                style = style + glass if style else glass
+            # A space shows no color, so it rides in whichever segment precedes
+            # it -- unless it carries a background, which is a color it shows.
+            bare = ch == " " and (style == glass if glass else "[48;" not in style)
+            if segments and (segments[-1][0] == style
+                             or (bare and (segments[-1][0].endswith(glass) if glass
+                                           else "[48;" not in segments[-1][0]))):
                 segments[-1] = (segments[-1][0], segments[-1][1] + ch)
             else:
                 segments.append((style, ch))
@@ -4488,7 +5486,7 @@ class _Stage:
         self.put(0, self.cols - len(SCENE_HINT) - 1, SCENE_HOLD_HINT, self.p.grey)
         for tick in range(frames):
             if self.cursor:
-                self.put(*self.cursor, "█" if tick % 6 < 3 else " ", self.p.phosphor)
+                self.put(*self.cursor, "█" if tick % 6 < 3 else " ", self.p.phosphor + self.band)
             self.snap()
 
 
@@ -4588,11 +5586,12 @@ def _tick_text(start: int, end: int, step: int, steps: int) -> str:
 # -- 1. Patch In: Root the Exchange ------------------------------------------------
 
 def root_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
+                      margin: int = 0,
                       handle: str = "", exchange_name: str = "", role: str = "pbx",
                       defender: str | None = None, kinds: list[str | None] | None = None,
                       index: int = 0, success: bool = True,
                       caption: str = "", sub: str = "") -> list[list[SplashOp]]:
-    st = _Stage(p, width, height, seed)
+    st = _Stage(p, width, height, seed, margin=margin)
     rng, large = st.rng, st.large
     kinds = list(kinds or [None] * 10)[:10] + [None] * max(0, 10 - len(kinds or []))
     defender_style = _holder_mark(p, defender)[1] if defender else p.grey
@@ -4712,9 +5711,10 @@ _BUST_LOG = ("CONNECT 14400", "> LIST /WAREZ", "XFER 0DAY.ZIP", "> WHO", "CARRIE
 
 
 def bust_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
+                      margin: int = 0,
                       cash_before: int = 0, cash_after: int = 0, crew_before: int = 1,
                       crew_after: int = 1, caption: str = "", sub: str = "") -> list[list[SplashOp]]:
-    st = _Stage(p, width, height, seed)
+    st = _Stage(p, width, height, seed, margin=margin)
     rng, large = st.rng, st.large
     if large:
         mon = (3, 14, 14, st.cols - 15)
@@ -4791,9 +5791,10 @@ def bust_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
 # -- 3. Raid ---------------------------------------------------------------------------
 
 def raid_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0, handle: str = "",
+                      margin: int = 0,
                       target: str = "", success: bool = True, amount: int = 0, crew: int = 1,
                       crew_lost: int = 0, caption: str = "", sub: str = "") -> list[list[SplashOp]]:
-    st = _Stage(p, width, height, seed)
+    st = _Stage(p, width, height, seed, margin=margin)
     large = st.large
     if large:
         lb, rb, line_row, stamp_row = (4, 2, 11, 24), (4, st.cols - 26, 11, st.cols - 4), 7, 14
@@ -4867,8 +5868,9 @@ def raid_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0, han
 # -- 4. Fed Crackdown ----------------------------------------------------------------
 
 def crackdown_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
+                           margin: int = 0,
                            season_number: int = 1, caption: str = "", sub: str = "") -> list[list[SplashOp]]:
-    st = _Stage(p, width, height, seed)
+    st = _Stage(p, width, height, seed, margin=margin)
     rng, large = st.rng, st.large
     kinds = [rng.choice(("mine", "rival", "rival", "npc", None)) for _ in range(10)]
     if large:
@@ -4938,9 +5940,10 @@ def _tier_word(text: str) -> list[str]:
 
 
 def tier_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0, handle: str = "",
+                      margin: int = 0,
                       old_tier: str = "", new_tier: str = "", rank: int = 0,
                       caption: str = "", sub: str = "") -> list[list[SplashOp]]:
-    st = _Stage(p, width, height, seed)
+    st = _Stage(p, width, height, seed, margin=margin)
     large = st.large
     names = [name for _, name in RANK_TIERS]
     old_i = names.index(old_tier) if old_tier in names else 0
@@ -4968,10 +5971,29 @@ def tier_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0, han
         st.snap()
         st.snap()
 
-    ramp = [_splash_rgb(p, (150, 255, 160), 120), _splash_rgb(p, (57, 255, 20), 82),
-            _splash_rgb(p, (28, 175, 36), 40)]
-    hot = _splash_rgb(p, (235, 255, 240), 231)
-    if use_font:
+    ramp = [p.tone((150, 255, 160), 120), p.tone((57, 255, 20), 82),
+            p.tone((28, 175, 36), 40)]
+    hot = p.tone((235, 255, 240), 231)
+    if use_font and not _ASCII_DECOR:
+        # The new tier in lit phosphor pixels (#24): the beam writes it across,
+        # then passes down it once.
+        mask = mask_from_rows(word)
+        lit = pixel_cells(p, phosphor_logo(mask, glow=False))
+        flare = pixel_cells(p, phosphor_logo(mask, glow=False, hot=0.7))
+        w = max(len(row) for row in lit)
+        left = word_lo + max(0, (st.cols - word_lo - w) // 2)
+        for end in range(0, w + 6, 6):
+            for r, (row, hot_row) in enumerate(zip(lit, flare)):
+                st.cells(word_row + r, left, row[:max(0, end - 6)])
+                st.cells(word_row + r, left + max(0, end - 6), hot_row[max(0, end - 6):end])
+            st.snap()
+        for r, row in enumerate(lit):
+            st.cells(word_row + r, left, row)
+        for sweep in range(len(lit) + 1):
+            for r, (row, hot_row) in enumerate(zip(lit, flare)):
+                st.cells(word_row + r, left, hot_row if r == sweep else row)
+            st.snap()
+    elif use_font:
         w = len(word[0])
         left = word_lo + max(0, (st.cols - word_lo - w) // 2)
         for end in range(0, w + 6, 6):
@@ -5006,10 +6028,11 @@ def tier_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0, han
 # -- 6 and 7. Contract hacks, and an operation's execution ---------------------------
 
 def hack_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0, handle: str = "",
+                      margin: int = 0,
                       contract: int = 0, approach: int = 1, success: bool = True, payout: int = 0,
                       crew_lost: int = 0, operation: bool = False,
                       caption: str = "", sub: str = "") -> list[list[SplashOp]]:
-    st = _Stage(p, width, height, seed)
+    st = _Stage(p, width, height, seed, margin=margin)
     rng, large = st.rng, st.large
     win = (2, 4, 17, st.cols - 5) if large else (1, 1, 9, st.cols - 2)
     inner = win[3] - win[1] - 3
@@ -5117,9 +6140,10 @@ def hack_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0, han
 # -- 8. Messages Waiting -----------------------------------------------------------------
 
 def messages_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
+                          margin: int = 0,
                           actors: list[str] | None = None, count: int = 0,
                           caption: str = "", sub: str = "") -> list[list[SplashOp]]:
-    st = _Stage(p, width, height, seed)
+    st = _Stage(p, width, height, seed, margin=margin)
     large = st.large
     actors = actors or []
     machine = (3, 12, 15, st.cols - 13) if large else (1, 3, 8, st.cols - 4)
@@ -5174,10 +6198,12 @@ def messages_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
 # -- 9. Cracktro: a medal's season ---------------------------------------------------
 
 def cracktro_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
+                          margin: int = 0,
                           season_number: int = 1, podium: list[tuple[str, str, int]] | None = None,
                           handle: str = "", placement: int = 1,
                           caption: str = "", sub: str = "") -> list[list[SplashOp]]:
-    st = _Stage(p, width, height, seed)
+    # A cracktro is played on the void, not the glass: its stars need black.
+    st = _Stage(p, width, height, seed, margin=margin, glass=False)
     rng, large = st.rng, st.large
     podium = podium or []
     logo = _splash_word(_SPLASH_FONT_SMALL, "WAR DIALER", 1, 2)
@@ -5185,7 +6211,7 @@ def cracktro_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
     logo_c = max(0, (st.cols - len(logo[0])) // 2)
     pod_rows = [6, 7, 8] if large else [5, 6, 7]
     band = (12, 15) if large else (8, 9)
-    busy = set(range(logo_row, logo_row + 3)) | set(pod_rows) | set(range(band[0], band[1] + 1))
+    busy = set(range(logo_row, logo_row + 4)) | set(pod_rows) | set(range(band[0], band[1] + 1))
     free_rows = [r for r in range(1, st.rows - 3) if r not in busy]
     stars = [[rng.choice(free_rows), rng.uniform(0, st.cols - 1), rng.choice((0.5, 1.0, 2.0))]
              for _ in range(14 if large else 6)] if free_rows else []
@@ -5197,16 +6223,31 @@ def cracktro_scene_frames(p: Palette, width: int, height: int, *, seed: int = 0,
               "WAR DIALER RULEZ THE EXCHANGES   ***   ")
     amp = band[1] - band[0]
     frames = 44 if large else 36
+    # Where the logo can be pixels (#24): the masthead's letters in a copper
+    # rainbow, drawn once. Recoloring pixel cells every frame would cost more
+    # wire than the whole scene is allowed.
+    pixel_logo = None
+    if large and not _ASCII_DECOR and p.surfaces:
+        mask = mast_mask()
+        rainbow = [[(ramp([(57, 255, 20), (56, 214, 255), (255, 60, 170), (255, 176, 0)],
+                          x / max(1, len(mask[0]) - 1)) if on else None) for x, on in enumerate(row)]
+                   for row in mask]
+        pixel_logo = pixel_cells(p, [[mix(px, (255, 255, 255), 0.35 if y == 0 else 0) if px else None
+                                      for px in row] for y, row in enumerate(rainbow)])
+        logo_c = max(0, (st.cols - len(pixel_logo[0])) // 2)
+        for r, row in enumerate(pixel_logo):
+            st.cells(logo_row + r, logo_c, row)
     for tick in range(frames):
         for star in stars:
             st.put(star[0], int(star[1]), " ")
             star[1] = (star[1] - star[2]) % (st.cols - 1)
             st.put(star[0], int(star[1]), "·" if star[2] < 1 else "∙" if star[2] < 2 else "*",
                    p.grey if star[2] < 2 else p.ink)
-        for r, line in enumerate(logo):
-            for c, ch in enumerate(line):
-                if ch != " ":
-                    st.put(logo_row + r, logo_c + c, ch, cycle[(c // 4 + tick // 3) % len(cycle)])
+        if pixel_logo is None:  # a pixel logo is drawn once, above
+            for r, line in enumerate(logo):
+                for c, ch in enumerate(line):
+                    if ch != " ":
+                        st.put(logo_row + r, logo_c + c, ch, cycle[(c // 4 + tick // 3) % len(cycle)])
         for k, (medal, who, score) in enumerate(podium[:3]):
             if tick >= 4 + 4 * k:
                 who = _fit(_event_plain(who), 17)
@@ -5242,6 +6283,7 @@ def outcome_scenes(p: Palette, player: Player | None, delta: ActionDelta, busted
         seed = _scene_seed(player.handle, player.season_number, player.turns_used, "bust")
         composers.append(lambda: bust_scene_frames(
             p, width, height, seed=seed, cash_before=player.cash - delta.cash, cash_after=player.cash,
+            margin=_MARGIN,
             crew_before=max(1, player.crew - delta.crew), crew_after=player.crew,
             caption="*** BUSTED *** Heat reset to 0", sub=headlines[-1] if headlines else ""))
     elif scene is not None:
@@ -5253,6 +6295,7 @@ def outcome_scenes(p: Palette, player: Player | None, delta: ActionDelta, busted
             seed = _scene_seed(player.handle, player.season_number, after, "tier")
             composers.append(lambda: tier_scene_frames(
                 p, width, height, seed=seed, handle=player.handle, old_tier=tier_name(before),
+                margin=_MARGIN,
                 new_tier=tier_name(after), rank=after,
                 caption=f"Promoted: {tier_name(after)}",
                 sub=f"Rank {after:,}, up from {tier_name(before)}"))
@@ -5306,8 +6349,13 @@ def draw_title(p: Palette, info: dict, season_number: int, w: int) -> None:
         return
     out_line()
     inner = _panel_width(p, w)
-    rows = [
-        center(sty(p.amber + BOLD, _fit("W A R   D I A L E R", inner)), inner),
+    if wordmark_fits(p, inner):
+        # The splash's phosphor, in the masthead's own letters (#24): the
+        # identity no longer stops at the splash, or is absent without one.
+        mark = [center(row, inner) for row in wordmark_rows(p)]
+    else:
+        mark = [center(sty(p.amber + BOLD, _fit("W A R   D I A L E R", inner)), inner)]
+    rows = mark + [
         center(sty(p.mint, _fit("Rival crews. Ten exchanges. One scene.", inner)), inner),
         scanline(p, inner, trailing=badge(p, f"SEASON {season_number}")),
     ]
@@ -5364,7 +6412,7 @@ def show_event_history(
     # The login view acknowledges a page with any key *except* Back, which is the
     # only way to keep these receipts unread -- so it has to be on the screen.
     bar = ([sty(p.grey, "Press any key to continue..."),
-            sty(p.amber + BOLD, "[B]") + " " + sty(p.mint, "Back")
+            keycap(p, "B") + " " + sty(p.mint, "Back")
             + sty(p.grey, " keeps this page unread")]
            if unseen_only else key_bar(p, LOG_BAR, width, 1))
     body_rows = max(1, height - len(bar) - frame_cost(p, width))
@@ -5567,6 +6615,10 @@ def dashboard_cards(p: Palette, state: DashboardState, now: datetime,
         threshold, upcoming = RANK_TIERS[tier + 1]
         progress = meter(p, rank - RANK_TIERS[tier][0], max(1, threshold - RANK_TIERS[tier][0]), gauge)
         next_tier = sty(p.grey, "next ") + sty(p.cyan, _fit(upcoming, 16))
+        if tier and rank == RANK_TIERS[tier][0]:
+            # An empty bar on the very rank that earned a tier reads as no
+            # progress at all; say it is the new tier's first step instead.
+            next_tier = sty(p.phosphor + BOLD, "new tier") + " " + next_tier
     else:
         progress, next_tier = meter(p, 1, 1, gauge), sty(p.grey, "top tier")
     rank_row = compose([label_value(p, "rank", f"{rank:,}", style=p.mint) + " " + progress,
@@ -5580,7 +6632,10 @@ def dashboard_cards(p: Palette, state: DashboardState, now: datetime,
     operation = ("none" if not player.operation_stage else
                  _fit(JOBS[player.operation_contract][0], 22)
                  + (" - cased" if player.operation_stage == 1 else " - prepared"))
-    resources = (
+    # The wide console lays the same facts out as its own instrument column,
+    # so the stacked card is only composed for the layout that shows it.
+    console = state.scene and _panel_framed(p, width) and width >= CONSOLE_WIDTH
+    resources = [] if console else (
         compose([label_value(p, "CASH", f"${player.cash:,}", style=p.amber),
                  sty(p.grey, "HEAT") + " " + meter(p, player.heat, 100, gauge, climb=True)
                  + " " + sty(p.ink, f"{player.heat:.0f}"),
@@ -5605,13 +6660,51 @@ def dashboard_cards(p: Palette, state: DashboardState, now: datetime,
     cards: list[tuple[str, list[str]]] = []
     if reset:
         cards.append(("SEASON RESET", prose_card(p, reset, width)))
-    cards += [("", identity + rank_row), ("", resources)]
-    if state.scene:
-        ring = scene_map(p, state.scene, player.user_id, width)
-        legend = scene_legend(p, state.scene, player.user_id)
-        beside = compose([ring[0]] + legend, width)
-        cards.append(("THE SCENE",
-                      beside + ring[1:] if len(beside) == 1 else ring + compose(legend, width)))
+    if console:
+        # The wide console (Carrier Detect, #24): the crew's instruments down
+        # the left, the switch ring beside them, the same facts in the same
+        # words, one glance instead of two cards.
+        left_w = 44
+        right_w = width - left_w - 3
+        gauge_w = 18
+
+        def row(label: str, *chunks: str) -> list[str]:
+            return compose([sty(p.grey, label.ljust(6)) + " " + chunks[0], *chunks[1:]], left_w)
+
+        instruments = (
+            row("CASH", sty(p.amber + BOLD, f"${player.cash:,}"))
+            + row("HEAT", meter(p, player.heat, 100, gauge_w, climb=True) + " "
+                  + sty(p.ink, f"{player.heat:.0f}"), heat_chip(p, player))
+            + row("CREW", dots(p, player.crew, player.crew + posted) + " "
+                  + sty(p.ink, f"{player.crew:,} free"), sty(p.cyan, f"{posted:,} posted"))
+            + row("TURNS", pips(p, turns_left, TURNS_PER_DAY) + " "
+                  + sty(p.ink, f"{turns_left}/{TURNS_PER_DAY}"))
+            + compose([" " * 7 + refill], left_w)
+            + row("HOLD", dots(p, len(state.holdings), 10, cap=10) + " "
+                  + sty(p.ink, f"{len(state.holdings)}/10"),
+                  label_value(p, "income", f"${income:,}/hr", style=p.amber))
+            + compose([shield_chip(p, player, now),
+                       label_value(p, "NEW", f"{state.new_events}",
+                                   style=p.amber if state.new_events else p.grey)], left_w)
+            + compose([label_value(p, "OPS", operation, style=p.cyan),
+                       label_value(p, "KIT", f"{player.specialty or 'untrained'}"
+                                   f" / {player.support or 'empty'}", style=p.cyan)], left_w)
+        )
+        ring = switch_ring(p, state.scene, player.user_id, right_w) or compact_scene(
+            p, state.scene, player.user_id, right_w)
+        yield_row = compose([sty(p.grey, "yield") + " "
+                             + sparkline(p, [exchange.income_per_hour for exchange in state.scene])
+                             + " " + sty(p.amber, f"${sum(e.income_per_hour for e in state.scene):,}/hr")],
+                            right_w)
+        scene_rows = ring + [""] + [" " * 3 + yield_row[0]] if yield_row else ring
+        cards += [("", identity + rank_row),
+                  (Split("CREW", "THE SCENE", left_w), split_rows(p, instruments, scene_rows, left_w))]
+    else:
+        cards += [("", identity + rank_row), ("", resources)]
+    if state.scene and not console:
+        ring = (switch_ring(p, state.scene, player.user_id, width)
+                or compact_scene(p, state.scene, player.user_id, width))
+        cards.append(("THE SCENE", ring))
     cards.append(("FEED", feed(p, state.recent, width, limit=4)))
     cards.append(("ORDERS", prose_card(p, next_steps(state, now), width)))
     notes = [note for note in dashboard_notes(state, now) if note not in reset]
@@ -6316,12 +7409,13 @@ def territory_columns(width: int) -> tuple[list[str], str, list[str]]:
 
 
 def territory_cards(p: Palette, exchanges: list[Exchange], viewer_id: int | None,
-                    player: Player | None, width: int) -> list[tuple[str, list[str]]]:
-    """The scene as a ring and a table, with owner color on both."""
-    ring = scene_map(p, exchanges, viewer_id, width)
-    legend = scene_legend(p, exchanges, viewer_id)
-    beside = compose([ring[0]] + legend, width)
-    rows = beside + ring[1:] if len(beside) == 1 else ring + compose(legend, width)
+                    player: Player | None, width: int, *, roomy: bool = False) -> list[tuple[str, list[str]]]:
+    """The scene as a ring and a table, with owner color on both.
+
+    `roomy` -- a terminal with rows to spare -- gets the named switch ring
+    (#24); otherwise the compact map keeps the table on the same page."""
+    rows = ((switch_ring(p, exchanges, viewer_id, width) if roomy else None)
+            or compact_scene(p, exchanges, viewer_id, width))
     rows += compose([sty(p.grey, "yield") + " "
                      + sparkline(p, [exchange.income_per_hour for exchange in exchanges])
                      + " " + sty(p.amber, f"${sum(e.income_per_hour for e in exchanges):,}/hr")
@@ -6337,7 +7431,7 @@ def territory_cards(p: Palette, exchanges: list[Exchange], viewer_id: int | None
         mine = viewer_id is not None and exchange.controller_user_id == viewer_id
         action = exchange_action(p, exchange, viewer_id)
         cell = {
-            "key": (sty(p.amber + BOLD, f"[{key}]") if key else sty(p.grey, "[-]"))
+            "key": (keycap(p, key) if key else sty(p.grey, "[-]"))
                    + " " + sty(style + BOLD, glyph),
             "name": (exchange_short_name(exchange), style),
             "owner": (owner_label(exchange), style),
@@ -6518,7 +7612,7 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
         else:
             detail = None
             title = "THE SCENE"
-            cards = territory_cards(p, exchanges, viewer_id, player, inner)
+            cards = territory_cards(p, exchanges, viewer_id, player, inner, roomy=height >= 30)
             mine = sum(1 for exchange in exchanges
                        if viewer_id is not None and exchange.controller_user_id == viewer_id)
             held = f"yours {mine}/{len(exchanges)}"
@@ -6528,10 +7622,10 @@ def show_territory(p: Palette, conn: sqlite3.Connection, width: int, height: int
             # A run of digits is written as a range rather than listed: ten
             # bracketed keys spend two rows of a twelve-row terminal, and the
             # table's own first column already shows which number is which.
-            shown = ([sty(p.amber + BOLD, f"[{keys[0]}]") + sty(p.grey, "-")
-                      + sty(p.amber + BOLD, f"[{keys[-2]}]"),
-                      sty(p.amber + BOLD, f"[{keys[-1]}]")] if len(keys) > 4
-                     else [sty(p.amber + BOLD, f"[{key}]") for key in keys])
+            shown = ([keycap(p, keys[0]) + sty(p.grey, "-")
+                      + keycap(p, keys[-2]),
+                      keycap(p, keys[-1])] if len(keys) > 4
+                     else [keycap(p, key) for key in keys])
             inspect = compose([sty(p.grey, "inspect")] + shown, width, gap=" ")
         pages = paginate_cards(cards, max(1, height - len(inspect) - len(footer)
                                           - frame_cost(p, width)))
@@ -6917,15 +8011,21 @@ def confirm_action(p: Palette, conn: sqlite3.Connection, player: Player, action:
 
 def show_action_result(p: Palette, headlines: list[str], delta: ActionDelta, busted: bool,
                        width: int, height: int, *, player: Player | None = None,
-                       scene: Callable[[], list[list[SplashOp]]] | None = None) -> None:
+                       scene: Callable[[], list[list[SplashOp]]] | None = None,
+                       success: bool | None = None) -> None:
     """The receipt for a committed action. A scene for it -- the action's own,
     a bust in its place, a promotion after -- opens it when one may play;
-    otherwise the carrier sweep does."""
+    otherwise the carrier sweep does.
+
+    `success` is the roll the action already made, for the stamp at the top:
+    None for an action that had no roll to win or lose."""
     inner = _panel_width(p, max(1, width - 1))
     if not play_scenes(p, width, height, outcome_scenes(p, player, delta, busted, headlines,
                                                         width, height, scene)):
         resolve_sweep(p, inner, amount=max(0, delta.cash))
-    rows = prose_card(p, headlines, inner)
+    # The stamp costs rows, so only a terminal with rows to spare draws it.
+    stamp = outcome_stamp(p, success, busted, inner) if not p.fast and height >= 20 else []
+    rows = stamp + prose_card(p, headlines, inner)
     if not p.fast:
         rows += prose_rows(p, "Sirens cut through the carrier tone." if busted else
                            "A clean signal carries your crew's name across the boards."
@@ -6936,7 +8036,9 @@ def show_action_result(p: Palette, headlines: list[str], delta: ActionDelta, bus
                         _fit("*** BUSTED *** Heat reset; losses included below.", inner)))
 
     def signed(value: float, text: str) -> str:
-        return sty(p.phosphor if value > 0 else p.alarm if value < 0 else p.grey, text)
+        # What changed is lit; what did not recedes, so the eye lands on the
+        # turn's real consequences first.
+        return sty(p.phosphor + BOLD if value > 0 else p.alarm + BOLD if value < 0 else p.grey, text)
 
     net = compose([
         sty(p.grey, "CASH") + " " + signed(delta.cash, f"{'+' if delta.cash >= 0 else '-'}"
@@ -7014,7 +8116,7 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
     inner = _panel_width(p, width)
     entries: list[tuple[list[tuple[str, str]], str]] = []
     for key, (item, selectable) in zip(PICK_KEYS, rendered if rendered is not None else records):
-        marker = sty(p.amber + BOLD, f"[{key}]") if selectable else sty(p.grey, "[-]")
+        marker = keycap(p, key) if selectable else sty(p.grey, "[-]")
         if rendered is not None:
             body = list(item)
         else:
@@ -7055,7 +8157,7 @@ def pick_record_page(p: Palette, title: str, records: list[tuple[list[str], bool
         cards = (list(before) if index == 0 else []) + [
             (heading, [line for line, _ in pages[index]])]
         draw_frame(p, width, cards, title=title, trailing=note)
-        out_line(sty(p.grey, "pick ") + " ".join(sty(p.amber + BOLD, f"[{key}]") for key in keys)
+        out_line(sty(p.grey, "pick ") + " ".join(keycap(p, key) for key in keys)
                  if keys else sty(p.grey, "no choice on this page"))
         for row in bar[:-1]:
             out_line(row)
@@ -7206,10 +8308,12 @@ def do_operation(p: Palette, conn: sqlite3.Connection, player: Player, rng: rand
                  f"Execution failed. Recovery payout ${payout}; casing retained. Prepare again before retrying."]
         scene = lambda: hack_scene_frames(
             p, width, height, seed=_scene_seed(player.handle, player.season_number, player.turns_used, "operation"),
+            margin=_MARGIN,
             handle=player.handle, contract=choice.contract, approach=choice.approach, success=success,
             payout=payout, crew_lost=max(0, -delta.crew), operation=True, caption=lines[1], sub=name)
     show_action_result(p, lines, delta, busted, width, height, player=player,
-                       scene=scene if result is not None else None)
+                       scene=scene if result is not None else None,
+                       success=result[1] if result is not None else None)
     return True
 
 
@@ -7383,9 +8487,10 @@ def do_job(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
              f"Success! Gross payout ${payout}." if success else f"Job failed. Recovery payout ${payout}."]
     scene = lambda: hack_scene_frames(
         p, w, height, seed=_scene_seed(player.handle, player.season_number, player.turns_used, "job"),
+        margin=_MARGIN,
         handle=player.handle, contract=choice.contract, approach=choice.approach, success=success,
         payout=payout, crew_lost=max(0, -delta.crew), caption=lines[1], sub=lines[0])
-    show_action_result(p, lines, delta, busted, w, height, player=player, scene=scene)
+    show_action_result(p, lines, delta, busted, w, height, player=player, scene=scene, success=success)
     return True
 
 
@@ -7402,10 +8507,12 @@ def do_raid(p: Palette, conn: sqlite3.Connection, player: Player, now: datetime,
     headline = f"You hit {target.handle}; gross take ${amount}." if success else f"The raid on {target.handle} failed."
     scene = lambda: raid_scene_frames(
         p, w, height, seed=_scene_seed(player.handle, player.season_number, player.turns_used, "raid"),
+        margin=_MARGIN,
         handle=player.handle, target=target.handle, success=success, amount=amount, crew=player.crew,
         crew_lost=max(0, -delta.crew), caption=headline,
         sub=f"+{delta.rank} Rank" if success else f"{delta.crew:+} crew, {delta.cash:+,} cash")
-    show_action_result(p, [headline], delta, busted, w, height, player=player, scene=scene)
+    show_action_result(p, [headline], delta, busted, w, height, player=player, scene=scene,
+                       success=success)
     return True
 
 
@@ -7451,11 +8558,13 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
         kinds[index] = "mine"
     scene = lambda: root_scene_frames(
         p, w, height, seed=_scene_seed(player.handle, player.season_number, player.turns_used, "root"),
+        margin=_MARGIN,
         handle=player.handle, exchange_name=exchange.name, role=exchange.role,
         defender=None if defender == "free" else defender, kinds=kinds, index=index, success=success,
         caption=headline, sub=(f"+{delta.rank} Rank, ${exchange.income_per_hour}/hour" if success
                                else f"{delta.crew:+} crew, {delta.cash:+,} cash"))
-    show_action_result(p, [headline], delta, busted, w, height, player=player, scene=scene)
+    show_action_result(p, [headline], delta, busted, w, height, player=player, scene=scene,
+                       success=success)
     return True
 
 
@@ -7557,6 +8666,7 @@ def do_garrison(p: Palette, conn: sqlite3.Connection, player: Player, width: int
 def draw_season_change(p: Palette, season_number: int, width: int = 78, height: int = 24) -> None:
     play_scene(p, width, height, lambda: crackdown_scene_frames(
         p, width, height, seed=_scene_seed(season_number, "crackdown"), season_number=season_number,
+        margin=_MARGIN,
         caption=f"Fed crackdown: season {season_number} has started.",
         sub="Crews and exchanges have reset."))
     inner = _panel_width(p, max(1, width - 1))
@@ -7578,7 +8688,12 @@ def draw_goodbye(p: Palette, player: Player, w: int) -> None:
         return
     out_line()
     inner = _panel_width(p, w)
-    rows = [center(sty(p.amber + BOLD, "Carrier lost."), inner),
+    # The line drops the way a modem says it does (#24).
+    letters = _tier_word("NO CARRIER")
+    sign_off = ([center(row, inner) for row in pixel_rows(p, phosphor_logo(
+        mask_from_rows(letters), glow=False, shadow=False, tint="cyan"))]
+        if not _ASCII_DECOR and _dlen(letters[0]) + 2 <= inner else [])
+    rows = sign_off + [center(sty(p.amber + BOLD, "Carrier lost."), inner),
             center(label_value(p, "final rank", f"{rank:,}", style=p.mint) + "  "
                    + badge(p, _fit(tier_name(rank).upper(), 14)), inner)]
     draw_frame(p, w, [("", rows)])
@@ -7609,13 +8724,17 @@ def resolve_sweep(p: Palette, width: int, *, amount: int = 0) -> None:
         return
     span = max(6, min(24, width - 24))
     label = sty(p.grey, "carrier")
+    # Where backgrounds exist the bar is a signal meter resolving in half-cell
+    # steps, twice the frames in the same budget (Carrier Detect, #24).
+    steps = span * 2 if p.surfaces else span
     out(f"{ESC}[2J{ESC}[H")
     out_line()
-    for step in range(1, span + 1):
-        money = sty(p.amber + BOLD, f"${amount * step // span:,}") if amount else ""
-        out("\r  " + label + " " + sty(p.phosphor, gl("meter_on") * step)
-            + sty(p.phosphor_dim, gl("meter_off") * (span - step)) + "  " + money)
-        if _beat(MOTION_BUDGET_SECONDS / span, hand_back=False):
+    for step in range(1, steps + 1):
+        money = sty(p.amber + BOLD, f"${amount * step // steps:,}") if amount else ""
+        bar = (meter(p, step, steps, span) if p.surfaces else
+               sty(p.phosphor, gl("meter_on") * step) + sty(p.phosphor_dim, gl("meter_off") * (span - step)))
+        out("\r" + " " * _MARGIN + "  " + label + " " + bar + "  " + money)
+        if _beat(MOTION_BUDGET_SECONDS / steps, hand_back=False):
             break
     out_line()
 
@@ -7875,10 +8994,13 @@ def _main(argv=None) -> int:
     palette = Palette(truecolor=info.get("color_depth") == "truecolor",
                       color_depth=info.get("color_depth"))
     palette.default_ascii = info.get("unicode_style", True) is False or info.get("color_depth") == "none"
+    # NetBBS 7.43.0 says when a caller's font has no quarter blocks (NetBBS #1560).
+    if info.get("quadrants") is False or info.get("charset") in ("cp437", "ascii"):
+        palette.pixels = "half"
     # Node-wide, per the drop-file contract: NetBBS has no per-caller timezone.
     apply_timezone(info.get("timezone"))
     _OUTPUT_WIDTH, height = terminal_size(info)
-    w = min(78, _OUTPUT_WIDTH)
+    w = apply_layout(_OUTPUT_WIDTH)
 
     if _OUTPUT_WIDTH < MINIMUM_WIDTH or height < MINIMUM_HEIGHT:
         # The reason has to survive the screen it is about, in both directions:
@@ -7964,7 +9086,7 @@ def _main(argv=None) -> int:
             if (size := take_resize()) is not None:
                 # Also a resize that arrived while another screen was open.
                 _OUTPUT_WIDTH, height = size
-                w, page_index = min(78, _OUTPUT_WIDTH), 0
+                w, page_index = apply_layout(_OUTPUT_WIDTH), 0
             page_index, page_count = draw_dashboard(palette, state, screen_now, w, height, page_index)
             # Always recognize action keys: a displayed zero-turn snapshot
             # may sit idle past its refill. The transaction decides allowance.

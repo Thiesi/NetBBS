@@ -549,7 +549,7 @@ SHOWS: dict[str, dict[str, str]] = {
     "war_dialer": {
         # `painted` collapses runs of spaces, so the letter-spaced wordmark is
         # matched single-spaced; Fast mode draws no art and says it plainly.
-        "Masthead": {"*": "W A R D I A L E R", "fast": "WAR DIALER"},
+        "Masthead": {"*": "Rival crews", "fast": "WAR DIALER"},
         "Launch splash": "CONNECT 14400",
         "First visit": "FIRST VISIT",
         "While you were away": "WHILE YOU WERE AWAY",
@@ -1109,10 +1109,13 @@ def _screen_rows(running: "Door") -> list[str]:
 
     Only the last page it drew. A door does not clear between screens, so the
     whole conversation is still on the wire, and an entry read out of an earlier
-    screen would send the walk somewhere else entirely.
+    screen would send the walk somewhere else entirely. Voidrunner's canopy
+    turns a page under the same sky by drawing the new panel from the top left,
+    without a clear, so the page starts at the last move home.
     """
+    page = last_screen(running.read()).split("\x1b[H")[-1]
     rows = [re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", row).strip()
-            for row in last_screen(running.read()).replace("\r\n", "\n").split("\n")]
+            for row in page.replace("\r\n", "\n").split("\n")]
     opened = max((index for index, row in enumerate(rows) if row[:1] in ("\u256d", "+")), default=0)
     return [row.strip("\u2502\u2551|").strip() for row in rows[opened:]]
 
