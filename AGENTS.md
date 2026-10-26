@@ -173,6 +173,14 @@ The standing principle is:
 - **Actually run tests.** Prefer regression tests which demonstrably fail
   without the fix. Confirm scripted UI tests still reach the path their name
   claims after signature/menu changes.
+- **Targeted tests per PR, one full check per release.** Before a PR merges,
+  run the tests for what it touches: its own test files plus the modules that
+  import the changed code. Before a release, run the full check once on the
+  exact release tree, all merged PRs together: `pytest -n auto --dist
+  worksteal`, then `pytest -m timing_sensitive`. A failure there is fixed
+  before tagging, not after. Also run the full check on a PR that changes
+  shared machinery every test goes through (`tests/conftest.py`, the database
+  layer, migrations, `Session` output).
 - **Use real boundaries.** Real SQLite files/connections for transactions,
   real loopback sockets for transports, serialization and restart for Link
   state, and the deterministic multi-node harness for ordering/partition

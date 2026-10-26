@@ -979,7 +979,10 @@ python -m pytest tests/test_doors_runtime.py tests/test_doors_resize.py tests/te
 ```
 
 Choose the relevant command, rather than running both for unrelated changes.
-For the full suite, use `python -m pytest`. On Windows, a writable test temp
+For the full suite, use `python -m pytest -n auto --dist worksteal`, then
+`python -m pytest -m timing_sensitive` for the tests a parallel run skips.
+A PR needs its targeted tests; the full check runs once before each release
+(see `AGENTS.md`). On Windows, a writable test temp
 directory and `-p no:cacheprovider --basetemp=<path>` can avoid sandbox/temp
 permission problems. Use a disposable basetemp directory; pytest manages it.
 
