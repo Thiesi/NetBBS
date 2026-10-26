@@ -30,21 +30,30 @@ import unicodedata
 import zlib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-VERSION = "0.6.0"
+VERSION = "0.7.1"
 DT = 1 / 60
 GRAVITY = 1.62
 DRY_MASS = 900.0
 MAX_THRUST = 3600.0
 FUEL_FLOW = 1.2
 # The fleet: (name, dry mass kg, thrust N, tank as a share of the mission's,
-# degrees per tilt key, engine lag s, the rank level that unlocks it). The LM
-# is the baseline; the others fly the same missions differently.
+# degrees per tilt key, engine lag s, cooling, and what unlocks it: a rank
+# level or an achievement). The LM is the baseline; the others fly the same
+# missions differently. The Hopper's cold-gas thrusters never run dry: its
+# "tank" is how much heat they can take, regained at `cooling` a second while
+# they idle, and they cut out when it is spent until it is back to
+# OVERHEAT_RESUME of the whole.
 CRAFT = {
-    "lm": ("LM", DRY_MASS, MAX_THRUST, 1.0, 10, 0.0, 0),
-    "surveyor": ("SURVEYOR", 500.0, 2400.0, .75, 15, 0.0, 4),
-    "altair": ("ALTAIR", 1600.0, 4800.0, 1.25, 5, 0.6, 6),
+    "lm": ("LM", DRY_MASS, MAX_THRUST, 1.0, 10, 0.0, 0.0, 0),
+    "surveyor": ("SURVEYOR", 500.0, 2400.0, .75, 15, 0.0, 0.0, 4),
+    "altair": ("ALTAIR", 1600.0, 4800.0, 1.25, 5, 0.6, 0.0, 6),
+    "hopper": ("HOPPER", 300.0, 900.0, .3, 10, 0.0, 1.2, "every-limit"),
 }
+OVERHEAT_RESUME = .4
 TRACE_EVERY = 0.5
+# A rover rendezvous: park within ROVER_REACH m of the rover, but no nearer
+# than ROVER_CLEAR (its half width and the feet's), or the craft is on it.
+ROVER_REACH, ROVER_CLEAR = 20.0, 6.0
 
 
 class DoorError(Exception):
@@ -565,6 +574,10 @@ class Flight:
     # The engine follows the throttle with this time constant (s); 0: at once.
     lag: float = 0.0
     engine: float = field(default=0.0, repr=False, compare=False)
+    # Cold gas: the "fuel" is heat margin, regained this fast (per second, at
+    # idle) and weightless; spent, the thrusters cut out until it recovers.
+    cooling: float = 0.0
+    overheated: bool = False
     # (altitude, fuel) every TRACE_EVERY seconds, for the debrief's descent trace.
     trace: list = field(default_factory=list, repr=False, compare=False)
     # A hop's pads still to come after the lit one, the (vy, vx) of each
@@ -577,6 +590,10 @@ class Flight:
     liftoff: float | None = None
     # Other smooth sites; a landing on any is a landing on the pad.
     sites: tuple = ()
+    # A sample return: after landing, climb this far above the pad (0: none).
+    ascent: float = 0.0
+    # A rover rendezvous: where the rover is parked on the pad (None: none).
+    rover: float | None = None
     # Physics steps flown, and (step, throttle, angle) whenever the controls
     # change: with the mission, all a ghost needs to fly the run again.
     steps: int = field(default=0, repr=False, compare=False)
@@ -622,17 +639,21 @@ class Flight:
             self.terrain, pad = replace(self.terrain, pad=chosen), chosen
         if not all(pad.left <= x <= pad.right for x, _ in feet):
             reason = "Terrain strike: put both landing feet inside the lit pad."
+        elif self.rover is not None and abs(self.x - self.rover) < ROVER_CLEAR:
+            reason = "Rover strike: park beside the rover, not on it."
         elif abs(self.angle) > 10:
             reason = "Attitude: land within 10 degrees of upright."
         elif abs(self.vx) > 2:
             reason = "Sideways drift: reduce horizontal speed to 2 m/s or less."
         elif abs(self.vy) > 3:
             reason = "Hard impact: reduce vertical speed to 3 m/s or less."
-        elif self.pads:
-            # A hop: down on this pad, the next one lit. The craft stands upright
-            # on its feet until the engine lifts it.
+        elif self.pads or self.ascent:
+            # A hop: down on this pad, the next one lit. A sample return: down,
+            # and the ascent still to fly. The craft stands upright on its feet
+            # until the engine lifts it.
             self.touchdowns.append((self.vy, self.vx))
-            self.terrain, self.pads = replace(self.terrain, pad=self.pads[0]), self.pads[1:]
+            if self.pads:
+                self.terrain, self.pads = replace(self.terrain, pad=self.pads[0]), self.pads[1:]
             self.x, self.y, self.vx, self.vy, self.angle = (self.x, pad.height + 3.01, 0.0, 0.0, 0.0)
             self.resting = True
             return True
@@ -662,14 +683,14 @@ class Flight:
         for _ in range(steps):
             self.engine = (self.throttle if not self.lag else
                            self.engine + (self.throttle - self.engine) * min(1.0, h / self.lag))
-            burn = min(self.fuel, FUEL_FLOW * self.engine * h)
+            burn = 0.0 if self.overheated else min(self.fuel, FUEL_FLOW * self.engine * h)
             power = burn / (FUEL_FLOW * h)
-            acceleration = self.thrust * power / (self.dry_mass + self.fuel - burn / 2)
+            acceleration = self.thrust * power / (self.dry_mass + (0 if self.cooling else self.fuel - burn / 2))
             if self.resting:
                 self.angle = 0.0
                 if acceleration <= self.gravity:
                     # Not yet enough thrust to lift off: the engine burns, the craft stands.
-                    self.fuel -= burn
+                    self.spend(burn, power, h)
                     self.elapsed += h
                     continue
                 self.resting, self.liftoff = False, self.y - 3.01
@@ -684,20 +705,44 @@ class Flight:
             self.y += self.vy * h + ay * h * h / 2
             self.vx += ax * h
             self.vy += ay * h
-            self.fuel -= burn
+            self.spend(burn, power, h)
             self.elapsed += h
+            if self.ascent and self.touchdowns and self.y - 3 - self.terrain.pad.height >= self.ascent:
+                self.status, self.reason = "landed", "Ascent stage through the line. Samples on their way home."
+                return
             if self.x < 3 or self.x > 997 or self.y > 800:
                 self.status, self.reason = "crashed", "Flight corridor exceeded. Stay within 0-1000 m and below 800 m."
                 return
             if self.contact():
                 return
 
+    def met(self) -> bool:
+        """Whether a landing did what the mission asked: a rendezvous parks
+        near the rover. A safe landing too far off is not scored."""
+        return self.rover is None or abs(self.x - self.rover) <= ROVER_REACH
+
+    def touchdown(self) -> tuple[float, float]:
+        """The (vy, vx) the craft came down at: a sample return's last touchdown,
+        not its climb through the line. A crash is the impact itself."""
+        landed = self.status == "landed" and self.ascent and self.touchdowns
+        return self.touchdowns[-1] if landed else (self.vy, self.vx)
+
+    def spend(self, burn: float, power: float, h: float):
+        """Burn fuel; or, in cold gas, heat margin, which idling wins back."""
+        self.fuel -= burn
+        if self.cooling:
+            self.fuel = min(self.initial_fuel, self.fuel + self.cooling * (1 - power) * h)
+            if self.fuel <= 1e-9:
+                self.fuel, self.overheated = 0.0, True
+            elif self.overheated and self.fuel >= OVERHEAT_RESUME * self.initial_fuel:
+                self.overheated = False
+
     def score(self, difficulty: int = 1) -> int:
-        if self.status != "landed":
+        if self.status != "landed" or not self.met():
             return 0
-        # A hop scores its worst touchdown.
+        # A hop scores its worst touchdown; a sample return, its touchdowns, not the climb.
         precision = min(max(0, 1 - abs(vy) / 3) + max(0, 1 - abs(vx) / 2)
-                        for vy, vx in (*self.touchdowns, (self.vy, self.vx)))
+                        for vy, vx in (self.touchdowns if self.ascent else (*self.touchdowns, (self.vy, self.vx))))
         return round(difficulty * (1000 + 500 * self.fuel / self.initial_fuel + 250 * precision))
 
 
@@ -730,6 +775,10 @@ class Mission:
     sites: tuple = ()
     # A landmark on the ground: (x, label), such as Surveyor 3 beside Apollo 12.
     marker: tuple | None = None
+    # A sample return's ascent line, metres above the pad (0: none).
+    ascent: float = 0.0
+    # A rover rendezvous: the rover's place on the pad (None: none).
+    rover: float | None = None
 
     def launch(self) -> Flight:
         if self.difficulty == 0:
@@ -743,11 +792,11 @@ class Mission:
         for p in pads + sites:
             points.extend(((p.left, p.height), (p.right, p.height)))
         points.append((1000.0, 80.0))
-        _, dry_mass, thrust, _, tilt_step, lag, _ = CRAFT[self.craft]
+        _, dry_mass, thrust, _, tilt_step, lag, cooling, _ = CRAFT[self.craft]
         return Flight(Terrain(tuple(sorted(points)), pad), x=self.center + self.offset,
                       y=self.altitude, vx=self.drift, vy=self.sink, fuel=self.fuel, initial_fuel=self.fuel,
                       gravity=self.gravity, pads=pads[1:], dry_mass=dry_mass, thrust=thrust,
-                      tilt_step=tilt_step, lag=lag, sites=sites)
+                      tilt_step=tilt_step, lag=lag, cooling=cooling, sites=sites, ascent=self.ascent, rover=self.rover)
 
 
 # The day's three challenges, one in the manner of each chapter. Every setting
@@ -814,6 +863,28 @@ def hopped(mission: Mission, rng: random.Random) -> Mission:
                    relief=(min(floor, HOP_CEILING - 30), min(ceiling, HOP_CEILING)))
 
 
+# A sample return: land, then lift off through a line this high above the
+# pad (m), with this much more fuel (kg). Maria's daily at weekends.
+ASCENT_LINE, ASCENT_FUEL = (100, 140), 30
+ASCENT_BRIEFING = "Weekend sample return: land, then lift off through the ascent line."
+# A rover rendezvous: the rover parked this far (m) from the pad's centre.
+# Highlands' daily at weekends.
+ROVER_OFFSET = (10, 14)
+ROVER_BRIEFING = "Weekend rendezvous: park within 20 m of the rover, not on it."
+
+
+def sample_return(mission: Mission, rng: random.Random) -> Mission:
+    """The mission as a sample return: an ascent line, and fuel to climb to it."""
+    return replace(mission, description=ASCENT_BRIEFING, ascent=float(rng.randint(*ASCENT_LINE)),
+                   fuel=mission.fuel + ASCENT_FUEL)
+
+
+def rendezvous(mission: Mission, rng: random.Random) -> Mission:
+    """The mission as a rover rendezvous: the rover parked on the pad, off centre."""
+    rover = mission.center + rng.choice((-1, 1)) * rng.randint(*ROVER_OFFSET)
+    return replace(mission, description=ROVER_BRIEFING, rover=float(rover), marker=(rover, "ROVER"))
+
+
 def daily_missions(day: str, date_format: str = "%Y-%m-%d") -> tuple[Mission, ...]:
     """The day's three dailies. A pure function of the date: every node and
     every pilot flies the same three on the same day."""
@@ -824,8 +895,10 @@ def daily_missions(day: str, date_format: str = "%Y-%m-%d") -> tuple[Mission, ..
         rng = random.Random(f"lunar-lander/daily/{day}/{key}")
         mission = generated_mission(f"daily-{day}-{key}", f"{name} {stamp}", briefing, tuple(spans), rng,
                                     rng.random(), int(day.replace("-", "")) * 10 + n)
-        if weekend and key == "frontier":
-            mission = hopped(mission, random.Random(f"lunar-lander/daily/{day}/{key}/hop"))
+        if weekend:
+            # The weekend specials: a sample return, a rendezvous and a hop.
+            special = {"maria": sample_return, "highlands": rendezvous, "frontier": hopped}[key]
+            mission = special(mission, random.Random(f"lunar-lander/daily/{day}/{key}/{special.__name__}"))
         dailies.append(mission)
     return tuple(dailies)
 
@@ -882,10 +955,15 @@ HISTORIC = (
 
 
 def history_line(mission: Mission, flight: Flight) -> str:
-    """What the real crew did, beside what this pilot did, for the debrief."""
+    """What the real crew did, beside what this pilot did, for the debrief;
+    or how near the rover a rendezvous parked."""
     key = mission.key.split("@", 1)[0]
     if flight.status != "landed":
         return ""
+    if flight.rover is not None:
+        off = abs(flight.x - flight.rover)
+        return (f"Parked {off:.0f} m from the rover: a short walk." if flight.met() else
+                f"Down safely, but {off:.0f} m from the rover: no rendezvous, no score.")
     if key == "apollo11":
         left = hover_seconds(flight.fuel, flight.gravity, flight.dry_mass, flight.thrust)
         return f"Eagle landed after Houston's \"30 seconds\"; you had {left:.0f} s."
@@ -1116,9 +1194,11 @@ _CATALOGUE = (
         ("streak-7", "Week on the Moon", "SILVER", "Land a daily seven days running"),
         ("streak-30", "Moonstruck", "GOLD", "Land a daily thirty days running"),
         ("daily-gold", "Frontier Gold", "SILVER", "Gold on a Frontier daily"))),
-    ("HOPS", (
+    ("WEEKENDS", (
         ("hop", "Grasshopper", "BRONZE", "Land both pads of a hop"),
-        ("hop-gold", "Kangaroo", "SILVER", "Earn gold on a hop"))),
+        ("hop-gold", "Kangaroo", "SILVER", "Earn gold on a hop"),
+        ("sample-return", "Sample Return", "BRONZE", "Lift samples through the line"),
+        ("rendezvous", "Rendezvous", "BRONZE", "Park within 20 m of the rover"))),
     ("INSTRUMENTS", (
         ("ifr", "Blind Faith", "BRONZE", "Land on instruments alone"),
         ("ifr-gold", "Cross-Pointer", "SILVER", "Earn gold on instruments alone"))),
@@ -1127,7 +1207,8 @@ _CATALOGUE = (
         ("eagle", "The Eagle Has Landed", "GOLD", "Earn gold on Apollo 11"))),
     ("FLEET", (
         ("craft-surveyor", "Light Touch", "SILVER", "Earn gold in the Surveyor"),
-        ("craft-altair", "Heavy Lifter", "SILVER", "Earn gold in the Altair"))),
+        ("craft-altair", "Heavy Lifter", "SILVER", "Earn gold in the Altair"),
+        ("craft-hopper", "Cool Head", "GOLD", "Earn gold in the Hopper"))),
     ("GRAND TOUR", (
         ("grand-tour", "Grand Tour", "SILVER", "Land every ranked mission in one tour"),
         ("grand-slam", "Grand Slam", "GOLD", "Gold on every mission of one tour"))),
@@ -1140,7 +1221,8 @@ _CATALOGUE = (
         ("sim-10h", "Simulator Junkie", "BRONZE", "Spend ten hours in the simulator"))),
 )
 ACHIEVEMENTS = tuple(Achievement(key, name, tier, group, hint,
-                                 group == "SPECTACULAR CRASHES" or key in ("every-limit", "never-trained"))
+                                 group == "SPECTACULAR CRASHES"
+                                 or key in ("every-limit", "never-trained", "craft-hopper"))
                      for group, rows in _CATALOGUE for key, name, tier, hint in rows)
 ACHIEVEMENT = {achievement.key: achievement for achievement in ACHIEVEMENTS}
 # Counter thresholds: (counter, value, achievement).
@@ -1161,10 +1243,13 @@ def flight_log(mission: Mission, flight: Flight, outcome: str):
              "flight_seconds": flight.elapsed}
     if outcome != "landed":
         return added, {}, {}
-    pad = flight.terrain.pad
-    middle = sum(x for x, _ in flight.feet()) / 2
-    return added, {"softest": abs(flight.vy), "closest": abs(middle - (pad.left + pad.right) / 2)}, \
-        {"most_fuel": flight.fuel}
+    lowest = {"softest": abs(flight.touchdown()[0])}
+    if not flight.ascent:
+        # A sample return ends in the air: no foot position to measure.
+        pad = flight.terrain.pad
+        middle = sum(x for x, _ in flight.feet()) / 2
+        lowest["closest"] = abs(middle - (pad.left + pad.right) / 2)
+    return added, lowest, {"most_fuel": flight.fuel}
 
 
 def apply_log(counters: dict[str, float], added: dict, lowest: dict, highest: dict) -> dict[str, float]:
@@ -1186,9 +1271,14 @@ def flight_feats(mission: Mission, flight: Flight) -> set[str]:
     pad = flight.terrain.pad
     centre = (pad.left + pad.right) / 2
     feet = flight.feet()
-    vy, vx, tilt = abs(flight.vy), abs(flight.vx), abs(flight.angle) + 1e-9
+    vy, vx = (abs(v) for v in flight.touchdown())
+    tilt = abs(flight.angle) + 1e-9
     got = set()
-    if flight.status == "landed":
+    if flight.status == "landed" and flight.ascent:
+        # The craft is in the air: its touchdown's precision is in the score.
+        got.add("sample-return")
+        return got
+    elif flight.status == "landed":
         middle = sum(x for x, _ in feet) / 2
         for key, met in (("feather", vy < .3), ("no-drift", vx < .1), ("dead-centre", abs(middle - centre) <= 1),
                          ("fuel-miser", flight.fuel >= .75 * flight.initial_fuel), ("fumes", flight.fuel < 1),
@@ -1205,6 +1295,8 @@ def flight_feats(mission: Mission, flight: Flight) -> set[str]:
             got.add("ifr")
             if medal(mission, flight.score(mission.difficulty)) == "GOLD":
                 got.add("ifr-gold")
+        if flight.rover is not None and flight.met():
+            got.add("rendezvous")
         if flight.touchdowns:
             got.add("hop")
             if medal(mission, flight.score(mission.difficulty)) == "GOLD":
@@ -1322,9 +1414,18 @@ def daily_format(host: Host) -> str:
 
 
 class DailyClock:
-    """Calendar boundaries use the host's IANA zone, never a fixed UTC offset."""
-    def __init__(self, zone: str = "UTC", date_format: str = "%Y-%m-%d", now=None):
+    """Calendar boundaries use the host's IANA zone, never a fixed UTC offset.
+    `today` (DOOR_LL_TODAY, a testing and preview aid) pins the game's date:
+    the dailies and weekend specials follow it (and are filed under it), the
+    countdown keeps the time of day, and records keep real timestamps. A value that is not a YYYY-MM-DD date
+    is ignored."""
+    def __init__(self, zone: str = "UTC", date_format: str = "%Y-%m-%d", now=None, today: str | None = None):
         self.warning = ""
+        try:
+            self.today = date.fromisoformat(today).isoformat() if re.fullmatch(r"\d{4}-\d\d-\d\d", today or "") \
+                else None
+        except ValueError:
+            self.today = None
         try:
             self.zone = timezone.utc if zone == "UTC" else ZoneInfo(zone)
         except (ValueError, ZoneInfoNotFoundError):
@@ -1337,7 +1438,7 @@ class DailyClock:
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def day(self) -> str:
-        return self.now().astimezone(self.zone).date().isoformat()
+        return self.today or self.now().astimezone(self.zone).date().isoformat()
 
     def reset_note(self) -> str:
         """How long until the node's next midnight, when the dailies change."""
@@ -1425,7 +1526,7 @@ class Records:
                             (host.node, host.user, host.handle))
 
     def save(self, host: Host, mission: Mission, flight: Flight) -> bool:
-        if not host.ranked or not mission.difficulty or flight.status != "landed":
+        if not host.ranked or not mission.difficulty or flight.status != "landed" or not flight.met():
             return False
         try:
             self.db.execute("BEGIN IMMEDIATE")
@@ -2136,6 +2237,75 @@ LANDERS = {"small": (_sprite(_LANDER_SMALL, 4, 5), 3, 3, 4),
 LANDERS_FINE = {"small": (_sprite(_LANDER_SMALL_FINE, 8, 5), 3, 3, 4),
                 "medium": (_sprite(_LANDER_MEDIUM_FINE, 12, 6), 4, 3, 6),
                 "large": (_sprite(_LANDER_LARGE_FINE, 20, 8), 6, 6, 8)}
+# The rest of the fleet, at the flight sizes, on the LM's frame (the same
+# centre, foot row and plume start); quadrant art is each pixel twice across.
+_CRAFT_ART = {
+    "surveyor": {"small": ("....h....",
+                           "DDD.A.DDD",
+                           "....A....",
+                           "...sSs...",
+                           "..sSSSs..",
+                           "...gGg...",
+                           "..L.n.L..",
+                           ".L.....L.",
+                           "L.......L"),
+                 "medium": ("......h......",
+                            "DDDD..A..DDDD",
+                            "......A......",
+                            "......A......",
+                            ".....sSs.....",
+                            "....sSSSs....",
+                            "....sSSSs....",
+                            ".....gGg.....",
+                            "...L..n..L...",
+                            "..L.......L..",
+                            "PL.........LP")},
+    "altair": {"small": ("...sSs...",
+                         "..sWwSs..",
+                         "..sSSSs..",
+                         ".RsSSSsR.",
+                         ".kkkkkkk.",
+                         "GgGgGgGgG",
+                         "GGGGGGGGG",
+                         ".L.nNn.L.",
+                         "L.......L"),
+               "medium": ("....sSShs....",
+                          "...sSWwSSs...",
+                          "...sSSSSSs...",
+                          "..RsSSSSSsR..",
+                          "...sSSSSSs...",
+                          ".kkkkkkkkkkk.",
+                          "GGgGGgGGgGGgG",
+                          "GGGGGGGGGGGGG",
+                          ".Lkkk.N.kkkL.",
+                          "L...nNNNn...L",
+                          "PP.........PP")},
+    "hopper": {"small": (".........",
+                         ".........",
+                         ".........",
+                         ".........",
+                         "....h....",
+                         ".DsSSSsD.",
+                         ".DkkkkkD.",
+                         ".L.nNn.L.",
+                         "L.......L"),
+               "medium": (".............",
+                          ".............",
+                          ".............",
+                          ".............",
+                          "......h......",
+                          "......A......",
+                          "..DD.sSs.DD..",
+                          ".DDDsSSSsDDD.",
+                          "..DDkkkkkDD..",
+                          "...L.nNn.L...",
+                          "PPL.......LPP")},
+}
+CRAFT_SPRITES = {(craft, size, across): _sprite(rows if across == 1 else tuple("".join(ch * 2 for ch in row)
+                                                                                for row in rows),
+                                                 {"small": 4, "medium": 6}[size] * across,
+                                                 {"small": 5, "medium": 6}[size])
+                 for craft, sizes in _CRAFT_ART.items() for size, rows in sizes.items() for across in (1, 2)}
 _SUBSAMPLES = tuple((dx, dy) for dy in (-1 / 3, 0, 1 / 3) for dx in (-1 / 3, 0, 1 / 3))
 _ROLE_RANK = {role: n for n, role in enumerate("WwFYOXGgoSsdhLPNnkARD")}
 
@@ -2149,10 +2319,18 @@ def hover_seconds(fuel: float, gravity: float = GRAVITY, dry_mass: float = DRY_M
     return fuel / (FUEL_FLOW * min(1.0, gravity * (dry_mass + fuel) / thrust))
 
 
+def thruster_heat(flight: Flight) -> float:
+    """Cold gas: how hot the thrusters are, 0 cold to 1 cut out."""
+    return 1 - flight.fuel / max(1e-9, flight.initial_fuel)
+
+
 def fuel_alert(flight: Flight) -> int:
-    """0 while fuel is ample, 1 low, 2 critical and 3 empty, by the hover time left."""
-    if flight.fuel <= 0:
+    """0 while fuel is ample, 1 low, 2 critical and 3 empty, by the hover time
+    left; for cold gas, warm, hot and cut out."""
+    if flight.overheated or flight.fuel <= 0:
         return 3
+    if flight.cooling:
+        return 2 if thruster_heat(flight) >= .8 else 1 if thruster_heat(flight) >= .6 else 0
     left = hover_seconds(flight.fuel, flight.gravity, flight.dry_mass, flight.thrust)
     return 2 if left <= FUEL_CRITICAL_SECONDS else 1 if left <= FUEL_LOW_SECONDS else 0
 
@@ -2162,6 +2340,7 @@ def fuel_alert(flight: Flight) -> int:
 # sink and drift; the debrief quotes the word on how it ended.
 FUEL_CALLS = {1: f"{FUEL_LOW_SECONDS} seconds.", 2: f"{FUEL_CRITICAL_SECONDS} seconds.",
               3: "Fuel's out. Coast it in."}
+HEAT_CALLS = {1: "Thrusters warming.", 2: "Thrusters hot. Ease off.", 3: "Thrusters cut out. Let them cool."}
 LANDED_CALLS = ("Contact light. Engine stop.", "Roger, we copy you on the ground.",
                 "Copy, you're down. Nice and easy.")
 CRASH_CALLS = ("Houston, we've had a problem.", "We've lost the signal. Say again?")
@@ -2185,10 +2364,10 @@ def debrief_call(flight: Flight, mission: Mission, award=None) -> str:
             base = base_name(mission)
             call = f"Houston, {base} here. The Eagle has landed."
             return call if len(call) <= 56 else f"{base} here. The Eagle has landed."
-        if flight.fuel < .1 * flight.initial_fuel:
+        if flight.fuel < .1 * flight.initial_fuel and not flight.cooling:
             return "A bunch of guys about to turn blue. We're breathing again."
         return LANDED_CALLS[pick % len(LANDED_CALLS)]
-    if flight.fuel <= 0:
+    if flight.fuel <= 0 and not flight.cooling:
         return "Fuel exhausted. We've lost the signal."
     return CRASH_CALLS[pick % len(CRASH_CALLS)]
 
@@ -2316,6 +2495,15 @@ def flag_sprite(across: int = 1) -> dict:
     return sprite
 
 
+def rover_sprite(across: int = 1) -> dict:
+    """A parked rover, wheels on the ground at (0, 0): body, mast and dish."""
+    body, wheel, dish = (206, 208, 216), (84, 86, 96), (232, 186, 70)
+    sprite = {(dx, -1): (wheel, "o") for dx in range(-2 * across, 3 * across) if (dx // across) % 2 == 0}
+    sprite.update({(dx, -2): (body, "=") for dx in range(-2 * across, 3 * across)})
+    sprite.update({(across, -3): (body, "|"), (across, -4): (dish, "o")})
+    return sprite
+
+
 def base_name(mission: Mission) -> str:
     """Where a landing put the crew: "Tranquility Base", or a daily's manner's."""
     name = mission.name.removesuffix(" IFR").removesuffix(" " + CRAFT[mission.craft][0])
@@ -2350,15 +2538,16 @@ def descent_trace(flight: Flight, width: int, blocks: bool = True) -> list[str]:
 
 
 def lander_roles(angle: float, throttle: float = 0, phase: float = 0,
-                 size: str = "small", across: int = 1) -> dict[tuple[int, int], str]:
+                 size: str = "small", across: int = 1, craft: str = "lm") -> dict[tuple[int, int], str]:
     """Hull, legs and plume as roles, rotated together in square-pixel space.
 
     Each target pixel takes the role most of its nine subsamples land on in the
     upright sprite, so a tilted hull keeps its shape and has no holes, and a
     symmetric hull stays mirror-symmetric when tilted. With `across` 2 the
-    pixels are half as wide (quadrants) and the craft is its fine art."""
+    pixels are half as wide (quadrants) and the craft is its fine art. Other
+    craft than the LM have their own art at the flight sizes."""
     roles, _, start, reach_full = (LANDERS_FINE if across == 2 else LANDERS)[size]
-    roles = dict(roles)
+    roles = dict(CRAFT_SPRITES.get((craft, size, across), roles))
     # The plume's core and its flanks, in this grid's columns.
     core, flanks = ((0,), (-1, 1)) if across == 1 else ((0, 1), (-1, 2))
     if throttle > 0:
@@ -2393,13 +2582,13 @@ def lander_roles(angle: float, throttle: float = 0, phase: float = 0,
 
 
 def lander_sprite(angle: float, throttle: float = 0, phase: float = 0, size: str = "small",
-                  across: int = 1) -> dict:
+                  across: int = 1, craft: str = "lm") -> dict:
     """The lander as (color, glyph) pixels. The flight sizes are lit from the
     left after rotation, so their shading stays put as they tilt; the large one
     carries its own."""
     sprite = {}
     edge = 1 if size == "small" else 2
-    for (x, y), role in lander_roles(angle, throttle, phase, size, across).items():
+    for (x, y), role in lander_roles(angle, throttle, phase, size, across, craft).items():
         color = LANDER_COLORS[role]
         if size != "large" and role not in "Ww" + _FLAME:
             u = _centre(x, across)
@@ -3334,10 +3523,13 @@ class Display:
             # contact light), a crash's under the reason it ended.
             call = debrief_call(flight, mission, self.deck.award)
             call = f'CAPCOM: "{call}"' if len(call) <= 50 else f'"{call}"'
-            lines = ["CONTACT LIGHT / LANDED" if landed else "SIGNAL LOST / LANDER DOWN",
+            touch_vy, touch_vx = flight.touchdown()
+            lines = [("ASCENT / SAMPLES ABOARD" if flight.ascent else "CONTACT LIGHT / LANDED") if landed
+                     else "SIGNAL LOST / LANDER DOWN",
                      "", *((call,) if landed else (flight.reason, call)), "",
-                     f"Vertical {flight.vy:+.2f} m/s | Drift {flight.vx:+.2f} m/s | Tilt {flight.angle:+.0f}",
-                     f"Fuel remaining {flight.fuel:.1f} kg | Flight time {flight.elapsed:.1f}s", ""]
+                     f"Vertical {touch_vy:+.2f} m/s | Drift {touch_vx:+.2f} m/s | Tilt {flight.angle:+.0f}",
+                     (f"Thrusters at {thruster_heat(flight) * 100:.0f}% heat" if flight.cooling else
+                      f"Fuel remaining {flight.fuel:.1f} kg") + f" | Flight time {flight.elapsed:.1f}s", ""]
             trace_at = len(lines) - 1
             award = self.deck.award
             if landed and award is not None and award.mission.key == mission.key:
@@ -3379,8 +3571,9 @@ class Display:
             if landed and ghost is not None and ghost.status == "landed" and len(lines) < c.height - 4:
                 seconds, kg = flight.elapsed - ghost.elapsed, flight.fuel - ghost.fuel
                 lines.insert(trace_at, f"Against the ghost: {abs(seconds):.1f} s "
-                                       f"{'slower' if seconds > 0 else 'faster'}, {abs(kg):.1f} kg "
-                                       f"{'more' if kg >= 0 else 'less'} fuel")
+                                       f"{'slower' if seconds > 0 else 'faster'}"
+                                       + ("" if flight.cooling else
+                                          f", {abs(kg):.1f} kg {'more' if kg >= 0 else 'less'} fuel"))
         elif mode == "presets":
             view = self.deck.program or ProgramView()
             lines = [f"NEW PROGRAM / SEASON {view.season}", "",
@@ -3564,7 +3757,8 @@ class Display:
             c.rich(rx + rw - width, top, switches, PANEL)
         for n, line in enumerate(textwrap.wrap(mission.description, rw)[:told]):
             c.text(rx, top + 1 + n, line, 7, PANEL)
-        stats = (("PAD", f"{mission.width:.0f} m"), ("FUEL", f"{mission.fuel:.0f} kg"),
+        stats = (("PAD", f"{mission.width:.0f} m"),
+                 ("FUEL", "cold gas" if CRAFT[mission.craft][6] else f"{mission.fuel:.0f} kg"),
                  ("START", f"{mission.altitude:.0f} m"), ("DRIFT", f"{mission.drift:+.0f} m/s"))
         stats_row = top + 1 + told
         for n, (label, value) in enumerate(stats):
@@ -3865,15 +4059,18 @@ class Display:
             gx = round((ghost.x - left) / step - (across - 1) / 2)
             gy = row_of(ghost.y - 3) - 1 - LANDERS[size][1]
             shade = {k: (GHOST_COLOR, glyph) for k, (_, glyph) in
-                     lander_sprite(ghost.angle, 0, 0, size, across).items()}
+                     lander_sprite(ghost.angle, 0, 0, size, across, mission.craft).items()}
             sprites.append(({(dx, dy): v for (dx, dy), v in shade.items()
                              if 0 <= gx + dx < px_w and 0 <= gy + dy < ground_row[gx + dx]}, gx, gy))
+        if flight.rover is not None:
+            rx = round((flight.rover - left) / step - (across - 1) / 2)
+            sprites.append((rover_sprite(across), rx, row_of(ground.height(flight.rover))))
         if flight.status == "crashed":
             sprites.append((explosion(1.6, 4, 9, across), sx,
                             min(px_h - 1, row_of(ground.height(flight.x)) - 1)))
         else:
-            power = flight.throttle if flight.fuel > 0 and flight.status == "flying" else 0
-            craft = lander_sprite(flight.angle, power, flight.elapsed, size, across)
+            power = flight.throttle if flight.fuel > 0 and not flight.overheated and flight.status == "flying" else 0
+            craft = lander_sprite(flight.angle, power, flight.elapsed, size, across, mission.craft)
             sprites.append(({(dx, dy): v for (dx, dy), v in craft.items()
                              if not 0 <= sx + dx < px_w or sy + dy < ground_row[sx + dx]}, sx, sy))
             gap_m = altitude
@@ -3910,6 +4107,14 @@ class Display:
             if self.frame % 6 < 4:
                 c.text(max(0, (c.width - len(alarm) - 4) // 2), view_y + 3, f"  {alarm}  ", (16, 12, 22),
                        (255, 186, 60))
+        if flight.ascent:
+            # A sample return's ascent line, across the sky above the pad.
+            line_row = view_y + row_of(flight.terrain.pad.height + 3 + flight.ascent) // 2
+            if view_y <= line_row < view_y + view_h:
+                dashes = ("╌" if unicode else "-") * width
+                c.text(0, line_row, dashes, 9 if flight.touchdowns else 12, None)
+                label = " ASCENT LINE "
+                c.text(max(0, (width - len(label)) // 2), line_row, label, 9 if flight.touchdowns else 12, None)
         for n, ahead in enumerate(flight.pads, 2):
             # A hop's pads to come: named by their order, not yet lit.
             middle = round(((ahead.left + ahead.right) / 2 - left) / (metres / across))
@@ -3936,8 +4141,9 @@ class Display:
         if lit:
             seconds = f"{hover_seconds(flight.fuel, flight.gravity, flight.dry_mass, flight.thrust):.0f} S HOVER LEFT"
             dot = "  ·  " if self.host.unicode else "  -  "
-            text = {1: "LOW FUEL" + dot + seconds, 2: "FUEL CRITICAL" + dot + seconds,
-                    3: "FUEL EXHAUSTED"}[level]
+            text = ({1: "THRUSTERS WARM", 2: "THRUSTERS HOT" + dot + "EASE OFF", 3: "OVERHEATED" + dot + "COASTING"}
+                    if flight.cooling else
+                    {1: "LOW FUEL" + dot + seconds, 2: "FUEL CRITICAL" + dot + seconds, 3: "FUEL EXHAUSTED"})[level]
             color = (255, 186, 60) if level == 1 else rgb(8)
             c.text(max(0, (c.width - len(text) - 4) // 2), row, f"  {text}  ", (16, 12, 22), color)
         return level >= 2 and lit
@@ -3991,14 +4197,17 @@ class Display:
             return
         if len(flight.touchdowns) > state[5]:
             state[5] = len(flight.touchdowns)
-            state[1], state[2] = "Contact. Lift off for the next pad when ready.", flight.elapsed + 4
+            state[1] = ("Contact. Samples aboard: lift off through the line." if flight.ascent else
+                        "Contact. Lift off for the next pad when ready.")
+            state[2] = flight.elapsed + 4
             state[3] = fuel_alert(flight)  # the hop's own call, not a stale fuel one
         level = fuel_alert(flight)
         if level != state[3]:
             state[3] = level
             if level in FUEL_CALLS:
-                state[1], state[2] = FUEL_CALLS[level], flight.elapsed + 3
+                state[1], state[2] = (HEAT_CALLS if flight.cooling else FUEL_CALLS)[level], flight.elapsed + 3
         elif (altitude < RADIO_LOW and flight.elapsed >= state[2] and not flight.resting
+              and not (flight.ascent and flight.touchdowns)
               and flight.elapsed - state[4] >= RADIO_EVERY):
             state[1], state[2], state[4] = altitude_call(altitude, flight), flight.elapsed + 2.5, flight.elapsed
         if state[1] and flight.elapsed < state[2]:
@@ -4051,6 +4260,10 @@ class Display:
                    abs(flight.vy) / 6, rgb(8) if fast else rgb(6), .5),
                   ("DRIFT", [(f"{flight.vx:+6.1f} m/s", 8 if sliding else 6)] + ([(" WIDE", 8)] if sliding else []),
                    abs(flight.vx) / 4, rgb(8) if sliding else rgb(6), .5),
+                  ("HEAT", [(f"{thruster_heat(flight) * 100:5.0f} %", 8 if low else 5)]
+                   + ([(" CUT OUT" if flight.overheated else " HOT" if fuel_alert(flight) == 2 else " WARM", 8)]
+                      if low else []),
+                   thruster_heat(flight), mix(rgb(5), rgb(8), thruster_heat(flight)), None) if flight.cooling else
                   ("FUEL", [(f"{flight.fuel:5.1f} kg", 8 if low else 5)]
                    + ([(" EMPTY" if flight.fuel <= 0 else " LOW", 8)] if low else []),
                    flight.fuel / max(1, flight.initial_fuel),
@@ -4380,9 +4593,11 @@ class Game:
         return {"doing": "idle"}
 
     def fleet(self) -> list[str]:
-        """The craft this pilot's rank has unlocked, the LM first."""
+        """The craft this pilot's rank (or, for the Hopper, a hidden
+        achievement) has unlocked, the LM first."""
         level = self.career().level
-        return [key for key, (*_, needed) in CRAFT.items() if level >= needed]
+        return [key for key, (*_, needed) in CRAFT.items()
+                if (needed in self.held if isinstance(needed, str) else level >= needed)]
 
     def variant(self, mission: Mission) -> Mission:
         """The mission as the briefing's switches would fly it."""
@@ -4836,7 +5051,9 @@ class Game:
             if self.flight.status != "flying":
                 saved = False
                 self.award, self.queue = None, []
-                if self.flight.status == "landed" and self.mission.difficulty and self.records and self.host.ranked:
+                if self.flight.status == "landed" and not self.flight.met():
+                    self.record_note = "No rendezvous with the rover: not scored"
+                elif self.flight.status == "landed" and self.mission.difficulty and self.records and self.host.ranked:
                     try:
                         best = self.records.save(self.host, self.mission, self.flight)
                         saved = True
@@ -4844,7 +5061,7 @@ class Game:
                     except sqlite3.Error as exc:
                         self.record_note = "Landing not saved: storage error. Ask your SysOp."
                         print("Lunar Lander records: " + plain(str(exc), 160), file=sys.stderr)
-                if self.flight.status == "landed" and self.mission.difficulty:
+                if self.flight.status == "landed" and self.mission.difficulty and self.flight.met():
                     self.award = self.reward()
                     self.queue = ["medal"] * bool(self.award.medal) + ["promotion"] * bool(self.award.promoted)
                     if saved and self.announcer is not None:
@@ -4932,7 +5149,7 @@ def run(host: Host, started: float) -> int:
             records = Records(root / "pilots.db")
         except DoorError as exc:
             print("Lunar Lander: " + plain(str(exc), 200), file=sys.stderr)
-    clock = DailyClock(host.timezone, daily_format(host))
+    clock = DailyClock(host.timezone, daily_format(host), today=os.environ.get("DOOR_LL_TODAY"))
     if clock.warning:
         print("Lunar Lander: " + clock.warning, file=sys.stderr)
     game = Game(host, records, clock=clock, scenes=os.environ.get("DOOR_LL_SCENES") != "0",

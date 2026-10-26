@@ -442,6 +442,12 @@ that dies leaves its file to go stale. These files are not records, and backups
 leave them out. `DOOR_LL_LIVE=0` in the door's profile environment turns this
 off.
 
+`DOOR_LL_TODAY=YYYY-MM-DD` pins the game's date, so the dailies, the weekend
+specials and the Program season follow it. It is a testing and preview aid,
+not a setting for a live node: dailies flown while it is set are filed under
+the pinned date, in the bests, the board, the ghosts and the streaks. An
+invalid value is ignored.
+
 | | |
 | --- | --- |
 | **Location** | `<database>.doors/lunar_lander/pilots.db`, beside War Dialer's world |
