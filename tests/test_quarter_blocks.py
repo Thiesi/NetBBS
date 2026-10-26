@@ -298,3 +298,23 @@ def test_a_session_starts_with_quarter_blocks():
 
 async def _async_telnet():
     return _telnet(UTF8)
+
+
+@pytest.mark.parametrize(("charset", "expected"), [
+    ("cp437", "Auto (off: CP437 has none)"),
+    ("ascii", "Auto (off: ASCII has none)"),
+])
+def test_the_profile_says_a_cp437_or_ascii_caller_gets_none(charset, expected):
+    """ReLink's check of v7.43.0: a SyncTERM caller read "Auto (now on)"."""
+    from netbbs.net.profile_flow import _quadrant_label
+
+    session = SimpleNamespace(output_charset=charset, quadrant_blocks=True)
+    assert _quadrant_label("auto", session) == expected
+
+
+def test_the_profile_label_on_a_unicode_terminal_keeps_its_sample():
+    from netbbs.net.profile_flow import _quadrant_label
+
+    session = SimpleNamespace(output_charset="utf-8", quadrant_blocks=False)
+    assert _quadrant_label("auto", session) == "Auto (now off: PuTTY detected)  ▗▟█▙▖"
+    assert _quadrant_label("on", None) == "On  ▗▟█▙▖"

@@ -1307,6 +1307,13 @@ def _quadrant_label(preference: str, session: Session | None) -> str:
     """The Quarter blocks value (issue #1560), with a sample of them so a
     caller can see whether their font has them. `session` as for
     `_charset_label`."""
+    charset = getattr(session, "output_charset", "utf-8") if session is not None else "utf-8"
+    if charset != "utf-8":
+        # CP437 and ASCII have no quarter blocks, whatever the setting says,
+        # and a sample would only show their substitutes (ReLink check of
+        # v7.43.0): say why it is off, and that it applies under Unicode.
+        value = {"auto": "Auto", "on": "On", "off": "Off"}[preference]
+        return f"{value} (off: {_CHARSET_NAMES.get(charset, charset)} has none)"
     if preference == "auto" and session is not None:
         value = "Auto (now on)" if getattr(session, "quadrant_blocks", True) else "Auto (now off: PuTTY detected)"
     else:
