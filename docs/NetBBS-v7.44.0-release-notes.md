@@ -135,7 +135,7 @@ Saved careers are unchanged.
   does not migrate. Lunar Lander upgrades its records the first time a caller
   launches it.
 - **MANUAL: Lunar Lander records after a rollback.** Rolling back to v7.43.0
-  needs only the old wheel, but once a caller has flown Lunar Lander v0.7.1
+  needs only the old wheel, but once a caller has launched Lunar Lander v0.7.1
   the records are schema 3. v7.43.0's Lunar Lander refuses them ("Records
   schema is unsupported"), and its backups refuse to take them. To fly Lunar
   Lander again after rolling back, restore the backup you took before
