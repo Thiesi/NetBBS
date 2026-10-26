@@ -1352,7 +1352,7 @@ Availability depends on what your SysOp has registered. The bundled games:
 | **Retro Trivia** | Answer a short round of multiple-choice questions. |
 | **Voidrunner** | Build a persistent space-trading and exploration career. |
 | **War Dialer** | Develop a crew in a shared world of fictional BBS networks. |
-| **Lunar Lander** | Fly a lander down onto a lit pad, and chase the best landing on each mission. Needs a terminal of at least 80 by 24. |
+| **Lunar Lander** | Fly a lander down onto a lit pad, chase the best landing on each mission, earn achievements and fly the month's Programs season. Needs a terminal of at least 80 by 24. |
 
 Each game opens with a short animated title screen. Any key skips it; once it
 has finished, it stays up until you press a key. Voidrunner and War Dialer
