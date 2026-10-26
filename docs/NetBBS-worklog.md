@@ -5636,8 +5636,12 @@ migrate for real:
   "MIGRATIONS", MIGRATIONS[:n])`), and a test that must run the full list
   from scratch can pass `list(MIGRATIONS)`.
 
-With the template and `--dist worksteal` (set in `pyproject.toml`), the full
-suite went from 30 to 10 minutes on the twenty-worker development host.
+With the template and work stealing, the full suite went from 30 to 10
+minutes on the twenty-worker development host. The full check is therefore
+`pytest -n auto --dist worksteal`, then `pytest -m timing_sensitive`. The
+flag goes on the command line, not in `addopts`: depending on the xdist
+version, `--dist` without `-n` can stop a plain `pytest` run with a usage
+error (review of #1572).
 Running two suites, or a suite beside an agent's work, roughly doubles either
 figure, so time a change on an otherwise idle machine.
 
