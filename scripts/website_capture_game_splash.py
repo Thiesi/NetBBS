@@ -22,7 +22,7 @@ def capture(name: str) -> str:
         recorder.frame(seconds)
         return name == "voidrunner"
 
-    def hold() -> None:
+    def hold(*_attract) -> None:  # Voidrunner v1.5.0 passes its attract frame
         recorder.frame(0)
 
     with contextlib.redirect_stdout(recorder):

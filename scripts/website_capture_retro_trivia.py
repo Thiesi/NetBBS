@@ -31,24 +31,26 @@ def _plain(raw: str) -> str:
 def _asked(raw: str, number: int) -> tuple[str, dict[str, str]]:
     """The question text and its lettered choices, as the game drew them."""
     text = _plain(raw)
-    start = text.rfind(f"Question {number}/")
+    start = text.rfind(f"QUESTION {number} OF ")
     if start < 0:
         raise SystemExit(f"Retro Trivia did not ask question {number}")
-    rows = [row.strip().strip("│").strip() for row in text[start:].split("\n")[1:]]
-    divider = next(i for i, row in enumerate(rows) if row.startswith("╞"))
-    question = " ".join(row for row in rows[:divider] if row)
+    # Since v1.3.0 a question is one card: the question's rows, then a podium
+    # key per choice ("A   720 KB"), with a long choice wrapped under its text.
+    question_rows: list[str] = []
     choices: dict[str, str] = {}
     letter = None
-    for row in rows[divider + 1:]:
+    for row in (row.strip().strip("│").strip() for row in text[start:].split("\n")[1:]):
         if row.startswith("╰"):
             break
-        match = re.match(r"^\[([A-D])\]\s+(.*)$", row)
+        match = re.match(r"^([A-D])\s{2,}(.*)$", row)
         if match:
             letter = match.group(1)
             choices[letter] = match.group(2)
         elif row and letter:
-            choices[letter] += " " + row  # a long choice wraps under its marker
-    return question, choices
+            choices[letter] += " " + row
+        elif row:
+            question_rows.append(row)
+    return " ".join(question_rows), choices
 
 
 def _right_letter(table: list, question: str, choices: dict[str, str]) -> str:
@@ -78,11 +80,11 @@ def capture(screen: str) -> str:
         raw = running.read()
         # This scrolling game keeps its title above the question. Keep the
         # complete output so the terminal emulator shows what the caller sees.
-        marker = {"question": "Question 1/5", "streak": f"Question {STREAK + 1}/5"}.get(
-            screen, "Round length")
+        marker = {"question": "QUESTION 1 OF 5", "streak": f"QUESTION {STREAK + 1} OF 5"}.get(
+            screen, "CHOOSE YOUR ROUND")
         if marker not in _plain(raw):
             raise SystemExit(f"Retro Trivia did not reach {screen}")
-        if screen == "streak" and _plain(raw).count("Correct!") != STREAK:
+        if screen == "streak" and len(re.findall(r"\bCORRECT\b", _plain(raw))) != STREAK:
             raise SystemExit(f"Retro Trivia did not mark {STREAK} answers correct")
         running.finish()
         return re.sub(r"\r+\n", "\r\n", raw)

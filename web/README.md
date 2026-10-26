@@ -175,10 +175,10 @@ rather than by writing its tables.
 ```sh
 PYTHONPATH=src python scripts/website_capture_door_screen.py voidrunner \
   "Command Deck" web/shots/raw-voidrunner.txt --fixture played \
-  --setup $'MDP12\rB' --expect "12/24"
+  --setup $'MAP12\rB' --expect "12/24"
 PYTHONPATH=src python scripts/website_capture_door_screen.py voidrunner \
   "Commodity Market" web/shots/raw-voidrunner-market.txt --fixture played \
-  --setup $'MDP12\rB' --expect "12/24"
+  --setup $'MAP12\rB' --expect "12/24"
 PYTHONPATH=src python scripts/website_capture_door_screen.py voidrunner \
   Combat web/shots/raw-voidrunner-combat.txt --fixture laden --expect "Dump"
 PYTHONPATH=src python scripts/website_capture_door_screen.py war_dialer \
@@ -188,15 +188,15 @@ PYTHONPATH=src python scripts/website_capture_door_screen.py war_dialer \
 ```
 
 Each gameplay still is chosen to show the game doing something, not waiting
-for a first move. `$'MDP12\rB'` is bash for the keys M, D, P, 1, 2, Enter, B:
+for a first move. `$'MAP12\rB'` is bash for the keys M, A, P, 1, 2, Enter, B:
 the deck and the market are photographed after buying twelve units of the
-market's `[D]` good, machinery, which the cached `played` career's station
-sells cheap. A rebuilt fixture can dock somewhere else, so check that the
+market's `[A]` good, food, which the cached `played` career's station, an
+agricultural one, sells cheap. A rebuilt fixture can dock somewhere else, so check that the
 caption still matches. The combat still uses `laden`: the `combat` fixture
 with a hold bought before the jump, so the fight has cargo at stake and
 offers Dump. Every value on it is one play left, unlike `outclassed`, which
 raises the opponent in the save. In PowerShell, write the Enter as
-``"MDP12`rB"``. War Dialer's scene is taken after the same Bay capture as the
+``"MAP12`rB"``. War Dialer's scene is taken after the same Bay capture as the
 switchboard, so the two show the same ring.
 
 A walk that is given `--fixture` or `--setup` starts somewhere its own keys
@@ -279,8 +279,8 @@ does not render SGR 2 (faint); remembered terrain shows in the game's own
 darker colours without the extra dimming a terminal adds. Blacksite's frames
 are box drawing, not half blocks, so they keep the stills' 1.55 line height.
 
-Lunar Lander's published screenshots come from the `v0.5.1` asset,
-`lunar_lander.py`, the release NetBBS 7.43.0 bundles. `website_capture_lunar_lander.py` keeps every release it
+Lunar Lander's published screenshots come from the `v0.7.1` asset,
+`lunar_lander.py`, the release NetBBS 7.44.0 bundles. `website_capture_lunar_lander.py` keeps every release it
 can capture in `PINS`, a table of tags and each release's `lunar_lander.py`
 digest from its `SHA256SUMS`, and refuses a source that matches none of them.
 To capture a new release, add its tag and digest there. It draws through the
@@ -297,9 +297,9 @@ capability, but the approach frame replaced it. Download the script and
 script against `SHA256SUMS`, then capture:
 
 ```sh
-gh release download v0.5.1 -R Thiesi/LunarLander -p lunar_lander.py -p SHA256SUMS -D /path/to/v0.5.1
-python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
-python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+gh release download v0.7.1 -R Thiesi/LunarLander -p lunar_lander.py -p SHA256SUMS -D /path/to/v0.7.1
+python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
+python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
 ```
 
 From v0.1.0, the helper can also photograph a whole flight: `approach` (30 m
@@ -326,14 +326,14 @@ records except by the game. nova is a fixture pilot too, and so are all six on
 these screens; their captions say so.
 
 ```sh
-python scripts/website_capture_lunar_lander.py approach web/shots/raw-lunar_lander-approach.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
-python scripts/website_capture_lunar_lander.py launch web/shots/raw-lunar_lander-launch.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
-python scripts/website_capture_lunar_lander.py touchdown web/shots/raw-lunar_lander-touchdown.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
-python scripts/website_capture_lunar_lander.py debrief web/shots/raw-lunar_lander-debrief.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
-python scripts/website_capture_lunar_lander.py scores web/shots/raw-lunar_lander-scores.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
-python scripts/website_capture_lunar_lander.py program web/shots/raw-lunar_lander-program.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
-python scripts/website_capture_lunar_lander.py record web/shots/raw-lunar_lander-record.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
-python scripts/website_capture_lunar_lander.py achievements web/shots/raw-lunar_lander-achievements.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py approach web/shots/raw-lunar_lander-approach.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
+python scripts/website_capture_lunar_lander.py launch web/shots/raw-lunar_lander-launch.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
+python scripts/website_capture_lunar_lander.py touchdown web/shots/raw-lunar_lander-touchdown.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
+python scripts/website_capture_lunar_lander.py debrief web/shots/raw-lunar_lander-debrief.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
+python scripts/website_capture_lunar_lander.py scores web/shots/raw-lunar_lander-scores.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
+python scripts/website_capture_lunar_lander.py program web/shots/raw-lunar_lander-program.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
+python scripts/website_capture_lunar_lander.py record web/shots/raw-lunar_lander-record.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
+python scripts/website_capture_lunar_lander.py achievements web/shots/raw-lunar_lander-achievements.txt --source /path/to/v0.7.1/lunar_lander.py --tag v0.7.1
 ```
 
 Convert at 80x24 with `website_ansi_to_html.py`. Lunar Lander's scenery uses
