@@ -58,9 +58,9 @@ _PLAIN = False
 # Screen artwork uses printable CP437 bytes, never its low control-byte glyphs.
 _CP437_TRANSLATION = str.maketrans({
     "╭": "┌", "╮": "┐", "╯": "┘", "╰": "└",
-    "⟦": "[", "⟧": "]", "•": "·", "…": ".",
+    "•": "·", "…": ".",
     "⋆": "*", "★": "*", "☆": ".", "✦": "*", "✧": "+",
-    "●": "o", "□": "o", "⚡": "!", "✔": "+", "✘": "x",
+    "●": "o", "×": "x",
 })
 
 
@@ -266,41 +266,24 @@ class Palette:
             return f"{ESC}[38;2;{r};{g};{b}m"
         return f"{ESC}[38;5;{idx256}m"
 
-    @property
-    def title(self) -> str:
-        return self._sgr((255, 90, 190), 205)
 
-    @property
-    def accent(self) -> str:
-        return self._sgr((100, 220, 255), 51)
-
-    @property
-    def correct(self) -> str:
-        return self._sgr((110, 255, 130), 46)
-
-    @property
-    def wrong(self) -> str:
-        return self._sgr((255, 100, 100), 203)
-
-    @property
-    def muted(self) -> str:
-        return self._sgr((150, 150, 160), 244)
-
-    @property
-    def gold(self) -> str:
-        return self._sgr((255, 200, 60), 220)
-
-    @property
-    def border(self) -> str:
-        return self._sgr((130, 95, 230), 135)
-
-    @property
-    def dark_border(self) -> str:
-        return self._sgr((85, 75, 130), 60)
-
-    @property
-    def white(self) -> str:
-        return self._sgr((250, 250, 255), 255)
+def _style(p: Palette, fg, bg=None, *, bold: bool = False) -> str:
+    """One escape that resets and sets everything a cell needs, from
+    (truecolor RGB, xterm-256 index) pairs."""
+    params = ["0"] + (["1"] if bold else [])
+    if p._basic:
+        params.append(p._ansi16(fg[0]))
+        if bg is not None:
+            params.append(p._ansi16(bg[0], background=True))
+    elif p._truecolor:
+        params.append("38;2;{};{};{}".format(*fg[0]))
+        if bg is not None:
+            params.append("48;2;{};{};{}".format(*bg[0]))
+    else:
+        params.append(f"38;5;{fg[1]}")
+        if bg is not None:
+            params.append(f"48;5;{bg[1]}")
+    return f"{ESC}[{';'.join(params)}m"
 
 
 def _cp437_text(text: str) -> str:
@@ -327,6 +310,7 @@ _ASCII_TRANSLATION = str.maketrans({
     **{ch: "+" for ch in "┌┐└┘╔╗╚╝╠╣╞╡╟╢╤╧╪╫╬├┤┬┴┼"},
     "─": "-", "│": "|", "═": "=", "║": "|",
     "█": "#", "▓": "#", "▒": ":", "░": ".", "▀": "\"", "▄": "_", "■": "#", "·": ".",
+    "»": ">",
 })
 #: Any escape sequence, so plain output can drop it.
 _ANY_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -/]*[@-~]")
@@ -904,7 +888,7 @@ QUESTIONS = [
     ("Which word processor dominated DOS offices and is remembered for its function-key template?", ["WordPerfect", "WordStar", "Word for DOS", "Ami Pro"], 0),
     ("Which spreadsheet was the DOS era's business standard before Excel?", ["Lotus 1-2-3", "VisiCalc", "Quattro Pro", "Multiplan"], 0),
     ("What frequency did a blue box use to seize a long-distance trunk?", ["2600 Hz", "1200 Hz", "440 Hz", "300 Hz"], 0),
-    ("Which magazine took its name from that frequency?", ["2600: The Hacker Quarterly", "Phrack", "Wired", "Byte"], 0),
+    ("Which hacker magazine was named after the tone a blue box used to seize a trunk line?", ["2600: The Hacker Quarterly", "Phrack", "Wired", "Byte"], 0),
     ("Which electronic magazine began publishing in 1985 from the BBS underground?", ["Phrack", "2600", "Dr. Dobb's", "Boardwatch"], 0),
     ("By what nickname was phone phreak John Draper known?", ["Captain Crunch", "The Condor", "Dark Dante", "Cap'n Zap"], 0),
     ("What was Operation Sundevil?", ["A 1990 US crackdown on BBS-linked computer crime", "A modem standard", "A FidoNet backbone", "An early ISP"], 0),
@@ -1282,21 +1266,7 @@ class _Stage:
     # -- palette -------------------------------------------------------------
 
     def style(self, fg, bg=None, *, bold: bool = False) -> str:
-        """One escape that resets and sets everything a cell needs."""
-        params = ["0"] + (["1"] if bold else [])
-        if self.p._basic:
-            params.append(self.p._ansi16(fg[0]))
-            if bg is not None:
-                params.append(self.p._ansi16(bg[0], background=True))
-        elif self.p._truecolor:
-            params.append("38;2;{};{};{}".format(*fg[0]))
-            if bg is not None:
-                params.append("48;2;{};{};{}".format(*bg[0]))
-        else:
-            params.append(f"38;5;{fg[1]}")
-            if bg is not None:
-                params.append(f"48;5;{bg[1]}")
-        return f"{ESC}[{';'.join(params)}m"
+        return _style(self.p, fg, bg, bold=bold)
 
     @staticmethod
     def _shade(color, factor: float):
@@ -2305,36 +2275,127 @@ def play_finale(p: Palette, info: dict, score: int, total: int, width: int, heig
     return True
 
 
-def draw_title(p: Palette, info: dict, width: int = 78) -> None:
-    """The masthead, drawn once before the caller is asked anything.
+# -- the round's screens -----------------------------------------------------
+#
+# The splash and the finale build a stage; the round is the contestant's card
+# on it, drawn in the stage's own colours. One rounded card per screen, its
+# title set into the top edge and its hint into the bottom one; the double
+# frame is kept for the results. Answer keys are podium buttons -- gold on
+# dark until pressed, lit gold once they are -- and the round runs along the
+# top edge as a row of marquee bulbs: right, wrong, the question being asked,
+# and the questions still to come. The screen is cleared once, when the round
+# starts; after that it scrolls, so the previous verdict stays in view above
+# the next card.
 
-    Its ROUND chip reads YOU CHOOSE rather than naming a length: the title is
-    printed before the picker and this door does not clear or redraw, so any
-    number here would be a guess at what the caller is about to pick. The
-    chosen length is echoed by the picker and carried by every `Question n/M`
-    header afterwards, so nothing is lost by not repeating it.
-    """
+#: What a caller reads: the question and its answers.
+_INK = ((250, 246, 236), 255)
+#: Prompts, captions and the rest of what supports the ink.
+_SOFT = ((150, 140, 172), 103)
+#: Separators and the bulbs still to come.
+_FAINT = ((92, 82, 112), 60)
+#: Card frames, quiet so the text leads. Nearest to magenta in 16 colours.
+_FRAME = ((150, 70, 160), 96)
+_KEY_INK = ((30, 14, 36), 16)
+_KEY_UNLIT = ((88, 34, 96), 53)
+_RIGHT = ((110, 225, 140), 114)
+_RIGHT_LIT = ((70, 180, 100), 71)
+_WRONG = ((255, 110, 120), 203)
+_WRONG_LIT = ((196, 36, 64), 161)
+#: A verdict's label between the flicker's flashes: an unlit tube, as the
+#: finale's APPLAUSE light is between its blinks.
+_RIGHT_OFF = ((22, 60, 34), 22)
+_RIGHT_OFF_TEXT = ((80, 140, 96), 65)
+#: How long each step of a verdict's flicker shows, in seconds.
+VERDICT_FLICKER_SECONDS = 0.05
+
+
+def _paint(p: Palette, color, text: str, *, bold: bool = False) -> str:
+    return f"{_style(p, color, bold=bold)}{text}{RESET}"
+
+
+def _chip(p: Palette, text: str, fg, bg) -> str:
+    """A lit label, like the stage's lower third. A plain caller, who sees no
+    colour, gets brackets in its place, so the label still stands apart."""
+    if _PLAIN:
+        return f"[{text}]"
+    # Bold would brighten dark ink to grey in 16 colours, unreadable on a chip.
+    return f"{_style(p, fg, bg, bold=fg is not _KEY_INK)} {text} {RESET}"
+
+
+def _key(p: Palette, key: str, *, lit: bool = False) -> str:
+    """A podium button: dark until pressed, then lit in marquee gold."""
+    return _chip(p, key, _KEY_INK, _LABEL_BG) if lit else _chip(p, key, _LABEL_BG, _KEY_UNLIT)
+
+
+def _edge(p: Palette, left: str, right: str, width: int, *, title: str = "", hint: str = "",
+          fill: str = "─") -> str:
+    """A card's top or bottom edge, with a title set in at the left and a
+    hint (or the round's bulbs) at the right."""
+    head = f"{fill} {title} " if title else ""
+    tail = f" {hint} {fill}" if hint else ""
+    frame = _style(p, _FRAME)
+    rule = fill * max(0, width - 2 - _dlen(head) - _dlen(tail))
+    return (f"{frame}{left}" + (f"{fill} {RESET}{title}{frame} " if title else "")
+            + rule + (f" {RESET}{hint}{frame} {fill}" if hint else "") + f"{right}{RESET}")
+
+
+def _card_row(p: Palette, content: str, width: int, side: str = "│") -> str:
+    side = _paint(p, _FRAME, side)
+    return _box_line(side, content, side, width)
+
+
+def _bulbs(p: Palette, record: list[bool], total: int, current: int | None = None) -> str:
+    """The round as a row of marquee bulbs, one per question."""
+    bulbs = []
+    for index in range(total):
+        if index < len(record):
+            bulbs.append(_paint(p, _RIGHT, "■") if record[index] else _paint(p, _WRONG, "×"))
+        elif index == current:
+            bulbs.append(_paint(p, _BULB_LIT, "●", bold=True))
+        else:
+            bulbs.append(_paint(p, _FAINT, "·"))
+    return " ".join(bulbs)
+
+
+def _marquee(p: Palette, width: int) -> str:
+    """The splash's chasing bulbs, caught mid-chase, as wide as a sign. A
+    plain caller cannot see a dim bulb's colour, so it gets a smaller one."""
+    count = min(width - 2, 51) // 2 + 1
+    dim = "·" if _PLAIN else "●"
+    return " ".join(_paint(p, _BULB_LIT, "●", bold=True) if index % 3 == 0 else _paint(p, _BULB_DIM, dim)
+                    for index in range(count))
+
+
+def _prompt(p: Palette, text: str) -> None:
+    out_prompt(f"   {_paint(p, _SOFT, text)} {_paint(p, _LABEL_BG, '»', bold=True)} ")
+
+
+def draw_title(p: Palette, info: dict, width: int = 78) -> None:
+    """The masthead, drawn once before the caller is asked anything: the name
+    lit between two rows of marquee bulbs, then who is playing where."""
     w = width
+    handle = _splash_plain(info.get("handle", "Guest")) or "Guest"
+    node = _splash_plain(info.get("node_name", "Local")) or "Local"
+    tagline = _TAGLINE_TEXT if len(_TAGLINE_TEXT) <= w - 2 else _TAGLINE_SHORT
     out_line()
-    out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
-    t1 = f"{p.accent}✦  ✦  ✦{RESET}       {p.gold}{BOLD}R E T R O   T R I V I A{RESET}       {p.accent}✦  ✦  ✦{RESET}"
-    out_line(_center_line(f"{p.border}{BOLD}║{RESET}", t1, f"{p.border}{BOLD}║{RESET}", w))
-    t2 = f"{p.title}The Classic BBS & Retro Computing Challenge{RESET}"
-    out_line(_center_line(f"{p.border}{BOLD}║{RESET}", t2, f"{p.border}{BOLD}║{RESET}", w))
-    out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
+    out_line(_center_line("", _marquee(p, w), "", w))
     out_line()
-    b1 = f"{p.dark_border}⟦{RESET} {p.muted}NODE:{RESET} {p.accent}{BOLD}{info.get('node_name', 'Local')}{RESET} {p.dark_border}⟧{RESET}"
-    b2 = f"{p.dark_border}⟦{RESET} {p.muted}CALLER:{RESET} {p.gold}{BOLD}{info.get('handle', 'Guest')}{RESET} {p.dark_border}⟧{RESET}"
-    b3 = f"{p.dark_border}⟦{RESET} {p.muted}ROUND:{RESET} {p.accent}{BOLD}YOU CHOOSE{RESET} {p.dark_border}⟧{RESET}"
-    out_line(f"  {b1}   {b2}   {b3}")
+    out_line(_center_line("", _paint(p, _LABEL_BG, "R E T R O   T R I V I A", bold=True), "", w))
+    out_line(_center_line("", _paint(p, _HEADER, tagline), "", w))
     out_line()
-    out_line(f"{p.muted}Welcome, {RESET}{p.accent}{BOLD}{info.get('handle', 'Guest')}{RESET}{p.muted}, to {info.get('node_name', 'Local')}'s trivia challenge.{RESET}")
-    out_line(f"{p.dark_border}╭{'─' * (w - 2)}╮{RESET}")
-    how = (f"  {p.gold}{BOLD}HOW TO PLAY:{RESET} {p.white}Press {p.gold}{BOLD}A{RESET}{p.white}/"
-           f"{p.gold}{BOLD}B{RESET}{p.white}/{p.gold}{BOLD}C{RESET}{p.white}/{p.gold}{BOLD}D{RESET}"
-           f"{p.white} to answer -- no Enter needed. {p.gold}{BOLD}[Q]{RESET}{p.white} quits.{RESET}")
-    out_line(_box_line(f"{p.dark_border}│{RESET}", how, f"{p.dark_border}│{RESET}", w))
-    out_line(f"{p.dark_border}╰{'─' * (w - 2)}╯{RESET}")
+    out_line(_center_line("", _marquee(p, w), "", w))
+    out_line()
+    welcome = (f"   {_paint(p, _SOFT, 'Welcome, ')}{_paint(p, _TAGLINE, handle, bold=True)}"
+               f"{_paint(p, _SOFT, ', to ')}{_paint(p, _INK, node)}"
+               f"{_paint(p, _SOFT, chr(39) + 's trivia challenge.')}")
+    if _dlen(welcome) > w:
+        # A long handle or board name: wrap the sentence under itself rather
+        # than leave the fallback wrap to break it against the left edge.
+        sentence = f"Welcome, {handle}, to {node}'s trivia challenge."
+        welcome = "\r\n".join(f"   {_paint(p, _SOFT, line)}" for line in _wrap(sentence, w - 4))
+    for line in welcome.split("\r\n"):
+        out_line(line)
+    out_line(f"   {_paint(p, _SOFT, 'Answer with one key, no Enter needed.')}")
 
 
 def ask_round_length(p: Palette, width: int = 78) -> int | None:
@@ -2349,30 +2410,22 @@ def ask_round_length(p: Palette, width: int = 78) -> int | None:
     notes = {lengths[0]: "a quick round", QUESTIONS_PER_ROUND: "the classic round"}
 
     out_line()
-    hdr = f"── {p.accent}{BOLD}Round length{RESET}{p.border} ──"
-    out_line(f"{p.border}╭{hdr}{'─' * max(0, w - 2 - _dlen(hdr))}╮{RESET}")
-    out_line(_box_line(f"{p.border}│{RESET}", "", f"{p.border}│{RESET}", w))
+    out_line(_edge(p, "╭", "╮", w, title=_paint(p, _HEADER, "CHOOSE YOUR ROUND", bold=True)))
+    out_line(_card_row(p, "", w))
     for index, count in enumerate(lengths, start=1):
-        note = notes.get(count, "")
-        row = f"   {p.gold}{BOLD}[{index}]{RESET}  {p.white}{count:>2} questions{RESET}"
-        annotated = row + f"   {p.muted}-- {note}{RESET}"
+        row = f"   {_key(p, str(index))}  {_paint(p, _INK, f'{count:>2} questions')}"
+        annotated = f"{row}   {_paint(p, _SOFT, notes.get(count, ''))}"
         # The note is a nicety; the number is the answer. At a narrow width the
-        # note goes rather than the row bursting its box.
-        if note and _dlen(annotated) <= w - 2:
+        # note goes rather than the row bursting its card.
+        if count in notes and _dlen(annotated) <= w - 2:
             row = annotated
-        out_line(_box_line(f"{p.border}│{RESET}", row, f"{p.border}│{RESET}", w))
-    out_line(_box_line(f"{p.border}│{RESET}", "", f"{p.border}│{RESET}", w))
-    out_line(f"{p.border}╰{'─' * (w - 2)}╯{RESET}")
+        out_line(_card_row(p, row, w))
+    out_line(_card_row(p, "", w))
+    out_line(_edge(p, "╰", "╯", w, hint=_paint(p, _SOFT, "Q leaves")))
 
     keys = "".join(str(index) for index in range(1, len(lengths) + 1))
-    span = keys[0] + "-" + keys[-1] if len(keys) > 1 else keys
-    full = (f"  {p.accent}⚡{RESET} {p.muted}How many questions? [{p.gold}{span}{p.muted}]"
-            f"  {p.muted}or {p.gold}{BOLD}[Q]{RESET} {p.muted}Quit: {RESET}")
-    short = (f"  {p.accent}⚡{RESET} {p.muted}[{p.gold}{span}{p.muted}] "
-             f"{p.gold}{BOLD}[Q]{RESET}{p.muted}: {RESET}")
-    # `< w`, not `<=`: a prompt that exactly fills the row leaves the
-    # cursor with nowhere to sit but the next line.
-    out_prompt(full if _dlen(full) < w else short)
+    prompt = "How many questions?"
+    _prompt(p, prompt)
     while True:
         try:
             key = read_key().upper()
@@ -2382,82 +2435,102 @@ def ask_round_length(p: Palette, width: int = 78) -> int | None:
             return min(QUESTIONS_PER_ROUND, len(QUESTIONS))
         if key in keys:
             count = lengths[int(key) - 1]
-            out_line(f"{p.gold}{BOLD}{key}{RESET}  {p.muted}{count} questions{RESET}")
+            echo = f"{_key(p, key, lit=True)}  {_paint(p, _SOFT, f'{count} questions')}"
+            # The count repeats what the key said; at a narrow width it goes
+            # rather than the echo wrapping under its own prompt.
+            out_line(echo if 3 + len(prompt) + 3 + _dlen(echo) < w else _key(p, key, lit=True))
             return count
         if key == QUIT_KEY:
-            out_line(f"{p.gold}{BOLD}{key}{RESET}")
+            out_line(_key(p, key, lit=True))
             return None
 
 
 def ask_question(p: Palette, number: int, total: int, question: str, choices: list[str],
-                 width: int = 78) -> int | None:
-    """The index of the chosen letter, or `None` if the caller quit the round."""
+                 width: int = 78, record: list[bool] | None = None) -> int | None:
+    """The index of the chosen letter, or `None` if the caller quit the round.
+    `record` is the round so far, right or wrong, for the bulbs."""
     w = width
-    pct = int((number - 1) / total * 100)
-    filled = int((number - 1) / total * 10)
-    bar = "■" * filled + "□" * (10 - filled)
+    head = _edge(p, "╭", "╮", w, title=_paint(p, _HEADER, f"QUESTION {number} OF {total}", bold=True),
+                 hint=_bulbs(p, record or [], total, number - 1))
+    if _dlen(head) > w:
+        # No room for the bulbs: keep the count, which is the part a caller
+        # needs, rather than letting the edge wrap onto a second row.
+        head = _edge(p, "╭", "╮", w, title=_paint(p, _HEADER, f"QUESTION {number}/{total}", bold=True))
 
     out_line()
-    top_hdr = f"── {p.accent}{BOLD}Question {number}/{total}{RESET}{p.border} ──── Progress [{p.gold}{bar}{p.border}] {pct:2d}% ──"
-    if _dlen(top_hdr) > w - 2:
-        # No room for the progress meter: keep the count, which is the part a
-        # caller needs, rather than letting the border wrap onto a second row.
-        top_hdr = f"── {p.accent}{BOLD}Question {number}/{total}{RESET}{p.border} ──"
-    dash_len = w - 2 - _dlen(top_hdr)
-    out_line(f"{p.border}╭{top_hdr}{'─' * max(0, dash_len)}╮{RESET}")
-    out_line(_box_line(f"{p.border}│{RESET}", "", f"{p.border}│{RESET}", w))
-
-    lines = _wrap(question, w - 6)
-
-    for ql in lines:
-        out_line(_box_line(f"{p.border}│{RESET}", f"  {p.white}{BOLD}{ql}{RESET}", f"{p.border}│{RESET}", w))
-
-    out_line(_box_line(f"{p.border}│{RESET}", "", f"{p.border}│{RESET}", w))
-    out_line(f"{p.border}╞{'═' * (w - 2)}╡{RESET}")
-    out_line(_box_line(f"{p.border}│{RESET}", "", f"{p.border}│{RESET}", w))
-
-    # A choice is wrapped under its own marker rather than run past the border.
-    # The marker is three spaces, "[A]" and two more: eight columns, which the
-    # continuation rows are indented by so the text stays in one column.
+    out_line(head)
+    out_line(_card_row(p, "", w))
+    for line in _wrap(question, w - 7):
+        out_line(_card_row(p, f"   {_paint(p, _INK, line, bold=True)}", w))
+    out_line(_card_row(p, "", w))
+    # A choice is wrapped under its own text rather than run past the frame.
+    # The key is three spaces, a three-column button and two more spaces:
+    # eight columns, which the continuation rows are indented by.
     for letter, choice in zip(LETTERS, choices):
-        for index, part in enumerate(_wrap(choice, max(8, w - 10))):
-            lead = (f"   {p.gold}{BOLD}[{letter}]{RESET}  " if index == 0
-                    else " " * 8)
-            out_line(_box_line(f"{p.border}│{RESET}", f"{lead}{p.white}{part}{RESET}",
-                               f"{p.border}│{RESET}", w))
-
-    out_line(_box_line(f"{p.border}│{RESET}", "", f"{p.border}│{RESET}", w))
-    out_line(f"{p.border}╰{'─' * (w - 2)}╯{RESET}")
-    full = (f"  {p.accent}⚡{RESET} {p.muted}Your answer [{p.gold}A{p.muted}/{p.gold}B{p.muted}/"
-            f"{p.gold}C{p.muted}/{p.gold}D{p.muted}]  {p.muted}or {p.gold}{BOLD}[Q]{RESET}"
-            f" {p.muted}Quit: {RESET}")
-    short = (f"  {p.accent}⚡{RESET} {p.muted}[{p.gold}A{p.muted}/{p.gold}B{p.muted}/{p.gold}C"
-             f"{p.muted}/{p.gold}D{p.muted}] {p.gold}{BOLD}[Q]{RESET}{p.muted}: {RESET}")
-    # A prompt that wraps puts the cursor on a fresh row under its own text,
-    # which reads as a rendering fault rather than a question.
-    # `< w`, not `<=`: a prompt that exactly fills the row leaves the
-    # cursor with nowhere to sit but the next line.
-    out_prompt(full if _dlen(full) < w else short)
+        for index, part in enumerate(_wrap(choice, max(8, w - 12))):
+            lead = f"   {_key(p, letter)}  " if index == 0 else " " * 8
+            out_line(_card_row(p, f"{lead}{_paint(p, _INK, part)}", w))
+    out_line(_card_row(p, "", w))
+    out_line(_edge(p, "╰", "╯", w, hint=_paint(p, _SOFT, "Q quits")))
+    _prompt(p, "Your answer")
 
     while True:
         key = read_key().upper()
         if key in LETTERS:
-            out_line(f"{p.gold}{BOLD}{key}{RESET}")
+            out_line(_key(p, key, lit=True))
             return LETTERS.index(key)
         if key == QUIT_KEY:
             # Not one of the four letters, so it can never be read as an answer.
-            out_line(f"{p.gold}{BOLD}{key}{RESET}")
+            out_line(_key(p, key, lit=True))
             return None
         # Stray bytes / arrow fragments ignored
 
 
-def draw_result(p: Palette, correct: bool, answer: str, width: int = 78) -> None:
-    w = width
+def _verdict_flickers() -> bool:
+    """Does the next verdict switch on like a neon tube? Only for a caller
+    watching an ANSI screen live, and never one already typing the next
+    answer: the flicker writes and waits but reads nothing, so it could only
+    hold that caller up. `DOOR_SPLASH=0` turns it off with the splash."""
+    if _PLAIN or splash_switched_off():
+        return False
+    poll = _open_key_poll()
+    return poll is not None and not _stdin_holds_typing() and not poll.waiting(0)
+
+
+def draw_result(p: Palette, correct: bool, letter: str, answer: str, width: int = 78) -> None:
+    """The verdict on one answer: a lit label, then the right answer on its
+    own key, as the card showed it."""
     if correct:
-        out_line(f"  {p.correct}{BOLD}✔ Correct!{RESET} {p.accent}Excellent deduction.{RESET}")
+        label, fg, bg, off = "CORRECT", _KEY_INK, _RIGHT_LIT, (_RIGHT_OFF_TEXT, _RIGHT_OFF)
+        lead = f"{_key(p, letter, lit=True)} "
     else:
-        out_line(f"  {p.wrong}{BOLD}✘ Not quite.{RESET} {p.muted}The answer was {RESET}{p.gold}{BOLD}{answer}{RESET}{p.muted}.{RESET}")
-    out_line(f"  {p.dark_border}{'─' * (w - 4)}{RESET}")
+        label, fg, bg, off = "NOT QUITE", _INK, _WRONG_LIT, (_APPLAUSE_OFF_TEXT, _APPLAUSE_OFF)
+        lead = f"{_paint(p, _SOFT, 'The answer was')} {_key(p, letter, lit=True)} "
+    lit = f"   {_chip(p, label, fg, bg)}  "
+    dark = f"   {_chip(p, label, *off)}  "
+    indent = _dlen(lit) + _dlen(lead)
+    rows: list[tuple[str, str]] = []
+    if width - indent - 1 < 16:
+        # Too narrow to say it all on the label's row: the label stands alone
+        # and the answer follows under it.
+        rows.append((lit.rstrip(), dark.rstrip()))
+        indent -= _dlen(lit) - 3
+        lit = dark = "   "
+    parts = _wrap(answer, max(8, width - indent - 1))
+    rows.append((f"{lit}{lead}{_paint(p, _INK, parts[0])}", f"{dark}{lead}{_paint(p, _INK, parts[0])}"))
+    rows.extend((" " * indent + _paint(p, _INK, part), "") for part in parts[1:])
+
+    on, off = rows[0]
+    if _verdict_flickers() and _dlen(on) < _OUTPUT_WIDTH:
+        # On, off, on again, the way the splash's tubes catch. Every step
+        # rewrites the same row from its start, so the last one is all that
+        # stays; the row is narrower than the terminal, so it never wraps.
+        for step in (on, off, on, off):
+            out(f"\r{step}")
+            time.sleep(VERDICT_FLICKER_SECONDS)
+        out("\r")
+    for row, _ in rows:
+        out_line(row)
 
 
 def rank_for(score: int, total: int) -> str:
@@ -2485,66 +2558,75 @@ def rank_flavor(score: int, total: int) -> tuple[str, str]:
 def draw_farewell(p: Palette, width: int = 78) -> None:
     """Leaving before a round starts: no score to report, so do not invent one."""
     out_line()
-    out_line(f"  {p.muted}No round played. Dial in again any time.{RESET}")
-    out_line(f"  {p.dark_border}{'─' * (width - 4)}{RESET}")
+    out_line(f"   {_paint(p, _SOFT, 'No round played. Dial in again any time.')}")
 
 
-def draw_abandoned(p: Palette, score: int, answered: int, width: int = 78) -> None:
+def draw_abandoned(p: Palette, score: int, answered: int, width: int = 78,
+                   record: list[bool] | None = None) -> None:
     """Leaving mid-round. The tally covers what was answered, not the whole
     round -- scoring unseen questions as wrong would misreport the caller."""
     w = width
     out_line()
-    out_line(f"{p.border}{BOLD}╭{'─' * (w - 2)}╮{RESET}")
-    headline = f"  {p.accent}{BOLD}Round abandoned.{RESET}"
-    out_line(_box_line(f"{p.border}{BOLD}│{RESET}", headline, f"{p.border}{BOLD}│{RESET}", w))
+    out_line(_edge(p, "╭", "╮", w, title=_paint(p, _HEADER, "ROUND ABANDONED", bold=True)))
+    out_line(_card_row(p, "", w))
     if answered:
-        tally = (f"  {p.muted}You answered {RESET}{p.gold}{BOLD}{score}{RESET}"
-                 f"{p.muted} of {RESET}{p.gold}{BOLD}{answered}{RESET}"
-                 f"{p.muted} before leaving.{RESET}")
+        tally = (f"   {_paint(p, _SOFT, 'You answered ')}{_paint(p, _LABEL_BG, str(score), bold=True)}"
+                 f"{_paint(p, _SOFT, ' of ')}{_paint(p, _LABEL_BG, str(answered), bold=True)}"
+                 f"{_paint(p, _SOFT, ' before leaving.')}")
     else:
-        tally = f"  {p.muted}No questions answered.{RESET}"
-    out_line(_box_line(f"{p.border}{BOLD}│{RESET}", tally, f"{p.border}{BOLD}│{RESET}", w))
-    out_line(f"{p.border}{BOLD}╰{'─' * (w - 2)}╯{RESET}")
-    out_line()
-    out_line(f"{p.muted}Press any key to leave...{RESET}")
+        tally = f"   {_paint(p, _SOFT, 'No questions answered.')}"
+    out_line(_card_row(p, tally, w))
+    if record and 3 + 2 * len(record) - 1 <= w - 4:
+        out_line(_card_row(p, f"   {_bulbs(p, record, len(record))}", w))
+    out_line(_card_row(p, "", w))
+    out_line(_edge(p, "╰", "╯", w))
+    _prompt(p, "Press any key to leave")
 
 
-def draw_final_score(p: Palette, score: int, total: int, info: dict | None = None, width: int = 78) -> None:
+def draw_final_score(p: Palette, score: int, total: int, info: dict | None = None, width: int = 78,
+                     record: list[bool] | None = None) -> None:
+    """The results card: the score and its stars, the round bulb by bulb, and
+    the finale's lower third again as the caption."""
     w = width
     info = info or _load_door_info()
     stars, flavor = rank_flavor(score, total)
     rank_name = rank_for(score, total)
-    pct_final = int(score / total * 100)
-    filled_acc = int(score / total * 20)
-    bar_acc = "█" * filled_acc + "░" * (20 - filled_acc)
+    handle = _splash_plain(info.get("handle", "Guest")) or "Guest"
+    node = _splash_plain(info.get("node_name", "Local")) or "Local"
+    side = "║"
 
     out_line()
-    out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
-    f_title = f"{p.gold}{BOLD}★   T R I V I A   R E S U L T S   ★{RESET}"
-    out_line(_center_line(f"{p.border}{BOLD}║{RESET}", f_title, f"{p.border}{BOLD}║{RESET}", w))
-    out_line(f"{p.border}{BOLD}╠{'═' * (w - 2)}╣{RESET}")
-    out_line(_box_line(f"{p.border}{BOLD}║{RESET}", "", f"{p.border}{BOLD}║{RESET}", w))
+    out_line(_edge(p, "╔", "╗", w, title=_paint(p, _HEADER, "THE RESULTS", bold=True), fill="═"))
+    out_line(_card_row(p, "", w, side))
+    score_line = (f"   {_paint(p, _SOFT, 'Final score:')} "
+                  f"{_paint(p, _LABEL_BG, f'{score}/{total}', bold=True)}")
+    rating = " ".join(_paint(p, _LABEL_BG, star, bold=True) if star == "★" else _paint(p, _FAINT, star)
+                      for star in stars)
+    gap = w - 2 - _dlen(score_line) - _dlen(rating) - 3
+    if gap >= 3:
+        score_line += " " * gap + rating
+    out_line(_card_row(p, score_line, w, side))
+    if record and 3 + 2 * total - 1 <= w - 4:
+        out_line(_card_row(p, f"   {_bulbs(p, record, total)}", w, side))
+    out_line(_card_row(p, "", w, side))
 
-    # Exact string required by tests: "Final score: {score}/{total}  ({rank_for(score, total)})"
-    fs_text = f"  {p.gold}{BOLD}Final score: {score}/{total}{RESET}  {p.white}({rank_name}){RESET}"
-    out_line(_box_line(f"{p.border}{BOLD}║{RESET}", fs_text, f"{p.border}{BOLD}║{RESET}", w))
+    label = _chip(p, rank_name.upper(), _KEY_INK, _LABEL_BG)
+    tail = "" if _PLAIN else "".join(_paint(p, tone, shade) for tone, shade in zip(_TAIL, "▓▒░"))
+    room = w - 2 - 3 - _dlen(label) - _dlen(tail) - 2 - 1
+    third = f"   {label}{_chip(p, _splash_fit(handle, room), _HANDLE_FG, _HANDLE_BG)}{tail}"
+    out_line(_card_row(p, third, w, side))
+    out_line(_card_row(p, "", w, side))
+    for line in _wrap(flavor, w - 7):
+        out_line(_card_row(p, f"   {_paint(p, _SOFT, line)}", w, side))
+    out_line(_card_row(p, "", w, side))
+    out_line(_paint(p, _FRAME, f"╟{'─' * (w - 2)}╢"))
 
-    acc_text = f"  {p.muted}Performance :{RESET} {p.accent}[{p.correct}{bar_acc}{p.accent}] {p.gold}{BOLD}{pct_final}%{RESET}"
-    out_line(_box_line(f"{p.border}{BOLD}║{RESET}", acc_text, f"{p.border}{BOLD}║{RESET}", w))
-
-    rank_badge = f"  {p.muted}Final Rank  :{RESET} {p.accent}{stars}{RESET} {p.gold}{BOLD}{rank_name}{RESET}"
-    out_line(_box_line(f"{p.border}{BOLD}║{RESET}", rank_badge, f"{p.border}{BOLD}║{RESET}", w))
-
-    flavor_text = f"  {p.muted}\"{flavor}\"{RESET}"
-    out_line(_box_line(f"{p.border}{BOLD}║{RESET}", flavor_text, f"{p.border}{BOLD}║{RESET}", w))
-    out_line(_box_line(f"{p.border}{BOLD}║{RESET}", "", f"{p.border}{BOLD}║{RESET}", w))
-    out_line(f"{p.border}{BOLD}╠{'─' * (w - 2)}╣{RESET}")
-
-    caller_str = f"  {p.muted}Player: {p.accent}{info.get('handle', 'Guest')}{p.muted}  •  Node: {p.accent}{info.get('node_name', 'Local')}{p.muted}  •  Format: {p.accent}{total}-Question Round{RESET}"
-    out_line(_box_line(f"{p.border}{BOLD}║{RESET}", caller_str, f"{p.border}{BOLD}║{RESET}", w))
-    out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
-    out_line()
-    out_line(f"{p.muted}Thanks for playing. Press any key to leave...{RESET}")
+    length = f"{total}-question round"
+    node = _splash_fit(node, w - 2 - 3 - 5 - len(length) - 1)
+    credits = f"   {_paint(p, _INK, node)}{_paint(p, _FAINT, '  ·  ')}{_paint(p, _SOFT, length)}"
+    out_line(_card_row(p, credits, w, side))
+    out_line(_edge(p, "╚", "╝", w, fill="═"))
+    _prompt(p, "Thanks for playing. Press any key to leave" if w >= 52 else "Press any key to leave")
 
 
 def report_perfect_round(info: dict, score: int, total: int) -> bool:
@@ -2639,6 +2721,8 @@ def _play_round(info: dict) -> int:
     draw_title(palette, info, width=w)
 
     score = 0
+    #: Each answered question, right or wrong, for the bulbs.
+    record: list[bool] = []
     try:
         wanted = ask_round_length(palette, width=w)
         if wanted is None:
@@ -2646,33 +2730,33 @@ def _play_round(info: dict) -> int:
             return 0
 
         round_questions = random.sample(QUESTIONS, k=min(wanted, len(QUESTIONS)))
+        if not _PLAIN:
+            # The round opens on a clean screen rather than under the leftover
+            # masthead and picker; from here on the questions scroll.
+            out(f"{RESET}{ESC}[2J{ESC}[H")
         for i, (question, choices, correct_index) in enumerate(round_questions, start=1):
             correct_answer = choices[correct_index]
             display_choices = choices.copy()
             random.shuffle(display_choices)
             display_correct_index = display_choices.index(correct_answer)
             chosen = ask_question(
-                palette, i, len(round_questions), question, display_choices, width=w
+                palette, i, len(round_questions), question, display_choices, width=w, record=record
             )
             if chosen is None:
                 # Abandoned mid-round: report what was actually answered rather
                 # than scoring the questions the caller never saw.
-                draw_abandoned(palette, score, i - 1, width=w)
+                draw_abandoned(palette, score, i - 1, width=w, record=record)
                 read_key()
                 return 0
             correct = chosen == display_correct_index
+            record.append(correct)
             if correct:
                 score += 1
-            draw_result(
-                palette,
-                correct,
-                f"{LETTERS[display_correct_index]}) {correct_answer}",
-                width=w,
-            )
+            draw_result(palette, correct, LETTERS[display_correct_index], correct_answer, width=w)
 
         report_perfect_round(info, score, len(round_questions))
         play_finale(palette, info, score, len(round_questions), _OUTPUT_WIDTH, height)
-        draw_final_score(palette, score, len(round_questions), info=info, width=w)
+        draw_final_score(palette, score, len(round_questions), info=info, width=w, record=record)
         read_key()
     except EOFError:
         return 0
