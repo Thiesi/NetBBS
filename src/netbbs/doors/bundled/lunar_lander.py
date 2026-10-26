@@ -11,7 +11,7 @@ import argparse
 from bisect import bisect_right
 import codecs
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as clock_time, timedelta, timezone
 from functools import lru_cache
 import json
 import math
@@ -29,7 +29,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 DT = 1 / 60
 GRAVITY = 1.62
 DRY_MASS = 900.0
@@ -803,7 +803,7 @@ CHAPTERS = (
     Chapter("maria", "MARIA", ("training", "tranquility", "serenitatis", "copernicus", "imbrium", "crisium")),
     Chapter("highlands", "HIGHLANDS", ("ridgetop", "descartes", "hadley", "needle", "apennine")),
     Chapter("frontier", "FRONTIER", ("farside", "polar", "tsiolkovsky", "shackleton", "aitken")),
-    Chapter("daily", "DAILY", ("daily-maria", "daily-highlands", "daily-frontier"), ranked=False),
+    Chapter("daily", "DAILIES", ("daily-maria", "daily-highlands", "daily-frontier"), ranked=False),
     Chapter("program", "PROGRAM", tuple(f"program-{n}" for n in range(1, 9)), ranked=False),
 )
 
@@ -1118,6 +1118,16 @@ class DailyClock:
 
     def day(self) -> str:
         return self.now().astimezone(self.zone).date().isoformat()
+
+    def reset_note(self) -> str:
+        """How long until the node's next midnight, when the dailies change."""
+        now = self.now()
+        midnight = datetime.combine(now.astimezone(self.zone).date() + timedelta(days=1), clock_time(), self.zone)
+        # Aware datetimes in one zone subtract as wall time; UTC counts real minutes across DST.
+        minutes = max(1, math.ceil((midnight.astimezone(timezone.utc) - now.astimezone(timezone.utc))
+                                   .total_seconds() / 60))
+        hours, minutes = divmod(minutes, 60)
+        return "DAILIES RESET IN " + (f"{hours} HR{'S' if hours != 1 else ''} " if hours else "") + f"{minutes} MIN"
 
 
 # The records schema. Version 1 held pilots and their bests; version 2 adds
@@ -2606,7 +2616,7 @@ class Display:
             if t >= 3.5:
                 chip = [("PILOT ", (179, 155, 125)), (self.host.handle, (232, 240, 255)),
                         ("  ·  " if unicode else "  -  ", (70, 82, 120)),
-                        (f"{career({}, missions()).total} MISSIONS + DAILY", (179, 155, 125))]
+                        (f"{career({}, missions()).total} MISSIONS + DAILIES", (179, 155, 125))]
                 texts.append((text_row + 2, mx, chip))
             if t >= SCENE_SECONDS["splash"]:
                 texts.append((rows - 1, max(0, cols - len(SPLASH_PROMPT) - 2), [(SPLASH_PROMPT, rgb(5))]))
@@ -2939,7 +2949,7 @@ class Display:
             if chosen:
                 c.fill(lx - 1, row, 33, 1, bg)
                 c.text(lx - 1, row, "►" if unicode else ">", 5, bg)
-            # The Daily tab is today's: its list names each daily by its manner, the briefing adds the date.
+            # The Dailies tab is today's: its list names each daily by its manner, the briefing adds the date.
             label = entry.name.split(" ", 1)[0] if entry.key.startswith("daily-") else entry.name
             c.rich(lx, row, [("[", 9), (str(n + 1), 5), ("] ", 9),
                              (plain(label, 19), (255, 240, 200) if chosen else 7)], bg)
@@ -2982,7 +2992,9 @@ class Display:
         if program_tab:
             notes = []
         elif daily:
-            notes = textwrap.wrap(clock_note.rstrip(".") + ". Not ranked.", rw)
+            # The reset countdown on a line of its own, unless a long warning needs the wrap.
+            notes = ([clock_note, "Not ranked."] if len(clock_note) <= rw else
+                     textwrap.wrap(clock_note.rstrip(".") + ". Not ranked.", rw))
         elif " / " in note:
             # "LABEL / detail" reads as a heading and its line, not wrapped mid-phrase.
             notes = note.split(" / ", 1)
@@ -2990,8 +3002,16 @@ class Display:
             notes = textwrap.wrap(note, rw)
         for n, line in enumerate(notes[:2]):
             c.text(rx, stats_row + 4 + n, plain(line, rw), 12, PANEL)
-        keys = (f"[{sideways}] Chapter  [S] Simulator  [ENTER] Real flight  [N] New  [B] Board" if program_tab else
-                f"[{updown}] Mission  [{sideways}] Chapter  [ENTER] Launch  [B] Leaders  [?] Manual")
+        if program_tab:
+            keys = f"[{sideways}] Chapter"
+            # Only the keys that work now: the simulator and the real flight for the next mission.
+            if view.ready:
+                chosen = int(mission.key.rsplit("-", 1)[1])
+                if view.next() == chosen:
+                    keys += ("  [S] Simulator" if view.runs_left(chosen) != 0 else "") + "  [ENTER] Real flight"
+                keys += "  [N] New program  [B] Board"
+        else:
+            keys = f"[{updown}] Mission  [{sideways}] Chapter  [ENTER] Launch  [B] Leaders  [?] Manual"
         back = "[P] Pilot record    " + self.back
         if compact:
             c.annotated(lx, y0 + box_h - 3, keys, PANEL, box_w - 6)
@@ -2999,7 +3019,7 @@ class Display:
             return
         c.text(x0 + 1, y0 + 14, rule, EDGE, PANEL)
         c.annotated(lx, y0 + 15, keys, PANEL, box_w - 6)
-        c.annotated(lx, y0 + 16, f"In flight: [W/S {updown}] Thrust  [A/D {sideways}] Tilt  [0-9] Power  [SPACE] Cut",
+        c.annotated(lx, y0 + 16, f"In flight: [W/S {updown} 0-9] Thrust  [A/D {sideways}] Tilt  [X] Level  [SPACE] Cut",
                     PANEL, box_w - 6)
         c.annotated(lx, y0 + 17, "Touchdown: |V|<=3 m/s  |H|<=2 m/s  |tilt|<=10", PANEL, box_w - 6)
         c.annotated(lx, y0 + 18, back, PANEL, box_w - 6)
@@ -4036,7 +4056,7 @@ def run(host: Host, started: float) -> int:
                     remaining = min(ends) if ends else None
                     frame = display.draw(game.flight, game.mode, remaining, game.slow,
                                          game.mission, game.standings, game.record_note, game.scene_age,
-                                         clock.warning or "DAILY RESET: midnight / " + plain(host.timezone, 30),
+                                         clock.warning or clock.reset_note(),
                                          game.missions, Deck(game.chapter, game.bests,
                                                              game.records is not None and host.ranked, game.award,
                                                              tuple(game.unlocked), game.logbook(), game.kind,
