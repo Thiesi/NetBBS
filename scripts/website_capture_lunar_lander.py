@@ -59,6 +59,7 @@ PINS = {
     "v0.5.0": "8d05824c0778e74f474e1ff8c9f0174c56ba735644dccbcb14044e9ff4aa6b6f",
     "v0.5.1": "33ff9d9b9e52eff38dedafeb717f79fda14c1338d314851091c9d6b5b6d971ea",
     "v0.7.1": "612eff2bc9c6b3048cd4637f783bb78ae84dd49e9877fbf8dfc08eded89643ff",
+    "v0.7.2": "caccdd55d3631b3b82620e042bf2d7e5257c54cc316bb23b2757d18400bf05fb",
 }
 DAY = "2026-10-24"
 EVENING = "T20:00:00+00:00"
@@ -247,10 +248,16 @@ def fly(game, autopilot, stop=None):
 
 
 def debrief(g, game):
-    """Let the landing, medal and promotion scenes play out by themselves."""
+    """Let the landing, medal and promotion scenes play out, then dismiss each.
+
+    Up to v0.7.1 a scene ends by itself; from v0.7.2 it holds its last frame
+    until a key, so a scene that has run its length is passed with space."""
     for _ in range(200):
         if game.mode not in g.SCENE_SECONDS:
             break
+        if game.scene_age >= g.SCENE_SECONDS[game.mode]:
+            game.key(" ")
+            continue
         game.tick(.1, True)
     if game.mode != "debrief":
         raise SystemExit(f"the flight did not end on the debrief: {game.mode}")
