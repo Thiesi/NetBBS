@@ -8,10 +8,10 @@
   },
   "retro_trivia.py": {
     "repository": "Thiesi/RetroTrivia",
-    "tag": "v1.2.0",
-    "commit": "559ddf3c69409585f60b7bf219c5c46e03531184",
-    "git_blob": "0b04a91ae5f764ece709ffcec3d170ff151a0ff0",
-    "sha256": "57d9be5af3df4b359c128960f1384ccf4bcd6154b47da4c4602dd0fdf605848b"
+    "tag": "v1.3.0",
+    "commit": "6f2733ebe98836a73923dc7b6c3dbecd3b28daf8",
+    "git_blob": "1280cb5c85e06fee87482bdb021eb1cad2f607ac",
+    "sha256": "47b9f3f3bfc007cdcd15bbf2b78e9f4ae8ba63bdb2d6f16d893df4f818d7c34d"
   },
   "voidrunner.py": {
     "repository": "Thiesi/Voidrunner",
