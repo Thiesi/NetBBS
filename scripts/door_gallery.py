@@ -549,7 +549,7 @@ SHOWS: dict[str, dict[str, str]] = {
     "war_dialer": {
         # `painted` collapses runs of spaces, so the letter-spaced wordmark is
         # matched single-spaced; Fast mode draws no art and says it plainly.
-        "Masthead": {"*": "W A R D I A L E R", "fast": "WAR DIALER"},
+        "Masthead": {"*": "Rival crews", "fast": "WAR DIALER"},
         "Launch splash": "CONNECT 14400",
         "First visit": "FIRST VISIT",
         "While you were away": "WHILE YOU WERE AWAY",

@@ -273,7 +273,7 @@ _DOOR_ANSI = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
     # round, then eight answers and one key to dismiss the score.
     ("retro_trivia.py", "2" + "A" * 9, b"Final score:"),
     ("voidrunner.py", "\rYQ", b"Docking clamps engaged"),
-    ("war_dialer.py", " Q", b"W A R"),
+    ("war_dialer.py", " Q", b"Ten exchanges. One scene."),
 ])
 def test_web_bundled_trivia_round_restores_menu_on_same_websocket(db, lane, player, tmp_path, monkeypatch, game, keys, expected):
     import aiohttp
@@ -513,7 +513,7 @@ def test_war_dialer_timeout_does_not_leave_bracketed_paste_enabled(db, lane, pla
         session = FakeSession()
         result = asyncio.run(_run(session, lane, door, player, wall_time_limit_seconds=limit))
         assert result.reason == "timed_out"
-        if b"W A R" in session.written:
+        if b"Ten exchanges. One scene." in session.written:
             break
     else:
         pytest.fail(f"War Dialer never drew its title within {limit} s: {bytes(session.written)!r}")
