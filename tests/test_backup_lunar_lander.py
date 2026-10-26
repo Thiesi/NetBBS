@@ -50,7 +50,7 @@ def test_records_round_trip_through_a_backup(tmp_path, db_path, identity_dir):
     _land(db_path, 1, "Armstrong")
     archive = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
     manifest = json.loads((archive / "manifest.json").read_text())
-    assert manifest["lunar_lander"] == {"version": 1, "source_path": str(_records(db_path)), "schema_version": 2}
+    assert manifest["lunar_lander"] == {"version": 1, "source_path": str(_records(db_path)), "schema_version": 3}
     snapshot = archive / "lunar-lander" / "pilots.db"
     assert manifest["checksums"]["lunar-lander/pilots.db"] == hashlib.sha256(snapshot.read_bytes()).hexdigest()
 
@@ -252,13 +252,25 @@ def test_restore_over_damaged_live_records_moves_them_aside(tmp_path, db_path, i
     assert (rollback / "lunar-lander" / "pilots.db").read_bytes().startswith(b"not a database")
 
 
-# Schema 2 (issue #1561): the bundled Lunar Lander (v0.5.0 and later) writes
-# achievements and programs beside the pilots and scores schema 1 had.
+# Schema 2 (issue #1561): Lunar Lander v0.5 kept achievements and programs
+# beside the pilots and scores schema 1 had. Schema 3 (issue #1577), which the
+# bundled game (v0.6.0 and later) writes, adds best-run ghosts and Grand Tours.
 _SCHEMA_2_TABLES = ("counters", "achievements", "programs", "program_missions")
+_SCHEMA_3_TABLES = ("ghosts", "tours")
+
+
+def _as_schema_2(path):
+    """The file Lunar Lander v0.5 kept: schema 3 without its additions."""
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        for table in _SCHEMA_3_TABLES:
+            conn.execute(f"DROP TABLE {table}")
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
 
 
 def _as_schema_1(path):
     """The file an older Lunar Lander kept: schema 2 without its additions."""
+    _as_schema_2(path)
     with contextlib.closing(sqlite3.connect(path)) as conn:
         for table in _SCHEMA_2_TABLES:
             conn.execute(f"DROP TABLE {table}")
@@ -266,56 +278,41 @@ def _as_schema_1(path):
         conn.commit()
 
 
-def test_the_bundled_game_writes_schema_2(db_path):
-    _land(db_path, 1, "Armstrong")
-    assert backup_module._inspect_lunar_lander(_records(db_path)) == 2
-
-
-def test_a_schema_1_backup_restores_and_the_game_upgrades_it(tmp_path, db_path, identity_dir):
-    """A node backed up under an older Lunar Lander restores under this one."""
-    _land(db_path, 1, "Armstrong")
-    _as_schema_1(_records(db_path))
-    archive = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
-    assert json.loads((archive / "manifest.json").read_text())["lunar_lander"]["schema_version"] == 1
-    restore_backup(source=archive, db_path=db_path, identity_dir=identity_dir)
-    assert backup_module._inspect_lunar_lander(_records(db_path)) == 1
-    _land(db_path, 2, "Aldrin")  # The game's first open upgrades it in place.
-    assert backup_module._inspect_lunar_lander(_records(db_path)) == 2
-    assert _pilots(_records(db_path)) == ["Aldrin", "Armstrong"]
-
-
-def _as_schema_3(path):
-    """The file the next Lunar Lander keeps (issue #1577): schema 2 plus its
-    best-run ghosts and Grand Tours, as listed there."""
-    with contextlib.closing(sqlite3.connect(path)) as conn:
-        conn.execute("CREATE TABLE ghosts (node TEXT NOT NULL, user INTEGER NOT NULL, mission TEXT NOT NULL, "
-                     "score INTEGER NOT NULL, recorded TEXT NOT NULL, data BLOB NOT NULL, "
-                     "PRIMARY KEY (node, user, mission), "
-                     "FOREIGN KEY (node, user) REFERENCES pilots (node, user))")
-        conn.execute("CREATE TABLE tours (id INTEGER PRIMARY KEY, node TEXT NOT NULL, user INTEGER NOT NULL, "
-                     "started TEXT NOT NULL, ended TEXT, status TEXT NOT NULL, landed INTEGER NOT NULL, "
-                     "retries INTEGER NOT NULL, seconds REAL NOT NULL, score INTEGER NOT NULL, "
-                     "FOREIGN KEY (node, user) REFERENCES pilots (node, user))")
-        conn.execute("INSERT INTO ghosts SELECT node, user, mission, score, achieved, zeroblob(512) FROM scores")
-        conn.execute("PRAGMA user_version = 3")
-        conn.commit()
-
-
 def _ghosts(path):
     with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
-        return conn.execute("SELECT COUNT(*), SUM(length(data)) FROM ghosts").fetchone()
+        return conn.execute("SELECT node, user, mission, score, data FROM ghosts ORDER BY mission").fetchall()
+
+
+def test_the_bundled_game_writes_schema_3(db_path):
+    _land(db_path, 1, "Armstrong")
+    assert backup_module._inspect_lunar_lander(_records(db_path)) == 3
+
+
+@pytest.mark.parametrize("schema, downgrade", [(1, _as_schema_1), (2, _as_schema_2)])
+def test_an_older_backup_restores_and_the_game_upgrades_it(tmp_path, db_path, identity_dir, schema, downgrade):
+    """A node backed up under an older Lunar Lander restores under this one."""
+    _land(db_path, 1, "Armstrong")
+    downgrade(_records(db_path))
+    archive = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    assert json.loads((archive / "manifest.json").read_text())["lunar_lander"]["schema_version"] == schema
+    restore_backup(source=archive, db_path=db_path, identity_dir=identity_dir)
+    assert backup_module._inspect_lunar_lander(_records(db_path)) == schema
+    _land(db_path, 2, "Aldrin")  # The game's first open upgrades it in place.
+    assert backup_module._inspect_lunar_lander(_records(db_path)) == 3
+    assert _pilots(_records(db_path)) == ["Aldrin", "Armstrong"]
 
 
 def test_schema_3_records_round_trip_through_a_backup(tmp_path, db_path, identity_dir):
     _land(db_path, 1, "Armstrong")
-    _as_schema_3(_records(db_path))
+    ghosts = _ghosts(_records(db_path))
+    assert len(ghosts) == 1 and ghosts[0][4]  # the landing's best run, as the game stored it
     archive = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
     assert json.loads((archive / "manifest.json").read_text())["lunar_lander"]["schema_version"] == 3
     _records(db_path).unlink()
     restore_backup(source=archive, db_path=db_path, identity_dir=identity_dir)
     assert backup_module._inspect_lunar_lander(_records(db_path)) == 3
     assert _pilots(_records(db_path)) == ["Armstrong"]
-    assert _ghosts(_records(db_path)) == (1, 512)
+    assert _ghosts(_records(db_path)) == ghosts
 
 
 @pytest.mark.parametrize("damage", ["unknown version", "missing table", "schema 1 tables at version 2",
@@ -323,13 +320,16 @@ def test_schema_3_records_round_trip_through_a_backup(tmp_path, db_path, identit
 def test_records_this_build_does_not_know_are_refused(tmp_path, db_path, identity_dir, damage):
     _land(db_path, 1, "Armstrong")
     path = _records(db_path)
+    if damage == "schema 1 tables at version 2":
+        _as_schema_2(path)
     with contextlib.closing(sqlite3.connect(path)) as conn:
         if damage == "unknown version":
             conn.execute("PRAGMA user_version = 4")
         elif damage == "missing table":
             conn.execute("DROP TABLE program_missions")
         elif damage == "schema 2 tables at version 3":
-            conn.execute("PRAGMA user_version = 3")
+            for table in _SCHEMA_3_TABLES:
+                conn.execute(f"DROP TABLE {table}")
         else:
             for table in _SCHEMA_2_TABLES:
                 conn.execute(f"DROP TABLE {table}")
