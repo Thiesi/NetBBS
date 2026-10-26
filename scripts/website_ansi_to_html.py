@@ -102,13 +102,22 @@ class Style:
         text. A font's half block spans neither the 1ch cell nor the line
         height, so thin strips of background showed between the pixels of
         half-block pictures (Lunar Lander's scenery, the games' splashes).
-        `web/game-scenes.js` applies the same rule to replayed scenes."""
+        `web/game-scenes.js` applies the same rule to replayed scenes.
+
+        A quadrant glyph (Lunar Lander's scenery from v0.5.0) names, in
+        `fill`, which quarters take the foreground: upper left, upper right,
+        lower left, lower right, as "1" or "0". It is one conic gradient
+        about the cell's centre, whose hard stops at the quarter turns are
+        the cell's two centre lines."""
         fg, bg = self.fg, self.bg
         if self.reverse:
             fg, bg = bg or DEFAULT_BG, fg or DEFAULT_FG
         top = "rgb(%d,%d,%d)" % (fg or DEFAULT_FG)
         under = "rgb(%d,%d,%d)" % bg if bg else "transparent"
-        if fill == "full":
+        if fill.isdigit():
+            ul, ur, ll, lr = (top if bit == "1" else under for bit in fill)
+            paint = f"conic-gradient({ur} 0 25%,{lr} 25% 50%,{ll} 50% 75%,{ul} 75%)"
+        elif fill == "full":
             paint = top
         else:
             direction = "to right," if fill in ("left", "right") else ""
@@ -119,6 +128,10 @@ class Style:
 
 #: Block glyphs drawn as cell fills (`Style.block_css`), with the part each fills.
 BLOCK_FILLS = {"▀": "top", "▄": "bottom", "█": "full", "▌": "left", "▐": "right"}
+#: The quadrant glyphs the halves above do not cover, each with the quarters
+#: it fills (upper left, upper right, lower left, lower right).
+BLOCK_FILLS.update({"▘": "1000", "▝": "0100", "▖": "0010", "▗": "0001", "▞": "0110",
+                    "▚": "1001", "▛": "1110", "▜": "1101", "▙": "1011", "▟": "0111"})
 
 
 BLANK = Style()

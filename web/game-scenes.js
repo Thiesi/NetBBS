@@ -11,14 +11,19 @@
     // half block neither spans the 1ch cell nor the line height, so thin
     // strips of background showed between the picture's pixels.
     // Same rule as scripts/website_ansi_to_html.py.
-    var BLOCKS = {'▀': 'top', '▄': 'bottom', '█': 'full', '▌': 'left', '▐': 'right'};
+    var BLOCKS = {'▀': 'top', '▄': 'bottom', '█': 'full', '▌': 'left', '▐': 'right',
+      // quadrants: the quarters each fills, upper left, upper right, lower left, lower right
+      '▘': '1000', '▝': '0100', '▖': '0010', '▗': '0001', '▞': '0110',
+      '▚': '1001', '▛': '1110', '▜': '1101', '▙': '1011', '▟': '0111'};
 
     function blockCss(fill, css){
       var fg = /(?:^|;)color:(rgb\([^)]*\))/.exec(css);
       var bg = /(?:^|;)background:(rgb\([^)]*\))/.exec(css);
       fg = fg ? fg[1] : 'rgb(199,202,212)';
       bg = bg ? bg[1] : 'transparent';
-      var paint = fill === 'full' ? fg
+      var q = /^[01]{4}$/.test(fill) ? fill.split('').map(function(bit){ return bit === '1' ? fg : bg; }) : null;
+      var paint = q ? 'conic-gradient(' + q[1] + ' 0 25%,' + q[3] + ' 25% 50%,' + q[2] + ' 50% 75%,' + q[0] + ' 75%)'
+        : fill === 'full' ? fg
         : 'linear-gradient(' + (fill === 'left' || fill === 'right' ? 'to right,' : '')
           + (fill === 'top' || fill === 'left' ? fg + ' 50%,' + bg + ' 50%' : bg + ' 50%,' + fg + ' 50%') + ')';
       return css.replace(/(?:^|;)background:rgb\([^)]*\)/, '') + ';background:' + paint;

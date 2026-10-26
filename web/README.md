@@ -379,7 +379,10 @@ all a page shows with scripts off.
   half block spans the 1ch cell and the full line, so the glyphs left thin
   strips of background between the pixels of every half-block picture.
   Captures converted before this rule were rewritten in place with the same
-  formula (only the block cells changed).
+  formula (only the block cells changed). The quadrant glyphs
+  `▘ ▝ ▖ ▗ ▞ ▚ ▛ ▜ ▙ ▟`, which Lunar Lander draws from v0.5.0, are painted
+  the same way: one conic gradient about the cell's centre, its hard stops at
+  the quarter turns, gives each quarter the foreground or the background.
 - **Re-record after vendoring a new game release.** A cast is that release's
   bytes, so `VENDORED.json` and the casts change together.
 
