@@ -382,8 +382,8 @@ def test_the_real_demo_door_plays_a_full_round_through_run_door(db, lane, player
     assert "R E T R O" in output  # the title screen's letter-spaced wordmark
     assert "Welcome, " in output
     assert "keeper" in output  # the real caller handle, from the drop-file
-    assert "Question 1/8" in output
-    assert "Question 8/8" in output
+    assert "QUESTION 1 OF 8" in output
+    assert "QUESTION 8 OF 8" in output
     assert "Final score:" in output
     # Every row fits the negotiated terminal. This held before issue #514 too --
     # `out_line` passes each row through `_wrap_output`, which re-wraps an
