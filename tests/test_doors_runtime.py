@@ -441,11 +441,18 @@ def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
     assert "keeper" in output  # the real caller handle, from the drop-file
     assert "Bought 3x Food" in output
     assert "Docking clamps engaged" in output
-    overflows = [
-        strip_ansi(line)
-        for line in output.splitlines()
-        if display_width(strip_ansi(line)) > 40
-    ]
+    # The canopy pages place their rows and panels with cursor moves, so a
+    # run of text ends at the column it starts from plus its width.
+    overflows = []
+    column = 1
+    for piece in re.split(r"(\x1b\[[\d;]*H|[\r\n])", output):
+        move = re.fullmatch(r"\x1b\[\d*(?:;(\d*))?H", piece)
+        if move:
+            column = int(move.group(1) or 1)
+        elif piece in ("\r", "\n"):
+            column = 1
+        elif column - 1 + display_width(strip_ansi(piece)) > 40:
+            overflows.append(strip_ansi(piece))
     assert not overflows
     assert save_path.exists()  # the door manages its own save, unmediated by NetBBS
     assert not (door_home / ".netbbs" / "voidrunner_saves").exists()
