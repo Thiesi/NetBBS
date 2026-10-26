@@ -5654,4 +5654,44 @@ MIGRATIONS = [
         CREATE INDEX idx_qwknet_held_conference ON qwknet_held(network_id, conference);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #1561: widens `door_events.type`'s CHECK to admit 'season', a game's own new "
+            "season, which names no caller and so has no `door_event_subjects` rows. SQLite "
+            "cannot change a CHECK in place, so this is the standard rebuild, with two things "
+            "kept that it would otherwise lose. `door_event_subjects` references `door_events` "
+            "with ON DELETE CASCADE, and DROP TABLE under foreign_keys=ON deletes every row "
+            "first: the subjects are copied aside and put back. And `door_events` is "
+            "AUTOINCREMENT, read by each bot's own cursor: its sqlite_sequence value is carried "
+            "over, so an id is never handed out twice. The bounding trigger goes with the old "
+            "table and is recreated."
+        ),
+        sql="""
+        CREATE TABLE door_event_subjects_kept AS SELECT event_id, position, user_id FROM door_event_subjects;
+        CREATE TABLE door_events_sequence_kept AS
+            SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'door_events'), 0) AS seq;
+        CREATE TABLE door_events_new (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            door_id     INTEGER NOT NULL REFERENCES doors(id) ON DELETE CASCADE,
+            type        TEXT NOT NULL CHECK (type IN ('rank', 'achievement', 'medal', 'capture', 'perfect', 'season')),
+            title       TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+        INSERT INTO door_events_new (id, door_id, type, title, created_at)
+            SELECT id, door_id, type, title, created_at FROM door_events;
+        DROP TABLE door_events;
+        ALTER TABLE door_events_new RENAME TO door_events;
+        INSERT INTO door_event_subjects (event_id, position, user_id)
+            SELECT event_id, position, user_id FROM door_event_subjects_kept;
+        DROP TABLE door_event_subjects_kept;
+        DELETE FROM sqlite_sequence WHERE name = 'door_events';
+        INSERT INTO sqlite_sequence (name, seq)
+            SELECT 'door_events', MAX((SELECT seq FROM door_events_sequence_kept),
+                                      (SELECT COALESCE(MAX(id), 0) FROM door_events));
+        DROP TABLE door_events_sequence_kept;
+        CREATE TRIGGER door_events_bound AFTER INSERT ON door_events BEGIN
+            DELETE FROM door_events WHERE id <= NEW.id - 1024;
+        END;
+        """,
+    ),
 ]

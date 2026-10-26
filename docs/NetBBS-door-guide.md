@@ -1100,7 +1100,7 @@ door cannot use up its board posts or the reverse.
 ### Letting it report game events
 
 A door can also report what callers earn in it -- a rank, a top achievement,
-a season's medals, a captured exchange, a perfect round -- and keep a top-ten
+a season's medals, a captured exchange, a perfect round, a new season -- and keep a top-ten
 table. A chat bot such as Baud then announces those in a channel, and answers
 `!top <door>` with the table:
 
@@ -1132,11 +1132,11 @@ what it reported; `[T]urn off` releases the events and the table with the
 rest of the hook.
 
 **What a door reports (door API 5).** `door_info.json` carries
-`outbound.events` while events are on: the five types, `events_per_hour`,
+`outbound.events` while events are on: the six types, `events_per_hour`,
 `title_max` (80) and `standings_rows` (10). A request in the drop directory is
 `{"event": {"type": ..., "user_id": ..., "title": ...}}`, where `type` is
-`rank`, `achievement`, `medal`, `capture` or `perfect`; a `medal` names up to
-three callers as `user_ids`, gold first. A standings snapshot is
+`rank`, `achievement`, `medal`, `capture`, `perfect` or `season`; a `medal` names up to
+three callers as `user_ids`, gold first, and a `season` names nobody. A standings snapshot is
 `{"standings": {"title": ..., "rows": [{"user_id": ..., "value": ...,
 "label": ...}]}}`, at most 10 rows, each replacing the last. The full
 contract, with each type's sentence, the limits and the receipts, is in the

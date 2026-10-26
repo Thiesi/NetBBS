@@ -1635,8 +1635,8 @@ allowlist and posting limit.
 
 ### Announce door game results
 
-A door can report ranks, top achievements, season medals, captures and perfect
-rounds, and a top-ten table, for a chat bot to announce and for `!top <door>`.
+A door can report ranks, top achievements, season medals, captures, perfect
+rounds and the start of a new season, and a top-ten table, for a chat bot to announce and for `!top <door>`.
 
 1. Open the door's <kbd>O</kbd> **Outbound** screen and switch the hook on.
 2. <kbd>E</kbd> **Events on**. <kbd>G</kbd> **Game events per hour** sets its
