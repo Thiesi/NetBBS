@@ -335,6 +335,12 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Mission briefing, a ranked mission", b"d4"),
         ("Flight manual", b"?"),
         ("Best pilots", b"2b"),
+        # v0.5.0's Pilot Record and its second tab, and the PROGRAM tab: the
+        # chapters wrap, so one step left from the first is the last.
+        ("Pilot Record", b"p"),
+        ("Pilot Record, achievements", b"pd"),
+        ("Program", b"a"),
+        ("Program, presets", b"an"),
         # Launched, then paused: the flight HUD under the pause card. Any key
         # ends the launch scene, so a space ends it before P pauses.
         ("Flight paused", b"\r! !p"),
@@ -611,6 +617,10 @@ SHOWS: dict[str, dict[str, str]] = {
         "Mission briefing, a ranked mission": "THE NEEDLE",
         "Flight manual": "FLIGHT MANUAL",
         "Best pilots": "BEST PILOTS",
+        "Pilot Record": "PILOT RECORD",
+        "Pilot Record, achievements": "First Contact",
+        "Program": "Start a program",
+        "Program, presets": "NEW PROGRAM",
         "Flight paused": "FLIGHT PAUSED",
         "Lander down": "SIGNAL LOST",
     },
@@ -1288,6 +1298,9 @@ def build_lunar_lander_records(door_name: str, door: pathlib.Path, state: pathli
             records.db.execute("INSERT INTO pilots VALUES (?,?,?)", ("gallery-node", user, handle))
             records.db.execute("INSERT INTO scores VALUES (?,?,?,?,?)",
                                ("gallery-node", user, "tranquility", score, user))
+        # Two earned achievements, so the record's second tab has some.
+        for key in ("land-1", "land-10"):
+            records.db.execute("INSERT INTO achievements VALUES (?,?,?,?)", ("gallery-node", 1, key, 1))
     finally:
         records.close()
 
