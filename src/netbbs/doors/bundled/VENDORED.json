@@ -1,10 +1,10 @@
 {
   "lunar_lander.py": {
     "repository": "Thiesi/LunarLander",
-    "tag": "v0.1.0",
-    "commit": "dfa5101277f54741f52cc287134ce5bc0e75bea1",
-    "git_blob": "dbf203d27f99b5ee4fb3b0b38c2b1fe0249f8885",
-    "sha256": "6aacc05f20d99fb35027bc04f050523bd4bedac5f47f0f24217da8ffc5d2bb71"
+    "tag": "v0.5.0",
+    "commit": "2acd4f851a1b8f18d65e337d6f87d2b8004cf6c0",
+    "git_blob": "d72ef0cabd06631b70c3dd75634d9dd732a923a3",
+    "sha256": "8d05824c0778e74f474e1ff8c9f0174c56ba735644dccbcb14044e9ff4aa6b6f"
   },
   "retro_trivia.py": {
     "repository": "Thiesi/RetroTrivia",

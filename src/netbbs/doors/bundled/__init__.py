@@ -96,7 +96,8 @@ BUNDLED_DOORS: tuple[BundledDoor, ...] = (
         description=(
             "Real-time lunar landing: tilt and throttle a lander down onto a lit pad. A "
             "training basin, fifteen ranked missions in three chapters and a daily challenge; "
-            "medals, ranks and per-mission leaderboards. Needs an 80x24 terminal."
+            "medals, ranks, achievements and per-mission leaderboards, and monthly Programs "
+            "seasons. Needs an 80x24 terminal."
         ),
         resource="lunar_lander.py",
         follows_resize=True,
