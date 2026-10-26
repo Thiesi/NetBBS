@@ -430,9 +430,17 @@ not configure a scheduler, remote storage, or automatic deletion.
 ## Lunar Lander pilot records
 
 Lunar Lander keeps one SQLite file, `pilots.db`: each pilot's best landing on
-each ranked mission. Training, crashes and aborted flights are never recorded.
-A flight has no save of its own, so a caller who hangs up mid-flight loses that
-flight and nothing else.
+each ranked mission and the recorded run behind it, which other pilots can fly
+against as a ghost, plus achievements, programs and Grand Tours. Training,
+crashes and aborted flights are never recorded. A flight has no save of its
+own, so a caller who hangs up mid-flight loses that flight and nothing else.
+
+The game also keeps a `live/` folder beside `pilots.db`, so each pilot sees
+who else on the node is flying right now. Each running door keeps one small
+file there, refreshed every few seconds and removed when the door exits; a door
+that dies leaves its file to go stale. These files are not records, and backups
+leave them out. `DOOR_LL_LIVE=0` in the door's profile environment turns this
+off.
 
 | | |
 | --- | --- |

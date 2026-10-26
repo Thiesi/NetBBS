@@ -124,7 +124,9 @@ def test_a_bundled_launch_keeps_records_beside_the_node_database(db, lane, playe
     door = create_door(db, "Lunar Lander", sys.executable, args=(str(_SCRIPT),), creator=player)
     result, _ = _fly_and_quit(FakeSession(), lane, door, player)
     assert result.reason == "exited" and result.exit_code == 0, result.diagnostic
-    assert _pilots(node_lunar_lander_dir(db.path) / "pilots.db") == []  # created, nobody landed
+    # Created beside the database. The briefing reads the caller's best runs,
+    # which enters them as a pilot (v0.6.0) before anyone lands.
+    assert _pilots(node_lunar_lander_dir(db.path) / "pilots.db") == ["pilot"]
     # Never inside the installed package, which an upgrade replaces.
     assert not (_SCRIPT.parent / "data").exists()
 
@@ -141,8 +143,9 @@ def test_a_guest_flies_against_a_copy_of_the_records(db, lane, tmp_path):
     door = create_door(db, "Lunar Lander", sys.executable, args=(str(_SCRIPT),), creator=guest)
     result, sandbox_pilots = _fly_and_quit(FakeSession(), lane, door, guest, as_guest=True)
     assert result.reason == "exited" and result.exit_code == 0, result.diagnostic
-    # The call played against its own copy of the node's records.
-    assert sandbox_pilots == ["Armstrong"]
+    # The call played against its own copy of the node's records: the guest
+    # is entered in the copy, and the node's own records never see it.
+    assert sandbox_pilots == ["Armstrong", "guest"]
     assert _pilots(records) == ["Armstrong"]
 
 
@@ -152,7 +155,7 @@ def test_a_guest_on_a_node_without_records_creates_none_of_the_nodes(db, lane):
     door = create_door(db, "Lunar Lander", sys.executable, args=(str(_SCRIPT),), creator=guest)
     result, sandbox_pilots = _fly_and_quit(FakeSession(), lane, door, guest, as_guest=True)
     assert result.reason == "exited" and result.exit_code == 0, result.diagnostic
-    assert sandbox_pilots == []  # the door made its records in the call's directory
+    assert sandbox_pilots == ["guest"]  # the door made its records in the call's directory
     assert not node_lunar_lander_dir(db.path).exists()
 
 
