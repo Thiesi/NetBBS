@@ -341,8 +341,9 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Pilot Record, achievements", b"pd"),
         ("Program", b"a"),
         ("Program, presets", b"an"),
-        # Launched, then paused: the flight HUD under the pause card. Any key
-        # ends the launch scene, so a space ends it before P pauses.
+        # Launched, then paused: the flight HUD under the pause card. With the
+        # launch scene off (DOOR_LL_SCENES) the space only cuts thrust; it
+        # still gives the flight a beat before P pauses.
         ("Flight paused", b"\r! !p"),
         # Training with the engine off falls to the surface inside the patience
         # window, and the debrief is still once it is drawn.
@@ -736,6 +737,10 @@ class Door:
                    DOOR_LL_DATA_DIR=str(state),
                    DOOR_SPLASH="1" if splash else "0",
                    DOOR_SCENES="0",
+                   # Lunar Lander's own switch for the same thing. From v0.7.2
+                   # its crash scene animates until a key, so a walk would
+                   # never see it go quiet.
+                   DOOR_LL_SCENES="0",
                    PYTHONIOENCODING="utf-8")
         extra_env = state / FIXTURE_ENVIRONMENT
         if extra_env.is_file():

@@ -30,7 +30,7 @@ import unicodedata
 import zlib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 DT = 1 / 60
 GRAVITY = 1.62
 DRY_MASS = 900.0
@@ -1225,6 +1225,8 @@ ACHIEVEMENTS = tuple(Achievement(key, name, tier, group, hint,
                                  or key in ("every-limit", "never-trained", "craft-hopper"))
                      for group, rows in _CATALOGUE for key, name, tier, hint in rows)
 ACHIEVEMENT = {achievement.key: achievement for achievement in ACHIEVEMENTS}
+HINT_WIDTH = max(len(a.hint) for a in ACHIEVEMENTS)
+
 # Counter thresholds: (counter, value, achievement).
 MILESTONES = (("landings", 1, "land-1"), ("landings", 10, "land-10"), ("landings", 25, "land-25"),
               ("landings", 50, "land-50"), ("landings", 100, "land-100"), ("landings", 250, "land-250"),
@@ -1982,13 +1984,17 @@ class Canvas:
             self.text(x + 4, y, label, accent, PANEL)
             self.text(x + 4 + _cells(label), y, " ├" if unicode else " ]", EDGE, PANEL)
 
-    def panel(self, x: int, y: int, width: int, lines: list[str], unicode: bool = True, accent=5):
-        """`lines[0]` titles the card; the rest is annotated body copy."""
+    def panel(self, x: int, y: int, width: int, lines: list, unicode: bool = True, accent=5):
+        """`lines[0]` titles the card; the rest is annotated body copy, or
+        (text, color) parts where a line needs colors of its own."""
         width = min(width, self.width - x)
         body = lines[1:]
         self.frame(x, y, width, len(body) + 2, lines[0], unicode, accent)
         for n, line in enumerate(body, y + 1):
-            self.annotated(x + 3, n, line, PANEL, width - 6)
+            if isinstance(line, list):
+                self.rich(x + 3, n, line, PANEL, width - 6)
+            else:
+                self.annotated(x + 3, n, line, PANEL, width - 6)
 
 
 # ---------------------------------------------------------------------------
@@ -3151,8 +3157,17 @@ TAGLINES = (
     "FLY IT LIKE THE TANK IS HALF EMPTY.",
 )
 
-SCENE_SECONDS = {"splash": 5.0, "launch": 3.0, "landing": 2.6, "crash": 2.4, "medal": 3.2, "promotion": 4.4}
+SCENE_SECONDS = {"splash": 5.0, "launch": 4.5, "landing": 2.6, "crash": 2.4, "medal": 3.2, "promotion": 4.4}
+# Played out, these hold their last frame until a key: a title to read, a medal
+# or a promotion to admire, the reason for a crash.
+SCENE_HOLDS = ("splash", "medal", "promotion", "crash")
+# A medal, promotion or crash ignores keys this long, so a burn held through touchdown
+# cannot skip it unseen.
+HOLD_GRACE = 1.2
 SCENE_MAX = (132, 50)
+# Things that share a line take turns this often (s): new achievements on the
+# debrief, an achievement's date and what it was for in the Pilot Record.
+TURN_SECONDS = 4.0
 SPLASH_PROMPT = "press any key to begin"
 
 
@@ -3179,6 +3194,7 @@ class Display:
         self.previous: list | None = None
         self.camera: tuple[float, float] | None = None
         self.frame = 0
+        self.clock = time.monotonic  # for things taking turns; tests pin it
         self._landscape: tuple | None = None
         self.tagline = random.choice(TAGLINES)
         # The fuel alert shown last, and the frame it began: a new alert flashes.
@@ -3228,6 +3244,10 @@ class Display:
                 cursor = (y, x + (2 if unicodedata.east_asian_width(char) in "WF" else 1))
         self.previous = canvas.cells
         return "".join(output)
+
+    def turn(self, count: int) -> int:
+        """Which of `count` things sharing a line shows now."""
+        return int(self.clock() / TURN_SECONDS) % count if count else 0
 
     # -- scenes --------------------------------------------------------------
 
@@ -3392,11 +3412,11 @@ class Display:
                 # Ignition: a cough of sparks, then the plume steadies and the descent
                 # begins, slow enough to read the briefing over it.
                 fire = _span(t, .35, .9)
-                y = round(h * .4 + _ease(_span(t, .6, 2.8)) * h * .08)
+                y = round(h * .4 + _ease(_span(t, .6, 4.2)) * h * .08)
                 sprites.append((above(lander_sprite(0, .3 + .6 * fire if fire else 0, t, "large", across), y, pad_y),
                                 pad_c, y))
                 checks = ("GUIDANCE", "ATTITUDE", "THROTTLE", "RANGE")
-                lit = min(len(checks), int(_span(t, .1, 1.6) * (len(checks) + 1)))
+                lit = min(len(checks), int(_span(t, .1, 2.6) * (len(checks) + 1)))
                 parts = []
                 for n, word in enumerate(checks):
                     parts += [(("■ " if unicode else "# "), rgb(6) if n < lit else (50, 62, 92)),
@@ -3431,7 +3451,7 @@ class Display:
             colors = ((255, 150, 120), rgb(8)) if kind == "crash" else ((255, 244, 214), (232, 160, 58))
             texts.append((2, max(1, (cols - len(spaced)) // 2), _gradient(spaced, *colors)))
             texts.append((4, max(1, (cols - len(subtitle)) // 2), [(subtitle, rgb(7))]))
-            hint = "[SPACE] Skip scene   " + self.back
+            hint = ("[SPACE] Continue   " if kind == "crash" else "[SPACE] Skip scene   ") + self.back
             texts.append((rows - 2, max(1, (cols - len(hint)) // 2), "annotated:" + hint))
 
         # Beacons at the pad's corners: masts with cyan lamps.
@@ -3541,9 +3561,13 @@ class Display:
                              f"Rank {ladder.rank}: {ladder.points} medal points"
                              + (f", {ladder.next_at - ladder.points} to {ladder.next_rank}" if ladder.next_rank else ""))
             if self.deck.unlocked:
-                first = ACHIEVEMENT[self.deck.unlocked[0]]
-                more = len(self.deck.unlocked) - 1
-                lines.append(f"ACHIEVEMENT: {first.name} ({first.tier.lower()})" + (f"  +{more} more" if more else ""))
+                # Each new one in turn, named in its medal's color, and what it was for.
+                count = len(self.deck.unlocked)
+                n = self.turn(count)
+                shown = ACHIEVEMENT[self.deck.unlocked[n]]
+                lines.append([("ACHIEVEMENT", 9), *(((" ", 9), (f"{n + 1} of {count}", 6)) if count > 1 else ()),
+                              (": ", 9), (shown.name, MEDAL_COLORS[shown.tier][1]), (f" ({shown.tier.lower()})", 9)])
+                lines.append([("  " + shown.hint, 7)])
             retry = {"real": "", "sim": "[R] Simulator again    "}.get(self.deck.kind, "[R] Retry    ")
             if self.deck.kind == "sim" and self.deck.program and                     self.deck.program.runs_left(int(mission.key.rsplit("-", 1)[1])) == 0:
                 retry = ""
@@ -3915,16 +3939,23 @@ class Display:
             got = row.key in book.held
             mark = ("●" if unicode else row.tier[0]) if got else ("·" if unicode else ".")
             name = row.name if got or not row.hidden else "???"
-            if got:
-                when = datetime.fromtimestamp(book.held[row.key] / 1e9, timezone.utc).astimezone(book.zone)
-                detail = when.strftime(book.date_format)
-            else:
-                detail = "Hidden until earned" if row.hidden else row.hint
             rarity = f"{book.rarity.get(row.key, 0)} of {book.pilots}" if book.pilots else ""
             room = width - 3 - 21 - len(rarity) - 1
+            if got:
+                when = datetime.fromtimestamp(book.held[row.key] / 1e9, timezone.utc).astimezone(book.zone)
+                stamp = when.strftime(book.date_format)
+                if room >= HINT_WIDTH + 2 + len(stamp):
+                    # Room for both: what it was for, and when.
+                    detail = [(f"{row.hint:<{HINT_WIDTH + 2}}", 7), (f"{stamp:<{room - HINT_WIDTH - 2}}", 6)]
+                else:
+                    # Not both on one line: the date and what it was for take turns.
+                    text, color = (stamp, 6) if self.turn(2) == 0 else (row.hint, 7)
+                    detail = [(f"{plain(text, room):<{room}}", color)]
+            else:
+                text = "Hidden until earned" if row.hidden else row.hint
+                detail = [(f"{plain(text, room):<{room}}", 9)]
             lines.append([(f" {mark} ", MEDAL_COLORS[row.tier][1] if got else (60, 72, 104)),
-                          (f"{plain(name, 20):<21}", 7 if got else 9),
-                          (f"{plain(detail, room):<{room}} ", 6 if got else 9), (rarity, 9)])
+                          (f"{plain(name, 20):<21}", 7 if got else 9), *detail, (" ", 9), (rarity, 9)])
         return lines
 
     def landscape(self, ground: Terrain, left: float, metres: float, top: float, width: int,
@@ -4813,6 +4844,8 @@ class Game:
                 self.leaving = True
             return True
         if self.mode in SCENE_SECONDS:
+            if self.mode in ("medal", "promotion", "crash") and self.scene_age < HOLD_GRACE:
+                return False
             self.finish_scene()
             return True
         if key == "?" or (key == "escape" and self.mode == "help"):
@@ -5018,8 +5051,7 @@ class Game:
         if self.mode in SCENE_SECONDS:
             if size_ok:
                 self.scene_age += elapsed
-                # The splash, played out, holds under its prompt until a key.
-                if self.scene_age >= SCENE_SECONDS[self.mode] and self.mode != "splash":
+                if self.scene_age >= SCENE_SECONDS[self.mode] and self.mode not in SCENE_HOLDS:
                     self.finish_scene()
             return
         if self.mode == "replay" and size_ok:
@@ -5224,11 +5256,11 @@ def run(host: Host, started: float) -> int:
                     terminal.write(display.encode(frame))
                     # Flight and scenes move at 10 fps. A card only changes when a key
                     # arrives (which redraws at once) or a countdown ticks, and the
-                    # splash's hold only twinkles, so idling costs little CPU.
+                    # holds of the splash and a medal only twinkle, so idling costs little CPU.
                     if game.mode in ("menu", "help", "paused", "debrief", "scores", "confirm", "record",
                                      "presets", "commit", "program-board", "tour", "tour-board", "postcard"):
                         next_frame = now + 1
-                    elif game.mode == "splash" and game.scene_age >= SCENE_SECONDS["splash"]:
+                    elif game.mode in SCENE_HOLDS and game.scene_age >= SCENE_SECONDS[game.mode]:
                         next_frame = now + .25
                     else:
                         next_frame = now + .1
