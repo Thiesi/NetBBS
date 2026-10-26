@@ -83,3 +83,7 @@ testpaths = ["tests"]
 # and takes precedence when set, this is only a default for a bare
 # `pytest tests/` invocation from repo root.
 pythonpath = [".", "src"]
+# Issue #1569: with `-n`, an idle worker takes queued tests from a busy one,
+# so a few slow modules no longer hold up the end of the run. Without `-n`
+# this does nothing.
+addopts = ["--dist", "worksteal"]

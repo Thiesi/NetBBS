@@ -5623,6 +5623,24 @@ skipped count), so a full check is `pytest -n auto` followed by
 `pytest -m timing_sensitive`. Use the marker only for that case. A test that
 merely waits for something should wait for it instead.
 
+**A fresh test database is a copy (issue #1569).** Running every migration
+from nothing cost about 0.3 s per `Database` on an idle Windows host, several
+times that under a parallel run, and the suite opens thousands, one test 103
+of them. `tests/conftest.py` therefore migrates one template per test
+process and gives each brand-new, empty database a copy of it, through
+SQLite's backup API into the already-open connection. Two things still
+migrate for real:
+- an existing file, from its own `user_version`;
+- any run while `MIGRATIONS` is not the shipped list object. That is how
+  upgrade tests build an older schema (`monkeypatch.setattr(database_module,
+  "MIGRATIONS", MIGRATIONS[:n])`), and a test that must run the full list
+  from scratch can pass `list(MIGRATIONS)`.
+
+With the template and `--dist worksteal` (set in `pyproject.toml`), the full
+suite went from 30 to 10 minutes on the twenty-worker development host.
+Running two suites, or a suite beside an agent's work, roughly doubles either
+figure, so time a change on an otherwise idle machine.
+
 A time limit under test is a race of its own. A door given a one-second wall
 limit, with the test checking it is still running 0.6 s after its first write,
 fails whenever the door takes longer than 0.4 s to start. Leave the limit
