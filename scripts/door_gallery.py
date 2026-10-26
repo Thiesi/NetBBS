@@ -347,6 +347,11 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # Training with the engine off falls to the surface inside the patience
         # window, and the debrief is still once it is drawn.
         ("Lander down", b"\r"),
+        # v0.7.0's hidden Hopper, unlocked in the fixture: [V] on a ranked
+        # mission's briefing picks it (training has no choice of craft), and its
+        # flight panel reads HEAT where the LM's reads FUEL.
+        ("Mission briefing, the Hopper", b"d4v", "hopper"),
+        ("Flight paused, the Hopper", b"d4v\r! !p", "hopper"),
     ],
 }
 
@@ -623,6 +628,8 @@ SHOWS: dict[str, dict[str, str]] = {
         "Program, presets": "NEW PROGRAM",
         "Flight paused": "FLIGHT PAUSED",
         "Lander down": "SIGNAL LOST",
+        "Mission briefing, the Hopper": "HOPPER",
+        "Flight paused, the Hopper": "HEAT",
     },
 }
 
@@ -1308,8 +1315,23 @@ def build_lunar_lander_records(door_name: str, door: pathlib.Path, state: pathli
         records.close()
 
 
+def build_lunar_lander_hopper(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """The base records, with the caller holding the achievement that unlocks the Hopper.
+
+    Squeaker (`every-limit`) is one landing at the edge of every limit at once,
+    which keys cannot fly on purpose, so its row is written as the game would."""
+    build_lunar_lander_records(door_name, door, state)
+    records = load_door(door).Records(state / "pilots.db")
+    try:
+        records.db.execute("INSERT INTO achievements VALUES (?,?,?,?)",
+                           ("gallery-node", DROP_USER_ID, "every-limit", 1))
+    finally:
+        records.close()
+
+
 FIXTURE_BUILDERS = {
     ("lunar_lander", "base"): build_lunar_lander_records,
+    ("lunar_lander", "hopper"): build_lunar_lander_hopper,
     ("voidrunner", "outclassed"): build_voidrunner_outclassed,
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "laden"): build_voidrunner_laden,
