@@ -279,44 +279,66 @@ does not render SGR 2 (faint); remembered terrain shows in the game's own
 darker colours without the extra dimming a terminal adds. Blacksite's frames
 are box drawing, not half blocks, so they keep the stills' 1.55 line height.
 
-Lunar Lander's published screenshots come from the `v0.1.0` asset,
-`lunar_lander.py`, the release NetBBS 7.41.0 bundles. `website_capture_lunar_lander.py` keeps every release it
+Lunar Lander's published screenshots come from the `v0.5.0` asset,
+`lunar_lander.py`, the release NetBBS 7.43.0 bundles. `website_capture_lunar_lander.py` keeps every release it
 can capture in `PINS`, a table of tags and each release's `lunar_lander.py`
 digest from its `SHA256SUMS`, and refuses a source that matches none of them.
 To capture a new release, add its tag and digest there. It draws through the
 game's own `Display.draw` and `Display.encode`, as its upstream capture tool
-does, on a fixed 2026-10-24 daily calendar. The flight capture advances the
+does, on a fixed 2026-10-24 daily calendar. It pins the release's clock and
+entropy, never its code: `time.time_ns`, which stamps records and
+achievements, reads a set evening, and the module's `random` draws from a
+fixed seed, so a recapture is byte for byte the same (the splash's tagline and
+a program's real-flight start included). The flight capture advances the
 real model with controls for eight seconds. Splash, briefing and flying make
 no pilot records. The site embeds splash and briefing; `flying` is kept as a
 capability, but the approach frame replaced it. Download the script and
-`SHA256SUMS` from the release, then capture:
+`SHA256SUMS` from the release into an empty directory of their own, check the
+script against `SHA256SUMS`, then capture:
 
 ```sh
-gh release download v0.1.0 -R Thiesi/LunarLander -p lunar_lander.py -p SHA256SUMS -D /path/to/v0.1.0
-python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
-python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
+gh release download v0.5.0 -R Thiesi/LunarLander -p lunar_lander.py -p SHA256SUMS -D /path/to/v0.5.0
+python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
+python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
 ```
 
 From v0.1.0, the helper can also photograph a whole flight: `approach` (30 m
 over the lit pad, engine burning), `touchdown` (the contact-light scene),
-`debrief` (a gold medal and a promotion) and `scores` (the best-pilots
-board). These play the release's own `Game`, the object its door loop drives,
-against a throwaway records database. The game gets only keys and elapsed
-time. A small autopilot in the helper chooses the keys, so the game's own
-physics, records and scoring decide every number. `scores` first flies the
+`debrief` (a gold medal, a promotion and the first achievements) and `scores`
+(the best-pilots board); from v0.5.0 also `launch` (the three-second GO FOR
+DESCENT scene). These play the release's own `Game`, the object its door loop
+drives, against a throwaway records database. The game gets only keys and
+elapsed time. A small autopilot in the helper chooses the keys, so the game's
+own physics, records and scoring decide every number. `scores` first flies the
 same mission for five **fixture pilots** (Kestrel, Okafor, Lindqvist, Moth and
 Sable), each with a differently tuned autopilot. They are made-up pilots, and
 a caption that shows the board must say so.
 
+From v0.5.0, `record` (the Pilot Record's Career tab), `achievements` (its
+Achievements tab, scrolled to the spectacular crashes) and `program` (the
+PROGRAM tab) show a pilot with wear. The fixture pilots fly first, so "how
+many of the node's pilots hold it" has six pilots to count. Then nova flies
+four October evenings, each a session of its own (`CAREER` in the helper):
+five ranked missions, one engine-off drop that earns the hidden Full Tank, and
+this season's Cadet program, two missions flown for real after simulator runs,
+so the third is next. Every value is the game's own; nothing is written to the
+records except by the game. nova is a fixture pilot too, and so are all six on
+these screens; their captions say so.
+
 ```sh
-python scripts/website_capture_lunar_lander.py approach web/shots/raw-lunar_lander-approach.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
-python scripts/website_capture_lunar_lander.py touchdown web/shots/raw-lunar_lander-touchdown.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
-python scripts/website_capture_lunar_lander.py debrief web/shots/raw-lunar_lander-debrief.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
-python scripts/website_capture_lunar_lander.py scores web/shots/raw-lunar_lander-scores.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
+python scripts/website_capture_lunar_lander.py approach web/shots/raw-lunar_lander-approach.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
+python scripts/website_capture_lunar_lander.py launch web/shots/raw-lunar_lander-launch.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
+python scripts/website_capture_lunar_lander.py touchdown web/shots/raw-lunar_lander-touchdown.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
+python scripts/website_capture_lunar_lander.py debrief web/shots/raw-lunar_lander-debrief.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
+python scripts/website_capture_lunar_lander.py scores web/shots/raw-lunar_lander-scores.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
+python scripts/website_capture_lunar_lander.py program web/shots/raw-lunar_lander-program.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
+python scripts/website_capture_lunar_lander.py record web/shots/raw-lunar_lander-record.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
+python scripts/website_capture_lunar_lander.py achievements web/shots/raw-lunar_lander-achievements.txt --source /path/to/v0.5.0/lunar_lander.py --tag v0.5.0
 ```
 
 Convert at 80x24 with `website_ansi_to_html.py`. Lunar Lander's scenery uses
-half-block pixels, so the still captures also need `line-height:1.2`.
+half-block pixels (quadrant blocks, two pixels across a cell, from v0.5.0), so
+the still captures also need `line-height:1.2`.
 Lunar Lander's hero image remains source concept art; its page and overview
 use the real splash. The landing page's Lunar Lander still is `touchdown`,
 with an inline `line-height:1.2`, since that page has no half-block class.
