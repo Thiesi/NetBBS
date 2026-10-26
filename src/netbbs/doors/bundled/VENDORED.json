@@ -22,9 +22,9 @@
   },
   "war_dialer.py": {
     "repository": "Thiesi/WarDialer",
-    "tag": "v1.4.0",
-    "commit": "eb6909b1f47b2dfa6f842c71ee9881a79bf87ab7",
-    "git_blob": "d765c2923345a4c3ad294ddbe99c6f2120870d9d",
-    "sha256": "5dca6a4556c7ec28bd84d41d71b73940a43f2c0f11680ba7fd4e1991ef403ae3"
+    "tag": "v1.5.0",
+    "commit": "92ee0a56d6ff3c11d40627372ae4fcdecc8e9713",
+    "git_blob": "6fb4e715204ba14a621971ef54b04a7047a61914",
+    "sha256": "c99493bc7d14e5b12659549385ccfe204e98e85177d1518c7504fc56b0532d3e"
   }
 }
