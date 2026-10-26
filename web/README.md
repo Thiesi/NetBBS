@@ -26,6 +26,7 @@ web/
   netbbs-lunar-lander.html -> https://www.netbbs.org/lunar-lander.html
   game-scenes.js        -> https://www.netbbs.org/game-scenes.js
   blacksite-hero.png     -> https://www.netbbs.org/blacksite-hero.png
+  blacksite-interface-mockup.png -> https://www.netbbs.org/blacksite-interface-mockup.png
   lunar-lander-hero.jpg  -> https://www.netbbs.org/lunar-lander-hero.jpg
   favicon.ico            -> https://www.netbbs.org/favicon.ico   the icon: a
   favicon.svg            -> https://www.netbbs.org/favicon.svg   terminal with a
@@ -87,9 +88,9 @@ what is live is what `main` says. Where it is hosted, how to reach that host,
 and the exact copy-and-install steps are operational details. They live in the
 maintainer's private operations notes, not in this public repository.
 
-The individual game pages also need `game-scenes.js` and the two hero images
-at the site root, under the exact names in the map above. Verify their hashes
-alongside the HTML. The `shots/` files are source captures embedded into HTML;
+The individual game pages also need `game-scenes.js`, the two hero images and
+`blacksite-interface-mockup.png` at the site root, under the exact names in
+the map above. Copy each of them and verify its hash alongside the HTML. The `shots/` files are source captures embedded into HTML;
 they do not need to be served for the game pages to work.
 
 A deploy backs up each page it replaces, outside the web-served directory. The
@@ -230,20 +231,29 @@ Voidrunner, War Dialer and Retro Trivia also have scene players. Lunar Lander
 is bundled since NetBBS 7.41.0, and its page shows captures of the release
 NetBBS bundles. Blacksite is
 in development and not yet released: its page separates what is built from
-what is still coming, labels the status, and shows only real captures. Never
-manufacture a screenshot.
-Their images are copied without modification from
+what is still coming and labels the status. It shows no terminal captures,
+only its labelled concept art and a labelled mockup of the planned interface.
+Never manufacture a screenshot, and never let a mockup pass for one.
+Their banners are copied without modification from
 `Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
 `Thiesi/LunarLander` (`assets/lunar-lander-social.jpg`). Both repositories are
 BSD-2-Clause licensed. Both banners stay labelled as concept art. A page with
 no captures at all may declare
 `<meta name="netbbs-capture-kind" content="concept-art">`; the page checker
-then requires labelled artwork and no terminal captures. No page declares it
-now.
+then requires labelled artwork and no terminal captures. Blacksite's page
+declares it.
 
-Blacksite's screenshots come from `Thiesi/Blacksite` at commit
-`d80dacdd58065f221d199b69df573fcf12f7d7cf` (package 0.0.20, slices S01-S24).
-The game is not vendored here. `website_capture_blacksite.py` refuses any
+`blacksite-interface-mockup.png` is copied without modification from
+`Thiesi/Blacksite` at commit `c351cac254382d3bcae8644680b70f91e26c0500`,
+`docs/design/proposals/68-presentation/target/tin-halo-scene-132x50-truecolor.png`:
+a design target for the Tin Halo scene at 132 x 50 in truecolor, not a frame
+the game draws. Its caption and alt text say so.
+
+Blacksite's page showed three screenshots until the maintainer asked for them
+to be removed; their raw and converted files went with them. The helper that
+took them is kept, so they can be retaken. They came from `Thiesi/Blacksite`
+at commit `d80dacdd58065f221d199b69df573fcf12f7d7cf` (package 0.0.20, slices
+S01-S24). The game is not vendored here. `website_capture_blacksite.py` refuses any
 other checkout HEAD, starts the game's own service in-process on a private
 loopback port, and runs the real door client (`python -m blacksite.door`) over
 stdio pipes, as a NetBBS native stdio door does. It plays one new Ghost through
@@ -269,44 +279,68 @@ does not render SGR 2 (faint); remembered terrain shows in the game's own
 darker colours without the extra dimming a terminal adds. Blacksite's frames
 are box drawing, not half blocks, so they keep the stills' 1.55 line height.
 
-Lunar Lander's published screenshots come from the `v0.1.0` asset,
-`lunar_lander.py`, the release NetBBS 7.41.0 bundles. `website_capture_lunar_lander.py` keeps every release it
+Lunar Lander's published screenshots come from the `v0.5.1` asset,
+`lunar_lander.py`, the release NetBBS 7.43.0 bundles. `website_capture_lunar_lander.py` keeps every release it
 can capture in `PINS`, a table of tags and each release's `lunar_lander.py`
 digest from its `SHA256SUMS`, and refuses a source that matches none of them.
 To capture a new release, add its tag and digest there. It draws through the
 game's own `Display.draw` and `Display.encode`, as its upstream capture tool
-does, on a fixed 2026-10-24 daily calendar. The flight capture advances the
+does, on a fixed 2026-10-24 daily calendar. It pins the release's clock and
+entropy, never its code: `time.time_ns`, which stamps records and
+achievements, reads a set evening, and the module's `random` draws from a
+fixed seed, so a recapture is byte for byte the same (the splash's tagline and
+a program's real-flight start included). The flight capture advances the
 real model with controls for eight seconds. Splash, briefing and flying make
 no pilot records. The site embeds splash and briefing; `flying` is kept as a
 capability, but the approach frame replaced it. Download the script and
-`SHA256SUMS` from the release, then capture:
+`SHA256SUMS` from the release into an empty directory of their own, check the
+script against `SHA256SUMS`, then capture:
 
 ```sh
-gh release download v0.1.0 -R Thiesi/LunarLander -p lunar_lander.py -p SHA256SUMS -D /path/to/v0.1.0
-python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
-python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
+gh release download v0.5.1 -R Thiesi/LunarLander -p lunar_lander.py -p SHA256SUMS -D /path/to/v0.5.1
+python scripts/website_capture_lunar_lander.py splash web/shots/raw-lunar_lander-splash.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py briefing web/shots/raw-lunar_lander-briefing.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
 ```
 
 From v0.1.0, the helper can also photograph a whole flight: `approach` (30 m
 over the lit pad, engine burning), `touchdown` (the contact-light scene),
-`debrief` (a gold medal and a promotion) and `scores` (the best-pilots
-board). These play the release's own `Game`, the object its door loop drives,
-against a throwaway records database. The game gets only keys and elapsed
-time. A small autopilot in the helper chooses the keys, so the game's own
-physics, records and scoring decide every number. `scores` first flies the
+`debrief` (a gold medal, a promotion and the first achievements) and `scores`
+(the best-pilots board); from v0.5.0 also `launch` (the three-second GO FOR
+DESCENT scene). These play the release's own `Game`, the object its door loop
+drives, against a throwaway records database. The game gets only keys and
+elapsed time. A small autopilot in the helper chooses the keys, so the game's
+own physics, records and scoring decide every number. `scores` first flies the
 same mission for five **fixture pilots** (Kestrel, Okafor, Lindqvist, Moth and
 Sable), each with a differently tuned autopilot. They are made-up pilots, and
 a caption that shows the board must say so.
 
+From v0.5.0, `record` (the Pilot Record's Career tab), `achievements` (its
+Achievements tab, scrolled to the spectacular crashes) and `program` (the
+PROGRAM tab) show a pilot with wear. The fixture pilots fly first, so "how
+many of the node's pilots hold it" has six pilots to count. Then nova flies
+four October evenings, each a session of its own (`CAREER` in the helper):
+five ranked missions, one engine-off drop that earns the hidden Full Tank, and
+this season's Cadet program, two missions flown for real after simulator runs,
+so the third is next. Every value is the game's own; nothing is written to the
+records except by the game. nova is a fixture pilot too, and so are all six on
+these screens; their captions say so.
+
 ```sh
-python scripts/website_capture_lunar_lander.py approach web/shots/raw-lunar_lander-approach.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
-python scripts/website_capture_lunar_lander.py touchdown web/shots/raw-lunar_lander-touchdown.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
-python scripts/website_capture_lunar_lander.py debrief web/shots/raw-lunar_lander-debrief.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
-python scripts/website_capture_lunar_lander.py scores web/shots/raw-lunar_lander-scores.txt --source /path/to/v0.1.0/lunar_lander.py --tag v0.1.0
+python scripts/website_capture_lunar_lander.py approach web/shots/raw-lunar_lander-approach.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py launch web/shots/raw-lunar_lander-launch.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py touchdown web/shots/raw-lunar_lander-touchdown.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py debrief web/shots/raw-lunar_lander-debrief.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py scores web/shots/raw-lunar_lander-scores.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py program web/shots/raw-lunar_lander-program.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py record web/shots/raw-lunar_lander-record.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
+python scripts/website_capture_lunar_lander.py achievements web/shots/raw-lunar_lander-achievements.txt --source /path/to/v0.5.1/lunar_lander.py --tag v0.5.1
 ```
 
 Convert at 80x24 with `website_ansi_to_html.py`. Lunar Lander's scenery uses
-half-block pixels, so the still captures also need `line-height:1.2`.
+half-block pixels (quadrant blocks, two pixels across a cell, from v0.5.0; from
+v0.5.1 a caller with quarter blocks off gets half blocks, and the captures run
+with them on), so
+the still captures also need `line-height:1.2`.
 Lunar Lander's hero image remains source concept art; its page and overview
 use the real splash. The landing page's Lunar Lander still is `touchdown`,
 with an inline `line-height:1.2`, since that page has no half-block class.
@@ -337,7 +371,7 @@ own scripts for unrelated interactions.
 
 `doors.html` is the game overview: one real launch splash per playable game
 (Lunar Lander's included), Blacksite's labelled concept art
-(it has no launch splash yet; its real captures are on its own page), a short description and a
+(it has no launch splash yet; its interface mockup is on its own page), a short description and a
 link to each dedicated page. Keep gameplay galleries and scene players on the
 individual pages. The landing page keeps at most one still per game in its
 general screenshot gallery. Every public page links to the overview.
@@ -379,7 +413,10 @@ all a page shows with scripts off.
   half block spans the 1ch cell and the full line, so the glyphs left thin
   strips of background between the pixels of every half-block picture.
   Captures converted before this rule were rewritten in place with the same
-  formula (only the block cells changed).
+  formula (only the block cells changed). The quadrant glyphs
+  `▘ ▝ ▖ ▗ ▞ ▚ ▛ ▜ ▙ ▟`, which Lunar Lander draws from v0.5.0, are painted
+  the same way: one conic gradient about the cell's centre, its hard stops at
+  the quarter turns, gives each quarter the foreground or the background.
 - **Re-record after vendoring a new game release.** A cast is that release's
   bytes, so `VENDORED.json` and the casts change together.
 
