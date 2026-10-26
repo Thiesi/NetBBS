@@ -17,14 +17,19 @@ call site needs to change.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import os
 import socket
+import sqlite3
+import tempfile
+from pathlib import Path
 
 import nacl.pwhash
 import pytest
 
 import netbbs.auth.passwords as passwords_module
+import netbbs.storage.database as database_module
 import netbbs.storage.execution as execution_module
 import netbbs.identity.keys as keys_module
 import netbbs.net.ssh as ssh_module
@@ -138,6 +143,62 @@ def _fast_argon2id(monkeypatch):
     monkeypatch.setattr(keys_module, "_SAVE_MEMLIMIT", nacl.pwhash.argon2id.MEMLIMIT_MIN)
     monkeypatch.setattr(passwords_module, "_PASSWORD_OPSLIMIT", nacl.pwhash.argon2id.OPSLIMIT_MIN)
     monkeypatch.setattr(passwords_module, "_PASSWORD_MEMLIMIT", nacl.pwhash.argon2id.MEMLIMIT_MIN)
+    yield
+
+
+_FULL_MIGRATIONS = database_module.MIGRATIONS
+_original_apply_migrations = database_module.Database._apply_migrations
+_template_path: Path | None = None
+
+
+def _migrated_template() -> Path:
+    """One database migrated through every migration, made once per test
+    process (each xdist worker has its own) and copied from then on."""
+    global _template_path
+    if _template_path is None:
+        path = Path(tempfile.mkdtemp(prefix="netbbs-template-")) / "template.db"
+        connection = sqlite3.connect(path)
+        try:
+            template = database_module.Database.__new__(database_module.Database)
+            template.path, template.connection = path, connection
+            connection.row_factory = sqlite3.Row
+            template._configure_pragmas()
+            for name, function in (("netbbs_plain_post_body", database_module._plain_post_body),
+                                   ("netbbs_link_user_subject_id", database_module._link_user_subject_id)):
+                connection.create_function(name, 1, function, deterministic=True)
+            _original_apply_migrations(template)
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
+        _template_path = path
+    return _template_path
+
+
+def _fresh(connection: sqlite3.Connection) -> bool:
+    return (connection.execute("PRAGMA user_version").fetchone()[0] == 0
+            and connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] == 0)
+
+
+@pytest.fixture(autouse=True)
+def _migrated_template_databases(monkeypatch):
+    """Issue #1569: a fresh `Database` starts as a copy of one migrated once.
+
+    Every migration, run from nothing, costs about 0.3 s per database on an
+    idle Windows host and several times that under a parallel suite, and the
+    suite opens thousands. Only a brand-new, empty file with the full
+    migration list is copied: an existing database still migrates from its
+    own version, and a test that truncates `MIGRATIONS` to build an older
+    schema still runs the real migrations it kept. The copy is SQLite's own
+    backup into the open connection, so the pragmas and SQL functions set on
+    it are untouched, and the template was made by those same migrations."""
+    def apply_migrations(self):
+        if database_module.MIGRATIONS is _FULL_MIGRATIONS and _fresh(self.connection):
+            with contextlib.closing(sqlite3.connect(_migrated_template())) as template:
+                template.backup(self.connection)
+            return
+        _original_apply_migrations(self)
+
+    monkeypatch.setattr(database_module.Database, "_apply_migrations", apply_migrations)
     yield
 
 
