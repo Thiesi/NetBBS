@@ -352,6 +352,14 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # flight panel reads HEAT where the LM's reads FUEL.
         ("Mission briefing, the Hopper", b"d4v", "hopper"),
         ("Flight paused, the Hopper", b"d4v\r! !p", "hopper"),
+        # v0.7.0's weekend specials, on a fixture pinned to a Saturday: the
+        # DAILIES tab is two chapters left of MARIA, 1 is the Maria daily and 2
+        # the Highlands one. The tab opens on the Maria daily, so its 1 redraws
+        # nothing and is pressed without waiting. A sample return starts above
+        # its ascent line and falls through it about ten seconds in, so the
+        # flight is photographed live a second after the launch scene ends.
+        ("Mission briefing, a weekend rendezvous", b"aa2", "weekend"),
+        ("Flight, a weekend sample return", b"aa1!\r! !", "weekend"),
     ],
 }
 
@@ -630,6 +638,8 @@ SHOWS: dict[str, dict[str, str]] = {
         "Lander down": "SIGNAL LOST",
         "Mission briefing, the Hopper": "HOPPER",
         "Flight paused, the Hopper": "HEAT",
+        "Mission briefing, a weekend rendezvous": "Weekend rendezvous",
+        "Flight, a weekend sample return": "ASCENT LINE",
     },
 }
 
@@ -675,6 +685,9 @@ HEIGHTS = {80: 24, 64: 20, 40: 12, 132: 50}
 
 
 DROP_USER_ID = 1  # the caller every panel is drawn for; display rows are keyed by it
+# A fixture's own environment for the door, as JSON beside its state: copied
+# with the fixture into every panel, so each launch of it sees the same values.
+FIXTURE_ENVIRONMENT = "gallery-env.json"
 
 
 def remove(path: pathlib.Path) -> None:
@@ -724,6 +737,9 @@ class Door:
                    DOOR_SPLASH="1" if splash else "0",
                    DOOR_SCENES="0",
                    PYTHONIOENCODING="utf-8")
+        extra_env = state / FIXTURE_ENVIRONMENT
+        if extra_env.is_file():
+            env.update(json.loads(extra_env.read_text(encoding="utf-8")))
         self.proc = subprocess.Popen(
             [sys.executable, str(door)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env)
@@ -1329,9 +1345,18 @@ def build_lunar_lander_hopper(door_name: str, door: pathlib.Path, state: pathlib
         records.close()
 
 
+def build_lunar_lander_weekend(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """The base records, on a Saturday: the dailies follow the host's clock, so
+    the weekend specials are reachable only on a weekend unless the game is told
+    the date (DOOR_LL_TODAY, v0.7.1's testing aid)."""
+    build_lunar_lander_records(door_name, door, state)
+    (state / FIXTURE_ENVIRONMENT).write_text(json.dumps({"DOOR_LL_TODAY": "2026-10-31"}), encoding="utf-8")
+
+
 FIXTURE_BUILDERS = {
     ("lunar_lander", "base"): build_lunar_lander_records,
     ("lunar_lander", "hopper"): build_lunar_lander_hopper,
+    ("lunar_lander", "weekend"): build_lunar_lander_weekend,
     ("voidrunner", "outclassed"): build_voidrunner_outclassed,
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "laden"): build_voidrunner_laden,

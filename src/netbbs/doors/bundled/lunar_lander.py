@@ -30,7 +30,7 @@ import unicodedata
 import zlib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 DT = 1 / 60
 GRAVITY = 1.62
 DRY_MASS = 900.0
@@ -723,8 +723,9 @@ class Flight:
 
     def touchdown(self) -> tuple[float, float]:
         """The (vy, vx) the craft came down at: a sample return's last touchdown,
-        not its climb through the line."""
-        return self.touchdowns[-1] if self.ascent and self.touchdowns else (self.vy, self.vx)
+        not its climb through the line. A crash is the impact itself."""
+        landed = self.status == "landed" and self.ascent and self.touchdowns
+        return self.touchdowns[-1] if landed else (self.vy, self.vx)
 
     def spend(self, burn: float, power: float, h: float):
         """Burn fuel; or, in cold gas, heat margin, which idling wins back."""
@@ -1242,10 +1243,13 @@ def flight_log(mission: Mission, flight: Flight, outcome: str):
              "flight_seconds": flight.elapsed}
     if outcome != "landed":
         return added, {}, {}
-    pad = flight.terrain.pad
-    middle = sum(x for x, _ in flight.feet()) / 2
-    return added, {"softest": abs(flight.vy), "closest": abs(middle - (pad.left + pad.right) / 2)}, \
-        {"most_fuel": flight.fuel}
+    lowest = {"softest": abs(flight.touchdown()[0])}
+    if not flight.ascent:
+        # A sample return ends in the air: no foot position to measure.
+        pad = flight.terrain.pad
+        middle = sum(x for x, _ in flight.feet()) / 2
+        lowest["closest"] = abs(middle - (pad.left + pad.right) / 2)
+    return added, lowest, {"most_fuel": flight.fuel}
 
 
 def apply_log(counters: dict[str, float], added: dict, lowest: dict, highest: dict) -> dict[str, float]:
@@ -1273,6 +1277,7 @@ def flight_feats(mission: Mission, flight: Flight) -> set[str]:
     if flight.status == "landed" and flight.ascent:
         # The craft is in the air: its touchdown's precision is in the score.
         got.add("sample-return")
+        return got
     elif flight.status == "landed":
         middle = sum(x for x, _ in feet) / 2
         for key, met in (("feather", vy < .3), ("no-drift", vx < .1), ("dead-centre", abs(middle - centre) <= 1),
@@ -1409,9 +1414,18 @@ def daily_format(host: Host) -> str:
 
 
 class DailyClock:
-    """Calendar boundaries use the host's IANA zone, never a fixed UTC offset."""
-    def __init__(self, zone: str = "UTC", date_format: str = "%Y-%m-%d", now=None):
+    """Calendar boundaries use the host's IANA zone, never a fixed UTC offset.
+    `today` (DOOR_LL_TODAY, a testing and preview aid) pins the game's date:
+    the dailies and weekend specials follow it (and are filed under it), the
+    countdown keeps the time of day, and records keep real timestamps. A value that is not a YYYY-MM-DD date
+    is ignored."""
+    def __init__(self, zone: str = "UTC", date_format: str = "%Y-%m-%d", now=None, today: str | None = None):
         self.warning = ""
+        try:
+            self.today = date.fromisoformat(today).isoformat() if re.fullmatch(r"\d{4}-\d\d-\d\d", today or "") \
+                else None
+        except ValueError:
+            self.today = None
         try:
             self.zone = timezone.utc if zone == "UTC" else ZoneInfo(zone)
         except (ValueError, ZoneInfoNotFoundError):
@@ -1424,7 +1438,7 @@ class DailyClock:
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def day(self) -> str:
-        return self.now().astimezone(self.zone).date().isoformat()
+        return self.today or self.now().astimezone(self.zone).date().isoformat()
 
     def reset_note(self) -> str:
         """How long until the node's next midnight, when the dailies change."""
@@ -5135,7 +5149,7 @@ def run(host: Host, started: float) -> int:
             records = Records(root / "pilots.db")
         except DoorError as exc:
             print("Lunar Lander: " + plain(str(exc), 200), file=sys.stderr)
-    clock = DailyClock(host.timezone, daily_format(host))
+    clock = DailyClock(host.timezone, daily_format(host), today=os.environ.get("DOOR_LL_TODAY"))
     if clock.warning:
         print("Lunar Lander: " + clock.warning, file=sys.stderr)
     game = Game(host, records, clock=clock, scenes=os.environ.get("DOOR_LL_SCENES") != "0",
