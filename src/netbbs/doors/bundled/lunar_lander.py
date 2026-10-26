@@ -29,7 +29,7 @@ import time
 import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 DT = 1 / 60
 GRAVITY = 1.62
 DRY_MASS = 900.0
@@ -80,6 +80,10 @@ class Host:
     # The character set NetBBS converts our output to ("utf-8", "cp437" or
     # "ascii"), when it says (NetBBS #1557); None when it does not.
     charset: str | None = None
+    # Whether the caller's terminal is sent quarter blocks (NetBBS 7.43.0, #1560):
+    # False when the caller turned them off or NetBBS guessed a font without them;
+    # None when NetBBS does not say.
+    quadrants: bool | None = None
     # The node's date-and-time display format (NetBBS 7.41.0), when it says.
     datetime_format: str | None = None
     # "netbbs", "classic" (a drop file) or "local"; a classic host never changes size.
@@ -141,6 +145,7 @@ class Host:
             return cls(*geometry, source="netbbs", color=data.get("color_depth") if data.get("color_depth") in
                        ("16", "256", "truecolor") else "16",
                        unicode=data.get("unicode_style") is True and charset != "ascii", charset=charset,
+                       quadrants=data.get("quadrants") if type(data.get("quadrants")) is bool else None,
                        handle=plain(data.get("handle", "Pilot")), node=node, user=user,
                        limit=limit, path=path,
                        timezone=data.get("timezone") if isinstance(data.get("timezone"), str) else "UTC",
@@ -2477,8 +2482,10 @@ class Display:
         # The fuel alert shown last, and the frame it began: a new alert flashes.
         self._alert = (0, 0)
         # Pixels to a cell across: quadrant blocks show two, but need Unicode
-        # all the way to the terminal. CP437 has half blocks and no quadrants.
-        self.across = 2 if host.unicode and host.pixels == "quad" and host.charset in (None, "utf-8") else 1
+        # all the way to the terminal and a font that has them. CP437 has half
+        # blocks and no quadrants; NetBBS says when a caller's font has none.
+        self.across = 2 if (host.unicode and host.pixels == "quad" and host.charset in (None, "utf-8")
+                            and host.quadrants is not False) else 1
 
     def encode(self, canvas: Canvas) -> str:
         """Only changed cells: the cursor moves only across gaps and a color is
