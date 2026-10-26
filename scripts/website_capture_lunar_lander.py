@@ -58,6 +58,7 @@ PINS = {
     "v0.1.0": "6aacc05f20d99fb35027bc04f050523bd4bedac5f47f0f24217da8ffc5d2bb71",
     "v0.5.0": "8d05824c0778e74f474e1ff8c9f0174c56ba735644dccbcb14044e9ff4aa6b6f",
     "v0.5.1": "33ff9d9b9e52eff38dedafeb717f79fda14c1338d314851091c9d6b5b6d971ea",
+    "v0.7.1": "612eff2bc9c6b3048cd4637f783bb78ae84dd49e9877fbf8dfc08eded89643ff",
 }
 DAY = "2026-10-24"
 EVENING = "T20:00:00+00:00"
