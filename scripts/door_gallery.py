@@ -175,8 +175,27 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Engineering Yard", b"Y"),
         # The crew roster is behind the yard, not the deck: `K` from `Y`.
         ("Crew Roster", b"YK"),
+        # The specialists are behind the yard too, and each workshop behind them.
+        ("Specialist Workshops", b"YS"),
+        ("Workshop", b"YS1"),
+        # The futures exchange is behind the market. Signing an order returns
+        # to the exchange with the result in the status line (v1.6.0).
+        ("Futures Exchange", b"MX"),
+        ("Futures order", b"MX1"),
+        ("Futures Exchange, an order just signed", b"MX1SY"),
         ("Mission Board", b"B"),
         ("Contract Details", b"B1"),
+        # Since v1.6.0 an action's result rides in the next page's bottom border
+        # instead of a "Press any key" pause: accepting the first offer returns
+        # to the board with the status line drawn there. Accept is on the
+        # offer's last page, which can be page 1 or a later one; N past the
+        # last page stays on it.
+        ("Mission Board, a contract just accepted", b"B1" + b"N" * 8 + b"A"),
+        # A delivery waiting for cargo adds the market's NEED column and its
+        # "Contracts need:" line, and a pilot who has docked elsewhere gets
+        # PRICE MEMORY under the table, which can take a page of its own.
+        ("Commodity Market, contracts and memory", b"M", "contracted"),
+        ("Commodity Market, contracts and memory, paged on", b"M" + b">" * 5, "contracted"),
         ("Navigation Chart", b"C"),
         ("Pilot Record", b"S", "played"),
         # The record's other four views, and the finale, are each one more key.
@@ -1235,8 +1254,7 @@ def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.P
                 if "[A] Accept" in " ".join(_screen_rows(running)):
                     break
                 running.press(b">")
-            running.press(b"A")
-            running.press(b"B")  # back to the board
+            running.press(b"A")  # since Voidrunner v1.6.0, straight back to the board
             running.press(b"B")  # back to the deck
             running.press(b"C")  # the chart
             letter = _entry_key(_screen_rows(running), re.escape(target))
@@ -1293,6 +1311,53 @@ def build_voidrunner_played(door_name: str, door: pathlib.Path, state: pathlib.P
         running.kill()
         raise
     running.kill()  # the career on disk is what the panels copy
+
+
+def build_voidrunner_contracted(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
+    """The played career with a delivery on the books, for the market's hints.
+
+    Since v1.6.0 the market shows a NEED column while a contract waits for
+    cargo, and PRICE MEMORY when the pilot remembers better quotes from another
+    station. `played` has docked at two stations; this accepts a delivery from
+    the board there, reading the board's own letters as the combat fixture
+    does. A board without a delivery, or two stations whose prices leave
+    nothing worth remembering, is retried with a fresh career.
+    """
+    for attempt in range(6):
+        build_voidrunner_played(door_name, door, state)
+        running = Door(door, state, 80, 24, {})
+        try:
+            running.settle()
+            running.press(b"B")  # the contract board
+            key = _entry_key(_screen_rows(running), r"DELIVERY")
+            if key is None:
+                running.kill()
+                continue
+            running.press(key.encode())  # the contract's own terms
+            for _ in range(8):
+                if "[A] Accept" in " ".join(_screen_rows(running)):
+                    break
+                running.press(b"N")  # the offer pages with N, not >
+            running.press(b"A")  # straight back to the board
+            if "ACTIVE" not in " ".join(_screen_rows(running)):
+                running.kill()
+                continue
+            running.press(b"B")  # the deck
+            running.press(b"M")
+            market = " ".join(_screen_rows(running))
+            for _ in range(5):
+                running.press(b">", expect=False)
+            market += " ".join(_screen_rows(running))
+            if "NEED" not in market or "PRICE MEMORY" not in market:
+                running.kill()
+                continue
+        except BaseException:
+            running.kill()
+            raise
+        running.kill()  # the career on disk is what the panels copy
+        return
+    raise SystemExit("6 careers gave no delivery with remembered prices; "
+                     "the contracted fixture could not be built")
 
 
 def build_voidrunner_retiring(door_name: str, door: pathlib.Path, state: pathlib.Path) -> None:
@@ -1366,6 +1431,7 @@ FIXTURE_BUILDERS = {
     ("voidrunner", "combat"): build_voidrunner_combat,
     ("voidrunner", "laden"): build_voidrunner_laden,
     ("voidrunner", "played"): build_voidrunner_played,
+    ("voidrunner", "contracted"): build_voidrunner_contracted,
     ("voidrunner", "retiring"): build_voidrunner_retiring,
 }
 
