@@ -15,10 +15,10 @@
   },
   "voidrunner.py": {
     "repository": "Thiesi/Voidrunner",
-    "tag": "v1.5.0",
-    "commit": "c5125461f3240ebdfeec4992cc6bc4453c72a642",
-    "git_blob": "6e3a89768e1abc477422864a0cfc0267153e68ad",
-    "sha256": "bcd44d8a7373b35525d1a6577fafdfca720fe13390ee1f9357d60039ac338b39"
+    "tag": "v1.6.0",
+    "commit": "20445268d9406ea11d3c3c7b31b57f9ed5d05d66",
+    "git_blob": "b850a1c59e29a373982c2d323b505ba9ad4c0f3d",
+    "sha256": "13ee6f1e6fe2c0f77873c3a504b4b05c3a8892cd5ce4c4008a002ad6dc9a8e51"
   },
   "war_dialer.py": {
     "repository": "Thiesi/WarDialer",

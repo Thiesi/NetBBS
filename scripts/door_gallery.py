@@ -1235,8 +1235,7 @@ def build_voidrunner_combat(door_name: str, door: pathlib.Path, state: pathlib.P
                 if "[A] Accept" in " ".join(_screen_rows(running)):
                     break
                 running.press(b">")
-            running.press(b"A")
-            running.press(b"B")  # back to the board
+            running.press(b"A")  # since Voidrunner v1.6.0, straight back to the board
             running.press(b"B")  # back to the deck
             running.press(b"C")  # the chart
             letter = _entry_key(_screen_rows(running), re.escape(target))
