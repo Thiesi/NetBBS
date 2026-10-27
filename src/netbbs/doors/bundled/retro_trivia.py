@@ -2283,9 +2283,9 @@ def play_finale(p: Palette, info: dict, score: int, total: int, width: int, heig
 # frame is kept for the results. Answer keys are podium buttons -- gold on
 # dark until pressed, lit gold once they are -- and the round runs along the
 # top edge as a row of marquee bulbs: right, wrong, the question being asked,
-# and the questions still to come. The screen is cleared once, when the round
-# starts; after that it scrolls, so the previous verdict stays in view above
-# the next card.
+# and the questions still to come. Each question is drawn on a cleared screen
+# under the verdict on the answer before it, so the bulbs are the only record
+# of the rest of the round.
 
 #: What a caller reads: the question and its answers.
 _INK = ((250, 246, 236), 255)
@@ -2730,11 +2730,26 @@ def _play_round(info: dict) -> int:
             return 0
 
         round_questions = random.sample(QUESTIONS, k=min(wanted, len(QUESTIONS)))
-        if not _PLAIN:
-            # The round opens on a clean screen rather than under the leftover
-            # masthead and picker; from here on the questions scroll.
-            out(f"{RESET}{ESC}[2J{ESC}[H")
+        #: The last answer's verdict, still to be shown on the next screen.
+        verdict: tuple[bool, str, str] | None = None
         for i, (question, choices, correct_index) in enumerate(round_questions, start=1):
+            if not _PLAIN:
+                # Every question gets a clean screen, so what came before is
+                # in the bulbs and not above the card (#22). The last answer's
+                # verdict is the one thing carried over: nothing waits after
+                # it, so it lights at the top here instead of being cleared
+                # away the moment it is drawn. A plain caller takes no escape
+                # sequences, so their round scrolls with each verdict in place.
+                out(f"{RESET}{ESC}[2J{ESC}[H")
+                if height >= 20:
+                    # A margin above, and question 1 keeps the verdict's row
+                    # empty, so the card stands in one place all round. A
+                    # short screen spends neither row: the bulbs come first.
+                    out_line()
+                    if not verdict:
+                        out_line()
+                if verdict:
+                    draw_result(palette, *verdict, width=w)
             correct_answer = choices[correct_index]
             display_choices = choices.copy()
             random.shuffle(display_choices)
@@ -2752,7 +2767,11 @@ def _play_round(info: dict) -> int:
             record.append(correct)
             if correct:
                 score += 1
-            draw_result(palette, correct, LETTERS[display_correct_index], correct_answer, width=w)
+            verdict = (correct, LETTERS[display_correct_index], correct_answer)
+            if _PLAIN or i == len(round_questions):
+                # The last verdict has no next screen; it stays under its
+                # card while the finale waits to start.
+                draw_result(palette, *verdict, width=w)
 
         report_perfect_round(info, score, len(round_questions))
         play_finale(palette, info, score, len(round_questions), _OUTPUT_WIDTH, height)
