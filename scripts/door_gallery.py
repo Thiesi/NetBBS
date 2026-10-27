@@ -175,6 +175,14 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         ("Engineering Yard", b"Y"),
         # The crew roster is behind the yard, not the deck: `K` from `Y`.
         ("Crew Roster", b"YK"),
+        # The specialists are behind the yard too, and each workshop behind them.
+        ("Specialist Workshops", b"YS"),
+        ("Workshop", b"YS1"),
+        # The futures exchange is behind the market. Signing an order returns
+        # to the exchange with the result in the status line (v1.6.0).
+        ("Futures Exchange", b"MX"),
+        ("Futures order", b"MX1"),
+        ("Futures Exchange, an order just signed", b"MX1SY"),
         ("Mission Board", b"B"),
         ("Contract Details", b"B1"),
         # Since v1.6.0 an action's result rides in the next page's bottom border
