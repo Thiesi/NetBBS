@@ -30,7 +30,7 @@ import unicodedata
 import zlib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 DT = 1 / 60
 GRAVITY = 1.62
 DRY_MASS = 900.0
@@ -3112,14 +3112,17 @@ class Deck:
     live: str = ""
 
 
+CARD_ROWS = 18  # the full card's height; a compact one is 15
+
+
 def full_card(height: int) -> bool:
-    """Whether the full 20-row card clears the instruments, centred: from 33 rows."""
-    return max(1, (height - 20) // 2) + 20 <= height - 7
+    """Whether the full card clears the instruments, centred: from 31 rows."""
+    return max(1, (height - CARD_ROWS) // 2) + CARD_ROWS <= height - 7
 
 
 def record_rows(height: int) -> int:
     """Lines the Pilot Record's body shows at this height."""
-    return 15 if full_card(height) else 11
+    return CARD_ROWS - 5 if full_card(height) else 11
 
 
 def _duration(seconds: float) -> str:
@@ -3689,12 +3692,12 @@ class Display:
 
     def menu_box(self, c: Canvas) -> tuple[int, int, int, int]:
         """The flight director's card, and the Pilot Record's: x, y, width and
-        height. Centred, the full card clears the instruments from 33 rows; on a
+        height. Centred, the full card clears the instruments from 31 rows; on a
         shorter screen a compact one sits under the header, its shadow on the
         instruments' rule at most, and the whole cockpit shows below it."""
         box_w = min(76, c.width - 2)
         if full_card(c.height):
-            return (c.width - box_w) // 2, max(1, (c.height - 20) // 2), box_w, 20
+            return (c.width - box_w) // 2, max(1, (c.height - CARD_ROWS) // 2), box_w, CARD_ROWS
         return (c.width - box_w) // 2, 2, box_w, 15
 
     def rank_parts(self, ladder: Career) -> list:
@@ -3713,9 +3716,9 @@ class Display:
         unicode, deck = self.host.unicode, self.deck
         updown, sideways = self.arrows[1], self.arrows[0]
         x0, y0, box_w, box_h = self.menu_box(c)
-        # Compact: no rules, a shorter briefing, and only the menu's own keys; the
-        # flight keys and touchdown limits are on the instruments below it.
-        compact = box_h < 20
+        # Compact: no rules and a shorter briefing. Either way only the menu's own
+        # keys: the flight keys and touchdown limits are on the instruments below.
+        compact = box_h < CARD_ROWS
         top = y0 + (3 if compact else 4)
         c.frame(x0, y0, box_w, box_h, "LUNAR LANDER / FLIGHT DIRECTOR", unicode)
         if deck.live:
@@ -3840,10 +3843,7 @@ class Display:
             return
         c.text(x0 + 1, y0 + 14, rule, EDGE, PANEL)
         c.annotated(lx, y0 + 15, keys, PANEL, box_w - 6)
-        c.annotated(lx, y0 + 16, f"In flight: [W/S {updown} 0-9] Thrust  [A/D {sideways}] Tilt  [X] Level  [SPACE] Cut",
-                    PANEL, box_w - 6)
-        c.annotated(lx, y0 + 17, "Touchdown: |V|<=3 m/s  |H|<=2 m/s  |tilt|<=10", PANEL, box_w - 6)
-        c.annotated(lx, y0 + 18, back, PANEL, box_w - 6)
+        c.annotated(lx, y0 + 16, back, PANEL, box_w - 6)
 
     def program_briefing(self, c: Canvas, view: ProgramView, mission: Mission, x: int, width: int, row: int,
                          compact: bool):
@@ -3872,7 +3872,7 @@ class Display:
         unicode, deck = self.host.unicode, self.deck
         book = deck.logbook or Logbook()
         x0, y0, box_w, box_h = self.menu_box(c)
-        compact = box_h < 20
+        compact = box_h < CARD_ROWS
         width = box_w - 6
         lx = x0 + 3
         c.frame(x0, y0, box_w, box_h, "PILOT RECORD / " + self.host.handle
