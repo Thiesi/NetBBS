@@ -5,7 +5,8 @@
     python scripts/door_gallery.py lunar_lander
 
 Lunar Lander needs 80x24 and pauses below it (issue #1542), so it is drawn at
-80x24 and 132x50 instead of the other doors' 80, 64 and 40 columns.
+80x24 and 132x50 instead of the other doors' 80, 64 and 40 columns. Voidrunner
+is drawn at 132x50 as well, where its console widens (v1.7.0).
 
 Voidrunner is vendored from its own repository (issue #1216), and screen changes
 are reviewed there, with Thiesi/Voidrunner's `tools/door_gallery.py`. Its walks
@@ -87,6 +88,9 @@ PAGE_NOTE = re.compile(r"page (\d+)/(\d+)")
 QUIET = 0.15
 SETTLE = 0.75
 ANSWER = 6.0  # a keypress can take a second to redraw; past this it did nothing.
+# A launch is an interpreter starting and compiling the whole door first:
+# Voidrunner v1.7.0 took up to 7.4s to its first byte on Windows, one launch at a time.
+STARTUP = 20.0
 PATIENCE = 30.0  # a door still drawing after this is hung, not slow.
 WORKERS = 4  # panels are independent subprocesses; a gallery is 150+ of them.
 
@@ -700,7 +704,9 @@ PRESETS: dict[str, dict[str, dict]] = {
 
 # Each door's default terminal sizes. Lunar Lander's floor is 80x24 (issue
 # #1542), a stated exception to the 40x12 floor the other doors share.
-SIZES: dict[str, list[int]] = {"lunar_lander": [80, 132]}
+# Voidrunner widens its console from 130 columns (v1.7.0), so it is pictured
+# at 132 as well.
+SIZES: dict[str, list[int]] = {"lunar_lander": [80, 132], "voidrunner": [80, 64, 40, 132]}
 HEIGHTS = {80: 24, 64: 20, 40: 12, 132: 50}
 
 
@@ -748,6 +754,7 @@ class Door:
     def __init__(self, door: pathlib.Path, state: pathlib.Path, width: int, height: int,
                  info_extra: dict, *, splash: bool = False) -> None:
         self.door = door
+        self.width, self.height = width, height
         self.size = f"{width}x{height}"
         env = dict(os.environ)
         env.update(NETBBS_DOOR_INFO=str(drop_file(state, width, height, info_extra)),
@@ -805,13 +812,16 @@ class Door:
         first-launch keys, where a door that asks one question fewer than the
         next door leaves a key with nothing to answer.
         """
-        answer = time.monotonic() + ANSWER
+        answer = time.monotonic() + (STARTUP if what == "startup" else ANSWER)
         deadline = time.monotonic() + PATIENCE
         while time.monotonic() < deadline:
             with self.lock:
                 quiet = time.monotonic() - self.spoke
                 answered = len(self.out) > since
-            if answered and quiet >= SETTLE:
+            # A screen just cleared is a screen still to come: Voidrunner v1.7.0
+            # clears at 132 columns and then spends most of a second on its wide
+            # canopy, which four panels at once stretched past SETTLE.
+            if answered and quiet >= SETTLE and not self.just_cleared():
                 return
             if not answered and time.monotonic() >= answer:
                 if not expect:
@@ -1001,6 +1011,11 @@ class Door:
         with self.lock:
             return bytes(self.out).decode("utf-8", "replace")
 
+    def just_cleared(self) -> bool:
+        """Whether the door's last clear has nothing drawn after it yet."""
+        raw = self.read()
+        return CLEAR in raw and not re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", last_screen(raw)).strip()
+
     def kill(self) -> None:
         """Leave nothing running behind a failed capture."""
         self.proc.kill()
@@ -1159,10 +1174,18 @@ def _screen_rows(running: "Door") -> list[str]:
     screen would send the walk somewhere else entirely. Voidrunner's canopy
     turns a page under the same sky by drawing the new panel from the top left,
     without a clear, so the page starts at the last move home.
+
+    The page is painted on a blank terminal rather than split at its line
+    breaks. Since Voidrunner v1.7.0 a fight drains its bars in place once the
+    page is drawn, and the title bar sweeps across its own row; read as text,
+    every one of those frames ran on into a single row with the prompt.
     """
     page = last_screen(running.read()).split("\x1b[H")[-1]
-    rows = [re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", row).strip()
-            for row in page.replace("\r\n", "\n").split("\n")]
+    screen = term.Screen(running.width, running.height)
+    screen.feed(page)
+    rows = ["".join(char for char, _ in cells).strip() for cells in screen.cells]
+    while rows and not rows[-1]:
+        rows.pop()
     opened = max((index for index, row in enumerate(rows) if row[:1] in ("\u256d", "+")), default=0)
     return [row.strip("\u2502\u2551|").strip() for row in rows[opened:]]
 
@@ -1684,7 +1707,7 @@ def main() -> None:
     parser.add_argument("door", choices=sorted(WALKS))
     parser.add_argument("--widths", type=int, nargs="+",
                         help="terminal widths to render (default 80 64 40, the supported floor; "
-                             "80 132 for Lunar Lander, whose floor is 80x24)")
+                             "80 132 for Lunar Lander, whose floor is 80x24; 80 64 40 132 for Voidrunner)")
     parser.add_argument("--out", type=pathlib.Path, default=ROOT / "build" / "gallery")
     parser.add_argument("--fresh", action="store_true", help="rebuild the cached fixture first")
     parser.add_argument("--open", action="store_true", help="open the page when it is written")

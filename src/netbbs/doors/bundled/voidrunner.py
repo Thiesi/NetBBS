@@ -83,6 +83,7 @@ import math
 import os
 import random
 import re
+import shutil
 import socket
 import sys
 import tempfile
@@ -4075,41 +4076,74 @@ def faction_story_action(world: World, faction: str, action: str) -> str:
     return result
 
 
-def faction_story_ending_lines(world: World, faction: str, choice: str, *, selectable: bool = True) -> list[str]:
+def faction_story_ending_column(world: World, faction: str, choice: str, *, selectable: bool = True) -> list[str]:
+    """One ending of a case as a column: what it is called, pays, asks and moves."""
+    p = pal()
     ending = FACTION_STORIES[faction][choice]
     target = faction_story_target(world, faction, choice)
-    if target is None: return ["Hardline unavailable: no Haven exists for the enforcement handover. The public beacon remains available."]
+    if target is None:
+        return [f"{p.wrong}Hardline unavailable:{RESET}", f"{p.slate}no Haven exists for the{RESET}",
+                f"{p.slate}enforcement handover.{RESET}"]
     destination = world.by_id[target]
     commodity, quantity = ending["commodity"], ending["quantity"]
-    cargo = (f"Deliver {quantity} {COMMODITIES[commodity]['label']}; {world.save.cargo.get(commodity, 0)} aboard. Consumes goods, including cargo promised to other contracts." if commodity else "Deliver the evidence; no cargo consumed.")
-    selector = ("[H] " if choice == "hardline" else "[A] ") if selectable else ""
-    lines = [f"{selector}{ending['label']}: {ending['reward']:,}cr gross.",
-             f"Destination: {destination.name} ({destination.x},{destination.y}). {cargo}",
-             f"At current standing: {faction_standing_terms(world, ending['standing'])}. Standing stays within -100..100."]
+    selector = f"{p.gold}{BOLD}[{'H' if choice == 'hardline' else 'A'}]{RESET} " if selectable else ""
+    column = [f"{selector}{p.ink}{BOLD}{ending['label']}{RESET}",
+              f"{p.gold}+{ending['reward']:,}cr{RESET} {p.slate}gross{RESET}",
+              f"{p.slate}at{RESET} {p.ink}{_mission_plain(destination.name)}{RESET} {p.slate}({destination.x},{destination.y}){RESET}"]
+    if commodity:
+        column.append(f"{p.ink}{quantity} {COMMODITIES[commodity]['label']}{RESET} "
+                      f"{p.slate}({world.save.cargo.get(commodity, 0)} aboard){RESET}")
+    else:
+        column.append(f"{p.slate}the evidence; no cargo{RESET}")
+    for term in faction_standing_terms(world, ending["standing"]).split("; "):
+        delta = term.rsplit(" ", 1)[1]
+        tone = "good" if delta.startswith("+") and delta != "+0" else "danger" if delta.startswith("-") else "info"
+        column.append(f"{p.tone(tone)}{term}{RESET}")
     if commodity is not None and not COMMODITIES[commodity]["legal"]:
-        lines.append("Contraband: procure at a Haven; intermediate non-Haven arrivals can trigger customs.")
-    return lines
+        column.append(f"{p.wrong}contraband: buy at a Haven{RESET}")
+    return column
 
 
 def faction_story_lines(world: World, faction: str) -> list[str]:
+    """A faction's case as a sheet, like the Archive's (issue #39).
+
+    Its two endings were paragraphs read one after the other, though choosing
+    between them is the whole point of the screen. They now stand side by
+    side, each a column of what it pays, where it ends, what it hands over and
+    how it moves standing, under a case of labelled rows and its next step.
+    """
+    p = pal()
     info, story = FACTION_STORIES[faction], world.save.faction_stories.get(faction)
-    lines = [f"{FACTION_LABEL[faction]}: {info['title']}."]
-    if story is not None and story["stage"] == "complete":
+    stage = story["stage"] if story is not None else None
+    lines = [f"{p.ink}{BOLD}{info['title']}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}{FACTION_LABEL[faction]}{RESET}"]
+    if stage == "complete":
         return lines + [info[story["choice"]]["closing"], "Case complete. Reward and recognition cannot be claimed again."]
-    lines += [info["intro"] if story is None or story["stage"] == "accepted" else info["evidence"],
-              "Optional: no membership, entry fee, deadline or contract-slot requirement. Ordinary travel fuel, wages and cargo costs apply."]
-    if story is not None and story["stage"] == "committed":
-        lines += ["Chosen course is final; [C] Complete at its destination."] + faction_story_ending_lines(world, faction, story["choice"], selectable=False)
-        if blocker := faction_story_completion_blocker(world, faction): lines.append(blocker)
+    lines.append(info["intro"] if stage in (None, "accepted") else info["evidence"])
+    target = world.by_id[faction_story_target(world, faction)]
+    stages = {None: "open", "accepted": "accepted; evidence not yet found", "evidence": "evidence in hand; choose an ending",
+              "committed": "course chosen; final"}
+    lines.append(section("CASE"))
+    lines += _sheet_rows([("STAGE", stages[stage], None),
+                          ("EVIDENCE", f"{WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y})", None),
+                          ("COSTS", "no membership, fee, deadline or contract slot", None)])
+    if stage == "committed":
+        lines.append(section("CHOSEN COURSE"))
+        lines += faction_story_ending_column(world, faction, story["choice"], selectable=False)
+        next_step = ["[C] Complete at its destination."]
+        if blocker := faction_story_completion_blocker(world, faction):
+            next_step.append(blocker)
     else:
-        lines.append("After investigating, choose one ending; the choice is final.")
-        for choice in ("hardline", "aid"):
-            lines += faction_story_ending_lines(world, faction, choice,
-                                                selectable=story is not None and story["stage"] == "evidence")
-        target = world.by_id[faction_story_target(world, faction)]
-        lines.append(f"Evidence: {WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y}).")
-        lines.append("[A] Accept the case." if story is None else "[I] Investigate at the workshop." if story["stage"] == "accepted" else "Choose an available ending with the action bar.")
-    lines.append("Case rewards pay once, without a commission bonus; one completed mission and a career highlight. Subtract procurement and travel from gross pay.")
+        selectable = stage == "evidence"
+        lines.append(section("THE CHOICE, FINAL ONCE MADE"))
+        lines += sheet_columns([("HARDLINE", faction_story_ending_column(world, faction, "hardline", selectable=selectable)),
+                                ("AID", faction_story_ending_column(world, faction, "aid", selectable=selectable))])
+        next_step = ["[A] Accept the case." if stage is None else "[I] Investigate at the workshop." if stage == "accepted"
+                     else "Choose an available ending with the action bar."]
+    lines.append(section("NEXT"))
+    lines += next_step
+    lines.append(f"{p.slate}Ordinary travel fuel, wages and cargo costs apply; an ending hands over cargo even if "
+                 f"promised to contracts. Case rewards pay once, without a commission bonus, and count as one "
+                 f"completed mission and a career highlight. Standing stays within -100..100.{RESET}")
     return lines
 
 
@@ -4165,19 +4199,49 @@ def faction_standing_route(faction: str) -> str:
 
 
 def faction_contact_lines(world: World, faction: str) -> list[str]:
-    info = FACTION_MEMBERSHIPS[faction]
-    lines = [f"{info['contact']}: {info['label']}.",
-             f"Standing: {world.save.pilot.reputation.get(faction, 0)}. {faction_membership_status(world, faction)}.",
-             f"Perk: {info['perk']}.",
-             faction_standing_route(faction),
-             f"Joining requires {info['threshold']} standing and grants {info['grant']:,}cr once. No entry fee.",
-             f"Perk suspended at {FACTION_PERK_SUSPEND_AT} standing or below; automatically restored above it. Membership stays, with no second grant.",
-             "Dual membership is allowed. Each faction judges its own standing independently. Membership does not clear notoriety or fines.",
-             info["intro"], f"[S] Story: {FACTION_STORIES[faction]['title']}."]
-    if blocker := faction_join_blocker(world, faction): lines.append(blocker)
-    else: lines.append("[J] Join after final confirmation.")
-    return lines
+    """A faction's contact as a sheet, like a contract's (issue #39).
 
+    Ten sentences said where the pilot stands, how standing is earned, what
+    joining takes and gives, and when the perk lapses; the one thing a pilot
+    came to learn -- how far they are from joining -- was a bare number in the
+    second. STANDING now answers that with a gauge and a mark; how standing is
+    earned, what joining gives and what the perk does are one row each; the
+    rules every faction shares are a footnote.
+    """
+    p = pal()
+    info = FACTION_MEMBERSHIPS[faction]
+    standing = world.save.pilot.reputation.get(faction, 0)
+    member = getattr(world.save.pilot, info["field"])
+    lines = [f"{p.ink}{BOLD}{info['contact']}{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}{info['label']}{RESET}",
+             f"{p.slate}{info['intro']}{RESET}"]
+    if member:
+        active = faction_perk_active(world, faction)
+        status = ("member, perk active", "good") if active else ("member, perk suspended", "bad")
+        progress = f"{standing}; the perk lapses at {FACTION_PERK_SUSPEND_AT} or below"
+        progress_tone = "good" if active else "bad"
+    else:
+        status = ("not joined", None)
+        short = info["threshold"] - standing
+        progress = (f"{gauge(max(0, standing), info['threshold'], 8, tone='good')} {standing} of {info['threshold']}"
+                    + (f", {short} to go" if short > 0 else ", enough to join"))
+        progress_tone = "good" if short <= 0 else "info"
+    earning = faction_standing_route(faction).removeprefix("Earning standing: ").rstrip(".")
+    lines.append(section("STANDING"))
+    lines += _sheet_rows([("STANDING", progress, progress_tone), ("STATUS", status[0], status[1])])
+    # Rows that only inform, apart from the judged ones: a long value here
+    # would push the marks above out to the far edge.
+    lines.append(section("MEMBERSHIP"))
+    lines += _sheet_rows([("EARN", earning, None),
+                          ("JOIN", f"needs {info['threshold']} standing; pays {p.gold}+{info['grant']:,}cr{p.ink} once, no fee", None),
+                          ("PERK", info["perk"], None),
+                          ("LAPSES", f"at {FACTION_PERK_SUSPEND_AT} standing or below; returns above it", None)])
+    lines.append(section("NEXT"))
+    blocker = faction_join_blocker(world, faction)
+    lines.append(blocker if blocker else "[J] Join after final confirmation.")
+    lines.append(f"[S] Story: {FACTION_STORIES[faction]['title']}.")
+    lines.append(f"{p.slate}Dual membership is allowed; each faction judges its own standing. A lapsed perk "
+                 f"keeps the membership, with no second grant. Membership does not clear notoriety or fines.{RESET}")
+    return lines
 
 
 def concord_commission_available(world: World) -> bool:
@@ -4413,6 +4477,20 @@ def career_rank(pilot: Pilot) -> str:
     return RANKS[career_rank_index(pilot)][1]
 
 
+def career_crew_row(world: World) -> str | None:
+    """The crew by name, service and what they cost a jump; None with no crew."""
+    p = pal()
+    ship = world.save.ship
+    hired = [role for role in CREW_ROLES if getattr(ship, f"has_{role}")]
+    if not hired:
+        return None
+    wages = sum(CREW_ROLES[role]["wage"] for role in hired)
+    names = f" {p.deep}{glyph('dot')}{RESET} ".join(
+        f"{p.ink}{_mission_plain(crew_name(world, role))}{RESET} {p.slate}{CREW_ROLES[role]['label']}, "
+        f"{CREW_SERVICE_LEVELS[crew_level(ship, role)][1]}{RESET}" for role in hired)
+    return f"{names}  {p.slate}wages{RESET} {p.ink}{wages}cr/jump{RESET}"
+
+
 def career_rank_terms(pilot: Pilot) -> list[str]:
     index = career_rank_index(pilot)
     lines = ["Rank is permanent for this career; spending and losses do not demote you."]
@@ -4442,7 +4520,13 @@ def career_accomplishments(save: SaveData) -> dict[str, int]:
             "missions": save.pilot.missions_completed, "failed": save.pilot.missions_failed, "expired": save.pilot.missions_expired}
 
 
-def career_path_lines(save: SaveData) -> list[str]:
+CAREER_PATH_NOTE = ("Paths are independent: trade counts market margin, exploring counts systems charted, "
+                    "combat counts victories. Market margin excludes deliveries, unknown-cost receipts and other "
+                    "income, and is before operating costs. A final stage earns its career conclusion and "
+                    "starting equipment; [R] Finale shows the terms.")
+
+
+def career_path_lines(save: SaveData, *, notes: bool = True) -> list[str]:
     progress = career_accomplishments(save)
     stages = {"trader": ((5000,20000,50000), ("Beginning","Broker","Guild Merchant","Founder")),
               "explorer": ((12,30,GALAXY_SYSTEM_COUNT), ("Local","Scout","Pathfinder","Cartographer")),
@@ -4461,18 +4545,22 @@ def career_path_lines(save: SaveData) -> list[str]:
         ceiling = marks[reached] if reached < len(marks) else marks[-1]
         done = reached >= len(marks)
         value = f"{progress[key]:+,}cr" if key == "trader" else f"{progress[key]}"
-        rows.append([f"{key.title()} ({labels[key]}):",
+        # Every stage of the path, the ones reached bright: the sentence that
+        # listed all nine marks is now this column (issue #39 playtest).
+        ladder = f" {p.slate}/{RESET} ".join(
+            f"{p.ink if progress[key] >= mark else p.slate}{mark:,}{RESET}" for mark in marks)
+        rows.append([key.title(), labels[key],
                      gauge(1 if done else progress[key] - floor, 1 if done else max(1, ceiling - floor),
                            cells, tone="brand" if done else None),
                      value,
                      badge("final", "good") if done
-                     else f"{p.slate}of{RESET} {p.ink}{ceiling:,}{RESET}"])
-        styles.append(["label", "value", "value", "value"])
-    lines = table(["", "", "", ""], rows, "llrl", styles=styles, repeat_header=False)[1:]
-    lines += ["Progress is market margin, systems charted and combat victories.",
-              "Stages: trader 5,000 / 20,000 / 50,000cr, explorer 12 / 30 / all systems, combat 5 / 20 / 50 victories.",
-              "Market margin excludes deliveries, unknown-cost receipts and other income. It is before operating costs, not total career profit.",
-              "Paths are independent. Reach a final stage for its career conclusion and starting equipment; [R] Finale shows the terms."]
+                     else f"{p.slate}of{RESET} {p.ink}{ceiling:,}{RESET}",
+                     ladder + (f"{p.slate}cr{RESET}" if key == "trader" else "")])
+        styles.append(["label", "value", "value", "value", "value", "value"])
+    lines = table(["PATH", "STAGE", "", "NOW", "NEXT", "STAGES"], rows, "lllrll", styles=styles,
+                  optional=(5,))
+    if notes:
+        lines.append(f"{p.slate}{CAREER_PATH_NOTE}{RESET}")
     return lines
 
 
@@ -5718,7 +5806,23 @@ CREW_LETTERS = choice_letters("Q")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
+#: The console is 79 columns on any terminal up to `WIDE_LAYOUT_FROM`. Wider, it
+#: grows -- to `WIDE_PANEL_MAX` at most, the most a line of prose reads well at --
+#: and always leaves the canopy `WIDE_WINDOW_MIN` columns of window beside it, so
+#: the picture keeps a real window rather than a strip (issue #39). Below that
+#: width a wider console would only squeeze the picture: a 120-column caller
+#: keeps the 79-column console and the window it has now.
+WIDE_LAYOUT_FROM, WIDE_PANEL_MAX, WIDE_WINDOW_MIN = 130, 112, 30
+
+
+def wide_layout() -> bool:
+    """Whether the console is wider than the classic 79 columns (issue #39)."""
+    return _OUTPUT_WIDTH >= WIDE_LAYOUT_FROM
+
+
 def _box_inner_width() -> int:
+    if wide_layout():
+        return min(WIDE_PANEL_MAX, _OUTPUT_WIDTH - WIDE_WINDOW_MIN) - 2
     return max(1, min(77, _OUTPUT_WIDTH - 2))
 
 
@@ -5798,11 +5902,17 @@ def _page_content_width() -> int:
     return max(1, _box_inner_width() - 3)
 
 
-def _page_frame_rows() -> int:
+def _page_frame_rows(title: str | None = None) -> int:
     """Rows the frame costs a page. The title moves into the top border, so
     only the bottom border is new -- and the rows of a status too long to ride
-    in it (issue #38)."""
-    return 1 + len(_status_overflow_rows(pal()))
+    in it (issue #38).
+
+    Given the page's title, only a status that page will show is counted: a
+    long result still pending from the screen just left is dropped when this
+    one draws, and reserving its rows cost blank rows and a page count that
+    overstated the screen (Thiesi/NetBBS#1593 review)."""
+    status = _STATUS if title is None else _status_shown_on(title)
+    return 1 + len(_status_overflow_rows(pal(), status))
 
 
 # ---------------------------------------------------------------------------
@@ -5880,13 +5990,20 @@ def _status_fits_border(status: dict, inner: int) -> bool:
     return 4 + _visible_width(status["text"]) + 1 + clock <= inner
 
 
-def _status_overflow_rows(p: "Palette") -> list[str]:
+def _status_shown_on(title: str) -> dict | None:
+    """The status a page with this title would show, without claiming it."""
+    if _STATUS is None or _STATUS["screen"] not in (None, _status_screen(title)):
+        return None
+    return _STATUS
+
+
+def _status_overflow_rows(p: "Palette", status: dict | None) -> list[str]:
     """Body rows for a status too long for the border; none when it fits."""
-    if _STATUS is None or _status_fits_border(_STATUS, _box_inner_width()):
+    if status is None or _status_fits_border(status, _box_inner_width()):
         return []
-    role = STATUS_TONES.get(_STATUS["tone"], STATUS_TONES["info"])[1]
-    rows = _wrap_output(_STATUS["text"], max(1, _page_content_width() - 2)).split("\r\n")
-    return [f"{_status_mark(p, _STATUS) if number == 0 else ' '} {getattr(p, role)}{row}{RESET}"
+    role = STATUS_TONES.get(status["tone"], STATUS_TONES["info"])[1]
+    rows = _wrap_output(status["text"], max(1, _page_content_width() - 2)).split("\r\n")
+    return [f"{_status_mark(p, status) if number == 0 else ' '} {getattr(p, role)}{row}{RESET}"
             for number, row in enumerate(rows)]
 
 
@@ -8469,6 +8586,23 @@ class _FinaleScene(_Scene):
         self.caption(stage, t, 0.66, self.title, _SPLASH_GOLD, self.detail)
 
 
+def result_row(message: str) -> str:
+    """One result on the deck: its label dim, what it says bright (issue #39 playtest).
+
+    "Result: Achievement unlocked: First Light -- Make 10 jumps." was one color
+    end to end. A message that opens with a short label ("Departure:",
+    "Achievement unlocked:") keeps the label in the labels' color, and what
+    follows a " -- " is the explanation of the bold part before it.
+    """
+    p = pal()
+    head, sep, rest = message.partition(": ")
+    if not (sep and rest and len(head) <= 24):
+        head, rest = "", message
+    name, dash, why = rest.partition(" -- ")
+    body = f"{p.ink}{BOLD}{name}{RESET} {p.slate}-- {why}{RESET}" if dash else f"{p.ink}{rest}{RESET}"
+    return f"{p.slate}Result:{RESET} " + (f"{p.slate}{head}:{RESET} " if head else "") + body
+
+
 def accolade_announcements(earned: list) -> list[str]:
     """The deck's rows for what a moment earned: each one by name when there
     are a few, a single count when a returning career catches up on many."""
@@ -8703,7 +8837,6 @@ _CANOPY_SKIES = {
     "transit": ((6, 5, 22), (18, 12, 52), (104, 72, 214), (90, 120, 230)),
 }
 QUADRANT_GLYPHS = " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█"
-CANOPY_PANEL_WIDTH = 79  # the console: `_box_outer_width()` on any terminal wide enough
 # The largest terminal the canopy is composed for. It is a picture made pixel by
 # pixel, like the scenes; the host accepts terminals up to 500x200, where one
 # would take seconds to compose and hundreds of kilobytes to send.
@@ -8982,13 +9115,13 @@ def canopy_key(scene: dict, width: int | None = None, height: int | None = None)
 
 def canopy_cells(scene: dict, width: int, height: int) -> list[list[tuple]]:
     """The whole canopy for a `width` x `height` terminal. The console covers
-    the top left, `CANOPY_PANEL_WIDTH` across and as many rows as its page
+    the top left, `_box_outer_width()` across and as many rows as its page
     has, so what the window shows is placed where the window is: beside the
     console on a wide terminal, along the bottom of a narrower one. Never on
     the console's own height, which changes from page to page -- one picture
     serves every page of a place, so paging redraws none of it."""
     across = canopy_across()
-    panel_w = min(width, CANOPY_PANEL_WIDTH)
+    panel_w = min(width, _box_outer_width())
     key = canopy_key(scene, width, height)
     if key in _CANOPY_CACHE:
         return _CANOPY_CACHE[key]
@@ -9448,6 +9581,8 @@ def deck_alert_rows(world: World) -> list[str]:
     if event:
         rows.append(alert("caution", event["description"],
                           f"{plural(event['turns_remaining'], 'day')} left", key_label("T", "ledger")))
+    rows += due_here_alert_rows(world)
+    rows += deadline_alert_rows(world)
     mission = tracked_mission(world)
     if mission is not None:
         kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
@@ -9463,24 +9598,91 @@ def deck_alert_rows(world: World) -> list[str]:
     # up -- except a futures order that has come due. That is the one thing on it
     # a caller had to act on, so it belongs here rather than on a screen wiped
     # before it can be read.
-    ready = sum(1 for order in world.save.active_futures
-                if world.save.turn >= order.settle_turn)
-    if ready:
-        rows.append(alert("caution", "Futures mature",
-                          f"{plural(ready, 'order')} ready to settle",
-                          key_label("M", "market")))
+    rows += futures_alert_rows(world)
     if world.save.flags.get("archive_v1_started") and not archive_finished(world):
         rows.append(alert("note", "Archive", archive_objective(world), key_label("N", "contacts")))
     if wage and pilot.credits >= wage:
         rows.append(alert("good", "Crew paid", f"{wage}cr per jump", key_label("K", "roster")))
-    for line in crew_assignment_recap(world) + faction_story_recap(world):
+    rows += crew_task_alert_rows(world)
+    for line in faction_story_recap(world):
         rows.append(alert("note", line))
+    return rows
+
+
+def due_here_alert_rows(world: World) -> list[str]:
+    """A delivery due at this station that the hold cannot complete yet.
+
+    Docking with too little cargo completed nothing and said nothing: the pilot
+    had to open the board, the contract and the market to find out why
+    (issue #41). The row says how short the hold is and whether this market
+    can make up the difference.
+    """
+    rows = []
+    for mission in world.save.active_missions:
+        if (mission.kind != "delivery" or mission.target_system != world.here.id or not mission.quantity
+                or mission_expired(world, mission)):
+            continue
+        have, promised = contract_cargo_aboard(world, mission)
+        short = mission.quantity - have
+        if short <= 0:
+            continue
+        label = COMMODITIES[mission.commodity]["label"]
+        if not COMMODITIES[mission.commodity]["legal"] and world.here.economy != "Haven":
+            source = "not sold here"
+        else:
+            source = f"stock {market_depth_quote(world, world.here.id, mission.commodity)['stock']}"
+        # Cargo an earlier contract claims is aboard but not this one's: say
+        # so, or "12 short" with ten in the hold reads as a miscount.
+        held = f" ({promised} held for earlier contracts)" if promised else ""
+        rows.append(alert("caution", f"Contract #{mission.id} due HERE",
+                          f"{have}/{mission.quantity} {label} aboard{held}, {short} short; {source}",
+                          key_label("M", "market")))
+    return rows
+
+
+def futures_alert_rows(world: World) -> list[str]:
+    """Each matured futures order: where it waits, and why one here has not loaded.
+
+    One count of "orders ready to settle" pointed at the market even when the
+    goods sat at another station. An order here settles on its own as the ship
+    docks, so one still waiting here means the hold is too full for it, which
+    is the one thing the pilot has to fix (issue #41).
+    """
+    rows = []
+    hops = None
+    free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+    for order in world.save.active_futures:
+        if world.save.turn < order.settle_turn:
+            continue
+        goods = f"{order.quantity} {COMMODITIES[order.commodity]['label']}"
+        if order.origin_system == world.here.id:
+            # `settle_futures_contracts` loads a ready order here as the ship
+            # docks unless the hold is too small: that is the only way one waits.
+            rows.append(alert("caution", f"Futures #{order.id} ready HERE",
+                              f"{goods} needs {order.quantity} hold, {max(0, free)} free",
+                              key_label("M", "market")))
+        else:
+            hops = bfs_hops(world.by_id, world.here.id) if hops is None else hops
+            jumps = hops.get(order.origin_system)
+            where = _mission_plain(world.by_id[order.origin_system].name) + (
+                f", {plural(jumps, 'jump')}" if jumps else "")
+            rows.append(alert("note", f"Futures #{order.id} ready", f"{goods} at {where}",
+                              key_label("C", "chart")))
     return rows
 
 
 # The service menu, as (key, label) with a short "what is in there" tail. The
 # tail is what turns a wall of twelve identical entries into a screen a caller
 # can read: it says how many offers are on the board without opening it.
+def affordable_upgrades(world: World) -> int:
+    """Yard upgrades the balance covers now; not "newly", which would need saved state.
+    Yard prices only: a workshop's cheaper install also wants materials and a visit."""
+    ship, credits = world.save.ship, world.save.pilot.credits
+    return sum(1 for key, upgrade in UPGRADES.items()
+               if getattr(ship, f"{key}_tier") < upgrade["max_tier"]
+               and upgrade["cost"](getattr(ship, f"{key}_tier")) <= credits)
+
+
 def deck_service_entries(world: World) -> list[tuple[str, str]]:
     goods = len(LEGAL_COMMODITIES) + sum(1 for c in CONTRABAND_COMMODITIES
                                          if world.here.economy == "Haven" or world.save.cargo.get(c, 0) > 0)
@@ -9489,7 +9691,9 @@ def deck_service_entries(world: World) -> list[tuple[str, str]]:
     # as a sentence -- subject "Board 4", verb "offers" -- which is how a caller
     # came to ask what the numbers meant (issue #518). The counts agree in
     # number too; `Chart 1 links` was reported from a real screen.
-    entries = [("M", f"Market: {plural(goods, 'good')}"), ("Y", "Yard repair/refit"),
+    upgrades = affordable_upgrades(world)
+    yard = f"Yard: {plural(upgrades, 'upgrade')} affordable" if upgrades else "Yard repair/refit"
+    entries = [("M", f"Market: {plural(goods, 'good')}"), ("Y", yard),
                ("B", f"Board: {plural(offers, 'offer')}"),
                ("C", f"Chart: {plural(len(world.here.connections), 'link')}"),
                ("S", "Status"), ("H", "Hall of Fame"),
@@ -9585,7 +9789,7 @@ def screen_station_menu(p: Palette, world: World) -> str:
     while True:
         lines = station_deck_lines(world, expanded=expanded)
         if notes or completed:
-            lines[0:0] = notes + ["Result: " + message for message in completed]
+            lines[0:0] = notes + [result_row(message) for message in completed]
         footer = "[<] Prev [>] Next [X] Compact [Q] Exit: " if expanded else "[<] Prev [>] Next [X] Expand [Q] Exit: "
         choice, page, count = _draw_service_page(p, f"Command Deck: {world.save.pilot.credits:,}cr", lines, footer, page)
         if (moved := page_step(choice, page, count)) is not None: page = moved
@@ -9845,7 +10049,25 @@ def archive_action(world: World, action: str) -> list[str]:
             "Kest Rel: The sealed copy is safe with me. Mara keeps only your account of the journey."]
 
 
+def archive_choice_columns(world: World) -> list[str]:
+    """The choice on return, as the comparison it is: two columns side by side.
+
+    Read out of one sentence, "public pays 500cr; Concord +5. Private pays
+    1,500cr; Blackwake +5; Concord -2" made the pilot hold one offer in mind
+    while reading the other (issue #39).
+    """
+    p = pal()
+    def column(pays: int, standing: str) -> list[str]:
+        return [f"{p.gold}+{pays:,}cr{RESET}"] + [
+            f"{p.tone('good' if delta.startswith('+') and delta != '+0' else 'danger' if delta.startswith('-') else 'info')}"
+            f"{faction} {delta}{RESET}" for faction, delta in (part.split(" ") for part in standing.split("; "))]
+    return sheet_columns([("PUBLIC EDITION (Mara)", column(500, archive_standing_terms(world, True))),
+                          ("PRIVATE SALE (Kest Rel)", column(1500, archive_standing_terms(world, False)))])
+
+
 def archive_lines(world: World) -> list[str]:
+    """The assignment as labelled rows, and its one choice as two columns (issue #39)."""
+    p = pal()
     flags = world.save.flags
     target = world.by_id[world.landmark["system_id"]]
     lines = ["Mara Venn, Freeport's archive keeper, collects the histories that shipping ledgers leave out."]
@@ -9853,21 +10075,33 @@ def archive_lines(world: World) -> list[str]:
         lines += (["Mara remembers your public edition. Families have begun adding names to the archive."] if flags.get("archive_v1_public") else
                   ["Kest Rel holds the sealed record. Mara preserves your travel account, but the source remains private."])
         return lines + ["Assignment complete. Rewards cannot be claimed again."]
-    lines += ["Optional assignment: no deadline, deposit or contract-slot cost. Ordinary fuel, wages and travel risks apply.",
-              f"At current standing: public preservation pays 500cr; {archive_standing_terms(world, True)}. Private sale pays 1,500cr; {archive_standing_terms(world, False)}. Standing stays within -100 to 100."]
-    if not flags.get("archive_v1_recovered"):
-        lines.append("Landmark salvage already claimed; transcribing the record pays no additional salvage." if flags.get("landmark_investigated") else
-                     f"Unclaimed landmark salvage: +{world.landmark['reward_credits']:,}cr once when investigating.")
+    site = f"{world.landmark['label']} near {target.name} ({target.x},{target.y})"
     if not flags.get("archive_v1_started"):
-        lines += [f"Site: {world.landmark['label']} near {target.name} ({target.x},{target.y}). Visiting the site is required; scanning it is not enough.",
-                  "[A] Accept at Freeport." if world.here.id == 0 else "Meet Mara at Freeport to accept. [R] Route there."]
+        stage, step = ("open", None), ("[A] Accept at Freeport." if world.here.id == 0 else "Meet Mara at Freeport to accept. [R] Route there.")
     elif not flags.get("archive_v1_recovered"):
-        lines += [f"Recover the record at {target.name} ({target.x},{target.y}).",
-                  "[I] Recover record here." if world.here.id == target.id else "[R] Route to the site; accepting its bearing does not chart it."]
+        stage, step = ("accepted", None), ("[I] Recover record here." if world.here.id == target.id else
+                                              f"Recover the record at {target.name}. [R] Route to the site; accepting its bearing does not chart it.")
     else:
+        stage, step = ("record aboard", None), ("[P] Publish / [S] Sell privately." if world.here.id == 0 else
+                                                  "[R] Return to Freeport with the record.")
+    salvage = (("claimed; transcribing pays no more", None) if flags.get("landmark_investigated") else
+               (f"+{world.landmark['reward_credits']:,}cr once, when investigating", None))
+    rows = [("STAGE", stage[0], stage[1]), ("SITE", site, None),
+            ("COSTS", "no deadline, deposit or contract slot", None)]
+    if not flags.get("archive_v1_recovered"):
+        rows.append(("SALVAGE", salvage[0], salvage[1]))
+    lines.append(section("ASSIGNMENT"))
+    lines += _sheet_rows(rows)
+    lines.append(section("CHOICE ON RETURN TO FREEPORT"))
+    lines += archive_choice_columns(world)
+    if flags.get("archive_v1_recovered"):
+        lines.append(section("RECORD"))
         lines += ARCHIVE_RECORDS[world.landmark["label"]]
-        lines += ["Mara offers a public edition; broker Kest Rel offers a private sale. Choose once on return to Freeport.",
-                  "[P] Publish / [S] Sell privately." if world.here.id == 0 else "[R] Return to Freeport with the record."]
+    lines.append(section("NEXT"))
+    lines.append(step)
+    if not flags.get("archive_v1_started"):
+        lines.append("Visiting the site is required; scanning it is not enough.")
+    lines.append(f"{p.slate}Ordinary fuel, wages and travel risks apply. Standing stays within -100 to 100.{RESET}")
     return lines
 
 
@@ -10879,6 +11113,26 @@ def mission_cargo_needs(world: World) -> dict[str, tuple[int, list[str]]]:
             if total > world.save.cargo.get(commodity, 0)}
 
 
+def contract_cargo_aboard(world: World, mission: Mission) -> tuple[int, int]:
+    """(usable, promised): the cargo aboard this contract can count on, and how
+    much of the rest the other live deliveries of the same goods already claim.
+
+    A contract's page used to count the whole hold as its own, so a second Ore
+    offer read "10 aboard, buy 0" while those ten were promised to the first
+    (issue #41). The claims run in the order deliveries are served, which is
+    the order they were accepted (`check_mission_completions`): an accepted
+    contract is owed only what earlier ones leave, and an offer what all of
+    them leave.
+    """
+    held = world.save.cargo.get(mission.commodity, 0)
+    active = world.save.active_missions
+    position = next((index for index, other in enumerate(active) if other.id == mission.id), len(active))
+    promised = sum(other.quantity or 0 for other in active[:position]
+                   if other.kind == "delivery" and other.commodity == mission.commodity
+                   and not (other.deadline_turn is not None and other.deadline_turn < world.save.turn))
+    return max(0, held - promised), min(held, promised)
+
+
 def spare_cargo(world: World, commodity: str) -> int:
     """Units aboard that no live delivery is waiting for: the ones free to sell."""
     return max(0, world.save.cargo.get(commodity, 0) - contract_cargo(world).get(commodity, (0, []))[0])
@@ -11016,12 +11270,42 @@ def market_catalog_lines(world: World, goods: list[str]) -> list[str]:
         lines.append(f"{p.slate}Contracts need:{RESET} " + f"{p.slate} · {RESET}".join(
             f"{p.ink}{COMMODITIES[c]['label']} {p.gold}{need}{RESET} {p.deep}{glyph('arrow')}{RESET} {p.ink}{', '.join(places)}{RESET}"
             for c, (need, places) in needs.items()))
+    lines += market_material_lines(world, goods)
     if any(not COMMODITIES[c]["legal"] for c in goods):
         lines.append(f"{p.slate}Blackwake standing: {p.ink}+1{p.slate} per new {p.ink}{CONTRABAND_STANDING_STEP}cr"
                      f"{p.slate} net contraband gain; purchases count against gains.{RESET}")
     if any(not COMMODITIES[c]["legal"] and system.economy != "Haven" for c in goods):
         lines.append(f"{p.slate}A {glyph('flat')} buy price is contraband this station will not sell.{RESET}")
     return lines + market_memory_lines(world, goods)
+
+
+def market_material_lines(world: World, goods: list[str]) -> list[str]:
+    """Cargo a crew task or a workshop wants, beside the market that sells it.
+
+    Both showed only on their own screens, so a pilot buying Machinery had to
+    remember Oren wanted three (issue #41). A crew task is a promise and reads
+    like the contracts' line; a workshop upgrade is optional, so its materials
+    stay one dim line."""
+    p = pal()
+    lines = []
+    task = crew_assignment_record(world, "engineer")
+    if "machinery" in goods and task is not None and task["state"] == "active":
+        have, need = crew_assignment_progress(world, "engineer")
+        lines.append(f"{p.slate}Crew task:{RESET} {p.ink}{_mission_plain(crew_name(world, 'engineer'))} needs "
+                     f"{p.gold}{need}{p.ink} Machinery{RESET} {p.slate}({have} aboard){RESET} "
+                     f"{p.deep}{glyph('arrow')}{RESET} {p.ink}{WORKSHOPS['engine']['name']}{RESET}")
+    wanted = []
+    for key, shop in WORKSHOPS.items():
+        if shop["commodity"] not in goods:
+            continue
+        try:
+            quote = workshop_quote(world, key)
+        except ValueError:
+            continue  # maxed: nothing left to install
+        wanted.append(f"{COMMODITIES[quote['commodity']]['label']} {quote['quantity']} {glyph('arrow')} {shop['name']}")
+    if wanted:
+        lines.append(f"{p.slate}Workshop upgrades, optional: {' · '.join(wanted)}.{RESET}")
+    return lines
 
 
 def screen_market(p: Palette, world: World) -> None:
@@ -11230,7 +11514,7 @@ def page_capacity(lines: list[str], title: str, footer: str) -> int:
     # wrapped rows when it does not; the action bar stays outside the box.
     header_rows = _page_header_rows(f"{title} {max_pages}/{max_pages}")
     overhead = (len(_wrap_output(footer, bar_width).split("\r\n"))
-                + header_rows + _page_frame_rows() + 3)
+                + header_rows + _page_frame_rows(title) + 3)
     return max(1, _OUTPUT_HEIGHT - overhead)
 
 
@@ -11299,6 +11583,14 @@ def paginate(groups: list[list[str]], capacity: int, *, render=None, keys=None):
         while remaining:
             current, choices = pages[-1]
             room = room_on(len(pages) - 1) - len(current)
+            # A page that holds nothing but headings carried to it cannot shed
+            # them onto another page: that one would be carried them in turn,
+            # forever. It happened where a long result left a 40x12 page room
+            # for a section rule and a table's headings and no row under them.
+            # The oldest heading gives way instead, until one row fits.
+            while room <= 0 and current and all(row[:1] in (SECTION_MARK, STICKY_MARK) for row in current):
+                current.pop(0)
+                room = room_on(len(pages) - 1) - len(current)
             if room <= 0:
                 open_page()
                 continue
@@ -11358,25 +11650,55 @@ def _trade_pages(lines: list[str], title: str, footer: str) -> list[list[str]]:
 
 
 def remembered_market_lines(world: World) -> list[str]:
-    lines = ["Last observed prices, not live remote data. Jumps advance the day; prices can change."]
-    for sid, quotes in sorted(world.save.market_memory.items(), key=lambda item: world.by_id[item[0]].name):
-        system = world.by_id[sid]
-        lines.append(f"{system.name} - {system.economy}.")
-        for commodity, quote in quotes.items():
-            buy = f"{quote['buy']}cr" if quote["buy"] is not None else "prohibited"
-            lines.append(f"{COMMODITIES[commodity]['label']}: buy {buy}, sell {quote['sell']}cr. Day {quote['day']} ({world.save.turn - quote['day']} days old).")
-            if "stock" in quote:
-                lines.append(f"Observed stock {quote['stock']}; station buying demand {quote['demand']}. Quantities may replenish or change.")
+    """The ship's price memory as a table per station, nearest first (issue #39).
+
+    It was a sentence per remembered quote -- "Food: buy 19cr, sell 17cr. Day 3
+    (2 days old)." and another for its stock -- so comparing one good across
+    stations meant reading every one. Each station is now a section headed by
+    how far it is, and its quotes a table whose columns line up with the market.
+    """
+    p = pal()
+    lines = [f"{p.slate}Last observed prices, not live remote data. Jumps advance the day; prices can change.{RESET}"]
     if not world.save.market_memory:
         lines.append("No market observations yet. Older discoveries have no recorded quotes.")
+        return lines
+    hops = bfs_hops(world.by_id, world.here.id)
+    for sid, quotes in sorted(world.save.market_memory.items(),
+                              key=lambda item: (hops.get(item[0], 999), world.by_id[item[0]].name)):
+        system = world.by_id[sid]
+        jumps = hops.get(sid)
+        where = "here" if sid == world.here.id else (plural(jumps, "jump") if jumps is not None else "unreachable")
+        lines.append(section(f"{_mission_plain(system.name)} · {system.economy} · {where}"))
+        rows, styles = [], []
+        for commodity, quote in quotes.items():
+            age = world.save.turn - quote["day"]
+            rows.append([COMMODITIES[commodity]["label"],
+                         f"{p.wrong}prohibited{RESET}" if quote["buy"] is None else f"{quote['buy']}",
+                         f"{quote['sell']}",
+                         f"{quote['stock']}" if "stock" in quote else f"{p.deep}?{RESET}",
+                         f"{quote['demand']}" if "demand" in quote else f"{p.deep}?{RESET}",
+                         "today" if age <= 0 else f"{age}d ago"])
+            styles.append(["value", "value", "value", "label", "label", "label"])
+        lines += table(["COMMODITY", "BUY", "SELL", "STOCK", "DEMAND", "SEEN"], rows, "lrrrrr",
+                       styles=styles, optional=(3, 4))
+    lines.append(f"{p.slate}Stock and demand were observed then; they replenish or change with time.{RESET}")
     return lines
 
 
 def trade_route_lines(world: World, destination: int | None, commodity: str, quantity: int, use_hold: bool) -> list[str]:
-    name = world.by_id[destination].name if destination is not None else "not selected"
-    lines = [f"Destination: {name}. Cargo: {COMMODITIES[commodity]['label']} x{quantity}.",
-             f"Source: {'existing hold cargo' if use_hold else 'buy new cargo here'}. Credits: {world.save.pilot.credits:,}cr.",
-             "Use [E] Edit draft to change the route. Back makes no changes; this estimate never buys cargo or launches a route."]
+    """A trade run's estimate as a sheet, like a contract's (issue #39).
+
+    Fifteen sentences of receipts, costs, fuel, wages, demand and warnings
+    become CHECKS -- is the quote fresh, will they buy it all, will fuel and cash
+    carry it, does a contract want this cargo -- and MONEY from receipts to the
+    margin, then the legs as the route planner's table.
+    """
+    p = pal()
+    label = COMMODITIES[commodity]["label"]
+    name = _mission_plain(world.by_id[destination].name) if destination is not None else "not selected"
+    lines = [f"{p.ink}{BOLD}{quantity} {label} {glyph('arrow')} {name}{RESET} "
+             f"{p.slate}{glyph('dot')} {'from the hold' if use_hold else 'bought here'}{RESET}",
+             f"{p.slate}[E] edits the draft. Back makes no changes; this estimate never buys cargo or launches a route.{RESET}"]
     if destination is None:
         return lines + ["No other station has remembered prices yet. Visit another station or receive a trader's market report first."]
     try:
@@ -11384,45 +11706,68 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
     except TradeError as exc:
         return lines + [str(exc)]
     age = world.save.turn - quote["observed_day"]
-    lines.extend([
-        f"Destination sell quote: {quote['unit_sale']}cr/unit, observed day {quote['observed_day']} ({age} days old).",
-        f"Sale receipts if the full load arrives and the station buys it: {quote['receipts']:,}cr.",
-        f"Cargo acquisition cost: {quote['cargo_cost']:,}cr.",
-        f"Buy now: {quote['procurement']:,}cr. Credits after buying: {world.save.pilot.credits - quote['procurement']:,}cr.",
-        f"Fuel: {quote['fuel']} units, replacement value {quote['fuel'] * 6}cr. Additional fuel cash: {quote['fuel_cash']}cr with your current tank.",
-        f"Crew wages: {quote['wages']}cr for {plural(len(quote['legs']), 'jump')}. Arrival day {world.save.turn + len(quote['legs'])} if uninterrupted.",
-        f"Cash needed before sale: {quote['cash_needed']:,}cr. Budget {'covered' if quote['cash_needed'] <= world.save.pilot.credits else 'SHORT by ' + str(quote['cash_needed'] - world.save.pilot.credits) + 'cr'}.",
-    ])
+    credits = world.save.pilot.credits
+    checks = [("QUOTE", f"{quote['unit_sale']}cr/unit, seen " + ("today" if age <= 0 else f"{age}d ago"),
+               "good" if age <= 3 else "info")]
     if quote["observed_demand"] is None:
-        lines.append("Destination buying demand was not observed; confirm capacity before relying on the full sale.")
+        checks.append(("DEMAND", "not observed", "unknown"))
+    elif quote["demand_shortfall"]:
+        checks.append(("DEMAND", f"only {quote['observed_demand']} observed", "bad"))
     else:
-        lines.append(f"Observed destination buying demand: {quote['observed_demand']} units on day {quote['observed_day']}; may replenish or change.")
-    if quote["demand_shortfall"]:
-        lines.append("DEMAND WARNING: this load exceeds observed buying demand. Reduce quantity or obtain a newer observation.")
+        checks.append(("DEMAND", f"{quote['observed_demand']} observed", "good"))
+    max_leg = max((burn for _, burn in quote["legs"]), default=0)
     if not quote["feasible"]:
-        lines.append("INFEASIBLE: a route leg exceeds your tank capacity. Upgrade or plan a different route.")
-    elif quote["margin"] is not None:
-        lines.append(f"Estimated margin after cargo, replacement fuel and wages: {quote['margin']:+,}cr.")
+        checks.append(("FUEL", f"infeasible: a jump needs {max_leg}", "bad"))
     else:
-        lines.append("Total margin unavailable: unknown cargo costs, delivery commitments or observed buying demand affect this load.")
+        checks.append(("FUEL", f"needs {quote['fuel']}, {world.save.ship.fuel} aboard",
+                       "good" if quote["fuel"] <= world.save.ship.fuel else "info"))
+    short = quote["cash_needed"] - credits
+    checks.append(("CASH", f"{quote['cash_needed']:,}cr of {credits:,}cr" + (f", {short:,} short" if short > 0 else ""),
+                   "bad" if short > 0 else "good"))
+    checks.append(("ARRIVAL", f"day {world.save.turn + len(quote['legs'])}, today {world.save.turn}", None))
     if quote["conflicts"]:
-        lines.append("DELIVERY CONFLICT: these contracts may consume this commodity on the route: " + "; ".join(quote["conflicts"]) + ".")
-    lines.append("ROUTE - shortest by jumps; fuel top-ups at stations are budgeted at 6cr/unit.")
-    tank = world.save.ship.fuel
-    previous = world.here
-    for sid, burn in quote["legs"]:
+        checks.append(("CONTRACTS", "may take this cargo", "bad"))
+    money = [("Receipts", quote["receipts"], "good"),
+             (f"Cargo ({'hold basis' if use_hold else f'{quantity} bought'})", -quote["cargo_cost"], "bad"),
+             ("Fuel replacement", -quote["fuel"] * 6, "bad")]
+    if quote["wages"]:
+        money.append(("Wages", -quote["wages"], "bad"))
+    if quote["margin"] is not None and quote["feasible"]:
+        money.append(("NET", quote["margin"], "good" if quote["margin"] > 0 else "bad"))
+    else:
+        money.append(("NET unavailable", None, "info"))
+    if not use_hold:
+        money.append((f"leaves {credits - quote['procurement']:,}cr after buying", None, "info"))
+    lines.append(section("ESTIMATE"))
+    lines += sheet_columns([("CHECKS", _sheet_rows(checks)), ("MONEY", _money_rows(money))])
+    if quote["demand_shortfall"]:
+        lines.append(f"{p.wrong}This load exceeds the observed buying demand;{RESET} reduce the quantity or observe again. "
+                     "Demand may replenish or change.")
+    if quote["conflicts"]:
+        lines.append(f"{p.wrong}Delivery conflict:{RESET} these contracts may consume this cargo on the route: "
+                     + "; ".join(quote["conflicts"]) + ".")
+    rows, styles = [], []
+    tank, previous = world.save.ship.fuel, world.here
+    for number, (sid, burn) in enumerate(quote["legs"], 1):
         system = world.by_id[sid]
-        if tank < burn and burn <= fuel_capacity(world.save.ship):
-            station = previous.name if previous.discovered else "the uncharted intermediate station"
-            lines.append(f"Refuel {burn - tank} units at {station} before the next leg.")
+        refuel = f"{p.deep}{glyph('flat')}{RESET}"
+        if burn > fuel_capacity(world.save.ship):
+            refuel = f"{p.wrong}BLOCKED by tank capacity{RESET}"
+        elif tank < burn:
+            station = _mission_plain(previous.name) if previous.discovered else "the uncharted stop"
+            refuel = f"{p.gold}+{burn - tank} at {station}{RESET}"
             tank = burn
-        label = system.name if system.discovered else "Uncharted system"
-        danger = str(system.danger) if system.discovered else "unknown"
-        blocked = " BLOCKED by tank capacity." if burn > fuel_capacity(world.save.ship) else ""
-        lines.append(f"Jump: {label}; {burn} fuel; danger {danger}.{blocked}")
+        danger = (f"{p.tone(danger_tone(system.danger))}{system.danger}{RESET}" if system.discovered
+                  else f"{p.slate}?{RESET}")
+        rows.append([f"{number}", _mission_plain(system.name) if system.discovered else "Uncharted system",
+                     f"{burn}", danger, refuel])
+        styles.append(["label", "value", "value", "value", "value"])
         tank = max(0, tank - burn)
         previous = system
-    lines.append("Estimate assumes the remembered sale price, sufficient station buying demand and intact cargo. Market changes, encounters, repairs, fines, detours and other income/spending are excluded.")
+    lines.append(section("LEGS"))
+    lines += table(["#", "LANDS AT", "FUEL", "DANGER", "REFUEL FIRST"], rows, "rlrrl", styles=styles)
+    lines.append(f"{p.slate}Shortest route; top-ups at 6cr/unit. Assumes the remembered price, enough buying demand "
+                 f"and intact cargo; market changes, encounters, repairs, fines and detours are excluded.{RESET}")
     return lines
 
 
@@ -11625,7 +11970,7 @@ def screen_trade_route(p: Palette, world: World, *, initial: dict | None = None)
 
 def screen_remembered_markets(p: Palette, world: World) -> None:
     footer = "[N] Next [P] Prev [B] Back: "
-    pages = _trade_pages(remembered_market_lines(world), "Market Memory", footer)
+    pages = _service_pages(remembered_market_lines(world), "Market Memory", footer)
     page = 0
     while True:
         draw_page(p, "Market Memory", pages[page], page, len(pages))
@@ -11685,38 +12030,56 @@ def trade_opportunities(world: World) -> list[dict]:
 
 
 def economy_opportunity_lines(world: World, candidates: list[dict]) -> list[str]:
-    lines = ["PUBLIC ECONOMY BULLETIN"]
+    """The bulletin and the ranked trade leads, a paragraph each (issue #39).
+
+    Every lead and every station was a run of plain sentences butted against
+    the next. Each is now its own paragraph, a blank row apart, with the
+    figure that matters in its color: a margin green or red, a risk red.
+    """
+    p = pal()
+    lines = [section("PUBLIC ECONOMY BULLETIN")]
     event = world.save.active_event
     if event is None:
-        lines.append("No active disruption reported. Ordinary price differences still create trade leads.")
+        lines.append(f"{p.slate}No active disruption reported. Ordinary price differences still create trade leads.{RESET}")
     else:
-        lines.append(_mission_plain(f"{event['description']}. {plural(event['turns_remaining'], 'jump')} of event time remain."))
+        boom = event["direction"] == "boom"
+        lines.append(f"{p.tone('good' if boom else 'caution')}{BOLD}{_mission_plain(event['description'])}{RESET}"
+                     f"{p.slate}. {plural(event['turns_remaining'], 'jump')} of event time remain.{RESET}")
         commodity = COMMODITIES[event["commodity"]]["label"]
-        lines.append(f"Lead: {'bring' if event['direction'] == 'boom' else 'investigate buying'} {commodity}. Prices and availability still need checking.")
+        lines.append(f"{p.slate}Lead:{RESET} {p.ink}{'bring' if boom else 'investigate buying'} {commodity}{RESET}"
+                     f"{p.slate}. Prices and availability still need checking.{RESET}")
         if not COMMODITIES[event["commodity"]]["legal"]:
-            lines.append("ILLEGAL CARGO: customs can confiscate this commodity outside Havens.")
+            lines.append(f"{p.wrong}ILLEGAL CARGO:{RESET} customs can confiscate this commodity outside Havens.")
         for sid in economy_event_system_ids(world, event):
             station = world.by_id[sid]
             path = bfs_path(world.by_id, world.here.id, sid)
-            threat = str(station.danger) if station.discovered else "unknown"
+            threat = (f"{p.tone(danger_tone(station.danger))}danger {station.danger}{RESET}" if station.discovered
+                      else f"{p.slate}danger unknown{RESET}")
             timing = "event ends by arrival if uninterrupted" if len(path) >= event["turns_remaining"] else "reachable before event ends if uninterrupted"
-            lines.append(f"{station.name} ({station.x},{station.y}), {plural(len(path), 'jump')}; danger {threat}; {timing}.")
+            lines.append("")
+            lines.append(f"{p.ink}{BOLD}{_mission_plain(station.name)}{RESET} {p.slate}({station.x},{station.y}), "
+                         f"{plural(len(path), 'jump')};{RESET} {threat}{p.slate}; {timing}.{RESET}")
             if path:
                 first = world.by_id[path[0]]
-                bearing = first.name if first.discovered else f"uncharted connection at ({first.x},{first.y})"
-                lines.append(f"First bearing: {bearing}. Public news does not chart its destinations.")
-    lines += ["TRADE CANDIDATES - remembered prices, outbound margin only; return travel is excluded.",
-              "Ranked by estimated margin per jump. Quotes can be stale; encounters, repairs and market changes can erase a margin."]
+                bearing = _mission_plain(first.name) if first.discovered else f"uncharted connection at ({first.x},{first.y})"
+                lines.append(f"{p.slate}First bearing:{RESET} {p.ink}{bearing}{RESET}{p.slate}. Public news does not chart its destinations.{RESET}")
+    lines += [section("TRADE CANDIDATES"),
+              f"{p.slate}Remembered prices, outbound margin only; return travel is excluded. Ranked by estimated "
+              f"margin per jump. Quotes can be stale; encounters, repairs and market changes can erase a margin.{RESET}"]
     if not candidates:
         lines.append("No positive quoted candidate fits current stock, hold space, cash, observed demand and delivery commitments. Visit markets or use the route draft for other plans.")
     for index, quote in enumerate(candidates, 1):
         station = world.by_id[quote["destination"]]
         cargo = COMMODITIES[quote["commodity"]]
         capacity = "capacity unobserved" if quote["observed_demand"] is None else f"observed demand {quote['observed_demand']}"
-        lines.append(f"[{index}] {quote['quantity']} {cargo['label']} to {station.name}: {quote['margin']:+,}cr estimate, {plural(len(quote['legs']), 'jump')}.")
-        lines.append(f"Buy {quote['procurement']}cr; additional fuel {quote['fuel_cash']}cr; wages {quote['wages']}cr. Quote day {quote['observed_day']}; {capacity}.")
+        margin = f"{p.tone('good' if quote['margin'] > 0 else 'danger')}{BOLD}{quote['margin']:+,}cr{RESET}"
+        lines.append("")
+        lines.append(f"{key_label(str(index), '')}{p.ink}{quote['quantity']} {cargo['label']} {glyph('arrow')} "
+                     f"{_mission_plain(station.name)}{RESET}  {margin} {p.slate}estimate, {plural(len(quote['legs']), 'jump')}{RESET}")
+        lines.append(f"{p.slate}Buy {p.ink}{quote['procurement']}cr{p.slate}; additional fuel {p.ink}{quote['fuel_cash']}cr"
+                     f"{p.slate}; wages {p.ink}{quote['wages']}cr{p.slate}. Quote day {quote['observed_day']}; {capacity}.{RESET}")
         if not cargo["legal"]:
-            lines.append("ILLEGAL CARGO: customs risk; quoted margin excludes confiscation and fines.")
+            lines.append(f"{p.wrong}ILLEGAL CARGO:{RESET} customs risk; quoted margin excludes confiscation and fines.")
     return lines
 
 
@@ -11823,9 +12186,21 @@ def _trade_commodity(p: Palette, world: World, commodity: str) -> str | None:
         if max_qty <= 0:
             result = f"Station demand is exhausted; replenishes {depth['demand_rate']}/day."
             return set_status(result, "bad")
-        out_prompt(f"{p.muted}Quantity (have {have}, station buys {max_qty}; Enter or Esc cancels): {RESET}")
+        spare = spare_cargo(world, commodity)
+        promised, places = have - spare, ""
+        if promised:
+            places = ", ".join(contract_cargo(world)[commodity][1])
+            holding = f"have {have}: {promised} for {places} deliveries, {spare} spare"
+        else:
+            holding = f"have {have}"
+        out_prompt(f"{p.muted}Quantity ({holding}; station buys {max_qty}; Enter or Esc cancels): {RESET}")
         qty = read_quantity(max_qty)
         if qty <= 0:
+            return
+        # Selling into a promise is allowed -- the pilot may mean to rebuy -- but
+        # never without being told which contracts it leaves short (issue #41).
+        if qty > spare and not confirm(f"Sell {qty}? {qty - spare} of them are promised to deliveries for "
+                                       f"{places}, which cannot complete without them.", p):
             return
         result = trade_cargo(world, commodity, qty, buying=False)
         world.commit()
@@ -11926,7 +12301,7 @@ def screen_workshop(p: Palette, world: World, key: str) -> str | None:
         elif action == "I" and available:
             quote = workshop_quote(world, key)
             if confirm(f"Install {UPGRADES[key]['label']} tier {quote['tier']} for {quote['credits']}cr and {quote['quantity']} {COMMODITIES[quote['commodity']]['label']}? Materials are consumed.", p):
-                result = install_workshop_module(world, key)
+                result = set_status(install_workshop_module(world, key), "good")
                 world.commit()
                 page = 0
 
@@ -11980,6 +12355,10 @@ def shipyard_lines(world: World) -> list[str]:
          key_label("R", "refuel")],
     ], "llrl", styles=[["label", "value", "value", "value"]] * 2, optional=(3,),
         repeat_header=False)[1:], portrait(ship_portrait(ship, "compact"), "info"))
+    if (route := tracked_route_fuel_text(world)) is not None:
+        plan = tracked_route_fuel(world)
+        lines.append(alert("danger" if plan["over"] else "note" if plan["buy"] else "good",
+                           f"Tracked #{plan['mission'].id}", route))
     lines.append(section("UPGRADES"))
     rows, styles = [], []
     for index, (key, upgrade) in enumerate(UPGRADES.items()):
@@ -12243,9 +12622,12 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     else:
         lines = [_box_top(p)]
         rows = wrap_styled(style_body_line(header), _page_content_width()) + list(rows)
+    # What each screen row was made from, so an in-place drain can find its rows.
+    sources: list[str | None] = [None]
     for row in rows:
         if row.startswith(SECTION_MARK):
             lines.append(_box_section(p, row[1:]))
+            sources.append(None)
             continue
         # The last place a body row can still be colorless. Screens that build
         # their own rows -- the contract board, the star map, a screen that
@@ -12253,9 +12635,10 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
         # `wrapped_group`, and a rule that held for most pages and not the rest
         # is how the color was lost one slice at a time to begin with.
         row = style_body_line(row.replace(STICKY_MARK, "").replace(MEMBER_MARK, ""))
-        lines.append(f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}")
+        lines.append(_box_body_row(p, row, inner))
+        sources.append(row)
     if status is not None and not _status_fits_border(status, inner):
-        overflow = _status_overflow_rows(p)
+        overflow = _status_overflow_rows(p, status)
         # A screen that measured its pages without `_page_frame_rows` has no
         # rows to spare: there the status is cut to the border, not scrolled.
         if len(lines) + len(overflow) + 2 <= _OUTPUT_HEIGHT:
@@ -12300,9 +12683,65 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
             pace = 0.0
         out_line(line)
     if canopy:
+        if _PENDING_DRAIN is not None:
+            _drain_in_place(p, sources, inner, tint, len(lines))
         # Until the action bar is down this page covers its own rows; the bar
         # (`out_prompt`) extends the claim to the strip and the key echoed on it.
         _CANOPY_SHOWN = (canopy_key(scene), len(lines), len(lines), _OUT_COUNT)
+
+
+def _box_body_row(p: Palette, row: str, inner: int) -> str:
+    """One body row inside the console's frame, as `draw_page` draws it."""
+    return f"{p.hull}│{RESET}{_pad('  ' + row, inner, 'left')}{RESET}{p.hull}│{RESET}"
+
+
+#: A drain the next canopy page performs in place (issue #39): `render(*values)`
+#: gives the rows to animate, from `start` to `end` readings.
+_PENDING_DRAIN: dict | None = None
+
+
+def drain_in_place_next(render, start: tuple, end: tuple) -> None:
+    """Have the next page drawn on the canopy walk these rows from `start` to `end`."""
+    global _PENDING_DRAIN
+    _PENDING_DRAIN = {"render": render, "start": start, "end": end} if start != end else None
+
+
+def _drain_in_place(p: Palette, sources: list[str | None], inner: int, tint, drawn: int) -> None:
+    """Walk a page's own bars from their old readings to the new ones, where they are.
+
+    `drain_gauge` predates the canopy: it animates a bar on a fresh row under the
+    page, moving only with carriage returns, which every terminal a BBS meets
+    can do. On the canopy the console is fixed and the page is drawn from the
+    top left, so the bars can move in the console itself: each step rewrites
+    just their rows by absolute position, and the cursor goes back to where the
+    action bar expects it. Any key ends it at the final reading, as before.
+    """
+    global _PENDING_DRAIN
+    drain, _PENDING_DRAIN = _PENDING_DRAIN, None
+    shown = [None if source is None else _ANSI_RE.sub("", source) for source in sources]
+    targets = []
+    for row in drain["render"](*drain["end"]):
+        want = _ANSI_RE.sub("", style_body_line(row))
+        if want not in shown:
+            return  # the bars are not on this page: nothing to walk
+        targets.append(shown.index(want))
+    if motion_interrupted():
+        return
+
+    def paint(values) -> None:
+        rows = drain["render"](*values)
+        out("".join(f"{ESC}[{index + 1};1H" + glass(_box_body_row(p, style_body_line(row), inner), tint)
+                    for index, row in zip(targets, rows)))
+
+    start, end = drain["start"], drain["end"]
+    for step in range(COMBAT_DRAIN_STEPS + 1):
+        paint(tuple(round(a + (b - a) * step / COMBAT_DRAIN_STEPS) for a, b in zip(start, end)))
+        if step < COMBAT_DRAIN_STEPS and not motion_pause(0.05):
+            break
+    paint(end)
+    # `drawn` counts every row the page put down, its bottom border and any
+    # status rows included: the action bar goes on the row after the last.
+    out(f"{ESC}[{drawn + 1};1H")
 
 
 def _draw_service_page(p: Palette, title: str, lines: list[str], footer: str, page: int, *, pages: list[list[str]] | None = None) -> tuple[str, int, int]:
@@ -12477,33 +12916,35 @@ def screen_shipyard(p: Palette, world: World) -> None:
 
 
 def crew_roster_lines(world: World) -> list[str]:
-    """One card per specialist: who they are, how far they have come, what they
-    cost. The head rows are measured together so the whole roster lines up, and
-    each card's own detail sits indented under its own head row."""
+    """The roster as the Yard shows upgrades: one table row per specialist.
+
+    It was a five-row card per specialist, prices, effect, progress, task and
+    personality stacked, so comparing three hires meant reading fifteen rows
+    (issue #39). Now SPECIALISTS compares who, what rank and what it costs, a
+    table row each, with what they do on the row under it: an effect runs to
+    sixty columns, which no row has room for beside the rest, and a price is
+    kept with what it buys. The rest follows in short sections, one row per
+    specialist, so each reads down a column rather than across a card.
+    """
     p = pal()
-    heads, styles, meta = [], [], []
-    for index, (role, info) in enumerate(CREW_ROLES.items()):
+    roles = list(CREW_ROLES.items())
+    rows, styles, effects, service, tasks, people = [], [], [], [], [], []
+    name_w = max(len(CREW_CANDIDATES[role][crew_identity(world, role)][0]) for role, _ in roles)
+    for index, (role, info) in enumerate(roles):
         hired = getattr(world.save.ship, f"has_{role}")
         level = crew_level(world.save.ship, role)
         name, personality = CREW_CANDIDATES[role][crew_identity(world, role)]
         pips = (f"{p.mint}{glyph('crew_on') * (level + 1)}{RESET}"
                 f"{p.deep}{glyph('crew_off') * (len(CREW_SERVICE_LEVELS) - level - 1)}{RESET}")
-        heads.append([
-            key_label(CREW_LETTERS[index], info["label"], tone="value" if hired else "label"),
-            badge("HIRED", "good") if hired else badge("for hire", "label"),
-            name, pips, CREW_SERVICE_LEVELS[level][1],
-        ])
-        styles.append(["value", "value", "value", "value", "label"])
-        price = (f"{p.gold}{info['wage']}cr/jump{RESET}" if hired
-                 else f"{p.gold}{info['hire_cost']}cr{RESET} {p.slate}+{RESET} {p.gold}{info['wage']}cr/jump{RESET}")
-        meta.append((index, role, hired, level, name, personality, price))
-    # Nothing on a specialist's head row is droppable: who they are, how far
-    # they have come and whether they are aboard are all the row is for. At
-    # forty columns it stacks instead, which keeps every one of them.
-    _, records = table_records(["", "", "", "", ""], heads, "lllll", styles=styles)
-    lines: list[str] = []
-    for record, (index, role, hired, level, name, personality, price) in zip(records, meta):
-        card = list(record)
+        row = [key_label(CREW_LETTERS[index], info["label"], tone="value" if hired else "label"),
+               name,
+               badge("HIRED", "good") if hired else badge("for hire", "label"),
+               f"{pips} {p.slate}{CREW_SERVICE_LEVELS[level][1]}{RESET}",
+               f"{p.deep}{glyph('flat')}{RESET}" if hired else f"{p.gold}{info['hire_cost']:,}cr{RESET}",
+               f"{p.gold}{info['wage']}cr/jump{RESET}"]
+        rows.append(row)
+        styles.append(["value"] * len(row))
+        effects.append(f"{p.slate}{crew_effect(role, level)}{RESET}")
         paid = world.save.ship.crew_records.get(role, {}).get("paid_jumps", 0)
         if level + 1 < len(CREW_SERVICE_LEVELS):
             target = CREW_SERVICE_LEVELS[level + 1]
@@ -12511,13 +12952,7 @@ def crew_roster_lines(world: World) -> list[str]:
                         f"{p.slate}paid jumps to {target[1]}{RESET}")
         else:
             progress = badge("service mastery reached", "good")
-        card.append(f"  {price}  {p.deep}{glyph('dot')}{RESET}  {p.slate}{crew_effect(role, level)}{RESET}")
-        card.append(f"  {progress}")
-        # The terms are one entry and the person is another: at the 40x12 floor
-        # a whole card is taller than a page, and what a caller has to be able
-        # to read in one place is the name, the price and what it buys.
-        lines.append("\n".join(card))
-        card = [f"  {p.slate}{_mission_plain(personality)}{RESET}"]
+        service.append(f"{p.ink}{_pad(name, name_w)}{RESET}  {progress}")
         task = crew_assignment_record(world, role)
         if task is not None:
             state, tone = task["state"], "good"
@@ -12526,9 +12961,23 @@ def crew_roster_lines(world: World) -> list[str]:
             tone = "good" if hired else "label"
         else:
             state, tone = "unlocks after hiring and five paid jumps", "label"
-        card.append(f"  {key_label(str(index + 1), 'Task')} "
-                    f"{p.ink}{CREW_ASSIGNMENTS[role]['title']}{RESET}  {badge(state, tone)}")
-        lines.append("\n".join(card))
+        tasks.append((key_label(str(index + 1), CREW_ASSIGNMENTS[role]['title']), badge(state, tone)))
+        people.append(f"{p.ink}{name}{RESET}  {p.slate}{_mission_plain(personality)}{RESET}")
+    lines = [section("SPECIALISTS")]
+    # Nothing on a specialist's row is droppable: at forty columns the table
+    # stacks instead, which keeps every one of them. Each record carries its
+    # effect, so the paginator keeps a price on the page with what it buys.
+    heading, records = table_records(["ROLE", "NAME", "STATUS", "RANK", "HIRE", "WAGE"], rows, "llllrr", styles=styles)
+    if "\n" not in heading:
+        # Stacked at forty columns, the heading is two rows that name columns
+        # no longer there, and would leave the first page for itself.
+        lines.append(sticky(heading))
+    for record, effect in zip(records, effects):
+        lines.append(table_member("\n".join(record + [f"    {effect}"])))
+    lines += [section("SERVICE")] + service
+    task_w = max(_visible_width(title) for title, _ in tasks)
+    lines += [section("TASKS")] + [f"{_pad(title, task_w)}  {state}" for title, state in tasks]
+    lines += [section("PEOPLE")] + people
     lines.append(f"{p.slate}Specialists earn wages on every jump, including detours. "
                  f"Promotions follow {p.ink}5{p.slate}, {p.ink}15{p.slate} and {p.ink}30{p.slate} paid jumps; "
                  f"rehiring keeps recorded experience. Engine promotions affect the following jump's fuel.{RESET}")
@@ -12556,6 +13005,38 @@ def crew_assignment_progress(world: World, role: str) -> tuple[int, int]:
         return (world.save.cargo.get("machinery", 0), 3) if role == "engineer" else (0, min(3, len(world.galaxy) - total) if role == "navigator" else 1)
     progress = world.save.cargo.get("machinery", 0) if role == "engineer" else crew_assignment_total(world, role) - task["baseline"]
     return max(0, progress), task["required"]
+
+
+def crew_task_objective(world: World, role: str) -> str:
+    """How far along a crew task is, in its own unit."""
+    have, need = crew_assignment_progress(world, role)
+    return (f"{have}/{need} new combat recordings" if role == "gunner" else
+            f"{have}/{need} Machinery aboard" if role == "engineer" else
+            f"{have}/{need} new chart entries" if need else "atlas complete")
+
+
+def crew_task_alert_rows(world: World) -> list[str]:
+    """Each active crew task: ready to hand over here, or how far along and where.
+
+    The deck said only that a task was open, and the engineer's Machinery
+    showed nowhere but the task's own page (issue #41)."""
+    rows = []
+    for role, info in CREW_ASSIGNMENTS.items():
+        task = crew_assignment_record(world, role)
+        if task is None or task["state"] != "active":
+            continue
+        name = _mission_plain(crew_name(world, role))
+        if crew_assignment_blocker(world, role, completing=True) is None:
+            have, need = crew_assignment_progress(world, role)
+            what = f"hand {name} {need} Machinery" if role == "engineer" else f"report to {WORKSHOPS[info['workshop']]['name']}"
+            rows.append(alert("good", "Crew task ready HERE", what, key_label("K", "crew")))
+            continue
+        target = crew_assignment_destination(world, role)
+        jumps = bfs_hops(world.by_id, world.here.id).get(target)
+        where = WORKSHOPS[info["workshop"]]["name"] + (" here" if jumps == 0 else f", {plural(jumps, 'jump')}" if jumps else "")
+        rows.append(alert("note", f"Crew task: {name}", f"{crew_task_objective(world, role)} {glyph('arrow')} {where}",
+                          key_label("K", "crew")))
+    return rows
 
 
 def crew_assignment_blocker(world: World, role: str, *, completing: bool = False) -> str | None:
@@ -12599,24 +13080,45 @@ def complete_crew_assignment(world: World, role: str) -> str:
 
 
 def crew_assignment_lines(world: World, role: str) -> list[str]:
+    """A crew task as a sheet: who asks, what for, how far along (issue #39).
+
+    Eight sentences read the objective, the reward, where to deliver and what
+    blocks it at the same weight as the terms every task shares. The request is
+    now the page's opening, TASK says where it stands one row each, and the
+    shared terms are a dim footnote."""
+    p = pal()
     info, task = CREW_ASSIGNMENTS[role], crew_assignment_record(world, role)
-    lines = [f"{crew_name(world, role)}: {info['title']}."]
+    lines = [f"{p.ink}{BOLD}{_mission_plain(crew_name(world, role))}{RESET} {p.deep}{glyph('dot')}{RESET} "
+             f"{p.slate}{info['title']}{RESET}"]
     if task is not None and task["state"] == "complete":
-        return lines + [info["closing"], "Assignment complete. Rewards cannot be claimed again."]
+        return lines + [info["closing"], f"{p.mint}Assignment complete.{RESET} {p.slate}Rewards cannot be claimed again.{RESET}"]
+    lines.append(info["request"])
     target = world.by_id[crew_assignment_destination(world, role)]
     have, need = crew_assignment_progress(world, role)
-    objective = (f"New combat recordings: {have}/{need}. Defeat one opponent after acceptance." if role == "gunner" else
-                 f"Machinery aboard: {have}/{need}. Handover consumes {need} units, including goods promised to other contracts." if role == "engineer" else
-                 f"New chart entries: {have}/{need}. Chart {need} new systems after acceptance." if need else
-                 "Your atlas is complete; deliver it for archival review.")
-    lines += [f"Reward: {info['reward']}cr and one completed mission, once.",
-              objective, f"Deliver to {WORKSHOPS[info['workshop']]['name']} at {target.name} ({target.x},{target.y}).",
-              info["request"],
-              "Optional: no deposit, deadline or contract-slot cost. Ordinary travel fuel, wages and risks apply.",
-              "Requires this specialist hired with five paid jumps. Dismissal keeps progress; rehiring costs the usual fee. Work while they are away still counts."]
-    if role == "engineer": lines.append("The reward is gross: subtract material acquisition, travel and wage costs. The delivery ledger records material costs.")
+    objective = crew_task_objective(world, role)
+    jumps = bfs_hops(world.by_id, world.here.id).get(target.id)
+    where = "here" if jumps == 0 else plural(jumps, "jump") if jumps is not None else "unreachable"
     blocker = crew_assignment_blocker(world, role, completing=task is not None)
-    lines.append(blocker or ("[C] Complete here." if task is not None else "[A] Accept assignment."))
+    # An accepted task that is not ready yet is in progress, not wrong.
+    status = ((blocker.rstrip("."), "info" if task is not None else "bad") if blocker else
+              ("ready to hand over here", "good") if task is not None else ("open; accept it to start", None))
+    lines.append(section("TASK"))
+    lines += _sheet_rows([
+        ("OBJECTIVE", objective, "good" if have >= need else "info"),
+        ("REWARD", f"{info['reward']}cr and one completed mission, once", None),
+        ("DELIVER TO", f"{WORKSHOPS[info['workshop']]['name']} at {_mission_plain(target.name)} ({target.x},{target.y}), {where}", None),
+        ("STATUS", status[0], status[1]),
+    ])
+    notes = {"gunner": "Defeat one opponent after acceptance.",
+             "engineer": f"Handover consumes {need} units, including goods promised to other contracts. "
+                         "The reward is gross: subtract material acquisition, travel and wage costs. "
+                         "The delivery ledger records material costs.",
+             "navigator": f"Chart {need} new systems after acceptance." if need else
+                          "Your atlas is complete; deliver it for archival review."}[role]
+    lines += [f"{p.slate}{notes}{RESET}",
+              f"{p.slate}Optional: no deposit, deadline or contract-slot cost. Ordinary travel fuel, wages and risks apply. "
+              f"Requires this specialist hired with five paid jumps. Dismissal keeps progress; rehiring costs the usual fee. "
+              f"Work while they are away still counts.{RESET}"]
     return lines
 
 
@@ -12725,6 +13227,51 @@ def _buy_upgrade(p: Palette, world: World, key: str) -> str | None:
     return set_status(f"{u['label']} upgraded to tier {tier + 1} for {cost}cr.", "good")
 
 
+def tracked_route_fuel(world: World) -> dict | None:
+    """What the tracked contract's route burns, and what to buy for it here.
+
+    The refuel prompt offered a full tank while the route's fuel was only on
+    the route screens (issue #41). `buy` fills toward the route's total, never
+    past the tank; `stops` counts the top-ups still needed on the way when the
+    route burns more than a full tank, and `over` a leg no tank can fly. Like
+    the route planner, it assumes every station on the way sells fuel."""
+    mission = tracked_mission(world)
+    if mission is None or (mission.kind == "scan" and world.by_id[mission.target_system].discovered):
+        return None
+    route = mission_route(world, mission)
+    if not route:
+        return None
+    ship = world.save.ship
+    capacity = fuel_capacity(ship)
+    burns, previous = [], world.here
+    for sid in route:
+        burns.append(fuel_cost_for_jump(previous, world.by_id[sid], ship))
+        previous = world.by_id[sid]
+    total = sum(burns)
+    buy = max(0, min(capacity, total) - ship.fuel)
+    tank, stops = ship.fuel + buy, 0
+    for burn in burns:
+        if tank < burn:
+            stops, tank = stops + 1, capacity
+        tank -= burn
+    return {"mission": mission, "jumps": len(route), "total": total, "buy": buy, "stops": stops,
+            "over": any(burn > capacity for burn in burns)}
+
+
+def tracked_route_fuel_text(world: World) -> str | None:
+    """`3 jumps, 14 fuel; tank 9, buy 5 (30cr)`, or None with no route to fuel."""
+    plan = tracked_route_fuel(world)
+    if plan is None:
+        return None
+    text = f"{plural(plan['jumps'], 'jump')}, {plan['total']} fuel; tank {world.save.ship.fuel}"
+    if plan["over"]:
+        return text + "; a leg needs more than a full tank"
+    text += f", buy {plan['buy']} ({plan['buy'] * 6}cr)" if plan["buy"] else ", enough"
+    if plan["stops"]:
+        text += f", then {plural(plan['stops'], 'refuel stop')} on the way"
+    return text
+
+
 def _refuel(p: Palette, world: World) -> str | None:
     ship = world.save.ship
     room = fuel_capacity(ship) - ship.fuel
@@ -12734,7 +13281,9 @@ def _refuel(p: Palette, world: World) -> str | None:
     max_qty = max(0, min(room, affordable))
     if max_qty <= 0:
         return set_status("Not enough credits to buy fuel (6cr/unit).", "bad")
-    out_prompt(f"{p.muted}Fuel to buy (6cr/unit; Enter buys {max_qty} for {max_qty * 6}cr, Esc cancels): {RESET}")
+    plan = tracked_route_fuel(world)
+    route = (f"tracked #{plan['mission'].id} needs {plan['buy']}; " if plan and plan["buy"] and not plan["over"] else "")
+    out_prompt(f"{p.muted}Fuel to buy (6cr/unit; {route}Enter buys {max_qty} for {max_qty * 6}cr, Esc cancels): {RESET}")
     qty = read_quantity(max_qty, max_qty, max_len=4)
     if qty <= 0:
         return
@@ -12866,6 +13415,68 @@ def mission_route(world: World, mission: Mission) -> list[int]:
     return path
 
 
+#: An untracked contract this close to its deadline gets a row on the deck.
+#: The chart badges every deadline, however far: there it says which
+#: departure leads toward which contract, not that one is urgent.
+DEADLINE_WARNING_DAYS = 3
+#: Deadline rows the deck shows before folding the rest into one.
+DEADLINE_ALERT_ROWS = 2
+
+
+def contract_deadlines(world: World) -> list[dict]:
+    """Every live contract with a deadline and a route: days left, the route,
+    and whether that route arrives too late. Soonest first.
+
+    Only the tracked contract's deadline was on the deck and the chart; an
+    untracked one about to expire showed only in the route planner (issue #41).
+    """
+    watch = []
+    for mission in world.save.active_missions:
+        if (mission.deadline_turn is None or mission_expired(world, mission)
+                or (mission.kind == "scan" and world.by_id[mission.target_system].discovered)):
+            continue
+        route = mission_route(world, mission)
+        left = mission.deadline_turn - world.save.turn
+        watch.append({"mission": mission, "left": left, "route": route, "late": len(route) > left})
+    return sorted(watch, key=lambda entry: (entry["left"], entry["mission"].id))
+
+
+def deadline_alert_rows(world: World) -> list[str]:
+    """Untracked contracts about to expire, with how far away they are."""
+    tracked = tracked_mission(world)
+    urgent = [entry for entry in contract_deadlines(world)
+              # the tracked row has its own gauge; one due here has its own row
+              if not (tracked is not None and entry["mission"].id == tracked.id) and entry["route"]
+              and (entry["left"] <= DEADLINE_WARNING_DAYS or entry["late"])]
+    rows = []
+    for entry in urgent[:DEADLINE_ALERT_ROWS]:
+        mission, left = entry["mission"], entry["left"]
+        when = "today" if left == 0 else f"in {plural(left, 'day')}"
+        rows.append(alert("danger" if entry["late"] else "caution", f"Contract #{mission.id} expires {when}",
+                          f"{plural(len(entry['route']), 'jump')} away" + (" (late)" if entry["late"] else ""),
+                          key_label("B", "board")))
+    # Several at once would push the services off a short terminal (#47 review).
+    rest = urgent[DEADLINE_ALERT_ROWS:]
+    if rest:
+        rows.append(alert("danger" if any(entry["late"] for entry in rest) else "caution",
+                          f"+{plural(len(rest), 'more contract')} expiring",
+                          ", ".join(f"#{entry['mission'].id}" for entry in rest), key_label("B", "board")))
+    return rows
+
+
+def departure_deadline_badges(world: World) -> dict[int, str]:
+    """For each departure, the soonest untracked deadline whose route starts there."""
+    tracked = tracked_mission(world)
+    badges = {}
+    for entry in contract_deadlines(world):
+        mission, route = entry["mission"], entry["route"]
+        if not route or route[0] in badges or (tracked is not None and mission.id == tracked.id):
+            continue
+        tone = "danger" if entry["late"] else "caution" if entry["left"] <= DEADLINE_WARNING_DAYS else "info"
+        badges[route[0]] = badge(f"#{mission.id} {entry['left']}d", tone)
+    return badges
+
+
 def mission_bearing(world: World, mission: Mission) -> str:
     target = world.by_id[mission.target_system]
     path = mission_route(world, mission)
@@ -12878,17 +13489,118 @@ def mission_bearing(world: World, mission: Mission) -> str:
     return f"{location}: {len(path)} jump(s), next bearing ({first.x},{first.y})"
 
 
+#: A data sheet's row marks (issue #39): fine, a problem, worth knowing, unknown.
+SHEET_MARKS = {"good": "info", "bad": "danger", "info": "note"}
+
+
+def sheet_mark(tone: str | None) -> str:
+    """The mark at the end of a CHECKS row, in its tone's color; `?` is unknown,
+    and a row that only informs has none."""
+    p = pal()
+    if tone is None:
+        return ""
+    if tone == "unknown":
+        return f"{p.slate}?{RESET}"
+    role = STATUS_TONES[tone][1]
+    return f"{getattr(p, role)}{glyph(SHEET_MARKS[tone])}{RESET}"
+
+
+def sheet_columns(columns: list[tuple[str, list[str]]], width: int | None = None, gap: int = 4) -> list[str]:
+    """Columns of a data sheet side by side, or stacked when they do not fit.
+
+    Each column is (heading, rows) of already-styled rows. Side by side, every
+    column starts on the same display column on every row; a narrow terminal
+    gets the same columns one under the other, headings and all, so nothing is
+    dropped to make it fit (issue #39).
+    """
+    p = pal()
+    width = _page_content_width() if width is None else width
+    widths = [max([_visible_width(heading)] + [_visible_width(row) for row in rows]) for heading, rows in columns]
+    if sum(widths) + gap * (len(columns) - 1) > width:
+        stacked = []
+        for heading, rows in columns:
+            stacked += [f"{p.slate}{BOLD}{heading}{RESET}"] + rows
+        return stacked
+    height = max(len(rows) for _, rows in columns)
+    out = [(" " * gap).join(_pad(f"{p.slate}{BOLD}{heading}{RESET}", w) for (heading, _), w in zip(columns, widths)).rstrip()]
+    for index in range(height):
+        cells = [_pad(rows[index] if index < len(rows) else "", w) for (_, rows), w in zip(columns, widths)]
+        out.append((" " * gap).join(cells).rstrip())
+    return out
+
+
+def _sheet_rows(entries: list[tuple[str, str, str]]) -> list[str]:
+    """CHECKS rows: a label, a value and a mark, each in its own column."""
+    p = pal()
+    label_w = max(_visible_width(label) for label, _, _ in entries)
+    value_w = max(_visible_width(value) for _, value, _ in entries)
+    return [f"{p.slate}{_pad(label, label_w)}{RESET}  {_pad(f'{p.ink}{value}{RESET}', value_w)}  {sheet_mark(tone)}".rstrip()
+            for label, value, tone in entries]
+
+
+def _money_rows(entries: list[tuple[str, int | None, str]]) -> list[str]:
+    """MONEY rows: what each item costs or pays, the amounts right-aligned.
+
+    An entry without an amount is a note under the sums (standing, say)."""
+    p = pal()
+    sums = [(label, amount, tone) for label, amount, tone in entries if amount is not None]
+    label_w = max(_visible_width(label) for label, _, _ in sums)
+    amounts = [f"{amount:+,}cr" if amount else "0cr" for _, amount, _ in sums]
+    amount_w = max(_visible_width(text) for text in amounts)
+    rows = []
+    for (label, amount, tone), text in zip(sums, amounts):
+        net = label == "NET"
+        color = getattr(p, STATUS_TONES[tone][1]) if tone in STATUS_TONES and amount else p.ink
+        rows.append(f"{p.slate}{BOLD if net else ''}{_pad(label, label_w)}{RESET}  "
+                    f"{BOLD if net else ''}{color}{_pad(text, amount_w, 'right')}{RESET}")
+    rows += [f"{p.slate}{label}{RESET}" for label, amount, _ in entries if amount is None]
+    return rows
+
+
+def contract_route_rows(world: World, path: list[int], limit: int = 8) -> list[str]:
+    """One row per leg of the shortest route: where, the fuel it burns, its danger.
+
+    An uncharted stop stays unnamed; the destination is named, as the contract
+    itself already names it."""
+    p = pal()
+    rows, previous = [], world.save.current_system
+    for number, sid in enumerate(path, 1):
+        system = world.by_id[sid]
+        burn = fuel_cost_for_jump(world.by_id[previous], system, world.save.ship)
+        previous = sid
+        if number > limit:
+            continue
+        name = _mission_plain(system.name) if system.discovered or number == len(path) else "uncharted"
+        danger = (f"{p.tone(danger_tone(system.danger))}danger {system.danger}{RESET}" if system.discovered
+                  else f"{p.slate}danger ?{RESET}")
+        rows.append(f"{p.slate}{number}.{RESET} {p.ink}{_pad(name, 16)}{RESET} {p.slate}{burn} fuel{RESET}  {danger}")
+    if len(path) > limit:
+        rows.append(f"{p.slate}... {len(path) - limit} more{RESET}")
+    return rows or [f"{p.slate}at this station{RESET}"]
+
+
 def mission_details(world: World, mission: Mission) -> list[str]:
-    """Read-only terms and explicit estimates; never reveal remote market state."""
+    """The contract as a data sheet; never reveal remote market state.
+
+    It was fourteen sentences a pilot had to read through to find the one
+    number that decides it (issue #39). Now the terms that decide it are two
+    rows on top; CHECKS says, one row each, whether cargo, hold, fuel, deadline,
+    danger and cash are fine, with a mark that tells at a glance; MONEY adds the
+    payout and the costs down to a NET; a wide console adds the route leg by leg.
+    What only some contracts need is said under NOTES, and what every estimate
+    leaves out is one footnote.
+    """
     p = pal()
     path = mission_route(world, mission)
     reward = mission_reward_for(world.save, mission.kind, mission.reward)
     target = world.by_id[mission.target_system]
     kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
     risk, tone = MISSION_RISK.get(mission.kind, ("CONTRACT", "info"))
+    what = (f"{mission.quantity} {COMMODITIES[mission.commodity]['label']} {glyph('arrow')} "
+            if mission.kind == "delivery" and mission.commodity else "")
     # The terms first, as terms: what it is, what it pays, and how far away the
     # job is, on two rows the caller can read without reading a paragraph.
-    lines = [f"{chip(kind, None)} {p.ink}{_mission_plain(target.name)}{RESET}  {badge(risk, tone)}"
+    lines = [f"{chip(kind, None)} {p.ink}{what}{_mission_plain(target.name)}{RESET}  {badge(risk, tone)}"
              f"   {p.gold}+{reward:,}cr{RESET}"]
     terms = [f"{p.slate}route{RESET} " + f" {p.deep}{glyph('arrow')}{RESET} ".join(
         f"{p.ink}{_mission_plain(world.by_id[sid].name) if world.by_id[sid].discovered else '?'}{RESET}"
@@ -12902,87 +13614,117 @@ def mission_details(world: World, mission: Mission) -> list[str]:
     else:
         terms.append(f"{p.slate}no deadline{RESET}")
     lines.append("   ".join(terms))
-    lines.append(section("TERMS"))
-    lines += [mission.description, f"Destination: {mission_bearing(world, mission)}",
-              f"Target danger: {target.danger}" if target.discovered else "Target danger: uncharted"]
-    ahead = preceding_bounties(world, mission)
-    if ahead:
-        lines.append(f"Queued bounties: {ahead} earlier contract(s) at this target resolve first. Budget includes re-entry after each, assuming they remain active and you win.")
-    if mission.kind == "bounty" and path and path[-1] == world.save.current_system:
-        lines.append("Retry: leave this system and jump back to re-engage the bounty; budget includes both jumps.")
-    if mission.deadline_turn is None:
-        lines.append("Deadline: none. Jumps advance the day.")
-    else:
-        remaining = mission.deadline_turn - world.save.turn
-        lines.append(f"Deadline: day {mission.deadline_turn} inclusive; today {world.save.turn}, {max(0, remaining)} jump(s) left.")
-        if remaining < 0:
-            lines.append("EXPIRED: this contract cannot pay.")
-        elif len(path) > remaining and mission.kind != "scan":
-            lines.append("WARNING: the shortest route misses the deadline.")
-    lines.append(f"Gross payout: {reward:,} cr. Credits available: {world.save.pilot.credits:,} cr.")
-    if mission.kind in CONCORD_STANDING_CONTRACTS:
-        lines.append(f"Completion also pays +{CONCORD_STANDING_PER_CONTRACT} Concord standing.")
-    if mission.kind in ("bounty", "escort") and world.save.pilot.has_concord_commission:
-        lines.append("The quoted commission bonus uses current standing; actual payout includes 25% only if Concord standing is above -50 when paid.")
-    procurement = 0
-    if mission.kind == "delivery":
-        quantity = mission.quantity or 0
-        have = world.save.cargo.get(mission.commodity, 0)
-        missing = max(0, quantity - have)
-        price = price_for(world, world.save.current_system, mission.commodity)
-        procurement = missing * price
-        free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
-        lines.extend([
-            f"Cargo: deliver {quantity} {COMMODITIES[mission.commodity]['label']}; {have} aboard, buy {missing} more.",
-            f"Procurement at this station: {missing} x {price} = {procurement:,} cr; prices can move after purchases.",
-            f"Hold: need {missing} free units; {free} available. Delivery consumes the cargo.",
-        ])
-        if missing > free:
-            lines.append("WARNING: make cargo space or upgrade before procuring the full load.")
-    elif mission.kind == "scan":
-        if target.discovered:
-            lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; abandon an active contract to free its slot.")
-        else:
-            lines.append("Survey: newly chart this target by arriving or discovering it with your scanner. No cargo required.")
-            lines.append("Area surveys require a scanner and cost 2 fuel; they chart all new contacts within 2 + scanner tier + navigator bonus hops without advancing the day.")
-            lines.append("Accepting or tracking the bearing does not chart the system.")
-    elif mission.kind == "bounty":
-        lines.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
-        lines.append("At interception, [V] verifies identity for one fuel before engaging; [W] withdraws. A mistaken-identity kill adds notoriety and harms Concord standing; a confirmed mismatch can be closed without a payout.")
-    elif mission.kind == "escort":
-        lines.append(f"Combat: one tier {mission.pirate_tier} raider fight on EVERY jump while active, including detours.")
-        lines.append("Other escort contracts add their own fights. Escape or destruction fails this convoy.")
-        lines.append("Payment follows a won convoy fight on arrival at the target; no cargo space is needed.")
-    fuel = 0
-    max_leg = 0
+
+    # --- the figures every check and sum below is made of ------------------
+    fuel = max_leg = 0
     previous = world.save.current_system
     for sid in path:
         leg = fuel_cost_for_jump(world.by_id[previous], world.by_id[sid], world.save.ship)
-        max_leg = max(max_leg, leg)
-        fuel += leg
-        previous = sid
-    fuel_cash = max(0, fuel - world.save.ship.fuel) * 6
+        max_leg, fuel, previous = max(max_leg, leg), fuel + leg, sid
+    aboard_fuel = world.save.ship.fuel
+    fuel_cash = max(0, fuel - aboard_fuel) * 6
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     wages = wage * len(path)
-    outlay = procurement + fuel_cash + wages
-    held = mission.kind == "delivery" and world.save.cargo.get(mission.commodity, 0) > 0
-    lines.extend([
-        f"Shortest-route budget: {fuel} fuel ({world.save.ship.fuel} aboard), {fuel_cash} cr top-ups"
-        + (f"; wages {wage} cr/jump, {wages} cr total." if wage else "."),
-        f"Estimated remaining cash outlay: {outlay:,} cr; payout less this outlay: {reward - outlay:+,} cr.",
-        "Estimate is not total profit: repairs, detours, combat and price changes are excluded"
-        + (", as is cargo already aboard." if held else "."),
-    ])
+    checks: list[tuple[str, str, str]] = []
+    money: list[tuple[str, int | None, str]] = [("Payout", reward, "good")]
+    procurement = 0
+    held = False
+    if mission.kind == "delivery":
+        quantity = mission.quantity or 0
+        have, promised = contract_cargo_aboard(world, mission)
+        held = have > 0
+        missing = max(0, quantity - have)
+        label = COMMODITIES[mission.commodity]["label"]
+        price = price_for(world, world.save.current_system, mission.commodity)
+        procurement = missing * price
+        free = cargo_capacity(world.save.ship) - sum(world.save.cargo.values())
+        prohibited = not COMMODITIES[mission.commodity]["legal"] and world.here.economy != "Haven"
+        stock = market_depth_quote(world, world.here.id, mission.commodity)["stock"]
+        aboard = f"{have} aboard" + (f", {promised} promised elsewhere" if promised else "")
+        if not missing:
+            checks.append(("CARGO", f"{quantity} {label} aboard", "good"))
+        elif prohibited:
+            checks.append(("CARGO", f"buy {missing} at a Haven; {aboard}", "bad"))
+        else:
+            checks.append(("CARGO", f"buy {missing} here; {aboard}", "good" if stock >= missing else "bad"))
+            if stock < missing:
+                checks.append(("STOCK", f"only {stock} here", "bad"))
+        checks.append(("HOLD", f"needs {missing}, {free} free", "good" if missing <= free else "bad"))
+        if procurement:
+            money.append((f"Cargo {missing} x {price}", -procurement, "bad"))
+    if path:
+        if max_leg > fuel_capacity(world.save.ship):
+            checks.append(("FUEL", f"a jump needs {max_leg}, tank holds {fuel_capacity(world.save.ship)}", "bad"))
+        else:
+            checks.append(("FUEL", f"needs {fuel}, {aboard_fuel} aboard", "good" if fuel <= aboard_fuel else "info"))
+        money.append(("Fuel top-ups", -fuel_cash, "bad"))
     if wage:
-        lines.append("Budget keeps current crew wages and assumes refuelling stops.")
+        money.append((f"Wages {len(path)} x {wage}", -wages, "bad"))
+    if mission.deadline_turn is None:
+        checks.append(("DEADLINE", "none", "good"))
+    else:
+        remaining = mission.deadline_turn - world.save.turn
+        if remaining < 0:
+            checks.append(("DEADLINE", "expired; cannot pay", "bad"))
+        elif len(path) > remaining and mission.kind != "scan":
+            checks.append(("DEADLINE", f"{plural(len(path), 'jump')}, {plural(max(0, remaining), 'day')}: late", "bad"))
+        else:
+            checks.append(("DEADLINE", f"{plural(len(path), 'jump')} in {plural(max(0, remaining), 'day')}", "good"))
+    if target.discovered:
+        checks.append(("DANGER", f"danger {target.danger}",
+                       {"good": "good", "caution": "info", "danger": "bad"}[danger_tone(target.danger)]))
+    else:
+        checks.append(("DANGER", "uncharted", "unknown"))
+    if mission.kind == "scan" and target.discovered:
+        checks.append(("SURVEY", "target already charted", "bad"))
+    outlay = procurement + fuel_cash + wages
+    if outlay:
+        short = outlay - world.save.pilot.credits
+        checks.append(("CASH", f"{outlay:,}cr of {world.save.pilot.credits:,}cr" + (f", {short:,} short" if short > 0 else ""),
+                       "bad" if short > 0 else "good"))
+    money.append(("NET", reward - outlay, "good" if reward - outlay > 0 else "bad"))
+    if mission.kind in CONCORD_STANDING_CONTRACTS:
+        money.append((f"also +{CONCORD_STANDING_PER_CONTRACT} Concord standing", None, "info"))
     if mission.kind == "scan" and not target.discovered:
-        lines.append(f"Survey scanning may avoid travel, at half pay ({remote_survey_payout(reward):,}cr).")
-    if any(not world.by_id[sid].discovered for sid in path):
-        lines.append("Remote danger remains unknown until charted.")
-    if max_leg > fuel_capacity(world.save.ship):
-        lines.append("WARNING: a shortest-route jump exceeds tank capacity; upgrade or find another route.")
-    if outlay > world.save.pilot.credits:
-        lines.append("WARNING: current credits do not cover the estimated remaining outlay.")
+        money.append((f"scanned from afar: +{remote_survey_payout(reward):,}cr", None, "info"))
+    columns = [("CHECKS", _sheet_rows(checks)), ("MONEY", _money_rows(money))]
+    if wide_layout() and path:
+        columns.append(("ROUTE", contract_route_rows(world, path)))
+    lines.append(section("TERMS"))
+    lines += sheet_columns(columns)
+
+    # --- what only some contracts need to say -----------------------------
+    notes = [mission.description]
+    ahead = preceding_bounties(world, mission)
+    if ahead:
+        notes.append(f"Queued bounties: {ahead} earlier contract(s) at this target resolve first. Budget includes re-entry after each, assuming they remain active and you win.")
+    if mission.kind == "bounty" and path and path[-1] == world.save.current_system:
+        notes.append("Retry: leave this system and jump back to re-engage the bounty; budget includes both jumps.")
+    if mission.kind in ("bounty", "escort") and world.save.pilot.has_concord_commission:
+        notes.append("The quoted commission bonus uses current standing; actual payout includes 25% only if Concord standing is above -50 when paid.")
+    if mission.kind == "delivery" and mission.commodity:
+        notes.append("Delivery consumes the cargo; prices here can move after purchases.")
+    elif mission.kind == "scan":
+        if target.discovered:
+            notes.append("BLOCKED SURVEY: revisiting cannot complete it; abandon an active contract to free its slot.")
+        else:
+            notes.append("Survey: chart this target by arriving or discovering it with your scanner. No cargo required.")
+            notes.append("Area surveys require a scanner and cost 2 fuel; they chart all new contacts within 2 + scanner tier + navigator bonus hops without advancing the day.")
+            notes.append("Accepting or tracking the bearing does not chart the system.")
+    elif mission.kind == "bounty":
+        notes.append(f"Combat: intercept a tier {mission.pirate_tier} raider at the target. Escape leaves the bounty active; destruction fails it.")
+        notes.append("At interception, [V] verifies identity for one fuel before engaging; [W] withdraws. A mistaken-identity kill adds notoriety and harms Concord standing; a confirmed mismatch can be closed without a payout.")
+    elif mission.kind == "escort":
+        notes.append(f"Combat: one tier {mission.pirate_tier} raider fight on EVERY jump while active, including detours.")
+        notes.append("Other escort contracts add their own fights. Escape or destruction fails this convoy.")
+        notes.append("Payment follows a won convoy fight on arrival at the target; no cargo space is needed.")
+    if notes:
+        lines.append(section("NOTES"))
+        lines += notes
+    lines.append(f"{p.slate}Estimates use the shortest route"
+                 + (f" and current wages, with refuelling stops" if wage else "")
+                 + "; they exclude repairs, detours, combat and price changes"
+                 + (", and cargo already aboard." if held else ".") + RESET)
     # Sanitize the rows built out of save data; never a completed styled row,
     # whose own untrusted segments were sanitized before they were styled.
     return [line if (ANSI_ESCAPE_RE.search(line) or line.startswith(SECTION_MARK))
@@ -13153,7 +13895,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
 def screen_pilot_guide(p: Palette, world: World) -> None:
     page = 0
     while True:
-        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5 + _page_frame_rows())
+        pages = _mission_text_pages(pilot_guide_lines(world), overhead=5 + _page_frame_rows("Pilot Guide"))
         page = min(page, len(pages) - 1)
         offer = opening_assignment_offer(world)
         draw_page(p, "Pilot Guide", pages[page], page, len(pages))
@@ -13191,89 +13933,151 @@ def prepare_mission_jump(world: World, mission_id: int) -> int:
 
 
 def mission_navigation_lines(world: World, mission: Mission, *, active: bool) -> list[str]:
+    """A contract's route as a sheet: the contract, the budget, the legs, then notes.
+
+    It was seven sentences ahead of the budget, and its last step stripped every
+    row to plain text -- the section rules and the table's headings with it, so
+    the whole screen read in one color (issue #39 playtest). What decides the
+    next jump -- target, deadline, cargo, fights on the way -- is now CONTRACT
+    rows with a mark each; what only explains the screen is NOTES, last and dim.
+    """
+    p = pal()
     path = mission_route(world, mission)
     target = world.by_id[mission.target_system]
-    lines = [f"{mission.description}", f"Target: {target.name} ({target.x},{target.y}).",
-             "Contract bearings do not chart destinations. Uncharted danger remains unknown."]
-    live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
+    lines = [f"{p.ink}{BOLD}{_mission_plain(mission.description)}{RESET}"]
     if mission.kind == "scan" and target.discovered:
-        lines.append("BLOCKED SURVEY: target already charted. Revisiting cannot complete it; no completion day. An active contract can be abandoned from its details to free the slot.")
-        return [_mission_plain(line) for line in lines]
-    if live:
-        lines.append("Jump next tracks this contract and flies one leg. Review the next step after each outcome.")
-    else:
-        lines.append("Read-only route: accept this contract first, or return to the board if it is no longer active.")
-    if not path:
-        lines.append("At the destination. No jump is needed for this objective.")
+        lines.append(f"{p.wrong}BLOCKED SURVEY: target already charted. Revisiting cannot complete it; no completion day.{RESET}")
+        lines.append(f"{p.slate}An active contract can be abandoned from its details to free the slot.{RESET}")
+        return lines
+    live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
+    checks = [("TARGET", f"{_mission_plain(target.name)} ({target.x},{target.y})"
+               + ("" if path else ", you are here"), None)]
+    if mission.deadline_turn is not None:
+        arrival = world.save.turn + len(path)
+        late = arrival > mission.deadline_turn
+        checks.append(("DEADLINE", f"day {mission.deadline_turn}, arrive day {arrival}"
+                       + ("; MISSES deadline by travel" if late else ""), "bad" if late else "good"))
+    warnings, notes = [], []
     if mission.kind == "delivery":
-        have = world.save.cargo.get(mission.commodity, 0)
+        have, promised = contract_cargo_aboard(world, mission)
         missing = max(0, mission.quantity - have)
-        lines.append(f"Delivery: {mission.quantity} {COMMODITIES[mission.commodity]['label']} required; {have} aboard, {missing} missing.")
+        aboard = f"{have} aboard" + (f" ({promised} more promised to other contracts)" if promised else "")
+        checks.append(("CARGO", f"{mission.quantity} {COMMODITIES[mission.commodity]['label']}: {aboard}, {missing} missing",
+                       "bad" if missing else "good"))
         if missing:
             if not COMMODITIES[mission.commodity]["legal"] and world.here.economy != "Haven":
-                lines.append("This station prohibits buying the missing contraband; procure it at a Haven. Travel budget excludes procurement.")
+                warnings.append("This station prohibits buying the missing contraband; procure it at a Haven.")
             else:
                 stock = market_depth_quote(world, world.here.id, mission.commodity)["stock"]
-                lines.append(f"Procure the missing cargo before delivery; this station has {stock} units in spot stock. Travel budget excludes procurement.")
+                warnings.append(f"Procure the missing cargo before delivery; this station has {stock} units in spot stock.")
+            notes.append("Travel budget excludes procurement.")
     if mission.kind == "bounty":
         ahead = preceding_bounties(world, mission)
-        lines.append(f"Bounty route includes {ahead} earlier target contract(s) and any required leave/re-enter legs. Escape can require another attempt.")
+        checks.append(("BOUNTY", f"{plural(ahead, 'earlier target contract')} first", "info" if ahead else None))
+        notes.append("The bounty route includes any required leave/re-enter legs. Escape can require another attempt.")
     escorts = sum(m.kind == "escort" and not mission_expired(world, m) for m in world.save.active_missions)
     if escorts:
-        lines.append(f"Active escorts: {escorts} fight(s) on every jump, including detours.")
+        checks.append(("ESCORTS", f"{plural(escorts, 'fight')} on every jump, including detours", "info"))
     if mission.kind == "escort" and not active:
-        lines.append("Accepting this escort adds a fight on EVERY jump, including detours, until completion or failure.")
-    if mission.kind == "scan":
-        lines.append("Survey: arrival or scanner discovery can complete the objective; viewing this route cannot.")
+        warnings.append("Accepting this escort adds a fight on EVERY jump, including detours, until completion or failure.")
+    lines.append(section("CONTRACT"))
+    lines += _sheet_rows(checks)
+    lines += [f"{p.gold}{warning}{RESET}" for warning in warnings]
     lines += navigation_budget_lines(world, path, public_target=target.id)
-    if mission.deadline_turn is not None:
-        timing = "within deadline" if world.save.turn + len(path) <= mission.deadline_turn else "MISSES deadline by travel"
-        lines.append(f"Deadline day {mission.deadline_turn} inclusive: {timing}.")
-    return [_mission_plain(line) for line in lines]
+    if live:
+        notes.insert(0, "[J] Jump next tracks this contract and flies one leg; review the next step after each outcome.")
+    else:
+        notes.insert(0, "Read-only route: accept this contract first, or return to the board if it is no longer active.")
+    if mission.kind == "scan":
+        notes.append("Survey: arrival or scanner discovery can complete the objective; viewing this route cannot.")
+    notes.append("Contract bearings do not chart destinations. Uncharted danger remains unknown.")
+    lines.append(section("NOTES"))
+    lines += [f"{p.slate}{note}{RESET}" for note in notes]
+    return lines
 
 
 def navigation_budget_lines(world: World, path: list[int], *, public_target: int | None = None) -> list[str]:
-    """Pure budget for a chosen path; never observes or charts intermediate systems."""
+    """Pure budget for a chosen path, as a sheet; never observes or charts intermediate systems.
+
+    It was a paragraph of totals and a sentence per leg (issue #39). CHECKS now
+    says whether fuel and cash will carry the route, MONEY what it costs, and
+    LEGS is a table a pilot reads down: where each jump lands, what it burns,
+    how dangerous it is and where to refuel first.
+    """
+    p = pal()
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     tank = world.save.ship.fuel
     total_fuel = 0
     previous = world.here
-    legs = []
+    rows, styles = [], []
     feasible = True
+    stops = 0
     for index, sid in enumerate(path, 1):
         station = world.by_id[sid]
         burn = fuel_cost_for_jump(previous, station, world.save.ship)
         total_fuel += burn
+        refuel = ""
         if burn > fuel_capacity(world.save.ship):
             feasible = False
-            legs.append(f"Leg {index} exceeds tank capacity: {burn} fuel needed; upgrade or find a different route.")
+            refuel = f"{p.wrong}needs {burn}, over tank{RESET}"
         elif tank < burn:
-            name = previous.name if previous.discovered or previous.id == public_target else f"uncharted station ({previous.x},{previous.y})"
-            legs.append(f"Before leg {index}, refuel {burn - tank} units at {name} for {(burn - tank) * 6}cr. Refuelling is manual.")
+            name = previous.name if previous.discovered or previous.id == public_target else f"uncharted ({previous.x},{previous.y})"
+            refuel = f"{p.gold}+{burn - tank} at {_mission_plain(name)}, {(burn - tank) * 6}cr{RESET}"
+            stops += 1
             tank = burn
         name = station.name if station.discovered or sid == public_target else f"Uncharted ({station.x},{station.y})"
-        danger = str(station.danger) if station.discovered else "unknown"
-        legs.append(f"Leg {index}: {name}; {burn} fuel, {wage}cr wages; danger {danger}.")
+        danger = (f"{p.tone(danger_tone(station.danger))}{station.danger}{RESET}" if station.discovered
+                  else f"{p.slate}?{RESET}")
+        rows.append([f"{index}", _mission_plain(name), f"{burn}", danger, refuel or f"{p.deep}{glyph('flat')}{RESET}"])
+        styles.append(["label", "value", "value", "value", "value"])
         tank = max(0, tank - burn)
         previous = station
     fuel_cash = max(0, total_fuel - world.save.ship.fuel) * 6
-    cash = fuel_cash + wage * len(path)
-    lines = [f"Route: {len(path)} jumps, {total_fuel} fuel; {world.save.ship.fuel} aboard.",
-              f"Additional fuel cash {fuel_cash}cr; wages {wage * len(path)}cr; travel cash {cash}cr of {world.save.pilot.credits:,}cr available.",
-              f"Arrival day {world.save.turn + len(path)} if uninterrupted; today {world.save.turn}."]
-    if cash > world.save.pilot.credits:
-        lines.append("CASH WARNING: the full travel budget is not covered; crew may leave if wages cannot be paid.")
+    wages = wage * len(path)
+    cash = fuel_cash + wages
+    checks = []
     if not feasible:
-        lines.append("INFEASIBLE on the current shortest route; do not rely on its fuel budget.")
-    lines += legs
+        checks.append(("FUEL", "a jump is over tank capacity; route infeasible", "bad"))
+    else:
+        checks.append(("FUEL", f"needs {total_fuel}, {world.save.ship.fuel} aboard"
+                       + (f"; {plural(stops, 'refuel stop')}" if stops else ""),
+                       "good" if total_fuel <= world.save.ship.fuel else "info"))
+    checks.append(("CASH", f"{cash:,}cr of {world.save.pilot.credits:,}cr"
+                   + ("; crew may leave unpaid" if cash > world.save.pilot.credits else ""),
+                   "bad" if cash > world.save.pilot.credits else "good"))
+    checks.append(("ARRIVAL", f"day {world.save.turn + len(path)}, today {world.save.turn}", None))
+    money = [("Fuel top-ups", -fuel_cash, "bad")]
+    if wage:
+        money.append((f"Wages {len(path)} x {wage}", -wages, "bad"))
+    money.append(("TRAVEL", -cash, "bad"))
+    lines = [section("BUDGET")]
+    lines += sheet_columns([("CHECKS", _sheet_rows(checks)), ("MONEY", _money_rows(money))])
+    if path:
+        lines.append(section("LEGS"))
+        lines += table(["#", "LANDS AT", "FUEL", "DANGER", "REFUEL FIRST"], rows, "rlrrl", styles=styles)
     if world.save.ship.has_engineer and crew_level(world.save.ship, "engineer") < 3:
         lines.append("Fuel budget uses current crew skill; a promotion can reduce later jumps' fuel cost.")
-    lines.append("Budget assumes retained crew and 6cr/unit refuelling. Cargo, repairs, encounters, detours and other income/spending are excluded.")
-    return [_mission_plain(line) for line in lines]
+    lines.append(f"{p.slate}Budget assumes retained crew and 6cr/unit refuelling, which is manual. Cargo, repairs, "
+                 f"encounters, detours and other income/spending are excluded.{RESET}")
+    return [line if (ANSI_ESCAPE_RE.search(line) or line.startswith((SECTION_MARK, STICKY_MARK, MEMBER_MARK)))
+            else _mission_plain(line) for line in lines]
+
+
+def last_hop_lines(world: World, result: str) -> list[str]:
+    """What the last jump said, kept on the route screen it was flown from.
+
+    A hop prints its departure, encounters and arrival as it happens, and the
+    route screen drawn after it covered them before they could be read; only
+    the deck showed them again, and a route of several jumps never passes the
+    deck (issue #39 playtest). The route screens now open with them.
+    """
+    p = pal()
+    return ([section("LAST HOP"), f"{p.ink}{result}{RESET}"]
+            + [f"{p.gold}{line}{RESET}" for line in world.hop_report])
 
 
 def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, active: bool) -> None:
-    page, result, pages = 0, None, None
+    page, result, pages, flown = 0, None, None, False
     while True:
         if pages is None:
             live = active and any(m.id == mission.id for m in world.save.active_missions) and not mission_expired(world, mission)
@@ -13281,7 +14085,7 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
             lines = ([mission.description, "Contract is no longer active. Return to the board or career log."]
                      if active and not live else mission_navigation_lines(world, mission, active=active))
             if result:
-                lines.insert(0, result)
+                lines[0:0] = last_hop_lines(world, result) if flown else [result]
             pages = _trade_pages(lines, f"Contract Route #{mission.id}", footer)
         page = min(page, len(pages) - 1)
         draw_page(p, f"Contract Route #{mission.id}", pages[page], page, len(pages))
@@ -13298,16 +14102,17 @@ def screen_mission_navigation(p: Palette, world: World, mission: Mission, *, act
             try:
                 destination = prepare_mission_jump(world, mission.id)
             except MissionError as exc:
-                result, page, pages = str(exc), 0, None
+                result, flown, page, pages = str(exc), False, 0, None
                 continue
             world.commit()
             screen_travel(p, world, destination)
             world.commit()
-            result = f"Last hop: arrived at {world.here.name}. Review the route before another jump."
+            flown = True
+            result = f"Arrived at {world.here.name}. Review the route before another jump."
             if world.save.current_system != destination:
                 result = f"Travel diverted to {world.here.name}; the route has been recalculated."
             if not any(m.id == mission.id for m in world.save.active_missions):
-                result += " Contract is no longer active; check the retained travel result and career log."
+                result += " Contract is no longer active; the hop's report below and the career log say why."
             page, pages = 0, None
 
 
@@ -13321,7 +14126,7 @@ def screen_mission_details(p: Palette, world: World, mission: Mission, *, active
         title = f"Contract #{mission.id} {max_pages}/{max_pages}"
         footer = "[R] Route [N] Next [P] Prev [B] Back: "
         pointer_rows = len(_wrap_output(f"[A] on the last page ({max_pages}; [N] Next).", max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
-        overhead = max(7, 1 + 1 + _page_frame_rows()
+        overhead = max(7, 1 + 1 + _page_frame_rows(f"Contract #{mission.id}")
                        + len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
                        + (2 if active else pointer_rows))
         pages = _mission_text_pages(lines, overhead=overhead)
@@ -13419,7 +14224,7 @@ def screen_missions(p: Palette, world: World) -> None:
         width = _page_content_width()
         max_pages = max(1, sum(len(rows) for _, _, rows in wrapped))
         overhead = 1 + 1
-        overhead += _page_frame_rows()
+        overhead += _page_frame_rows("Contracts")
         overhead += sum(len(_wrap_output(line, width).split("\r\n")) for line in summary)
         overhead += len(_wrap_output(footer, max(1, _OUTPUT_WIDTH - 1)).split("\r\n"))
         capacity = max(1, _OUTPUT_HEIGHT - overhead)
@@ -13530,9 +14335,10 @@ def accolade_lines(save: SaveData, rarity: tuple[dict[str, int], int] | None = N
 def pilot_record_lines(world: World, view: str = "O") -> list[str]:
     """Complete retained records, without display truncation or state changes."""
     pilot, ship = world.save.pilot, world.save.ship
+    counts = {"C": len(world.save.active_missions), "H": len(pilot.highlights) + len(pilot.log)}
     lines = [f"{pal().slate}Views{RESET}  " + "  ".join(
-        key_label(key, label) for key, label in
-        (("O", "Pilot"), ("C", "Jobs"), ("H", "Log"), ("D", "Dossiers")))]
+        key_label(key, label) + (f" {pal().slate}{counts[key]}{RESET}" if key in counts else "")
+        for key, label in (("O", "Pilot"), ("C", "Jobs"), ("H", "Log"), ("D", "Dossiers"), ("R", "Finale")))]
     if view == "C":
         lines.append(f"Active Contracts & Missions: {len(world.save.active_missions)}. Full terms, tracking and routes: station [B] Mission Board.")
         for mission in world.save.active_missions:
@@ -13566,7 +14372,8 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
         previous = RANKS[earned][0]
         lines.append(f"{p.slate}next rank{RESET} "
                      f"{gauge(max(0, pilot.credits - previous), max(1, following[0] - previous), cells, tone='brand')} "
-                     f"{p.ink}{max(0, following[0] - pilot.credits):,}cr{RESET} {p.slate}to {following[1]}{RESET}")
+                     f"{p.ink}{max(0, following[0] - pilot.credits):,}cr{RESET} {p.slate}to {following[1]} "
+                     f"({following[0]:,}cr){RESET}")
     event = world.save.active_event
     if event:
         lines.append(alert("caution", "Economy event",
@@ -13574,6 +14381,8 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                            f"({event['turns_remaining']} day(s) left)"))
     lines.append(section("SHIP"))
     lines += ship_gauge_rows(world)
+    if (crew_row := career_crew_row(world)) is not None:
+        lines.append(crew_row)
     lines.append(section("STANDING"))
     standing_rows = []
     for faction in FACTIONS:
@@ -13597,12 +14406,8 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                    # The word repeats the number and its tone; the membership
                    # state is the only thing on the row nothing else says.
                    optional=(4, 3), repeat_header=False)[1:]
-    lines.append(f"{p.slate}Membership perks suspend at {p.ink}-50{p.slate} standing or below.{RESET}")
-    lines.append(section("CAREER"))
+    lines.append(section("RECORD"))
     discovered = sum(system.discovered for system in world.galaxy)
-    crew = [f"{crew_name(world, role)} ({info['label']}, {CREW_SERVICE_LEVELS[crew_level(ship, role)][1]})"
-            for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}")]
-    wages = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(ship, f"has_{role}"))
     lines.append(f"{p.slate}charted{RESET} {gauge(discovered, len(world.galaxy), cells, tone='info')} "
                  f"{p.ink}{discovered}/{len(world.galaxy)}{RESET} "
                  f"{p.slate}({round(discovered / len(world.galaxy) * 100)}%){RESET}")
@@ -13611,13 +14416,16 @@ def pilot_record_lines(world: World, view: str = "O") -> list[str]:
                             chip("failed", str(pilot.missions_failed)),
                             chip("expired", str(pilot.missions_expired)),
                             chip("retirements", str(pilot.retirements))]))
-    lines.append(f"{p.slate}Crew{RESET} "
-                 + (f"{p.ink}" + ", ".join(crew) + RESET if crew else f"{p.ink}none{RESET}")
-                 + f"  {p.slate}wages{RESET} {p.ink}{wages}cr/jump{RESET}")
-    lines += career_rank_terms(pilot)
-    lines.append(f"[C] Jobs: {len(world.save.active_missions)} active. [H] Log: {len(pilot.highlights)} highlights, {len(pilot.log)} log entries.")
-    lines.append("[R] Finale shows endings and New Game+ terms. [D] Dossiers shows archived careers.")
-    lines += career_path_lines(world.save)
+    lines.append(section("PATHS"))
+    lines += career_path_lines(world.save, notes=False)
+    # What the screen's figures mean, said once and dim (issue #39 playtest):
+    # it was six sentences between and under the readings, two of them the
+    # next-rank target the header already shows and the keys the views row lists.
+    rank_note = ("Rank is permanent for this career; spending and losses do not demote you."
+                 if following is not None else "Top rank retained; retirement stays available after spending.")
+    lines.append(section("NOTES"))
+    lines += [f"{p.slate}{rank_note} Membership perks suspend at -50 standing or below.{RESET}",
+              f"{p.slate}{CAREER_PATH_NOTE}{RESET}"]
     return lines
 
 
@@ -13635,15 +14443,30 @@ def career_ending_lines(fresh: SaveData) -> tuple[list[str], list[str]]:
     leading = [f"{badge(info['label'].upper(), 'brand')}  {p.slate}career{RESET} {p.ink}#{dossier['number']}{RESET} "
                f"{p.slate}of{RESET} {p.plasma}{BOLD}{_mission_plain(fresh.pilot.handle)}{RESET}",
                info["closing"]]
-    details = [section("THE CAREER"),
-               f"{plural(dossier['days'], 'day')}, {show_date(dossier['started']) or 'an unrecorded start'} to {show_date(dossier['ended'])}; "
-               f"retired a {RANKS[dossier['rank']][1]} in a {dossier['ship']}.",
-               f"Final credits {dossier['credits']:,}cr; market margin {dossier['market_margin']:+,}cr.",
-               f"{dossier['charted']}/{GALAXY_SYSTEM_COUNT} systems charted; "
-               f"{dossier['kills']} {'victory' if dossier['kills'] == 1 else 'victories'}; "
-               f"{plural(dossier['missions'], 'contract')} completed, {dossier['failed']} failed, {dossier['expired']} expired."]
+    # The career as labelled rows, its figures picked out from their labels,
+    # and what it was remembered for split the same way (issue #39): "First
+    # kill" is the label, "destroyed the Void Jackal" the thing to read.
+    details = [section("THE CAREER")]
+    details += _sheet_rows([
+        ("SPAN", f"{plural(dossier['days'], 'day')}, {show_date(dossier['started']) or 'an unrecorded start'} "
+                 f"to {show_date(dossier['ended'])}", None),
+        ("RETIRED", f"a {RANKS[dossier['rank']][1]} in a {dossier['ship']}", None),
+        ("CREDITS", f"{p.gold}{dossier['credits']:,}cr{p.ink} final; market margin "
+                    f"{p.tone('good' if dossier['market_margin'] > 0 else 'danger' if dossier['market_margin'] < 0 else 'info')}"
+                    f"{dossier['market_margin']:+,}cr", None),
+        ("CHARTED", f"{dossier['charted']}/{GALAXY_SYSTEM_COUNT} systems", None),
+        ("COMBAT", f"{dossier['kills']} {'victory' if dossier['kills'] == 1 else 'victories'}", None),
+        ("CONTRACTS", f"{plural(dossier['missions'], 'contract')} completed, {dossier['failed']} failed, "
+                      f"{dossier['expired']} expired", None)])
     # The last few things the career was remembered for; the dossier keeps them all.
-    details += ["* " + _mission_plain(entry) for entry in dossier["highlights"][-3:]]
+    remembered = []
+    for entry in dossier["highlights"][-3:]:
+        entry = _mission_plain(entry)
+        label, colon, value = entry.partition(": ")
+        remembered.append(f"{p.deep}{glyph('dot')}{RESET} " + (f"{p.slate}{label}:{RESET} {p.ink}{BOLD}{value}{RESET}"
+                                                              if colon else f"{p.ink}{BOLD}{entry}{RESET}"))
+    if remembered:
+        details += [section("REMEMBERED FOR")] + remembered
     start = f"A fresh galaxy, a Shuttle and {fresh.pilot.credits:,}cr"
     if info["tier"] is not None:
         start += f", with {UPGRADES[info['tier']]['label']} tier 1 from this ending"
@@ -13938,10 +14761,18 @@ def chart_entries(world: World) -> list[tuple[int | None, str]]:
     entries.append((None, "  ".join(key_label(key, label) for key, label in actions)))
     entries.append((None, section("DEPARTURES")))
     rows, styles, ids = [], [], []
+    deadlines = departure_deadline_badges(world)
     for sid in sorted(here.connections):
         dest = world.by_id[sid]
         cost = fuel_cost_for_jump(here, dest, world.save.ship)
         short = world.save.ship.fuel < cost
+        # Which contract this departure leads toward, and how long it has
+        # left: the tracked one's badge alone hid the rest (issue #41).
+        marks = [badge("TRACKED", "brand")] if route and route[0] == sid else []
+        if sid in deadlines:
+            marks.append(deadlines[sid])
+        if short:
+            marks.append(badge("LOW FUEL", "danger"))
         rows.append([
             dest.name if dest.discovered else "Uncharted Bearing",
             f"{dest.x},{dest.y}",
@@ -13949,7 +14780,7 @@ def chart_entries(world: World) -> list[tuple[int | None, str]]:
             dest.economy if dest.discovered else "?",
             danger_dots(dest.danger, known=dest.discovered),
             f"{p.alarm}{cost}{RESET}" if short else f"{p.ink}{cost}{RESET}",
-            badge("TRACKED", "brand") if route and route[0] == sid else (badge("LOW FUEL", "danger") if short else ""),
+            " ".join(marks),
         ])
         styles.append(["value", "label", "label", "label", "value", "value", "value"])
         ids.append(sid)
@@ -14083,22 +14914,33 @@ def survey_candidates(world: World) -> list[int]:
 
 
 def survey_terms(world: World) -> list[str]:
+    """The survey as CHECKS: what it costs, how far it reaches, what it finds (issue #39)."""
+    p = pal()
     candidates = set(survey_candidates(world))
-    fuel = world.save.ship.fuel
-    radius = 2 + world.save.ship.scanner_tier + navigator_bonus(world.save.ship)
-    label = "[S] Survey" if candidates and fuel >= 2 and world.save.ship.scanner_tier > 0 else "Survey"
-    lines = [f"{label}: 2 fuel; {fuel} aboard." + (" Tank empties." if fuel == 2 else "")]
-    lines += [f"Range: {radius} connection hops; {len(candidates)} new contacts.",
-              "Chart all contacts in range, including station, economy and danger. No day or wages pass.",
-              f"Navigator bonus: +{navigator_bonus(world.save.ship)} connection hops. Surveying creates no remote price quotes."]
+    ship = world.save.ship
+    fuel = ship.fuel
+    bonus = navigator_bonus(ship)
+    radius = 2 + ship.scanner_tier + bonus
+    lines = []
+    if ship.scanner_tier == 0:
+        lines.append(alert("danger", "NO SCANNER", "surveying unavailable"))
+    elif fuel < 2:
+        lines.append(alert("danger", "LOW FUEL", "surveying unavailable"))
+    elif not candidates:
+        lines.append(f"{p.ink}Area already charted: no new contacts; no charge.{RESET}")
+    checks = [("COST", f"2 fuel, {fuel} aboard" + ("; the tank empties" if fuel == 2 else ""),
+               "bad" if fuel < 2 else "info" if fuel == 2 else "good"),
+              ("RANGE", f"{radius} connection hops" + (f" (navigator +{bonus})" if bonus else ""), None),
+              ("CONTACTS", f"{len(candidates)} new", "good" if candidates else None)]
     contracts = [m for m in world.save.active_missions if m.kind == "scan" and m.target_system in candidates and not mission_expired(world, m)]
-    if contracts: lines.append(f"Active surveys in range: {len(contracts)}; scanner payout "
-                               f"{sum(remote_survey_payout(m.reward) for m in contracts):,}cr, half of "
-                               f"{sum(m.reward for m in contracts):,}cr on arrival.")
-    if world.save.ship.scanner_tier == 0: lines.insert(0, "Scanner required; surveying unavailable.")
-    elif fuel < 2: lines.insert(0, "Insufficient fuel: surveying unavailable.")
-    elif not candidates: lines.insert(0, "Area already charted: no new contacts; no charge.")
-    lines.append("[B] Back: leave without surveying.")
+    if contracts:
+        checks.append(("CONTRACTS", f"{len(contracts)} in range; scanner payout "
+                       f"{sum(remote_survey_payout(m.reward) for m in contracts):,}cr, half of "
+                       f"{sum(m.reward for m in contracts):,}cr on arrival", "good"))
+    lines.append(section("SURVEY"))
+    lines += _sheet_rows(checks)
+    lines.append(f"{p.slate}Charts every contact in range: station, economy and danger. No day or wages pass; "
+                 f"surveying creates no remote price quotes.{RESET}")
     return lines
 
 
@@ -14127,7 +14969,7 @@ def _do_scan(p: Palette, world: World) -> str | None:
     page, result, report = 0, None, []
     while True:
         can_scan = world.save.ship.scanner_tier > 0 and world.save.ship.fuel >= 2 and bool(survey_candidates(world))
-        lines = ([f"Result: {result}"] + report if result else []) + survey_terms(world)
+        lines = ([result_row(result)] + report if result else []) + survey_terms(world)
         action, page, count = _draw_service_page(p, f"Survey {world.save.pilot.credits:,}cr", lines,
             "[S] Survey [B] Back [<>] Page: " if can_scan else "[B] Back [<>] Page: ", page)
         if action in ("B", "Q"): return result
@@ -14252,20 +15094,30 @@ def map_legend(p: "Palette") -> str:
 
 
 def map_list_lines(world: World, path: list[int], public_target: int | None) -> list[str]:
+    """Charted space as a table per sector: where each station is, what it trades,
+    how dangerous and how far (issue #39)."""
+    p = pal()
     ids = map_system_ids(world, path, public_target)
     hops = bfs_hops(world.by_id, world.here.id)
-    lines = ["Exact positions; @ here, ! objective, X route end, * plotted route."]
+    lines = [f"{p.slate}Exact positions; @ here, ! objective, X route end, * plotted route.{RESET}"]
     if not any(s.discovered for s in world.galaxy):
         lines.append("Nothing charted yet; current and supplied bearings only.")
     for sector in SECTOR_NAMES:
         stations = sorted((world.by_id[sid] for sid in ids if sector_for(world.by_id[sid]) == sector), key=lambda s: (s.x, s.y, s.id))
         if not stations: continue
-        lines.append("Sector: " + sector)
+        lines.append(section(sector))
+        rows, styles = [], []
         for station in stations:
             markers = ("@" if station.id == world.here.id else "") + ("!" if station.id == map_goal(world, public_target) else "") + ("*" if station.id in path else "") + ("X" if path and station.id == path[-1] else "")
-            details = f"{station.economy}, danger {station.danger}" if station.discovered else "uncharted; danger unknown"
-            distance = "here" if station.id == world.here.id else f"{hops[station.id]} jumps"
-            lines.append(f"{markers or 'o'} {map_label(world, station.id, public_target)}: {details}; {distance}.")
+            if station.discovered:
+                economy, danger = station.economy, f"{p.tone(danger_tone(station.danger))}{station.danger}{RESET}"
+            else:
+                economy, danger = f"{p.slate}uncharted{RESET}", f"{p.slate}?{RESET}"
+            distance = "here" if station.id == world.here.id else plural(hops[station.id], "jump")
+            rows.append([f"{p.gold}{markers}{RESET}" if markers else f"{p.deep}o{RESET}",
+                         map_label(world, station.id, public_target), economy, danger, distance])
+            styles.append(["value", "value", "label", "value", "label"])
+        lines += table(["", "STATION", "ECONOMY", "DANGER", "DISTANCE"], rows, "lllrr", styles=styles)
     return lines
 
 
@@ -14395,11 +15247,16 @@ def prepare_route_jump(world: World, destination: int) -> int:
     return path[0]
 
 
-def route_mission_implications(world: World, path: list[int]) -> list[str]:
-    lines = []
-    if not world.save.active_missions:
-        return ["No active contract deadlines."]
-    lines.append("Contract timing assumes successful travel, unchanged bounty queues and ready delivery cargo. Earlier failures, expiry and scanner use can change it.")
+def route_contract_estimates(world: World, path: list[int]) -> list[dict]:
+    """When each active contract would resolve if the pilot flies `path` then onward.
+
+    One dict per contract, in active order: `mission`; `day`, the estimated
+    objective day, or None for a survey of a target already charted; `late`,
+    past its deadline by then; and `ready`, whether a delivery's cargo is
+    aboard once earlier resolutions have taken theirs. The route planner draws
+    these as a table (issue #39); keeping them data is what lets a test check
+    the meaning rather than the wording.
+    """
     end = path[-1] if path else world.here.id
     estimates = []
     arrivals_by_target = {}
@@ -14441,18 +15298,40 @@ def route_mission_implications(world: World, path: list[int]) -> list[str]:
         ready[index] = available >= mission.quantity
         if ready[index] and (mission.deadline_turn is None or day <= mission.deadline_turn):
             remaining[mission.commodity] = available - mission.quantity
-    lines.append("Cargo is allocated by estimated arrival, then active-contract order. Late contracts consume none; missing cargo leaves completion day unknown.")
-    for index, (mission, day) in enumerate(estimates):
+    return [{"mission": mission, "day": day,
+             "late": day is not None and mission.deadline_turn is not None and day > mission.deadline_turn,
+             "ready": ready.get(index, True)} for index, (mission, day) in enumerate(estimates)]
+
+
+def route_mission_implications(world: World, path: list[int]) -> list[str]:
+    """The active contracts' timing on a route, one table row each (issue #39)."""
+    if not world.save.active_missions:
+        return ["No active contract deadlines."]
+    p = pal()
+    rows, styles = [], []
+    for estimate in route_contract_estimates(world, path):
+        mission, day = estimate["mission"], estimate["day"]
+        kind = "SURVEY" if mission.kind == "scan" else mission.kind.upper()
+        due = "none" if mission.deadline_turn is None else f"day {mission.deadline_turn}"
         if day is None:
-            lines.append(f"Contract #{mission.id}: BLOCKED SURVEY - target already charted; no completion day. Revisiting cannot complete it. Abandon it from contract details to free the slot.")
-            continue
-        timing = "no deadline" if mission.deadline_turn is None else f"deadline {mission.deadline_turn} inclusive; " + ("travel within deadline" if day <= mission.deadline_turn else "TRAVEL ESTIMATE LATE")
-        suffix = ""
-        label = "objective day"
-        if mission.kind == "delivery" and not ready[index]:
-            label = "arrival day"
-            suffix = " Missing delivery cargo after earlier allocations; procurement required, completion day unknown."
-        lines.append(f"Contract #{mission.id}: {label} {day} by this route then onward; {timing}.{suffix}")
+            status = f"{sheet_mark('bad')} {p.wrong}BLOCKED SURVEY: target already charted{RESET}"
+            arrives = f"{p.deep}{glyph('flat')}{RESET}"
+        else:
+            arrives = f"day {day}"
+            if estimate["late"]:
+                status = f"{sheet_mark('bad')} {p.wrong}late{RESET}"
+            elif mission.kind == "delivery" and not estimate["ready"]:
+                status = f"{sheet_mark('info')} {p.ink}cargo still to buy{RESET}"
+            else:
+                status = f"{sheet_mark('good')} {p.ink}on time{RESET}"
+        rows.append([f"#{mission.id}", kind, arrives, due, status])
+        styles.append(["value", "label", "value", "label", "value"])
+    lines = [section("CONTRACTS ON THIS ROUTE")]
+    lines += table(["", "KIND", "ARRIVES", "DUE", "STATUS"], rows, "lllll", styles=styles)
+    lines.append(f"{p.slate}Arrival days assume successful travel by this route then onward, unchanged bounty "
+                 f"queues and ready delivery cargo. Earlier failures, expiry and scanner use can change them.{RESET}")
+    lines.append(f"{p.slate}Cargo is allocated by estimated arrival, then active-contract order; late contracts consume none. "
+                 f"A blocked survey cannot complete; abandon it from contract details to free the slot.{RESET}")
     return lines
 
 
@@ -14461,15 +15340,17 @@ def navigation_route_lines(world: World, destination: int | None) -> list[str]:
         return ["Choose a charted destination to preview its route.",
                 "Destination selection is read-only. Jump next flies one leg; Back leaves the plan.",
                 "For an uncharted contract target, use Route in its details or the tracked chart."]
+    p = pal()
     target = world.by_id[destination]
     path = bfs_path(world.by_id, world.here.id, destination)
-    lines = [f"Destination: {target.name} ({target.x},{target.y}). Shortest route by jumps.",
-             "Jump next flies one leg. Review after each outcome, change destination, or Back to refuel."]
+    lines = [f"{p.ink}{BOLD}{_mission_plain(world.here.name)} {glyph('arrow')} {_mission_plain(target.name)}{RESET} "
+             f"{p.slate}({target.x},{target.y}) {glyph('dot')} {plural(len(path), 'jump')}, the shortest route{RESET}",
+             f"{p.slate}[J] flies one leg. Review after each outcome, change destination, or Back to refuel.{RESET}"]
     if not path:
         lines.append("Arrived at the selected destination.")
     escorts = sum(m.kind == "escort" and not mission_expired(world, m) for m in world.save.active_missions)
     if escorts:
-        lines.append(f"Active escorts: {escorts} fight(s) on EVERY jump, including detours.")
+        lines.append(f"{p.wrong}Active escorts:{RESET} {escorts} fight(s) on EVERY jump, including detours.")
     lines += navigation_budget_lines(world, path)
     lines += route_mission_implications(world, path)
     return lines
@@ -14477,7 +15358,7 @@ def navigation_route_lines(world: World, destination: int | None) -> list[str]:
 
 def screen_auto_route(p: Palette, world: World, *, destination: int | None = None) -> None:
     """Screen-first route planner; each deliberate command flies one ordinary hop."""
-    page, result, pages = 0, None, None
+    page, result, pages, flown = 0, None, None, False
     if destination is None:
         # Nothing to plan without a destination: open the picker at once; Back leaves.
         choices = sorted(((station.id, station.name) for station in world.galaxy
@@ -14491,7 +15372,7 @@ def screen_auto_route(p: Palette, world: World, *, destination: int | None = Non
             footer = ("[J] Jump next " if path else "") + "[D] Destination [V] Map [N] Next [P] Prev [B] Back: "
             lines = navigation_route_lines(world, destination)
             if result:
-                lines.insert(0, result)
+                lines[0:0] = last_hop_lines(world, result) if flown else [result]
             pages = _trade_pages(lines, "Route Planner", footer)
         page = min(page, len(pages) - 1)
         draw_page(p, "Route Planner", pages[page], page, len(pages))
@@ -14514,11 +15395,12 @@ def screen_auto_route(p: Palette, world: World, *, destination: int | None = Non
             try:
                 hop = prepare_route_jump(world, destination)
             except MissionError as exc:
-                result, page, pages = str(exc), 0, None
+                result, flown, page, pages = str(exc), False, 0, None
                 continue
             screen_travel(p, world, hop)
             world.commit()
-            result = f"Last hop: arrived at {world.here.name}. Review before another jump."
+            flown = True
+            result = f"Arrived at {world.here.name}. Review before another jump."
             if world.here.id != hop:
                 result = f"Travel diverted to {world.here.name}; route recalculated."
             page, pages = 0, None
@@ -14622,27 +15504,41 @@ def exploration_choice(p: Palette, world: World, title: str, lines: list[str], a
 
 
 def derelict_terms(world: World) -> list[str]:
+    """A derelict's choice, its figures standing out like combat's (issue #39).
+
+    Five sentences put the odds, the payout and the ambush at one weight; the
+    options are now one row each, with what decides them in color."""
+    p = pal()
     danger = encounter_danger(world)
+    ship = world.save.ship
     return [
-        "[S] Salvage: board the hulk; 70% salvage, 30% ambush.",
-        f"Drifting hulk. Sector danger {danger}/5; fuel {world.save.ship.fuel}/{fuel_capacity(world.save.ship)}.",
-        f"Salvage recovers 60-{100 + max(0, danger) * 120}cr.",
-        f"Ambush: one tier {span(max(0, danger - 1), min(4, danger + 1))} opponent; ordinary combat choices and losses apply.",
-        "Boarding costs no fuel. [I] Ignore: no reward or penalty; continue your journey.",
+        f"{p.ink}{BOLD}Drifting hulk{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}sector danger{RESET} "
+        f"{p.tone(danger_tone(danger))}{danger}/5{RESET}",
+        section("OPTIONS"),
+        f"{key_label('S', 'Salvage')}: {odds(0.70)} recovers {gain(f'60-{100 + max(0, danger) * 120}cr')}; "
+        f"{harm('30%')} ambush by one tier {span(max(0, danger - 1), min(4, danger + 1))} opponent.",
+        f"{key_label('I', 'Ignore')}: no reward or penalty; continue your journey.",
+        section("NOTES"),
+        f"{p.slate}Boarding costs no fuel; fuel {ship.fuel}/{fuel_capacity(ship)}. "
+        f"An ambush is an ordinary fight: combat choices and losses apply.{RESET}",
     ]
 
 
 def distress_terms(world: World) -> list[str]:
+    """A distress call's choice, its figures standing out like combat's (issue #39)."""
+    p = pal()
     fuel = world.save.ship.fuel
     low, high = min(fuel, 2), min(fuel, 4)
-    cost = span(low, high)
-    lines = [
-        f"[H] Help: spend {cost} fuel.",
-        f"Survivors offer 60-180cr and Concord standing +{min(3, 100 - world.save.pilot.reputation.get(FACTION_CONCORD, 0))} (cap 100). No combat. Current fuel: {fuel}.",
-        f"Fuel after helping: {span(fuel - high, fuel - low)}.",
-        "[I] Ignore: spend nothing, no reputation penalty; continue your journey.",
+    standing = min(3, 100 - world.save.pilot.reputation.get(FACTION_CONCORD, 0))
+    lines = [f"{p.ink}{BOLD}Distress call{RESET} {p.deep}{glyph('dot')}{RESET} {p.slate}no combat{RESET}"]
+    if fuel <= 4:
+        lines.append(alert("danger", "LOW FUEL", "helping can leave the tank empty"))
+    lines += [
+        section("OPTIONS"),
+        f"{key_label('H', 'Help')}: spend {cost(f'{span(low, high)} fuel')}, leaving {span(fuel - high, fuel - low)}; "
+        f"survivors offer {gain('60-180cr')} and {gain(f'Concord standing +{standing}')} (cap 100).",
+        f"{key_label('I', 'Ignore')}: spend nothing, no reputation penalty; continue your journey.",
     ]
-    if fuel <= 4: lines.insert(1, "Risk: tank empty.")
     return lines
 
 
@@ -14800,15 +15696,16 @@ def bounty_identification_lines(world: World, warrant: dict) -> list[str]:
         status = ("Identity confirmed; no mistaken-identity penalty." if warrant["matches"] else
                   f"Identity mismatch confirmed. Firing pays the bounty; the wrong-ID penalty is +{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety and Concord -3, in addition to combat rewards.")
     else:
-        status = (f"Identity unverified: {WRONG_BOUNTY_KILL_CHANCE:.0%} of posted matches are incorrect. "
-                  f"Wrong-ID penalty: +{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety and Concord -3, in addition to combat rewards.")
+        status = (f"Identity unverified: {harm(f'{WRONG_BOUNTY_KILL_CHANCE:.0%}')} of posted matches are incorrect. "
+                  f"Wrong-ID penalty: {harm(f'+{NOTORIETY_PER_WRONG_BOUNTY_KILL} notoriety and Concord -3')}, in addition to combat rewards.")
     lines = [status]
     if not warrant["engaged"]:
         if not warrant["checked"]:
-            lines.append("[V] Verify before engaging: costs one fuel." if world.save.ship.fuel else "Verification unavailable: requires one fuel.")
+            lines.append(f"{key_label('V', 'Verify')} before engaging: costs {cost('one fuel')}." if world.save.ship.fuel
+                         else "Verification unavailable: requires one fuel.")
         elif not warrant["matches"]:
-            lines.append("[R] Close incorrect warrant: no fight, payout or mission credit.")
-        lines.append("[W] Withdraw before engaging: keep the contract and continue your journey.")
+            lines.append(f"{key_label('R', 'Report')}: close the incorrect warrant; no fight, payout or mission credit.")
+        lines.append(f"{key_label('W', 'Withdraw')} before engaging: keep the contract and continue your journey.")
     else: lines.append("Engaged: identification and free withdrawal are closed.")
     return lines
 
@@ -15001,6 +15898,51 @@ def screen_notoriety_patrol(p: Palette, world: World) -> None:
     _screen_combat_session(p, world, patrol, patrol=True)
 
 
+def combat_contact_rows(world: World, pirate: Pirate, pirate_hp: int, hull_hp: int) -> list[str]:
+    """The two hulls in a fight, as bars on one scale, for any two readings.
+
+    The combat page draws them at the readings after an exchange; the canopy's
+    in-place drain draws them at every reading on the way there, which is why
+    both go through here (issue #39)."""
+    ship = world.save.ship
+    cells = _gauge_cells()
+    condition = hull_condition(dataclasses.replace(ship, hull_hp=max(0, hull_hp)))
+    contact = [[_mission_plain(pirate.name), gauge(pirate_hp, pirate.hp_max, cells, tone="danger"),
+                f"{pirate_hp}/{pirate.hp_max}", f"tier {pirate.tier}"],
+               ["Your hull", gauge(hull_hp, hull_hp_max(ship), cells),
+                f"{hull_hp}/{hull_hp_max(ship)}", condition]]
+    return table(["", "", "", ""], contact, "llrl",
+                 styles=[["label", "value", "value", "label"] for _ in contact],
+                 optional=(3,), repeat_header=False)[1:]
+
+
+def odds(chance: float) -> str:
+    """A chance as a bold figure in the color of how good it is (issue #39 playtest).
+
+    The combat options read as one paragraph of slate and white, and the four
+    numbers that decide a fight -- the odds of each option, the damage coming,
+    what a bribe costs -- sat in it at the same weight as "draws enemy fire"."""
+    p = pal()
+    color = p.mint if chance >= 0.6 else p.amber if chance >= 0.3 else p.alarm
+    return f"{BOLD}{color}{chance:.0%}{RESET}"
+
+
+def harm(text: str) -> str:
+    """Damage or a penalty coming the pilot's way, as `odds` draws a chance."""
+    return f"{BOLD}{pal().alarm}{text}{RESET}"
+
+
+def gain(text: str) -> str:
+    """What an option pays, as `odds` draws a chance."""
+    return f"{BOLD}{pal().mint}{text}{RESET}"
+
+
+def cost(text: str) -> str:
+    """What an option charges, as `odds` draws a chance: bold value, since gold
+    is the hotkeys' alone (`key_label`)."""
+    return f"{BOLD}{pal().ink}{text}{RESET}"
+
+
 def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, patrol: bool, tactics: dict, details: bool = False, warrant: dict | None = None, hull_before: int | None = None) -> list[str]:
     """Read-only combat terms; no random draw or persisted presentation state."""
     ship, pilot = world.save.ship, world.save.pilot
@@ -15022,13 +15964,7 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     # The two hulls in the fight, one above the other, on the same scale of
     # cells: which bar is longer *is* who is winning, and it used to be two
     # sentences with the numbers buried in the middle of them.
-    contact = [[_mission_plain(pirate.name), gauge(pirate.hp, pirate.hp_max, cells, tone="danger"),
-                f"{pirate.hp}/{pirate.hp_max}", f"tier {pirate.tier}"],
-               ["Your hull", gauge(ship.hull_hp, hull_hp_max(ship), cells),
-                f"{ship.hull_hp}/{hull_hp_max(ship)}", hull_condition(ship)]]
-    lines += table(["", "", "", ""], contact, "llrl",
-                   styles=[["label", "value", "value", "label"] for _ in contact],
-                   optional=(3,), repeat_header=False)[1:]
+    lines += combat_contact_rows(world, pirate, pirate.hp, ship.hull_hp)
     # Fuel and hold are the stakes of an escape and a dump, not readings that
     # move in a fight: one row of chips rather than two more gauges, which is
     # the row that let every option onto the first page at 80x24 (#28).
@@ -15040,12 +15976,12 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
     # "Ravage" read as a second contact or a ship class (#648).
     lines.append(f"{p.ink}{_mission_plain(pirate.name)}{RESET} {p.slate}flies {tactics['profile']}; intent{RESET} "
                  f"{badge(intent.upper(), 'danger')}  "
-                 f"{p.slate}incoming{RESET} {p.ink}{span(low, high)}{RESET} "
+                 f"{p.slate}incoming{RESET} {harm(span(low, high))} "
                  f"{p.slate}if it survives or you fail to disengage{RESET}")
     if tactics["brace_ready"]:
         low, high = (_tactical_incoming_damage(ship, pirate.tier, intent, roll, tactics, braced=True, cover=squadron_cover(world)) for roll in (4, 9))
-        lines.append(f"{key_label('G', 'Guard')}{p.slate}: your shot at 55%, incoming{RESET} "
-                     f"{p.ink}{span(low, high)}{RESET}{p.slate}. Fire recharges Guard.{RESET}")
+        lines.append(f"{key_label('G', 'Guard')}{p.slate}: your shot at{RESET} {odds(0.55)}{p.slate}, incoming{RESET} "
+                     f"{harm(span(low, high))}{p.slate}. Fire recharges Guard.{RESET}")
     else: lines.append("Guard recharging: fire once before using G again.")
     if not patrol and outclassed(world, pirate, tactics):
         # One row, said where the decision is made: the numbers above already
@@ -15067,27 +16003,29 @@ def combat_display_lines(world: World, pirate: Pirate, result: list[str], *, pat
         chance = combat_evade_chance(world, pirate, dumped_cargo=True, tactics=tactics, cargo_units=max(0, used - units))
         what = (f"jettison half the hold ({units} of {used} units, chosen at random) for the raider to take"
                 if outclassed(world, pirate, tactics) else "jettison one unit of a random held commodity to try to break contact")
-        dump_row = f"[D] Dump: {what}; about {chance:.0%} success; failure draws fire." + escort_at_stake
+        dump_row = f"{key_label('D', 'Dump')}: {what}; about {odds(chance)} success; failure draws fire." + escort_at_stake
     # Against a raider that outclasses the hull, Dump is the answer the alert row
     # points at, so it leads the options: listed fourth, it fell onto the second
     # page at 80x24 while the row that names it stayed on the first (the gallery's
     # "Combat, outclassed" panel is where that was seen).
     dump_leads = dump_row is not None and outclassed(world, pirate, tactics)
     lines += [section("OPTIONS")] + ([dump_row] if dump_leads else []) + [
-        "[F] Fire: one shot; a surviving enemy returns fire.",
-        f"[E] Evade: about {combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol):.0%} success; failure draws enemy fire.{escort_at_stake}",
+        f"{key_label('F', 'Fire')}: one shot; a surviving enemy returns fire.",
+        f"{key_label('E', 'Evade')}: about {odds(combat_evade_chance(world, pirate, dumped_cargo=False, tactics=tactics, patrol=patrol))} success; failure draws enemy fire.{escort_at_stake}",
     ]
     if patrol:
-        cost = notoriety_fine_cost(pilot.notoriety)
-        lines.append((f"[S] Surrender: pay {cost}cr, clear notoriety, Concord +2 and escape. " if pilot.credits >= cost else f"Surrender requires {cost}cr. ") +
-                     ("Available." if pilot.credits >= cost else "UNAFFORDABLE; surrender unavailable."))
+        fine = notoriety_fine_cost(pilot.notoriety)
+        lines.append((f"{key_label('S', 'Surrender')}: pay {cost(f'{fine}cr')}, clear notoriety, Concord +2 and escape. "
+                      if pilot.credits >= fine else f"Surrender requires {cost(f'{fine}cr')}. ") +
+                     ("Available." if pilot.credits >= fine else harm("UNAFFORDABLE") + "; surrender unavailable."))
     else:
         if dump_row is not None and not dump_leads:
             lines.append(dump_row)
-        cost = bribe_cost(pirate)
-        lines.append((f"[P] Pay bribe: " if pilot.credits >= cost else "Pay bribe unavailable: ") +
-                     f"{cost}cr only if accepted (about {bribe_chance(world, pirate):.0%}); "
-                     "Blackwake +2 if accepted; refusal draws enemy fire. " + ("Available." if pilot.credits >= cost else "UNAFFORDABLE; bribe unavailable.")
+        bribe = bribe_cost(pirate)
+        lines.append((f"{key_label('P', 'Pay bribe')}: " if pilot.credits >= bribe else "Pay bribe unavailable: ") +
+                     f"{cost(f'{bribe}cr')} only if accepted (about {odds(bribe_chance(world, pirate))}); "
+                     "Blackwake +2 if accepted; refusal draws enemy fire."
+                     + ("" if pilot.credits >= bribe else " " + harm("UNAFFORDABLE") + "; bribe unavailable.")
                      + (" An accepted bribe fails the escort contract." if escort_at_stake else ""))
     if warrant is not None:
         # After the options it qualifies: as the page's opening paragraph it
@@ -15312,10 +16250,20 @@ def _screen_combat_session(p: Palette, world: World, pirate: Pirate, *, patrol: 
             outcome = "destroyed"
         combat.update(pirate=dataclasses.asdict(pirate), outcome=outcome, lines=lines)
         world.commit()
-        drain_gauge(_mission_plain(pirate.name), opened_at[0], max(0, pirate.hp), pirate.hp_max, tone="danger")
-        drain_gauge("Your hull", opened_at[1],
-                    lethal if lethal is not None else max(0, ship.hull_hp), hull_hp_max(ship))
+        closed_at = (max(0, pirate.hp), lethal if lethal is not None else max(0, ship.hull_hp))
         page = 0
+        if canopy_active():
+            # The next combat page drains its own bars; a fight that just ended
+            # draws that page once more, so its last exchange is seen there too.
+            drain_in_place_next(lambda enemy, hull: combat_contact_rows(world, pirate, enemy, hull), opened_at, closed_at)
+            if outcome is not None:
+                shown = combat_display_lines(world, pirate, lines, patrol=patrol, details=details, tactics=tactics,
+                                             warrant=warrant, hull_before=hull_before)
+                pages = _service_pages(shown, f"Combat {world.save.pilot.credits:,}cr", combat_action_bar(""))
+                draw_page(p, f"Combat {world.save.pilot.credits:,}cr", pages[0], 0, len(pages))
+        else:
+            drain_gauge(_mission_plain(pirate.name), opened_at[0], closed_at[0], pirate.hp_max, tone="danger")
+            drain_gauge("Your hull", opened_at[1], closed_at[1], hull_hp_max(ship))
         if outcome is not None:
             play_combat_outcome_scene(world, pirate, outcome, action, patrol=patrol, loot=loot)
             report_hop(world, lines)
@@ -15420,7 +16368,7 @@ def screen_outdated_career(p: Palette, error: OutdatedSave) -> bool:
              "Beginning a new career takes the slot: the refused career is kept as a recovery "
              "copy, the same place a rollback puts the career it replaces."]
     title, lines = lines[0], lines[1:]
-    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows())
+    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows(title))
     page = 0
     while True:
         draw_page(p, title, pages[page], page, len(pages))
@@ -15476,7 +16424,7 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
             lines += ["Automatic restoration is unavailable: " + preservation_problem,
                       "Please contact your SysOp for manual recovery."]
     title, lines = lines[0], lines[1:]
-    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows())
+    pages = _mission_text_pages(lines, overhead=4 + _page_header_rows(f"{title} 9/9") + _page_frame_rows(title))
     page = 0
     while True:
         draw_page(p, title, pages[page], page, len(pages))
@@ -15511,6 +16459,51 @@ def screen_save_recovery(p: Palette, save_dir: Path, user_id: int, error: Resume
                 return RecoveryResult(restored, 0)
 
 
+@contextlib.contextmanager
+def _standalone_console(info: dict):
+    """A local terminal, played without a BBS: one key at a time, at its real size.
+
+    A BBS hands the door each key as it is typed. A local console holds a line
+    until Enter and then sends it, Enter included, which the game reads as
+    keys: "P" then Enter bought the default and every later purchase cancelled
+    itself. So a standalone run on a real terminal turns line input and echo
+    off for the session, and restores them however it ends; Ctrl-C still works.
+    Anything that is not a terminal -- a pipe, a test -- is left as it is.
+    """
+    if not sys.stdin.isatty():
+        yield
+        return
+    size = shutil.get_terminal_size((80, 24))
+    info.update(terminal_width=size.columns, terminal_height=size.lines)
+    if os.environ.get("COLORTERM") in ("truecolor", "24bit") or os.environ.get("WT_SESSION"):
+        info["color_depth"] = "truecolor"
+    if os.name == "nt":
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handles = [kernel.GetStdHandle(-10), kernel.GetStdHandle(-11)]
+        saved = [ctypes.c_uint32() for _ in handles]
+        for handle, mode in zip(handles, saved):
+            kernel.GetConsoleMode(handle, ctypes.byref(mode))
+        # Input: no line buffering or echo (0x2, 0x4), keys as VT sequences (0x200).
+        # Output: VT processing (0x4), so an older console draws the colors too.
+        kernel.SetConsoleMode(handles[0], (saved[0].value & ~0x6) | 0x200)
+        kernel.SetConsoleMode(handles[1], saved[1].value | 0x4)
+        try:
+            yield
+        finally:
+            for handle, mode in zip(handles, saved):
+                kernel.SetConsoleMode(handle, mode.value)
+    else:
+        import termios
+        import tty
+        saved = termios.tcgetattr(sys.stdin.fileno())
+        tty.setcbreak(sys.stdin.fileno())
+        try:
+            yield
+        finally:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+
+
 def main(drop_file: str | None = None) -> int:
     global _OUTPUT_STYLE, _DEFAULT_ENCODING, _CLASSIC_DROP_FILE, _SOCKET_TRANSPORT
     global _INPUT_READER, _INPUT_STREAM, _SESSION_CLOCK
@@ -15534,7 +16527,9 @@ def main(drop_file: str | None = None) -> int:
                 return 1
         started = True
         _SESSION_CLOCK = _session_clock(info, session_started)
-        return _run_game(info)
+        standalone = drop_file is None and not os.environ.get("NETBBS_DOOR_INFO")
+        with _standalone_console(info) if standalone else contextlib.nullcontext():
+            return _run_game(info)
     except _SessionExpired:
         _SESSION_CLOCK = None
         with contextlib.suppress(_CarrierLost):
