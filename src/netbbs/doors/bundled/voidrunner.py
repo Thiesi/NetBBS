@@ -2885,6 +2885,9 @@ def engineer_discount(ship: Ship) -> int:
 
 
 REPAIR_COST_PER_HP = 4
+#: Credits per unit of fuel, at every station. Every screen that prices fuel
+#: reads it from here, so none can quote an old figure (issue #48).
+FUEL_PRICE = 6
 
 
 def repair_cost_per_hp(ship: Ship) -> int:
@@ -3070,7 +3073,7 @@ def trade_route_quote(world: World, destination: int, commodity: str, quantity: 
     fuel = sum(burn for _, burn in legs)
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     wages = wage * len(path)
-    fuel_cash = max(0, fuel - world.save.ship.fuel) * 6
+    fuel_cash = max(0, fuel - world.save.ship.fuel) * FUEL_PRICE
     receipts = quantity * remembered["sell"]
     conflicts = []
     available = world.save.cargo.get(commodity, 0) + (0 if use_hold else quantity)
@@ -3092,7 +3095,7 @@ def trade_route_quote(world: World, destination: int, commodity: str, quantity: 
             "fuel": fuel, "fuel_cash": fuel_cash, "wages": wages,
             "cash_needed": procurement + fuel_cash + wages,
             "conflicts": conflicts, "observed_demand": observed_demand, "demand_shortfall": demand_shortfall,
-            "margin": None if conflicts or demand_shortfall else receipts - cost - fuel * 6 - wages,
+            "margin": None if conflicts or demand_shortfall else receipts - cost - fuel * FUEL_PRICE - wages,
             "feasible": all(burn <= fuel_capacity(world.save.ship) for _, burn in legs)}
 
 
@@ -3566,11 +3569,11 @@ def opening_assignment_offer(world: World) -> Mission | None:
                 continue  # Earlier deliveries would consume this introductory load first.
             missing = max(0, 3 - save.cargo.get(commodity, 0))
             price = price_for(world, 0, commodity)
-            budget = missing * price + max(0, 2 * fuel - ship.fuel) * 6 + 2 * wage
+            budget = missing * price + max(0, 2 * fuel - ship.fuel) * FUEL_PRICE + 2 * wage
             if missing > room or missing > market_depth_quote(world, 0, commodity)["stock"] or budget > save.pilot.credits:
                 continue
             preference = (target.danger, fuel, commodity not in ECONOMY_PRODUCES[world.here.economy], price, sid, commodity)
-            reward = 3 * price + 2 * fuel * 6 + 2 * wage + 200
+            reward = 3 * price + 2 * fuel * FUEL_PRICE + 2 * wage + 200
             candidates.append((preference, Mission(
                 id=save.next_mission_id, kind="delivery", origin_system=0, target_system=sid,
                 description=f"First Flight: deliver 3 {COMMODITIES[commodity]['label']} to {target.name}",
@@ -4381,7 +4384,7 @@ def is_stranded(world: World) -> bool:
     """True when the pilot has no way to leave the current system under
     their own power: no cargo to sell for cash, not enough fuel for even
     the cheapest reachable jump, and not enough credits to buy the
-    shortfall at 6cr/unit either.
+    shortfall at FUEL_PRICE either.
 
     Deliberately narrower than "ship destroyed" -- `destroy_ship` already
     has its own tow-home recovery, and a destroyed ship can never reach
@@ -4402,7 +4405,7 @@ def is_stranded(world: World) -> bool:
     if world.save.ship.fuel >= cheapest:
         return False
     shortfall = cheapest - world.save.ship.fuel
-    return world.save.pilot.credits < shortfall * 6
+    return world.save.pilot.credits < shortfall * FUEL_PRICE
 
 
 def rescue_stranded_pilot(world: World) -> str:
@@ -5930,6 +5933,12 @@ def _page_frame_rows(title: str | None = None) -> int:
 
 _STATUS: dict | None = None
 
+#: The last few results, newest first, for the wide console's window (issue
+#: #46). Session state like the status itself: a resumed career starts empty.
+#: One more is kept than is shown, for the one a page's border is showing.
+RESULT_LOG_ENTRIES = 6
+_RESULT_LOG: list[dict] = []
+
 #: Tone -> (glyph name, palette role). A result is done, refused, or just said.
 STATUS_TONES = {"good": ("info", "correct"), "bad": ("danger", "wrong"), "info": ("note", "slate")}
 
@@ -5949,12 +5958,25 @@ def set_status(text: str, tone: str | None = None) -> str:
     if tone not in STATUS_TONES:
         raise ValueError(f"Unknown status tone: {tone}")
     _STATUS = {"text": text, "tone": tone, "screen": None}
+    # A result handed back up by the screen that said it is the same result.
+    # So, by the same test, is the same refusal twice running: the log reads
+    # it once, which is what a glance at it needs.
+    if _RESULT_LOG and _RESULT_LOG[0]["text"] == text:
+        _RESULT_LOG[0]["tone"] = tone
+    else:
+        _RESULT_LOG.insert(0, {"text": text, "tone": tone})
+        del _RESULT_LOG[RESULT_LOG_ENTRIES:]
     return text
 
 
 def clear_status() -> None:
     global _STATUS
     _STATUS = None
+
+
+def clear_result_log() -> None:
+    """Forget the recent results: a new career has none of the last one's."""
+    _RESULT_LOG.clear()
 
 
 def _status_screen(title: str) -> str:
@@ -6005,6 +6027,48 @@ def _status_overflow_rows(p: "Palette", status: dict | None) -> list[str]:
     rows = _wrap_output(status["text"], max(1, _page_content_width() - 2)).split("\r\n")
     return [f"{_status_mark(p, status) if number == 0 else ' '} {getattr(p, role)}{row}{RESET}"
             for number, row in enumerate(rows)]
+
+
+def result_log_rows(p: "Palette", width: int, budget: int, shown: str | None = None) -> list[str]:
+    """The log as rows `width` wide: a heading, then each result with its
+    mark, newest first, two rows at most each, as many as `budget` holds.
+    `shown` is the result the page itself is showing: the log is what it no
+    longer does, so that one is left out rather than read twice."""
+    entries = _RESULT_LOG[1:] if _RESULT_LOG and _RESULT_LOG[0]["text"] == shown else _RESULT_LOG
+    if not entries or budget < 2 or width < 8:
+        return []
+    rows = [f"{p.slate}{BOLD}RECENT{RESET}"]
+    for entry in entries[:RESULT_LOG_ENTRIES - 1]:
+        role = getattr(p, STATUS_TONES.get(entry["tone"], STATUS_TONES["info"])[1])
+        wrapped = _wrap_output(entry["text"], width - 2).split("\r\n")
+        if len(wrapped) > 2:
+            # The second row is cut to leave room for the dots; `width - 2`
+            # is what is left beside the mark.
+            wrapped = [wrapped[0], _fit_text(wrapped[1], width - 2 - len("...")) + "..."]
+        if len(rows) + len(wrapped) > budget:
+            break
+        rows += [f"{_status_mark(p, entry) if number == 0 else ' '} {role}{row}{RESET}"
+                 for number, row in enumerate(wrapped)]
+    return rows if len(rows) > 1 else []
+
+
+#: The log's rows in the window: under the place's name, above the art. The
+#: art (station, planet, contact) starts about a quarter of the way down.
+RESULT_LOG_TOP, RESULT_LOG_DEPTH = 4, 0.26
+
+
+def result_log_paint(p: "Palette", tint: tuple, shown: str | None = None) -> str:
+    """The log as bytes on its own glass in the canopy's window, beside the
+    console; nothing where there is no window. Ends at home, like the sky."""
+    if not wide_layout():
+        return ""
+    left = _box_outer_width() + 3  # where the window's own labels start
+    width = _OUTPUT_WIDTH - left - 1
+    rows = result_log_rows(p, width - 2, int(_OUTPUT_HEIGHT * RESULT_LOG_DEPTH) - RESULT_LOG_TOP, shown)
+    if not rows:
+        return ""
+    return "".join(f"{ESC}[{RESULT_LOG_TOP + number + 1};{left + 1}H" + glass(_pad(" " + row, width, "left"), tint)
+                   for number, row in enumerate(rows)) + f"{RESET}{ESC}[H"
 
 
 def _box_bottom_status(p: "Palette", inner: int, status: dict | None) -> str:
@@ -9569,7 +9633,7 @@ def deck_alert_rows(world: World) -> list[str]:
     costs = [fuel_cost_for_jump(here, world.by_id[sid], ship) for sid in here.connections]
     if costs and ship.fuel < min(costs):
         rows.append(alert("danger", "LOW FUEL", f"cheapest jump needs {min(costs)}",
-                          key_label("Y", "refuel 6cr/unit")))
+                          key_label("Y", f"refuel {FUEL_PRICE}cr/unit")))
     if has_contraband(world):
         rows.append(alert("caution", "Contraband aboard", "customs risk at this station",
                           key_label("D", "jettison")))
@@ -11488,7 +11552,7 @@ def trading_ledger_lines(world: World) -> list[str]:
     lines += table(
         ["", ""],
         [["Tank", f"{p.ink}{world.save.ship.fuel}/{fuel_capacity(world.save.ship)}{RESET} {p.slate}units{RESET}"],
-         ["Replacement fuel", f"{money(6)}{p.slate}/unit{RESET}"],
+         ["Replacement fuel", f"{money(FUEL_PRICE)}{p.slate}/unit{RESET}"],
          ["Crew wages", f"{money(wage)}{p.slate}/jump{RESET}"]],
         "ll", styles=[["label", "value"] for _ in range(3)], repeat_header=False)[1:]
     lines.append(section("LOCAL MARKET"))
@@ -11729,7 +11793,7 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
         checks.append(("CONTRACTS", "may take this cargo", "bad"))
     money = [("Receipts", quote["receipts"], "good"),
              (f"Cargo ({'hold basis' if use_hold else f'{quantity} bought'})", -quote["cargo_cost"], "bad"),
-             ("Fuel replacement", -quote["fuel"] * 6, "bad")]
+             ("Fuel replacement", -quote["fuel"] * FUEL_PRICE, "bad")]
     if quote["wages"]:
         money.append(("Wages", -quote["wages"], "bad"))
     if quote["margin"] is not None and quote["feasible"]:
@@ -11766,7 +11830,7 @@ def trade_route_lines(world: World, destination: int | None, commodity: str, qua
         previous = system
     lines.append(section("LEGS"))
     lines += table(["#", "LANDS AT", "FUEL", "DANGER", "REFUEL FIRST"], rows, "rlrrl", styles=styles)
-    lines.append(f"{p.slate}Shortest route; top-ups at 6cr/unit. Assumes the remembered price, enough buying demand "
+    lines.append(f"{p.slate}Shortest route; top-ups at {FUEL_PRICE}cr/unit. Assumes the remembered price, enough buying demand "
                  f"and intact cargo; market changes, encounters, repairs, fines and detours are excluded.{RESET}")
     return lines
 
@@ -12344,7 +12408,7 @@ def shipyard_lines(world: World) -> list[str]:
     ship, credits = world.save.ship, world.save.pilot.credits
     cells = _gauge_cells()
     lines = [f"{p.hull}{BOLD}{world.here.station_name.upper()}{RESET}  "
-             + "  ".join([chip("refuel", "6cr/unit"),
+             + "  ".join([chip("refuel", f"{FUEL_PRICE}cr/unit"),
                           chip("repair", f"{repair_cost_per_hp(ship)}cr/HP")])
              + (f"  {p.mint}{crew_name(world, 'engineer')} discounts repairs{RESET}" if ship.has_engineer else "")]
     lines.append(section("SHIP"))
@@ -12612,11 +12676,12 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
     # this one does not are given back to the sky.
     keep = (canopy and shown is not None and shown[0] == canopy_key(scene)
             and _OUT_COUNT - shown[3] <= CANOPY_ECHO_ALLOWANCE)
-    if not keep:
-        clear_screen()
+    # The clear waits until the frame is built. Sent first, it left the screen
+    # blank while a new canopy was computed: 0.64s at 132x50 (NetBBS gallery).
     header = _page_header(title, page, count)
     inner = _box_inner_width()
     status = _claim_status(title)
+    bordered = status["text"] if status is not None else None
     if _header_fits_border(header):
         lines = [_box_header(p, title, f"{page + 1}/{count}", alert=red_alert())]
     else:
@@ -12659,9 +12724,16 @@ def draw_page(p: Palette, title: str, rows: list[str], page: int, count: int) ->
             out(f"{ESC}[H" + canopy_paint(scene, _box_outer_width(), len(lines),
                                           range(min(len(lines), shown[1]), shown[2])))
         else:
-            out(canopy_paint(scene, _box_outer_width(), len(lines)))
+            sky = canopy_paint(scene, _box_outer_width(), len(lines))
+            clear_screen()
+            out(sky)
         tint = CANOPY_ALERT_GLASS if scene["kind"] == "combat" else CANOPY_GLASS
+        # Over the sky, every page: a page turn gives rows back to the sky,
+        # and a new result is news for the log (issue #46).
+        out(result_log_paint(p, tint, bordered))
         lines = [glass(line, tint) for line in lines]
+    elif not keep:
+        clear_screen()
     # A reveal belongs to arriving somewhere, not to every keypress: a screen
     # redrawn unchanged (a key that did nothing, a prompt reprinted) must cost
     # the caller nothing. Paging counts as arriving; pressing `X` twice does not.
@@ -13266,7 +13338,7 @@ def tracked_route_fuel_text(world: World) -> str | None:
     text = f"{plural(plan['jumps'], 'jump')}, {plan['total']} fuel; tank {world.save.ship.fuel}"
     if plan["over"]:
         return text + "; a leg needs more than a full tank"
-    text += f", buy {plan['buy']} ({plan['buy'] * 6}cr)" if plan["buy"] else ", enough"
+    text += f", buy {plan['buy']} ({plan['buy'] * FUEL_PRICE}cr)" if plan["buy"] else ", enough"
     if plan["stops"]:
         text += f", then {plural(plan['stops'], 'refuel stop')} on the way"
     return text
@@ -13277,17 +13349,17 @@ def _refuel(p: Palette, world: World) -> str | None:
     room = fuel_capacity(ship) - ship.fuel
     if room <= 0:
         return set_status("Tanks are already full.", "info")
-    affordable = world.save.pilot.credits // 6
+    affordable = world.save.pilot.credits // FUEL_PRICE
     max_qty = max(0, min(room, affordable))
     if max_qty <= 0:
-        return set_status("Not enough credits to buy fuel (6cr/unit).", "bad")
+        return set_status(f"Not enough credits to buy fuel ({FUEL_PRICE}cr/unit).", "bad")
     plan = tracked_route_fuel(world)
     route = (f"tracked #{plan['mission'].id} needs {plan['buy']}; " if plan and plan["buy"] and not plan["over"] else "")
-    out_prompt(f"{p.muted}Fuel to buy (6cr/unit; {route}Enter buys {max_qty} for {max_qty * 6}cr, Esc cancels): {RESET}")
+    out_prompt(f"{p.muted}Fuel to buy ({FUEL_PRICE}cr/unit; {route}Enter buys {max_qty} for {max_qty * FUEL_PRICE}cr, Esc cancels): {RESET}")
     qty = read_quantity(max_qty, max_qty, max_len=4)
     if qty <= 0:
         return
-    cost = qty * 6
+    cost = qty * FUEL_PRICE
     world.save.pilot.credits -= cost
     _ledger(world).fuel_spend += cost
     ship.fuel += qty
@@ -13622,7 +13694,7 @@ def mission_details(world: World, mission: Mission) -> list[str]:
         leg = fuel_cost_for_jump(world.by_id[previous], world.by_id[sid], world.save.ship)
         max_leg, fuel, previous = max(max_leg, leg), fuel + leg, sid
     aboard_fuel = world.save.ship.fuel
-    fuel_cash = max(0, fuel - aboard_fuel) * 6
+    fuel_cash = max(0, fuel - aboard_fuel) * FUEL_PRICE
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     wages = wage * len(path)
     checks: list[tuple[str, str, str]] = []
@@ -13834,7 +13906,7 @@ def pilot_guide_lines(world: World) -> list[str]:
         lines.append("First Flight needs an affordable cargo and return-fuel budget while still at Freeport on day zero. The guide remains available anywhere.")
     lines += [
         "1. Buy cargo: [M] Market, choose the commodity's letter, [P] Purchase, enter a quantity. Buying spends credits and needs free hold space. Enter with no quantity cancels.",
-        "2. Keep fuel: [Y] Yard, [R] Refuel. Each fuel unit costs 6 cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
+        f"2. Keep fuel: [Y] Yard, [R] Refuel. Each fuel unit costs {FUEL_PRICE} cr. Reserve enough for the outward and return jumps; keep credits for repairs and crew wages too.",
         "3. Depart: [C] Chart, select the destination's letter, then confirm its fuel cost and danger. A jump advances one day, uses fuel and charges wages. Browsing, trading and upgrades do not advance the day.",
         "4. Deliver a contract by docking with its full cargo. Ordinary trading instead uses [M] Market, commodity letter, [S] Sell. Sales pay less than the local buy quote; distant prices can change.",
         f"5. First upgrade: [Y] Yard, [{YARD_LETTERS[list(UPGRADES).index('cargo')]}] Cargo Bay Expansion adds 8 cargo spaces. [{YARD_LETTERS[list(UPGRADES).index('hull')]}] Hull Reinforcement adds 35 maximum hull. Keep travel money before investing.",
@@ -13864,7 +13936,7 @@ def _screen_opening_offer(p: Palette, world: World, offer: Mission) -> bool:
     wage = sum(info["wage"] for role, info in CREW_ROLES.items() if getattr(world.save.ship, f"has_{role}"))
     lines = ["Freeport merchants need a reliable new pilot. First Flight sponsors one delivery; acceptance also tracks it."]
     lines += mission_details(world, offer)
-    lines += [f"Reserve {2 * fuel} fuel for delivery and return; {world.save.ship.fuel} aboard. Fuel replacement costs {12 * fuel} cr for both jumps.",
+    lines += [f"Reserve {2 * fuel} fuel for delivery and return; {world.save.ship.fuel} aboard. Fuel replacement costs {2 * fuel * FUEL_PRICE} cr for both jumps.",
               f"Current crew: {wage} cr per jump, {2 * wage} cr for delivery and return.",
               "Payment covers the quoted three units, round-trip fuel and current crew wages plus 200 cr. Detours, repairs, encounters and later prices can change your result.",
               "No deadline. This uses one active-contract slot. Abandonment closes First Flight for this career; the guide stays available.",
@@ -14022,7 +14094,7 @@ def navigation_budget_lines(world: World, path: list[int], *, public_target: int
             refuel = f"{p.wrong}needs {burn}, over tank{RESET}"
         elif tank < burn:
             name = previous.name if previous.discovered or previous.id == public_target else f"uncharted ({previous.x},{previous.y})"
-            refuel = f"{p.gold}+{burn - tank} at {_mission_plain(name)}, {(burn - tank) * 6}cr{RESET}"
+            refuel = f"{p.gold}+{burn - tank} at {_mission_plain(name)}, {(burn - tank) * FUEL_PRICE}cr{RESET}"
             stops += 1
             tank = burn
         name = station.name if station.discovered or sid == public_target else f"Uncharted ({station.x},{station.y})"
@@ -14032,7 +14104,7 @@ def navigation_budget_lines(world: World, path: list[int], *, public_target: int
         styles.append(["label", "value", "value", "value", "value"])
         tank = max(0, tank - burn)
         previous = station
-    fuel_cash = max(0, total_fuel - world.save.ship.fuel) * 6
+    fuel_cash = max(0, total_fuel - world.save.ship.fuel) * FUEL_PRICE
     wages = wage * len(path)
     cash = fuel_cash + wages
     checks = []
@@ -14057,7 +14129,7 @@ def navigation_budget_lines(world: World, path: list[int], *, public_target: int
         lines += table(["#", "LANDS AT", "FUEL", "DANGER", "REFUEL FIRST"], rows, "rlrrl", styles=styles)
     if world.save.ship.has_engineer and crew_level(world.save.ship, "engineer") < 3:
         lines.append("Fuel budget uses current crew skill; a promotion can reduce later jumps' fuel cost.")
-    lines.append(f"{p.slate}Budget assumes retained crew and 6cr/unit refuelling, which is manual. Cargo, repairs, "
+    lines.append(f"{p.slate}Budget assumes retained crew and {FUEL_PRICE}cr/unit refuelling, which is manual. Cargo, repairs, "
                  f"encounters, detours and other income/spending are excluded.{RESET}")
     return [line if (ANSI_ESCAPE_RE.search(line) or line.startswith((SECTION_MARK, STICKY_MARK, MEMBER_MARK)))
             else _mission_plain(line) for line in lines]
@@ -14529,6 +14601,7 @@ def screen_career_finale(p: Palette, world: World) -> str | None:
         label = CAREER_FINALES[selected]["label"]
         retired_ship = dataclasses.replace(world.save.ship)  # the ship that flew this career, for its portrait
         world.reset(fresh.save)
+        clear_result_log()  # New Game+ begins in this same session (#51 review)
         world.pending_promotions.extend(fresh.pending_promotions)
         world.pending_accolades.extend(fresh.pending_accolades)
         world.commit()
