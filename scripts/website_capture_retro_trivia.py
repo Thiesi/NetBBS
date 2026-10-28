@@ -78,8 +78,9 @@ def capture(screen: str) -> str:
                 letter = _right_letter(table, *_asked(running.read(), number))
                 running.press(letter.encode())
         raw = running.read()
-        # This scrolling game keeps its title above the question. Keep the
-        # complete output so the terminal emulator shows what the caller sees.
+        # Since v1.4.0 each question in colour opens on a cleared screen, with
+        # the verdict on the previous answer above its card. Keep the complete
+        # output so the terminal emulator shows what the caller sees.
         marker = {"question": "QUESTION 1 OF 5", "streak": f"QUESTION {STREAK + 1} OF 5"}.get(
             screen, "CHOOSE YOUR ROUND")
         if marker not in _plain(raw):
