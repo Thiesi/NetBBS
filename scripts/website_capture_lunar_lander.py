@@ -60,6 +60,7 @@ PINS = {
     "v0.5.1": "33ff9d9b9e52eff38dedafeb717f79fda14c1338d314851091c9d6b5b6d971ea",
     "v0.7.1": "612eff2bc9c6b3048cd4637f783bb78ae84dd49e9877fbf8dfc08eded89643ff",
     "v0.7.2": "caccdd55d3631b3b82620e042bf2d7e5257c54cc316bb23b2757d18400bf05fb",
+    "v0.7.3": "b89b26921fb86c0b02875fa1ddb59e50356a5df3a211129b394841b159ccf5da",
 }
 DAY = "2026-10-24"
 EVENING = "T20:00:00+00:00"
@@ -84,6 +85,11 @@ SCREENS = ("splash", "briefing", "flying", "approach", "launch", "touchdown", "d
            "record", "achievements", "program")
 TOUCHDOWN_AGE = 1.4       # seconds into the landing scene: dust settling, flag up
 LAUNCH_AGE = 1.6          # seconds into the launch scene: GO FOR DESCENT on screen
+# Things sharing a line take turns by the display's clock, which is the real
+# monotonic clock unless pinned. Each screen's turn is pinned, so a recapture
+# shows the same one: the debrief's third achievement, Fuel Miser, and the
+# Achievements tab's descriptions rather than its dates.
+TURNS = {"debrief": 2, "achievements": 1}
 
 
 class PinnedTime:
@@ -346,8 +352,10 @@ def deck(g, game):
     return g.Deck(**values)
 
 
-def draw(g, game) -> str:
+def draw(g, game, screen: str) -> str:
     display = g.Display(game.host)
+    if hasattr(g, "TURN_SECONDS"):
+        display.clock = lambda: TURNS.get(screen, 0) * g.TURN_SECONDS
     canvas = display.draw(game.flight, game.mode, None, False, game.mission, game.standings,
                           game.record_note, game.scene_age, "DAILY RESET: midnight / UTC",
                           game.missions, deck(g, game))
@@ -374,7 +382,7 @@ def played_frame(g, screen: str) -> str:
                     game.key("right")
                     for _ in range(ACHIEVEMENT_SCROLL):
                         game.key("down")
-            return draw(g, game)
+            return draw(g, game, screen)
         if screen == "approach":
             def low(game):
                 pad = game.flight.terrain.pad
@@ -383,13 +391,13 @@ def played_frame(g, screen: str) -> str:
             game = play(g, records, 1, HANDLE, CAPTAIN, stop=low)
             if game.mode != "flying":
                 raise SystemExit(f"the approach ended before the photograph: {game.flight.reason}")
-            return draw(g, game)
+            return draw(g, game, screen)
         if screen == "launch":
             game = play(g, records, 1, HANDLE, CAPTAIN,
                         stop=lambda game: game.mode == "launch" and game.scene_age >= LAUNCH_AGE)
             if game.mode != "launch":
                 raise SystemExit(f"no launch scene before the flight: {game.mode}")
-            return draw(g, game)
+            return draw(g, game, screen)
         game = play(g, records, 1, HANDLE, CAPTAIN)
         if game.flight.status != "landed":
             raise SystemExit(f"the capture flight did not land: {game.flight.reason}")
@@ -397,14 +405,14 @@ def played_frame(g, screen: str) -> str:
             if game.mode != "landing":
                 raise SystemExit(f"no landing scene after touchdown: {game.mode}")
             game.tick(TOUCHDOWN_AGE, True)
-            return draw(g, game)
+            return draw(g, game, screen)
         debrief(g, game)
         if screen == "scores":
             game.key("m")
             game.key("b")
             if game.mode != "scores" or len(game.standings) < 2:
                 raise SystemExit("the best-pilots board did not open with rows")
-        return draw(g, game)
+        return draw(g, game, screen)
     finally:
         records.close()
         for path in sorted(folder.rglob("*"), reverse=True):
