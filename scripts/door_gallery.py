@@ -195,6 +195,11 @@ WALKS: dict[str, list[tuple[str, bytes]]] = {
         # offer's last page, which can be page 1 or a later one; N past the
         # last page stays on it.
         ("Mission Board, a contract just accepted", b"B1" + b"N" * 8 + b"A"),
+        # Back on the deck the border has let that result go, and from 130
+        # columns the window beside the console lists it under RECENT (v1.7.1).
+        # The log lasts a session, so only a walk that sets a result and then
+        # moves on can show it.
+        ("Command Deck, after a result", b"B1" + b"N" * 8 + b"AB"),
         # A delivery waiting for cargo adds the market's NEED column and its
         # "Contracts need:" line, and a pilot who has docked elsewhere gets
         # PRICE MEMORY under the table, which can take a page of its own.
