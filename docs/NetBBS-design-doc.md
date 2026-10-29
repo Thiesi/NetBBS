@@ -47,8 +47,8 @@ reading this design reference first.
 - Phase 7 has native, DOSBox-X, VM (qemu) and remote door adapters, four bundled games,
   companion services, and door API 4 with optional outbound board posting and
   chat lines. Compatibility is bounded to the documented host/game profiles.
-- Phase 6 has Link Communities (#1310). Delegated Link moderation is decided
-  (§16, #1357) but not built; the rest of Phase 6 and the remaining deferred
+- Phase 6 has Link Communities (#1310) and delegated Link moderation (§16,
+  #1357, built in #1359). The rest of Phase 6 (§15) and the remaining deferred
   protocol features are future work, and current issues track their scope.
 
 Implementation status belongs beside the relevant design rule in its area file and must be

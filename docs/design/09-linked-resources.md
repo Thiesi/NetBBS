@@ -348,8 +348,8 @@ moderator_edit_if_linked` ever builds and signs the event. A carrying
 stays purely local and is never propagated — it has no origin authority to
 assert an edit the rest of the network would recognize. Linked-board
 moderator *grants and revocations* (a network-visible delegation of that
-authority to non-origin nodes) remain out of scope, unchanged from this
-section's prior framing.
+authority to non-origin nodes) are not part of these event types; they are the
+delegated-moderator mechanism described at the end of this section.
 
 **`board_post_tombstone`.** Also extends the per-post chain, as a terminal
 entry — no further `board_post_edit`/`board_post_moderator_edit`/a second
@@ -397,12 +397,13 @@ signature against its current signing key. None invents a new authorization
 primitive — they reuse the origin's existing signing identity and, for the
 two post-scoped types, an already-existing local permission check.
 
+Delegated moderators for linked boards and channels, which let a non-origin
+node's moderator act across the Link instead of only the origin asserting a
+moderator edit or tombstone as above, are built (§16, issue #1357, #1359); the
+decision records the roster, signing and reach rules.
+
 Still future or incomplete:
 
-- linked-board moderator grants and revocations (delegating origin-recognized
-  moderator authority to a non-origin node, rather than only the origin
-  itself ever asserting a moderator edit/tombstone, as above) -- decided in
-  §16, issue #1357, not yet built;
 - general public-network anti-entropy beyond the current bounded
   full-known-ID inventory exchange;
 - Link-blanket governance surfaces and audit feeds (Phase 6).
