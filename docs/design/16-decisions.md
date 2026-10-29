@@ -87,7 +87,7 @@ Each decision lives in its own file under [`decisions/`](decisions/), named afte
 | #1302 | [audible chat bells](decisions/1302-audible-chat-bells.md) | decided |
 | #1308 | [Link Communities](decisions/1308-link-communities.md) | decided |
 | #1354 | [the New Year and clock changes in chat](decisions/1354-the-new-year-and-clock-changes-in-chat.md) | decided |
-| #1357 | [Link moderation: delegated moderators for linked boards and channels](decisions/1357-link-moderation-delegated-moderators-for-linked.md) | decided |
+| #1357 | [Link moderation: delegated moderators for linked boards and channels](decisions/1357-link-moderation-delegated-moderators-for-linked.md) | decided and built |
 | #1368 | [Link DMs: cross-node `/dm` direct chats](decisions/1368-link-dms-cross-node-dm-direct-chats.md) | decided and built |
 | #1372 | [private bot replies](decisions/1372-private-bot-replies.md) | decided |
 | #1373 | [titled block replies for bots](decisions/1373-titled-block-replies-for-bots.md) | decided |

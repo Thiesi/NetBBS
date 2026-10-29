@@ -1,4 +1,4 @@
-# Issue #1357 — Link moderation: delegated moderators for linked boards and channels — decided
+# Issue #1357 — Link moderation: delegated moderators for linked boards and channels — decided and built
 
 A decision recorded in [§16](../16-decisions.md) of the [NetBBS design](../../NetBBS-design-doc.md).
 

@@ -397,12 +397,13 @@ signature against its current signing key. None invents a new authorization
 primitive — they reuse the origin's existing signing identity and, for the
 two post-scoped types, an already-existing local permission check.
 
+Delegated moderators for linked boards and channels, which let a non-origin
+node's moderator act across the Link instead of only the origin asserting a
+moderator edit or tombstone as above, are built (§16, issue #1357, #1359); the
+decision records the roster, signing and reach rules.
+
 Still future or incomplete:
 
-- linked-board moderator grants and revocations (delegating origin-recognized
-  moderator authority to a non-origin node, rather than only the origin
-  itself ever asserting a moderator edit/tombstone, as above) -- decided in
-  §16, issue #1357, not yet built;
 - general public-network anti-entropy beyond the current bounded
   full-known-ID inventory exchange;
 - Link-blanket governance surfaces and audit feeds (Phase 6).
