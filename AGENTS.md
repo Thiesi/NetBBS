@@ -1,13 +1,12 @@
 # NetBBS — developer project notes
 
 NetBBS is a modern, TCP/IP-native BBS with an ad-hoc mesh network
-(**NetBBS Link**). Phases 1–3 are complete. Phase 4 (trust, reputation, and
-public-readiness) is implemented; its public-readiness gate (issue #131)
-stays open pending human/operational validation, not further code-level
-work. Phase 5 (real-time Link chat) is active: Noise XX transport
-authentication and the first real-time linked-channel chat vertical
-(issue #148) are shipped, released as v5.0.0. Node-wide presence and
-per-message trust-filtered scrollback (issue #164) shipped in v5.3.0.
+(**NetBBS Link**). It is feature complete for now (see the freeze notice under
+"Development direction"). NetBBS Link remains private, experimental
+federation: public readiness waits on issue #131's human/operational checks
+and sustained dogfood (#83), and independent implementation compatibility is
+unclaimed (#71). The current status and roadmap live in
+`docs/NetBBS-design-doc.md`; this file does not track them.
 
 ## Start here
 
@@ -254,65 +253,37 @@ The standing principle is:
 
 ## Current scope summary
 
-The local BBS includes boards, files, chat, mail, Communities, permissions,
-moderation, identity attestation, SysOp tools, ANSI/TUI editors, registration,
-and update infrastructure.
+A short orientation, not the status record. `docs/NetBBS-design-doc.md`
+(current status) and design §15 (roadmap) are authoritative and are updated in
+place; when this summary disagrees with them, they win and this file needs
+fixing.
 
-Phase 3 (Link connectivity and asynchronous services) is complete: node-key
-lifecycle, canonical event bytes, hello/endpoint protocol, configured-seed
-sync and peer exchange, persistent peer/event state with restart
-reconstruction, foreground/background database lanes, linked boards/
-channels/file areas/mail with genesis/materialization/origin-succession
-where applicable, tier-1 Link messages, authenticated inventory/pull catch-up
-across every content kind, and WAN reachability (reliability scoring, relay
-consent/selection, bounded relay mailboxes).
+The local BBS is complete: boards, files, chat, mail, Communities,
+permissions, moderation, identity attestation, SysOp tools, ANSI/TUI editors,
+registration, and self-update, reachable over SSH, Telnet and a browser
+terminal. Optional bridges to external networks exist for MRC chat, FTN
+(FidoNet-technology networks) and QWK/QWKnet.
 
-Phase 4 (local trust/reputation policy, signed trust-signal/vouch
-subscriptions, enforcement across every Link boundary, SysOp
-explanation/override/recovery workflows, and remote age/name attestation)
-is implemented. Its public-readiness gate (issue #131) stays open: the
-automated adversarial-validation evidence is complete, but a manual
-recovery exercise, independently administered multi-node validation, and
-continued sustained dogfood (issue #83) remain pending — human/operational
-work, not further code-level validation.
+NetBBS Link (Phases 3-6) has signed identity, discovery, persistent events and
+peers, linked boards/channels/file areas, mail, inventory/pull catch-up, relays
+for outgoing-only nodes, local trust/reputation and quarantine, authenticated
+real-time chat (Noise XX) with presence, scrollback-on-join, live private
+messages and cross-node `/dm` chats, Link Communities, and delegated Link
+moderation. Deliberately deferred or not built: simultaneous background
+channel memberships, and the remaining Phase 6 governance items listed in §15.
+Phase 4's public-readiness gate (#131) stays open: the automated adversarial
+validation evidence is complete, but a manual recovery exercise,
+independently administered multi-node validation and sustained dogfood (#83)
+are human/operational work, not further code-level validation.
 
-Phase 5 (real-time Link chat) is active. Shipped: Noise XX transport
-authentication and the first real-time linked-channel chat vertical (issue
-#148) — direct sessions and one linked channel, live; node-wide presence and
-per-message trust-filtered scrollback (issue #164, v5.3.0); trusted
-scrollback-on-join (issue #194) — a freshly-subscribing peer gets a bounded,
-ephemeral catch-up snapshot of the origin's own recent scrollback alongside
-the existing presence snapshot. Not yet built: multiple simultaneous channel
-memberships with background/unread delivery (investigated and deliberately
-deferred — no observable benefit over the existing durable unread-count
-model). Live relay for two mutually-unreachable nodes and Link-wide live
-direct messages (`/msg user@node-fingerprint`, issue #168) shipped with the
-reliable-nodes onboarding (issue #219): a raw-socket proxy below Noise at any
-full peer with relay serving on, anchored at the reliable nodes; chained
-two-relay bridges plus anchor advertisement and cross-node `/private`
-followed (issue #270). Still not built: cross-node `/dm` invites. The MRC
-gateway scoped in issue #165 shipped as issue #275: `netbbs.mrc`, an
-opt-in per-channel bridge to the external Multi Relay Chat network, with
-DB-backed SysOp configuration and no change to Link's own protocol.
+Doors (Phase 7) run as supervised subprocesses under the same OS user, with
+native, DOSBox-X, VM-hosted and remote adapters, door API 4 with optional
+outbound posting, companion services, and four bundled games vendored from
+their own repositories. Compatibility is bounded to the host/game profiles in
+`docs/NetBBS-door-guide.md`.
 
-Phase 7's first vertical (issue #172, closed — supersedes #63/#167, both
-closed) shipped in v5.4.0: a native door-game execution model (subprocess
-isolation under the same OS user, `resource.setrlimit` CPU/memory/
-process-count ceilings, an async wall-time watchdog, and unconditional
-reap on every exit path) behind a deliberately minimal, drop-file-shaped
-v1 API, plus two real bundled doors proving the pipeline end to end —
-Retro Trivia and Voidrunner, the latter a full persistent space-trading
-game after several post-launch expansion and hardening rounds. Issue #296
-extends this with native legacy profiles, DOSBox-X and remote RLogin adapters;
-#297 adds explicit browser door mode. External installations remain manual.
-Consult `docs/NetBBS-door-guide.md` for the bounded verification matrix,
-setup templates and outstanding platform/game certification limits.
-
-It does **not** yet imply public federation, Phase 4's public-readiness gate
-being closed, Phase 5 complete beyond its first vertical, Phase 6 (advanced
-governance/Link Communities) work, or universal legacy-door compatibility.
-Check the design document and open issues for the current roadmap
-rather than extending this summary.
+None of this implies public federation, a closed Phase 4 gate, or universal
+legacy-door compatibility.
 
 <!-- moradin-forge:start -->
 ## Moradin's Forge
