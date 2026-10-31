@@ -26,7 +26,9 @@ web/
   netbbs-lunar-lander.html -> https://www.netbbs.org/lunar-lander.html
   game-scenes.js        -> https://www.netbbs.org/game-scenes.js
   blacksite-hero.png     -> https://www.netbbs.org/blacksite-hero.png
-  blacksite-interface-mockup.png -> https://www.netbbs.org/blacksite-interface-mockup.png
+  blacksite-sodium-row.png -> https://www.netbbs.org/blacksite-sodium-row.png
+  blacksite-tin-halo.png -> https://www.netbbs.org/blacksite-tin-halo.png
+  blacksite-lattice.png  -> https://www.netbbs.org/blacksite-lattice.png
   lunar-lander-hero.jpg  -> https://www.netbbs.org/lunar-lander-hero.jpg
   favicon.ico            -> https://www.netbbs.org/favicon.ico   the icon: a
   favicon.svg            -> https://www.netbbs.org/favicon.svg   terminal with a
@@ -89,7 +91,7 @@ and the exact copy-and-install steps are operational details. They live in the
 maintainer's private operations notes, not in this public repository.
 
 The individual game pages also need `game-scenes.js`, the two hero images and
-`blacksite-interface-mockup.png` at the site root, under the exact names in
+Blacksite's three planned-look screens at the site root, under the exact names in
 the map above. Copy each of them and verify its hash alongside the HTML. The `shots/` files are source captures embedded into HTML;
 they do not need to be served for the game pages to work.
 
@@ -234,7 +236,7 @@ is bundled since NetBBS 7.41.0, and its page shows captures of the release
 NetBBS bundles. Blacksite is
 in development and not yet released: its page separates what is built from
 what is still coming and labels the status. It shows no terminal captures,
-only its labelled concept art and a labelled mockup of the planned interface.
+only its labelled concept art and three labelled screens of its planned look.
 Never manufacture a screenshot, and never let a mockup pass for one.
 Their banners are copied without modification from
 `Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
@@ -245,11 +247,16 @@ no captures at all may declare
 then requires labelled artwork and no terminal captures. Blacksite's page
 declares it.
 
-`blacksite-interface-mockup.png` is copied without modification from
-`Thiesi/Blacksite` at commit `c351cac254382d3bcae8644680b70f91e26c0500`,
-`docs/design/proposals/68-presentation/target/tin-halo-scene-132x50-truecolor.png`:
-a design target for the Tin Halo scene at 132 x 50 in truecolor, not a frame
-the game draws. Its caption and alt text say so.
+`blacksite-sodium-row.png`, `blacksite-tin-halo.png` and `blacksite-lattice.png`
+are copied without modification from `Thiesi/Blacksite` at commit
+`e04d31c`, `docs/assets/website/` (`sodium-row-night-`, `tin-halo-scene-` and
+`lattice-sodium-row-132x50-truecolor.png`). They are design targets for one
+evening in Sodium Row at 132 x 50 in truecolor, not frames the game draws, and
+their captions and alt text say so. The lamp light and the painted scene view are
+planned work. Blacksite's own README there says what is real and what is planned.
+Captions keep to the game's voice, which avoids the words cyberpunk, hacker and
+cyberspace. They replace `blacksite-interface-mockup.png`, an earlier Tin Halo
+target from commit `c351cac2`.
 
 Blacksite's page showed three screenshots until the maintainer asked for them
 to be removed; their raw and converted files went with them. The helper that
