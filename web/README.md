@@ -93,7 +93,7 @@ and the exact copy-and-install steps are operational details. They live in the
 maintainer's private operations notes, not in this public repository.
 
 The individual game pages also need `game-scenes.js`, the two hero images and
-Blacksite's three planned-look screens at the site root, under the exact names in
+Blacksite's two planned-look screens and three illustrated maps at the site root, under the exact names in
 the map above. Copy each of them and verify its hash alongside the HTML. The `shots/` files are source captures embedded into HTML;
 they do not need to be served for the game pages to work.
 
@@ -238,7 +238,8 @@ is bundled since NetBBS 7.41.0, and its page shows captures of the release
 NetBBS bundles. Blacksite is
 in development and not yet released: its page separates what is built from
 what is still coming and labels the status. It shows no terminal captures,
-only its labelled concept art and three labelled screens of its planned look.
+only its labelled concept art, two labelled screens of its planned look and
+three labelled illustrated maps.
 Never manufacture a screenshot, and never let a mockup pass for one.
 Their banners are copied without modification from
 `Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
@@ -255,6 +256,8 @@ modification from `Thiesi/Blacksite` at commit `e04d31c`,
 `lattice-sodium-row-132x50-truecolor.png`). They are design targets for one
 evening in Sodium Row at 132 x 50 in truecolor, not frames the game draws, and
 their captions and alt text say so. The painted scene view is planned work.
+They replace `blacksite-interface-mockup.png`, an earlier Tin Halo
+target from commit `c351cac2`.
 A third screen, `blacksite-sodium-row.png` (the street), was replaced by the maps
 below.
 
@@ -264,10 +267,10 @@ below.
 `karst-by-ringlight.jpg` and `karst-transit-map.png`). They are illustrated maps,
 not game screens; the in-game City Map is still planned, and their captions and
 alt text say so. The transit map is on light paper, so the page frames it in a
-light mat. Blacksite's own README there says what is real and what is planned.
-Captions keep to the game's voice, which avoids the words cyberpunk, hacker and
-cyberspace. They replace `blacksite-interface-mockup.png`, an earlier Tin Halo
-target from commit `c351cac2`.
+light mat.
+
+Blacksite's own README says what is real and what is planned. Captions keep
+to the game's voice, which avoids the words cyberpunk, hacker and cyberspace.
 
 Blacksite's page showed three screenshots until the maintainer asked for them
 to be removed; their raw and converted files went with them. The helper that
