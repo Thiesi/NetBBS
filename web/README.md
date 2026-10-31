@@ -26,7 +26,9 @@ web/
   netbbs-lunar-lander.html -> https://www.netbbs.org/lunar-lander.html
   game-scenes.js        -> https://www.netbbs.org/game-scenes.js
   blacksite-hero.png     -> https://www.netbbs.org/blacksite-hero.png
-  blacksite-sodium-row.png -> https://www.netbbs.org/blacksite-sodium-row.png
+  blacksite-karst-city-map.png -> https://www.netbbs.org/blacksite-karst-city-map.png
+  blacksite-karst-by-ringlight.jpg -> https://www.netbbs.org/blacksite-karst-by-ringlight.jpg
+  blacksite-karst-transit-map.png -> https://www.netbbs.org/blacksite-karst-transit-map.png
   blacksite-tin-halo.png -> https://www.netbbs.org/blacksite-tin-halo.png
   blacksite-lattice.png  -> https://www.netbbs.org/blacksite-lattice.png
   lunar-lander-hero.jpg  -> https://www.netbbs.org/lunar-lander-hero.jpg
@@ -247,13 +249,22 @@ no captures at all may declare
 then requires labelled artwork and no terminal captures. Blacksite's page
 declares it.
 
-`blacksite-sodium-row.png`, `blacksite-tin-halo.png` and `blacksite-lattice.png`
-are copied without modification from `Thiesi/Blacksite` at commit
-`e04d31c`, `docs/assets/website/` (`sodium-row-night-`, `tin-halo-scene-` and
+`blacksite-tin-halo.png` and `blacksite-lattice.png` are copied without
+modification from `Thiesi/Blacksite` at commit `e04d31c`,
+`docs/assets/website/` (`tin-halo-scene-` and
 `lattice-sodium-row-132x50-truecolor.png`). They are design targets for one
 evening in Sodium Row at 132 x 50 in truecolor, not frames the game draws, and
-their captions and alt text say so. The lamp light and the painted scene view are
-planned work. Blacksite's own README there says what is real and what is planned.
+their captions and alt text say so. The painted scene view is planned work.
+A third screen, `blacksite-sodium-row.png` (the street), was replaced by the maps
+below.
+
+`blacksite-karst-city-map.png`, `blacksite-karst-by-ringlight.jpg` and
+`blacksite-karst-transit-map.png` are copied without modification from
+`Thiesi/Blacksite` at commit `98e775a`, `docs/assets/website/` (`karst-city-map.png`,
+`karst-by-ringlight.jpg` and `karst-transit-map.png`). They are illustrated maps,
+not game screens; the in-game City Map is still planned, and their captions and
+alt text say so. The transit map is on light paper, so the page frames it in a
+light mat. Blacksite's own README there says what is real and what is planned.
 Captions keep to the game's voice, which avoids the words cyberpunk, hacker and
 cyberspace. They replace `blacksite-interface-mockup.png`, an earlier Tin Halo
 target from commit `c351cac2`.
