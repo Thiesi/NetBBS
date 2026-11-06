@@ -380,17 +380,14 @@ def test_no_write_lock_is_held_while_the_first_pass_waits_on_a_relay_dial(tmp_pa
     assert probe["error"] is None, f"the write lock was held during the dial: {probe['error']}"
 
 
-def test_a_lane_job_that_leaves_a_transaction_open_is_caught():
+def test_a_lane_job_that_leaves_a_transaction_open_is_caught(tmp_path):
     """The class guard: in strict mode (the whole suite) a lane job that
     returns with a transaction open fails; in production it is committed
     and logged, so a missed commit can never hold the write lock."""
-    import tempfile
-    from pathlib import Path
-
     import netbbs.storage.execution as execution_module
     from netbbs.storage.execution import DatabaseLane, LeakedTransactionError
 
-    path = Path(tempfile.mkdtemp()) / "lane.db"
+    path = tmp_path / "lane.db"
     Database(path).close()
 
     def leaky(db):

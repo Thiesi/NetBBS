@@ -180,6 +180,13 @@ The standing principle is:
   before tagging, not after. Also run the full check on a PR that changes
   shared machinery every test goes through (`tests/conftest.py`, the database
   layer, migrations, `Session` output).
+- **Keep local scratch bounded.** Millions of leftover files can take a
+  development machine down. Leave `--basetemp` out or use `.test-tmp/pytest`;
+  the suite refuses any other name inside the checkout. Anything that makes a
+  temp folder removes it when it finishes. Remove a worktree when its PR merges,
+  keep worktrees outside any synced folder, and commit and push work early,
+  because a worktree is the one place work can be lost. `python
+  scripts/clean_scratch.py --report` shows what has piled up.
 - **Use real boundaries.** Real SQLite files/connections for transactions,
   real loopback sockets for transports, serialization and restart for Link
   state, and the deterministic multi-node harness for ordering/partition

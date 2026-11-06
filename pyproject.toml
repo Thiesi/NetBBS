@@ -17,7 +17,8 @@ dependencies = [
 # Optional OpenAI-compatible chatbot endpoint client (also supplied by web).
 bots = ["aiohttp>=3.9"]
 dev = [
-    "pytest>=7.0",
+    # 7.3: the tmp_path retention settings below.
+    "pytest>=7.3",
     # `pytest -n auto`: the suite is parallel-safe (see the worklog's
     # testing policy) and runs roughly ten times faster that way.
     "pytest-xdist>=3.0",
@@ -75,6 +76,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A passing test's files go when it ends and only the latest run is kept, so
+# runs can't pile up in the temp folder. tests/scratch_guard.py has the rest.
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 # "." (repo root): makes `services.managed_dns` importable (issue #201)
 # -- that package deliberately lives outside src/ (see its own __init__
 # docstring for why) so [tool.setuptools.packages.find] never packages

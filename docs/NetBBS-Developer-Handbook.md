@@ -982,9 +982,11 @@ Choose the relevant command, rather than running both for unrelated changes.
 For the full suite, use `python -m pytest -n auto --dist worksteal`, then
 `python -m pytest -m timing_sensitive` for the tests a parallel run skips.
 A PR needs its targeted tests; the full check runs once before each release
-(see `AGENTS.md`). On Windows, a writable test temp
-directory and `-p no:cacheprovider --basetemp=<path>` can avoid sandbox/temp
-permission problems. Use a disposable basetemp directory; pytest manages it.
+(see `AGENTS.md`). On Windows, `-p no:cacheprovider --basetemp=.test-tmp/pytest`
+can avoid sandbox/temp permission problems. Use that one name: each run replaces
+it, while pytest never cleans a new name, so the suite refuses any other basetemp
+inside the checkout. `python scripts/clean_scratch.py` removes test scratch, and
+`--report` counts it across every worktree without deleting anything.
 
 For doors, inspect [runtime tests](../tests/test_doors_runtime.py),
 [resize tests](../tests/test_doors_resize.py),
