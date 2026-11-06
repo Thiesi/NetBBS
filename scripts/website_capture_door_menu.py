@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import json
 import pathlib
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -70,6 +72,7 @@ def preset(name: str) -> dict:
 
 async def capture() -> str:
     tmp = Path(tempfile.mkdtemp(prefix="netbbs-shot-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(tmp / "node.db")
     lane = DatabaseLane(db.path)
     try:

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import atexit
 import re
+import shutil
 import tempfile
 
 from door_gallery import Door, ROOT, load_door, remove
@@ -65,6 +67,7 @@ def _right_letter(table: list, question: str, choices: dict[str, str]) -> str:
 
 def capture(screen: str) -> str:
     state = Path(tempfile.mkdtemp(prefix="website-trivia-"))
+    atexit.register(shutil.rmtree, state, ignore_errors=True)
     running = None
     try:
         running = Door(DOOR, state, 80, 24,

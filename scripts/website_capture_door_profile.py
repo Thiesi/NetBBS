@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import json
 import pathlib
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -60,6 +62,7 @@ class CaptureSession(FakeSession):
 
 async def capture(template: str, title: str) -> str:
     tmp = Path(tempfile.mkdtemp(prefix="netbbs-shot-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(tmp / "node.db")
     lane = DatabaseLane(db.path)
     try:
