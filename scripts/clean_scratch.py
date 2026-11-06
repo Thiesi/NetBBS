@@ -30,6 +30,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
+from netbbs.rendering.reflow import print_wrapped  # noqa: E402
 from tests.scratch_guard import count_files, scratch_dirs, scratch_limit  # noqa: E402
 
 SKIP = {".git", ".venv", ".worktrees", "node_modules"}
@@ -135,7 +137,7 @@ def report(root: Path, temp: Path, limit: int) -> int:
     for tree, head in worktrees(root):
         main_tree = main_tree or tree
         if not tree.is_dir():
-            print(f"{'missing':>10}  {tree}  ** registered, but gone: `git worktree prune`")
+            print_wrapped(f"{'missing':>10}  {tree}  ** registered, but gone: `git worktree prune`")
             flagged += 1
             continue
         scratch = sum(count_files(path, UNLIMITED) for path in scratch_dirs(tree))
@@ -146,11 +148,11 @@ def report(root: Path, temp: Path, limit: int) -> int:
             notes.append("already on origin/main: can be removed")
         flagged += len(notes)
         suffix = f"  ** {'; '.join(notes)}" if notes else ""
-        print(f"{count_tree(tree):>10}  {tree}  (scratch {scratch}){suffix}")
+        print_wrapped(f"{count_tree(tree):>10}  {tree}  (scratch {scratch}){suffix}")
     for prefix in TEMP_PREFIXES + REPORTED_ONLY:
         folders = [path for path in temp.glob(prefix + "*") if path.is_dir()]
         if folders:
-            print(f"{len(folders):>10}  {temp / prefix}*")
+            print_wrapped(f"{len(folders):>10}  {temp / prefix}*")
     return flagged
 
 
@@ -162,16 +164,16 @@ def main() -> int:
     temp = Path(tempfile.gettempdir())
     if args.report:
         flagged = report(ROOT, temp, scratch_limit())
-        print(f"{flagged} flagged. Nothing was deleted.")
+        print_wrapped(f"{flagged} flagged. Nothing was deleted.")
         return 0
     failed = clean(ROOT)
-    print(f"{ROOT}: scratch removed.")
+    print_wrapped(f"{ROOT}: scratch removed.")
     if args.temp:
         removed, temp_failed = clean_temp(temp)
         failed += temp_failed
-        print(f"{temp}: {removed} old folders removed.")
+        print_wrapped(f"{temp}: {removed} old folders removed.")
     for path in failed[:20]:
-        print(f"  could not remove {path}")
+        print_wrapped(f"  could not remove {path}")
     return 1 if failed else 0
 
 

@@ -132,7 +132,8 @@ def test_temp_cleaning_takes_old_folders_with_our_prefixes_only(tmp_path):
         assert (tmp_path / kept).exists(), kept
 
 
-def test_the_report_flags_problems_and_deletes_nothing(checkout, tmp_path, capsys):
+def test_the_report_flags_problems_and_deletes_nothing(checkout, tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "1000")  # long temp paths would wrap across what it checks
     (checkout / ".test-tmp").mkdir()
     _files(checkout / ".test-tmp", 3)
     _git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
