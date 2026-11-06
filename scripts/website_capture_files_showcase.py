@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -106,6 +108,7 @@ class Node:
 
     def __init__(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="netbbs-files-shot-"))
+        atexit.register(shutil.rmtree, self.tmp, ignore_errors=True)
         self.db = Database(self.tmp / "node.db")
         stamps = iter(JOINED_AT)
         original = users_module.utc_now_iso

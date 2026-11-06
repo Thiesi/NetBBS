@@ -25,6 +25,7 @@ Two things it inherits that matter for a screenshot:
 from __future__ import annotations
 
 import argparse
+import atexit
 import pathlib
 import re
 import shutil
@@ -81,6 +82,7 @@ def capture_walk(door_name: str, label: str, width: int, height: int,
     fixture = gallery.base_fixture(door_name, door, cache, fresh, fixture_name)
 
     work = pathlib.Path(tempfile.mkdtemp(prefix="website-door-"))
+    atexit.register(shutil.rmtree, work, ignore_errors=True)
     try:
         state = work / "state"
         if label in gallery.FRESH.get(door_name, ()):

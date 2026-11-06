@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import dataclasses
 import datetime
 import random
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -100,6 +102,7 @@ class Node:
 
     async def _setup(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="netbbs-mrc-shot-"))
+        atexit.register(shutil.rmtree, self.tmp, ignore_errors=True)
         self.db = Database(self.tmp / "node.db")
         self.lane = DatabaseLane(self.db.path)
         self.fake = FakeMrcHub()

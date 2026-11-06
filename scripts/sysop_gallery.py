@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import html
 import pathlib
 import re
+import shutil
 import sys
 import tempfile
 import webbrowser
@@ -270,6 +272,7 @@ def main() -> None:
     from netbbs.storage.execution import DatabaseLane
 
     root = pathlib.Path(tempfile.mkdtemp(prefix="netbbs-sysop-gallery-"))
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
     database = Database(root / "node.db")
     sysop = seed(database)
     database.close()

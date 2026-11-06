@@ -41,6 +41,7 @@ SHA256SUMS to `PINS`.
 from __future__ import annotations
 
 import argparse
+import atexit
 import dataclasses
 from datetime import datetime, timezone
 import hashlib
@@ -48,6 +49,7 @@ import importlib.util
 import math
 from pathlib import Path
 import random
+import shutil
 import sys
 import tempfile
 import time
@@ -368,6 +370,7 @@ def played_frame(g, screen: str) -> str:
     if screen in ("record", "achievements", "program", "launch") and not hasattr(g, "Logbook"):
         raise SystemExit(f"{screen} needs a release with the Pilot Record and Programs (v0.5.0 onwards)")
     folder = Path(tempfile.mkdtemp(prefix="website-lunar-lander-"))
+    atexit.register(shutil.rmtree, folder, ignore_errors=True)
     records = g.Records(folder / "pilots.db")
     try:
         if screen in ("scores", "record", "achievements", "program"):

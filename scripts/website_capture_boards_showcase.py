@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import itertools
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -483,7 +485,9 @@ SHOTS = {
 
 
 async def run(name: str) -> str:
-    node = Node(Path(tempfile.mkdtemp(prefix="netbbs-boards-shot-")))
+    tmp = Path(tempfile.mkdtemp(prefix="netbbs-boards-shot-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+    node = Node(tmp)
     try:
         return await SHOTS[name](node)
     finally:

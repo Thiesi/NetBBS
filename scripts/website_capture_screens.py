@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -807,6 +809,7 @@ def main() -> None:
         raise SystemExit("an output path is required")
 
     tmp = Path(tempfile.mkdtemp(prefix="netbbs-shot-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
     screen = asyncio.run(SCREENS[args.screen](tmp))
     if not screen.strip():
         raise SystemExit(f"{args.screen} drew nothing")

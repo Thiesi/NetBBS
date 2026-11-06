@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import json
 import pathlib
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -89,6 +91,7 @@ def register(db, sysop, title: str, name: str | None, description: str = ""):
 
 async def profile(name: str, title: str, pages: int = 0) -> str:
     tmp = Path(tempfile.mkdtemp(prefix="netbbs-shot-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(tmp / "node.db")
     lane = DatabaseLane(db.path)
     try:
@@ -115,6 +118,7 @@ async def console_doors() -> str:
     from netbbs.net.redraw_preference import set_redraw_in_place_enabled
 
     tmp = Path(tempfile.mkdtemp(prefix="netbbs-shot-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(tmp / "node.db")
     try:
         sysop = create_user(db, "carrier", password="hunter2", user_level=255)
