@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import datetime
 import random
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -196,6 +198,7 @@ async def until(predicate, seconds: float, what: str) -> None:
 
 async def capture(exchanges: int) -> str:
     tmp = Path(tempfile.mkdtemp(prefix="netbbs-shot-"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(tmp / "node.db")
     lane = DatabaseLane(db.path)
     fake = FakeMrcHub()
