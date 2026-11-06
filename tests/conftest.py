@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import os
+import shutil
 import socket
 import sqlite3
 import tempfile
@@ -33,15 +34,31 @@ import netbbs.storage.database as database_module
 import netbbs.storage.execution as execution_module
 import netbbs.identity.keys as keys_module
 import netbbs.net.ssh as ssh_module
+from tests.scratch_guard import basetemp_problem, scratch_problem
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def pytest_configure(config):
+    # The controller checks once; a worker's basetemp is one xdist chose under it.
+    if not hasattr(config, "workerinput"):
+        problem = basetemp_problem(config.option.basetemp, REPO_ROOT) or scratch_problem(REPO_ROOT)
+        if problem:
+            raise pytest.UsageError(problem)
+        if config.option.basetemp:
+            Path(config.option.basetemp).resolve().parent.mkdir(parents=True, exist_ok=True)
     config.addinivalue_line(
         "markers",
         "timing_sensitive: the test's subject is a real-time window (an input "
         "timeout, a burst threshold), so a starved process fails it by design. "
         "Skipped under pytest-xdist; run them with `pytest -m timing_sensitive`.",
     )
+
+
+def pytest_unconfigure(config):
+    # Here, not atexit: an xdist worker can leave without running atexit handlers.
+    if _template_path is not None:
+        shutil.rmtree(_template_path.parent, ignore_errors=True)
 
 
 def pytest_collection_modifyitems(config, items):
