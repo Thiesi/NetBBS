@@ -267,7 +267,10 @@ below.
 `karst-by-ringlight.jpg` and `karst-transit-map.png`). They are illustrated maps,
 not game screens; the in-game City Map is still planned, and their captions and
 alt text say so. The transit map is on light paper, so the page frames it in a
-light mat.
+light mat. The page shows the three in one frame that cycles every eight
+seconds, with named buttons and Pause. It holds still under a mouse or keyboard
+focus, and doesn't start for callers who ask for reduced motion. Without
+JavaScript the maps simply stack.
 
 Blacksite's own README says what is real and what is planned. Captions keep
 to the game's voice, which avoids the words cyberpunk, hacker and cyberspace.
