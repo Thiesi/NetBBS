@@ -500,9 +500,10 @@ def test_a_hook_switched_off_during_the_root_scan_does_not_fail_the_backup(
         scan = real_scandir(path)
         return _WithReleased(scan) if Path(path) == root else scan
 
-    monkeypatch.setattr(backup_module.os, "scandir", scandir)
-
-    backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
+    # Only around the backup: `os` is shared, and pytest walks with it to clear tmp_path.
+    with monkeypatch.context() as patch:
+        patch.setattr(backup_module.os, "scandir", scandir)
+        backup = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup")
 
     assert _manifest(backup)["door_outbound"]["pruned"] == 1
 
