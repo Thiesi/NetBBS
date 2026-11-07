@@ -1,4 +1,0 @@
-# CI Workflows
-
-- `.github/workflows/claude-code-review.yml`
-- `.github/workflows/claude.yml`

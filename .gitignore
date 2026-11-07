@@ -29,4 +29,6 @@ node.pub
 # Machine-local agent configuration
 .claude/settings.local.json
 .codex/
+# Moradin's Forge sidecar: local only, the upstream has no license (#1607)
+.moradins-harness/
 .test-tmp*/
