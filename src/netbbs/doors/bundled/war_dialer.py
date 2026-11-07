@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""
+"""War Dialer for NetBBS and classic BBSes. Copyright (c) 2026 Thiesi. BSD-2-Clause.
+
 War Dialer -- an asynchronous, play-by-post multiplayer BBS door
 (originally NetBBS issue #200; design recorded in `docs/design.md`).
 Rival 80s/90s BBS-scene hacker/phreaker crews
@@ -3778,9 +3779,22 @@ def feed(p: Palette, events: list[GameEvent], width: int, *, limit: int = 6) -> 
         wrapped = _wrap_output(_event_plain(event.summary_text),
                                max(8, width - _dlen(lead))).split("\r\n")
         tone = p.magenta if hostile else p.ink
-        rows.append(bullet + " " + sty(p.grey, stamp) + " " + sty(tone, wrapped[0]))
-        rows.extend(Cont(" " * _dlen(lead) + sty(tone, line)) for line in wrapped[1:])
+        # The door's own receipts point at keys ("[I] Scene shows ..."), lit
+        # as they are everywhere else. A rival's row carries a handle the
+        # rival chose, and a "[A]ce" there is not a key to press.
+        paint = (lambda line: sty(tone, line)) if hostile else (lambda line: _feed_keys(p, line, tone))
+        rows.append(bullet + " " + sty(p.grey, stamp) + " " + paint(wrapped[0]))
+        rows.extend(Cont(" " * _dlen(lead) + paint(line)) for line in wrapped[1:])
     return rows or [sty(p.grey, NO_EVENTS)]
+
+
+_FEED_KEY = re.compile(r"(\[[^\[\]]\])")
+
+
+def _feed_keys(p: Palette, line: str, tone: str) -> str:
+    """A receipt row in its tone, with each single-character `[K]` a keycap."""
+    return "".join(keycap(p, piece[1]) if _FEED_KEY.fullmatch(piece) else sty(tone, piece)
+                   for piece in _FEED_KEY.split(line) if piece)
 
 
 def key_bar(p: Palette, entries: tuple, width: int, budget: int) -> list[str]:
@@ -4026,8 +4040,10 @@ TEXT_BAR = (("N", "Next", "Next"), ("P", "Prev", "Prev"), ("B", "Back", "Back"))
 ACCEPT_BAR = (("A", "Act", "Act"), ("B", "Back", "Back"))
 
 
-PICK_BAR = (("N", "Next", "Next"), ("P", "Prev", "Prev"), ("B", "Back", "Back"),
-            ("Q", "Cancel", "Cxl"))
+#: `Q` leaves a picker too, unadvertised, as it leaves every browsing screen:
+#: a caller whose fingers know `[Q] Quit` from the switchboard is backed out,
+#: not ignored. Shown as `[Q] Cancel`, it was a second key for `[B] Back`.
+PICK_BAR = (("N", "Next", "Next"), ("P", "Prev", "Prev"), ("B", "Back", "Back"))
 
 
 LOG_BAR = (("N", "Next", "Next"), ("P", "Prev", "Prev"), ("A", "Ack page", "Ack"),
@@ -8529,7 +8545,7 @@ def do_root_exchange(p: Palette, conn: sqlite3.Connection, player: Player, now: 
     # not targets: a capture price, root Heat and odds against your own garrison
     # describe an action this picker will not even offer.
     # Named with the screen it lives on, like every other borrowed key in the
-    # door: this picker's reader takes Next/Prev/Back/Cancel and the selectable
+    # door: this picker's reader takes Next/Prev/Back (and Q) and the selectable
     # digits, so a bare `[G]` here would be a key that does nothing.
     rendered = [((garrison_entry_rows(p, exchange, player, inner - 4)
                   + prose_rows(p, "Already yours. Back, then [G] Garrison on the "
