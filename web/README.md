@@ -22,15 +22,15 @@ web/
   netbbs-voidrunner.html -> https://www.netbbs.org/voidrunner.html
   netbbs-war-dialer.html -> https://www.netbbs.org/war-dialer.html
   netbbs-retro-trivia.html -> https://www.netbbs.org/retro-trivia.html
-  netbbs-blacksite.html  -> https://www.netbbs.org/blacksite.html
+  netbbs-karst41.html    -> https://www.netbbs.org/karst41.html
   netbbs-lunar-lander.html -> https://www.netbbs.org/lunar-lander.html
   game-scenes.js        -> https://www.netbbs.org/game-scenes.js
-  blacksite-hero.png     -> https://www.netbbs.org/blacksite-hero.png
-  blacksite-karst-city-map.png -> https://www.netbbs.org/blacksite-karst-city-map.png
-  blacksite-karst-by-ringlight.jpg -> https://www.netbbs.org/blacksite-karst-by-ringlight.jpg
-  blacksite-karst-transit-map.png -> https://www.netbbs.org/blacksite-karst-transit-map.png
-  blacksite-tin-halo.png -> https://www.netbbs.org/blacksite-tin-halo.png
-  blacksite-lattice.png  -> https://www.netbbs.org/blacksite-lattice.png
+  karst41-hero.png       -> https://www.netbbs.org/karst41-hero.png
+  karst41-city-map.png   -> https://www.netbbs.org/karst41-city-map.png
+  karst41-by-ringlight.jpg -> https://www.netbbs.org/karst41-by-ringlight.jpg
+  karst41-transit-map.png -> https://www.netbbs.org/karst41-transit-map.png
+  karst41-tin-halo.png   -> https://www.netbbs.org/karst41-tin-halo.png
+  karst41-lattice.png    -> https://www.netbbs.org/karst41-lattice.png
   lunar-lander-hero.jpg  -> https://www.netbbs.org/lunar-lander-hero.jpg
   favicon.ico            -> https://www.netbbs.org/favicon.ico   the icon: a
   favicon.svg            -> https://www.netbbs.org/favicon.svg   terminal with a
@@ -93,7 +93,7 @@ and the exact copy-and-install steps are operational details. They live in the
 maintainer's private operations notes, not in this public repository.
 
 The individual game pages also need `game-scenes.js`, the two hero images and
-Blacksite's two planned-look screens and three illustrated maps at the site root, under the exact names in
+Karst 41's two planned-look screens and three illustrated maps at the site root, under the exact names in
 the map above. Copy each of them and verify its hash alongside the HTML. The `shots/` files are source captures embedded into HTML;
 they do not need to be served for the game pages to work.
 
@@ -235,23 +235,24 @@ the classes still fit.
 The four bundled games have dedicated pages with their gameplay galleries;
 Voidrunner, War Dialer and Retro Trivia also have scene players. Lunar Lander
 is bundled since NetBBS 7.41.0, and its page shows captures of the release
-NetBBS bundles. Blacksite is
+NetBBS bundles. Karst 41 is
 in development and not yet released: its page separates what is built from
 what is still coming and labels the status. It shows no terminal captures,
 only its labelled concept art, two labelled screens of its planned look and
 three labelled illustrated maps.
 Never manufacture a screenshot, and never let a mockup pass for one.
 Their banners are copied without modification from
-`Thiesi/Blacksite` (`docs/assets/blacksite-banner.png`) and
+`Thiesi/Karst41` at commit `0c6a505` (`docs/assets/blacksite-banner.png`,
+which kept its old file name) and
 `Thiesi/LunarLander` (`assets/lunar-lander-social.jpg`). Both repositories are
 BSD-2-Clause licensed. Both banners stay labelled as concept art. A page with
 no captures at all may declare
 `<meta name="netbbs-capture-kind" content="concept-art">`; the page checker
-then requires labelled artwork and no terminal captures. Blacksite's page
+then requires labelled artwork and no terminal captures. Karst 41's page
 declares it.
 
-`blacksite-tin-halo.png` and `blacksite-lattice.png` are copied without
-modification from `Thiesi/Blacksite` at commit `e04d31c`,
+`karst41-tin-halo.png` and `karst41-lattice.png` are copied without
+modification from `Thiesi/Karst41` at commit `e04d31c`,
 `docs/assets/website/` (`tin-halo-scene-` and
 `lattice-sodium-row-132x50-truecolor.png`). They are design targets for one
 evening in Sodium Row at 132 x 50 in truecolor, not frames the game draws, and
@@ -261,10 +262,11 @@ target from commit `c351cac2`.
 A third screen, `blacksite-sodium-row.png` (the street), was replaced by the maps
 below.
 
-`blacksite-karst-city-map.png`, `blacksite-karst-by-ringlight.jpg` and
-`blacksite-karst-transit-map.png` are copied without modification from
-`Thiesi/Blacksite` at commit `98e775a`, `docs/assets/website/` (`karst-city-map.png`,
-`karst-by-ringlight.jpg` and `karst-transit-map.png`). They are illustrated maps,
+`karst41-city-map.png` and `karst41-by-ringlight.jpg` are copied without
+modification from `Thiesi/Karst41` at commit `0c6a505`, `docs/assets/website/`
+(`karst-city-map.png` and `karst-by-ringlight.jpg`), the re-exports that carry
+the Karst 41 title. `karst41-transit-map.png` comes unmodified from commit
+`98e775a`, `docs/assets/website/karst-transit-map.png`. They are illustrated maps,
 not game screens; the in-game City Map is still planned, and their captions and
 alt text say so. The transit map is on light paper, so the page frames it in a
 light mat. The page shows the three in one frame that cycles every eight
@@ -272,10 +274,15 @@ seconds, with named buttons and Pause. It holds still under a mouse or keyboard
 focus, and doesn't start for callers who ask for reduced motion. Without
 JavaScript the maps simply stack.
 
-Blacksite's own README says what is real and what is planned. Captions keep
+Karst 41's own README says what is real and what is planned. Captions keep
 to the game's voice, which avoids the words cyberpunk, hacker and cyberspace.
 
-Blacksite's page showed three screenshots until the maintainer asked for them
+Karst 41 was called Blacksite until November 2026. Its page moved from
+`blacksite.html` to `karst41.html`, and the server redirects the old address.
+"The Blacksite" is still a place inside the game. The capture helper below
+keeps the old name, because it is pinned to a commit from before the rename.
+
+Its page showed three screenshots until the maintainer asked for them
 to be removed; their raw and converted files went with them. The helper that
 took them is kept, so they can be retaken. They came from `Thiesi/Blacksite`
 at commit `d80dacdd58065f221d199b69df573fcf12f7d7cf` (package 0.0.20, slices
@@ -302,7 +309,7 @@ Use the NetBBS venv's Python 3.12; the game has no runtime dependencies. The
 helper takes about three minutes. Combat and ICE use the game's randomness,
 so a recapture shows the same places with different numbers. The converter
 does not render SGR 2 (faint); remembered terrain shows in the game's own
-darker colours without the extra dimming a terminal adds. Blacksite's frames
+darker colours without the extra dimming a terminal adds. Those frames
 are box drawing, not half blocks, so they keep the stills' 1.55 line height.
 
 Lunar Lander's published screenshots come from the `v0.7.3` asset,
@@ -398,7 +405,7 @@ when changing a game page; the live checkers include all five game URLs.
 own scripts for unrelated interactions.
 
 `doors.html` is the game overview: one real launch splash per playable game
-(Lunar Lander's included), Blacksite's labelled concept art
+(Lunar Lander's included), Karst 41's labelled concept art
 (it has no launch splash yet; its interface mockup is on its own page), a short description and a
 link to each dedicated page. Keep gameplay galleries and scene players on the
 individual pages. The landing page keeps at most one still per game in its

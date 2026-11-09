@@ -38,7 +38,7 @@ PAGES = {
     "voidrunner.html": "https://www.netbbs.org/voidrunner.html",
     "war-dialer.html": "https://www.netbbs.org/war-dialer.html",
     "retro-trivia.html": "https://www.netbbs.org/retro-trivia.html",
-    "blacksite.html": "https://www.netbbs.org/blacksite.html",
+    "karst41.html": "https://www.netbbs.org/karst41.html",
     "lunar-lander.html": "https://www.netbbs.org/lunar-lander.html",
 }
 # A scene player's data (`<script type="application/json">`) is terminal art, like a capture.

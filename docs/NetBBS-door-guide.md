@@ -1054,7 +1054,7 @@ yours, exactly as it is for any door you register.
 On a door's screen in the SysOp area, press `[O]utbound`.
 
 1. `[T]urn on`. The door is given a **posting name** derived from its own,
-   ending in `.door` — `Blacksite` posts as `Blacksite.door`. This is a label,
+   ending in `.door` — `Karst41` posts as `Karst41.door`. This is a label,
    not an account: nobody can log in as it, it never appears in the user list,
    and it cannot receive mail. If something already answers to that name the
    door gets a numbered variant instead, and the screen shows you which.
@@ -1105,9 +1105,9 @@ door cannot use up its board posts or the reverse.
   channel, and chat has no way to take a line back — there is no tombstone
   for a chat line as there is for a post. The screen asks you to confirm
   before allowing one.
-- **A channel's moderators can mute the door there.** `/mute Blacksite.door
+- **A channel's moderators can mute the door there.** `/mute Karst41.door
   [duration] [reason]` in the channel stops the door speaking there, for a
-  time or until `/unmute Blacksite.door`, without you having to touch the
+  time or until `/unmute Karst41.door`, without you having to touch the
   allowlist. The mute is announced in the channel and logged like any other,
   and the door's outbound screen shows it next to the channel.
 
