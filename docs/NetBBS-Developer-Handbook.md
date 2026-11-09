@@ -301,7 +301,7 @@ test for it:
 
 ```json
 "outbound": {
-  "label": "Blacksite.door",
+  "label": "Karst41.door",
   "directory": "outbound",
   "results": "/home/netbbs/.netbbs/door-outbound/3",
   "boards": ["Chronicle"],
