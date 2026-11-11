@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Retro Trivia -- a single-player BBS trivia door, originally for NetBBS.
+Copyright (c) 2026 Thiesi. BSD-2-Clause.
 
 A genuine proof-of-concept for the native door-game vertical, not a
 throwaway test fixture: reads the v1 drop-file (see `netbbs.doors.

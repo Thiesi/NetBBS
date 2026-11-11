@@ -8,23 +8,23 @@
   },
   "retro_trivia.py": {
     "repository": "Thiesi/RetroTrivia",
-    "tag": "v1.4.0",
-    "commit": "d89cfd7436d4510da63ca6eb31208733bf2b4a4c",
-    "git_blob": "7c4dfc773a6562cee67f93ccffdb740e329f60b9",
-    "sha256": "29a4fa0a3164d4d4f509ce2439f6dede474f740c121c2f2f821e92f8bfc5f8de"
+    "tag": "v1.4.1",
+    "commit": "6074e9fda4e4db85ed3b159204732cbbafbf9b1e",
+    "git_blob": "c72c1112de83eb177de1620b68f5be8d147e9331",
+    "sha256": "4d3605a4382d708bdf29a4f6008d40fcefc9f799c0c6f5de3fb96206d18d2cdf"
   },
   "voidrunner.py": {
     "repository": "Thiesi/Voidrunner",
-    "tag": "v1.7.1",
-    "commit": "0ca83746b0c50251047bb37008de83d6cf0d959a",
-    "git_blob": "245f0fb2b5d40b3955683d1cf4015083db0648e9",
-    "sha256": "42f4807387f3dc4c959b43b01b9bce5b2553be323e0a4c9b0ab40a011fda467a"
+    "tag": "v1.7.2",
+    "commit": "08e59ce67f1f35ffdf12ef944a8c5547b5caa6cc",
+    "git_blob": "da93975ace544dcb1857d4fe8278399e7446e946",
+    "sha256": "144fb5b5d260b6e70348def2eb8a49e7629c6adade6f627ab8decc7e8e3b1500"
   },
   "war_dialer.py": {
     "repository": "Thiesi/WarDialer",
-    "tag": "v1.5.0",
-    "commit": "92ee0a56d6ff3c11d40627372ae4fcdecc8e9713",
-    "git_blob": "6fb4e715204ba14a621971ef54b04a7047a61914",
-    "sha256": "c99493bc7d14e5b12659549385ccfe204e98e85177d1518c7504fc56b0532d3e"
+    "tag": "v1.5.1",
+    "commit": "8caf208265720dd0cd63b2dc7b3c928b67e0bd94",
+    "git_blob": "3c73e3a4f646fdef8e14c737c465df67977ea87b",
+    "sha256": "c9522158bc5b2b8511efd81a36365a4a08cb8e6364d056597ebd50c628b1393b"
   }
 }
