@@ -31,6 +31,7 @@ web/
   karst41-transit-map.png -> https://www.netbbs.org/karst41-transit-map.png
   karst41-tin-halo.png   -> https://www.netbbs.org/karst41-tin-halo.png
   karst41-lattice.png    -> https://www.netbbs.org/karst41-lattice.png
+  karst41-og.jpg         -> https://www.netbbs.org/karst41-og.jpg  social preview
   lunar-lander-hero.jpg  -> https://www.netbbs.org/lunar-lander-hero.jpg
   favicon.ico            -> https://www.netbbs.org/favicon.ico   the icon: a
   favicon.svg            -> https://www.netbbs.org/favicon.svg   terminal with a
@@ -93,7 +94,7 @@ and the exact copy-and-install steps are operational details. They live in the
 maintainer's private operations notes, not in this public repository.
 
 The individual game pages also need `game-scenes.js`, the two hero images and
-Karst 41's two planned-look screens and three illustrated maps at the site root, under the exact names in
+Karst 41's two planned-look screens and three illustrated maps, and its social preview card, at the site root, under the exact names in
 the map above. Copy each of them and verify its hash alongside the HTML. The `shots/` files are source captures embedded into HTML;
 they do not need to be served for the game pages to work.
 
@@ -273,6 +274,13 @@ light mat. The page shows the three in one frame that cycles every eight
 seconds, with named buttons and Pause. It holds still under a mouse or keyboard
 focus, and doesn't start for callers who ask for reduced motion. Without
 JavaScript the maps simply stack.
+
+`karst41-og.jpg` is the 1200 x 630 social preview card, copied without
+modification from `Thiesi/Karst41` at commit `800b86b`
+(`docs/assets/karst41-og.jpg`). It is the game's key art, not a game screen,
+and appears only in the page's `og:image` and `twitter:image` tags. It is
+hosted here rather than linked from GitHub, so the card keeps working if the
+repository moves.
 
 Karst 41's own README says what is real and what is planned. Captions keep
 to the game's voice, which avoids the words cyberpunk, hacker and cyberspace.
