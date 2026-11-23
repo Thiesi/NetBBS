@@ -24,6 +24,7 @@ web/
   netbbs-retro-trivia.html -> https://www.netbbs.org/retro-trivia.html
   netbbs-karst41.html    -> https://www.netbbs.org/karst41.html
   netbbs-lunar-lander.html -> https://www.netbbs.org/lunar-lander.html
+  netbbs-fair-winds.html -> https://www.netbbs.org/fair-winds.html
   game-scenes.js        -> https://www.netbbs.org/game-scenes.js
   karst41-hero.png       -> https://www.netbbs.org/karst41-hero.png
   karst41-city-map.png   -> https://www.netbbs.org/karst41-city-map.png
@@ -33,6 +34,7 @@ web/
   karst41-lattice.png    -> https://www.netbbs.org/karst41-lattice.png
   karst41-og.jpg         -> https://www.netbbs.org/karst41-og.jpg  social preview
   lunar-lander-hero.jpg  -> https://www.netbbs.org/lunar-lander-hero.jpg
+  fair-winds-hero.png    -> https://www.netbbs.org/fair-winds-hero.png  also its social preview
   favicon.ico            -> https://www.netbbs.org/favicon.ico   the icon: a
   favicon.svg            -> https://www.netbbs.org/favicon.svg   terminal with a
   apple-touch-icon.png   -> https://www.netbbs.org/apple-touch-icon.png  prompt
@@ -93,7 +95,7 @@ what is live is what `main` says. Where it is hosted, how to reach that host,
 and the exact copy-and-install steps are operational details. They live in the
 maintainer's private operations notes, not in this public repository.
 
-The individual game pages also need `game-scenes.js`, the two hero images and
+The individual game pages also need `game-scenes.js`, the three hero images (Lunar Lander, Karst 41 and Fair Winds) and
 Karst 41's two planned-look screens and three illustrated maps, and its social preview card, at the site root, under the exact names in
 the map above. Copy each of them and verify its hash alongside the HTML. The `shots/` files are source captures embedded into HTML;
 they do not need to be served for the game pages to work.
@@ -241,6 +243,14 @@ in development and not yet released: its page separates what is built from
 what is still coming and labels the status. It shows no terminal captures,
 only its labelled concept art, two labelled screens of its planned look and
 three labelled illustrated maps.
+Fair Winds is earlier still: its plan is complete and its build has just
+begun. Its page describes the planned game from the repository's design
+documents, says plainly that nothing is playable yet, and shows only the
+labelled banner, which also serves as its social preview card.
+`fair-winds-hero.png` is copied without modification from `Thiesi/FairWinds`
+at commit `ddd4242` (`art/banner.png`, 1280 x 640, BSD-2-Clause). It is
+pixel art drawn by the repository's own `art/render_art.py`, not a game
+screen. The page declares the concept-art capture kind.
 Never manufacture a screenshot, and never let a mockup pass for one.
 Their banners are copied without modification from
 `Thiesi/Karst41` at commit `0c6a505` (`docs/assets/blacksite-banner.png`,
@@ -408,13 +418,13 @@ recapturing shows a different round. Keep its raw output with the converted
 fragment. `question` stops on the round's first question instead.
 
 Run the local page and wording checkers over **all** `web/netbbs-*.html` files
-when changing a game page; the live checkers include all five game URLs.
+when changing a game page; the live checkers include all six game URLs.
 `game-scenes.js` is the game pages' shared player; the older pages retain their
 own scripts for unrelated interactions.
 
 `doors.html` is the game overview: one real launch splash per playable game
-(Lunar Lander's included), Karst 41's labelled concept art
-(it has no launch splash yet; its interface mockup is on its own page), a short description and a
+(Lunar Lander's included), the labelled concept art of Karst 41 and Fair Winds
+(they have no launch splash yet; Karst 41's planned-look screens are on its own page), a short description and a
 link to each dedicated page. Keep gameplay galleries and scene players on the
 individual pages. The landing page keeps at most one still per game in its
 general screenshot gallery. Every public page links to the overview.

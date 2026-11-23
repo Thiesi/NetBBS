@@ -42,6 +42,7 @@ PAGES = {
     "retro-trivia.html": "https://www.netbbs.org/retro-trivia.html",
     "karst41.html": "https://www.netbbs.org/karst41.html",
     "lunar-lander.html": "https://www.netbbs.org/lunar-lander.html",
+    "fair-winds.html": "https://www.netbbs.org/fair-winds.html",
 }
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr"}
