@@ -40,6 +40,7 @@ PAGES = {
     "retro-trivia.html": "https://www.netbbs.org/retro-trivia.html",
     "karst41.html": "https://www.netbbs.org/karst41.html",
     "lunar-lander.html": "https://www.netbbs.org/lunar-lander.html",
+    "fair-winds.html": "https://www.netbbs.org/fair-winds.html",
 }
 # A scene player's data (`<script type="application/json">`) is terminal art, like a capture.
 PROTECTED = re.compile(r"<pre\b.*?</pre>|<style>.*?</style>|<script\b[^>]*>.*?</script>", re.S)
